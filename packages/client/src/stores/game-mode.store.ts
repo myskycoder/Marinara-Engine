@@ -224,3 +224,12 @@ export const useGameModeStore = create<GameModeStore>((set) => ({
   setBlueprint: (bp) => set({ blueprint: bp }),
   reset: () => set(INITIAL_STATE),
 }));
+
+// Dev-only: expose the store on `window` so we can inspect NPC asset state
+// directly from the browser console:
+//   window.__gameStore.getState().npcs
+// Vite strips this whole block from production bundles via dead-code
+// elimination on `import.meta.env.DEV`.
+if (import.meta.env.DEV && typeof window !== "undefined") {
+  (window as unknown as { __gameStore?: typeof useGameModeStore }).__gameStore = useGameModeStore;
+}

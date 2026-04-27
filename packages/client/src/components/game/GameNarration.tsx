@@ -2351,6 +2351,64 @@ function humanizeName(name: string): string {
   return name.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
 }
 
+/**
+ * Keywords that look like a speaker name to the loose dialogue regex but are
+ * actually structural prefixes used by the GM (or the user) to introduce a
+ * non-dialogue block. Without filtering, lines like `Quest: «Find the lost
+ * book»` would be parsed as dialogue from a character literally named "Quest".
+ *
+ * All values are lower-cased; the matcher lower-cases the captured speaker
+ * before lookup. Includes English + common localized synonyms (Russian) since
+ * the codebase serves a multilingual playerbase.
+ */
+const LOOSE_DIALOGUE_NON_SPEAKER_KEYWORDS = new Set<string>([
+  // English
+  "narration",
+  "narrator",
+  "note",
+  "notes",
+  "quest",
+  "objective",
+  "system",
+  "warning",
+  "info",
+  "log",
+  "journal",
+  "chapter",
+  "scene",
+  "location",
+  "setting",
+  "tip",
+  "hint",
+  "summary",
+  "recap",
+  "ooc",
+  "gm",
+  "dm",
+  // Russian
+  "повествование",
+  "рассказчик",
+  "заметка",
+  "заметки",
+  "задание",
+  "квест",
+  "цель",
+  "система",
+  "предупреждение",
+  "информация",
+  "лог",
+  "журнал",
+  "дневник",
+  "глава",
+  "сцена",
+  "место",
+  "локация",
+  "подсказка",
+  "итог",
+  "резюме",
+  "мастер",
+]);
+
 function parseNarrationSegments(message: NarrationMessage, speakerColors: Map<string, string>): NarrationSegment[] {
   // Use stripGmTagsKeepReadables so [Note:] and [Book:] stay inline for position-aware display.
   // Extract them first as placeholders so multi-line readables don't break line-based parsing.
@@ -2399,14 +2457,36 @@ function parseNarrationSegments(message: NarrationMessage, speakerColors: Map<st
   const legacyDialogueRegex = /^\s*Dialogue\s*\[([^\]]+)\]\s*(?:\[([^\]]+)\])?\s*:\s*(.+)$/i;
   // New compact format: [Name] [expression]: "text" or [Name]: "text" or [Name]: text
   const compactDialogueRegex = /^\s*\[([^\]]+)\]\s*(?:\[([^\]]+)\])?\s*:\s*(.+)$/;
+  // Lenient fallback for GM responses that drop the brackets around the speaker:
+  //   Корчмарь [exhausted]: «text»
+  //   **Баба** [frightened]: «text»     ← LLMs often wrap the name in markdown bold
+  //   *Ингвар Кривой* [neutral]: «text»
+  //   Bartender: "text"
+  // Constraints to avoid false positives:
+  //   - Speaker must start with an uppercase letter and consist of 1–3
+  //     capitalized words (handles "Монах Нифонт", "Ингвар Кривой", but not
+  //     "Then he looked at her").
+  //   - Optional surrounding * or ** is allowed so markdown-emphasized names
+  //     ("**Корчмарь**") still parse as dialogue instead of narration prose.
+  //   - The speech must start with an opening quote so plain prose containing
+  //     a colon (e.g. "She remembered: long ago, ...") isn't misclassified.
+  const looseDialogueRegex =
+    /^\s*\*{0,2}(\p{Lu}[\p{L}\p{M}\d'’-]*(?:\s+\p{Lu}[\p{L}\p{M}\d'’-]*){0,2})\*{0,2}\s*(?:\[([^\]]+)\])?\s*:\s*(["'«»“”„‟‘’].+)$/u;
   // Party dialogue lines — parsed inline as VN segments
   const partyLineRegex =
     /^\s*\[([^\]]+)\]\s*\[(main|side|extra|action|thought|whisper(?::([^\]]+))?)\]\s*(?:\[([^\]]+)\])?\s*:\s*(.+)$/i;
 
   let fallbackText = "";
 
+  // GMs occasionally emit `Narration Speaker [emotion]: «...»` — a hybrid where
+  // the keyword "Narration" precedes a real dialogue line instead of being its
+  // own narration block. Strip the bare `Narration` prefix (followed by a
+  // capitalized word OR markdown emphasis on a capitalized name, not a colon)
+  // so the dialogue regexes below can match.
+  const narrationPrefixRe = /^\s*Narration\s+(?=[*\p{Lu}])/u;
+
   for (const rawLine of lines) {
-    const line = rawLine.trim();
+    let line = rawLine.trim();
     if (!line) {
       if (fallbackText.trim()) {
         parsed.push({
@@ -2417,6 +2497,9 @@ function parseNarrationSegments(message: NarrationMessage, speakerColors: Map<st
         fallbackText = "";
       }
       continue;
+    }
+    if (narrationPrefixRe.test(line)) {
+      line = line.replace(narrationPrefixRe, "");
     }
 
     // Detect readable placeholders ([Note:] / [Book:] inline markers)
@@ -2533,6 +2616,43 @@ function parseNarrationSegments(message: NarrationMessage, speakerColors: Map<st
         color: findNamedMapValue(speakerColors, speaker),
       });
       continue;
+    }
+
+    // Loose fallback: `Имя [emotion]: «...»` without brackets around the speaker.
+    // Some LLMs drop the bracket prefix despite the system prompt asking for it,
+    // which previously caused dialogue to be folded into a plain narration block
+    // (and lost its avatar/sprite). We require the speech to start with an
+    // opening quote so plain narration with internal colons isn't misclassified.
+    const looseMatch = line.match(looseDialogueRegex);
+    if (looseMatch) {
+      const rawSpeaker = looseMatch[1]!.trim();
+      // Reject structural keywords that look like names (capitalized + colon +
+      // quoted text). Without this guard a journal line like
+      // `Quest: «Find the lost book»` would be parsed as dialogue from a
+      // character named "Quest". Includes English + localized synonyms used
+      // by various GM prompts and by users in their narration.
+      if (!LOOSE_DIALOGUE_NON_SPEAKER_KEYWORDS.has(rawSpeaker.toLowerCase())) {
+        if (fallbackText.trim()) {
+          parsed.push({
+            id: `${message.id}-fallback-${parsed.length}`,
+            type: "narration",
+            content: fallbackText.trim(),
+          });
+          fallbackText = "";
+        }
+        const speaker = humanizeName(rawSpeaker);
+        let content = looseMatch[3]!.trim();
+        content = stripSurroundingDialogueQuotes(content);
+        parsed.push({
+          id: `${message.id}-d-loose-${parsed.length}`,
+          type: "dialogue",
+          speaker,
+          sprite: looseMatch[2]?.trim() || undefined,
+          content,
+          color: findNamedMapValue(speakerColors, speaker),
+        });
+        continue;
+      }
     }
 
     fallbackText += `${fallbackText ? "\n" : ""}${line}`;

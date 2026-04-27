@@ -361,7 +361,7 @@ Schema:
       "name": "string — display name",
       "emoji": "string — 1 emoji summarizing them",
       "mood": "string — one word describing the current emotional state",
-      "appearance": "string|null — brief persistent physical traits (build, hair, eyes, distinguishing features).",
+      "appearance": "string|null — brief persistent physical traits. ALWAYS lead with apparent gender + age range (e.g. 'young woman', 'middle-aged man', 'elderly androgynous figure'), then build, hair, eyes, skin/coloring, and any distinguishing features. This field drives portrait generation — be explicit about gender and physical type even when the name is ambiguous (e.g. 'Greta — middle-aged stocky woman with iron-capped front tooth, weathered face, grey-streaked braids').",
       "outfit": "string|null — brief traits (up to five), describing what they're currently wearing, including accessories",
       "thoughts": "string|null — one sentence of internal thoughts or feelings they haven't voiced out loud",
       "stats": [{ "name": "string", "value": number, "max": number, "color": "string (hex)" }]

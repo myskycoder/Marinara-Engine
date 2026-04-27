@@ -113,6 +113,10 @@ export interface GameNpc {
   notes: string[];
   /** Optional avatar URL (generated or uploaded) */
   avatarUrl?: string | null;
+  /** Optional sprite sheet/storage ID for VN-style sprite rendering */
+  spriteId?: string | null;
+  /** Current server-side sprite generation status */
+  spriteStatus?: "pending" | "ready" | "failed";
 }
 
 // ── Sessions ──

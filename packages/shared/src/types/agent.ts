@@ -471,6 +471,18 @@ export const BUILT_IN_AGENT_RUN_INTERVAL_DEFAULTS: Readonly<Record<string, numbe
   "chat-summary": 5,
 };
 
+/**
+ * Default agents seeded for every Game-mode chat. These three trackers are the
+ * minimum required for HUD tracker injection (date/time/weather/location/persona stats),
+ * NPC materialization, and other Game-mode features that read `activeAgentIds`.
+ * Both server (chat creation) and client (migration button) reference this list.
+ */
+export const GAME_MODE_DEFAULT_AGENT_IDS = [
+  "character-tracker",
+  "world-state",
+  "persona-stats",
+] as const;
+
 export function getDefaultBuiltInAgentSettings(agentType: string): Record<string, unknown> {
   const builtIn = BUILT_IN_AGENTS.find((agent) => agent.id === agentType);
   const settings: Record<string, unknown> = {};

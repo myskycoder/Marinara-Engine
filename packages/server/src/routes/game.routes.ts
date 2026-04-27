@@ -63,7 +63,12 @@ import {
   buildStructuredRecap,
   type Journal,
 } from "../services/game/journal.service.js";
-import { generationParametersSchema, scoreMusic, scoreAmbient } from "@marinara-engine/shared";
+import {
+  generationParametersSchema,
+  scoreMusic,
+  scoreAmbient,
+  GAME_MODE_DEFAULT_AGENT_IDS,
+} from "@marinara-engine/shared";
 import { postToDiscordWebhook } from "../services/discord-webhook.js";
 import type {
   GameActiveState,
@@ -76,7 +81,12 @@ import type {
   PartyArc,
 } from "@marinara-engine/shared";
 import { getAssetManifest } from "../services/game/asset-manifest.service.js";
-import { generateNpcPortrait, generateBackground } from "../services/game/game-asset-generation.js";
+import {
+  generateNpcPortrait,
+  generateBackground,
+  safeName as slugifyNpcName,
+} from "../services/game/game-asset-generation.js";
+import { regenerateNpcAssets } from "../services/game/npc-materializer.service.js";
 
 // ──────────────────────────────────────────────
 // Helpers
@@ -1001,6 +1011,15 @@ export async function gameRoutes(app: FastifyInstance) {
       gameSceneConnectionId: setupConfig.sceneConnectionId || null,
       gameNpcs: [],
       enableAgents: true,
+      // Game Mode requires Character Tracker / World State / Persona Stats trackers
+      // for HUD injection and NPC materialization. Seed defaults while preserving
+      // any agents the chat may already have (e.g. user-added before this hook).
+      activeAgentIds: Array.from(
+        new Set([
+          ...((sessionMeta.activeAgentIds as string[] | undefined) ?? []),
+          ...GAME_MODE_DEFAULT_AGENT_IDS,
+        ]),
+      ),
       enableSpriteGeneration: setupConfig.enableSpriteGeneration || false,
       gameImageConnectionId: setupConfig.imageConnectionId || null,
       activeLorebookIds: setupConfig.activeLorebookIds || [],
@@ -1605,6 +1624,15 @@ export async function gameRoutes(app: FastifyInstance) {
         gameDialogueChatId: null,
         gameCombatChatId: null,
         enableAgents: true,
+        // Defensive merge: even if previous session was created before defaults were
+        // seeded (or had its activeAgentIds emptied), make sure follow-up sessions
+        // always carry the Game-mode tracker trio so HUD injection / NPC materialization run.
+        activeAgentIds: Array.from(
+          new Set([
+            ...((prevMeta.activeAgentIds as string[] | undefined) ?? []),
+            ...GAME_MODE_DEFAULT_AGENT_IDS,
+          ]),
+        ),
         ...(carriedInventory.length > 0 ? { gameInventory: carriedInventory } : {}),
       };
       await chats.updateMetadata(newChat.id, updatedNewMeta);
@@ -3371,10 +3399,16 @@ export async function gameRoutes(app: FastifyInstance) {
     chatId: z.string().min(1),
     /** Background tag that didn't resolve (the scene model suggested it). */
     backgroundTag: z.string().max(500).optional(),
-    /** NPCs needing portraits: [{ name, description }] */
+    /**
+     * NPCs needing portraits. `id` is the materializer-issued stable id
+     * (`npc-...`); when supplied it's used as the on-disk filename. Older
+     * clients may omit it, in which case the server resolves an id from
+     * `chat.metadata.gameNpcs` by name.
+     */
     npcsNeedingAvatars: z
       .array(
         z.object({
+          id: z.string().min(1).max(120).optional(),
           name: z.string().min(1).max(200),
           description: z.string().min(1).max(1000),
         }),
@@ -3448,7 +3482,6 @@ export async function gameRoutes(app: FastifyInstance) {
 
     // ── Generate NPC avatars ──
     if (input.npcsNeedingAvatars?.length) {
-      // Check character library first — reuse existing avatars
       const charStore = createCharactersStorage(app.db);
       const allChars = await charStore.list();
       const charAvatarByName = new Map<string, string>();
@@ -3463,14 +3496,27 @@ export async function gameRoutes(app: FastifyInstance) {
         }
       }
 
+      // Build name→id lookup from currently materialized NPCs so we can
+      // resolve a stable filesystem id even when the client doesn't pass one.
+      const existingGameNpcs = (meta.gameNpcs as GameNpc[]) ?? [];
+      const idByLowerName = new Map<string, string>();
+      for (const n of existingGameNpcs) {
+        if (n?.name && n?.id) {
+          idByLowerName.set(n.name.normalize("NFKC").trim().toLowerCase(), n.id);
+        }
+      }
+
       for (const npc of input.npcsNeedingAvatars) {
         const libAvatar = findCharAvatarFuzzy(npc.name, charAvatarByName);
         if (libAvatar) {
           generatedNpcAvatars.push({ name: npc.name, avatarUrl: libAvatar });
           continue;
         }
+        const npcId =
+          npc.id?.trim() || idByLowerName.get(npc.name.normalize("NFKC").trim().toLowerCase()) || slugifyNpcName(npc.name);
         const avatarUrl = await generateNpcPortrait({
           chatId: input.chatId,
+          npcId,
           npcName: npc.name,
           appearance: npc.description,
           artStyle,
@@ -3508,6 +3554,38 @@ export async function gameRoutes(app: FastifyInstance) {
     }
 
     return { generatedBackground, generatedNpcAvatars };
+  });
+
+  // ── POST /game/npc/regenerate ──
+  // User-triggered manual regeneration of an NPC's avatar and/or sprite.
+  // Server-side this nukes the on-disk artifacts (otherwise the existsSync
+  // short-circuits in the generators would skip work), resets the NPC's
+  // metadata fields, and re-runs the unified asset pipeline. Image generation
+  // remains fire-and-forget; the client picks up new assets via the existing
+  // `useNpcAssetWatcher` polling on `chatKeys.detail`.
+  const regenerateNpcAssetsSchema = z.object({
+    chatId: z.string().min(1),
+    npcId: z.string().min(1).max(120),
+    /** Defaults to true. */
+    avatar: z.boolean().optional(),
+    /** Defaults to true. */
+    sprite: z.boolean().optional(),
+  });
+
+  app.post("/npc/regenerate", async (req) => {
+    const input = regenerateNpcAssetsSchema.parse(req.body);
+    const connections = createConnectionsStorage(app.db);
+
+    const result = await regenerateNpcAssets({
+      db: app.db,
+      connections,
+      chatId: input.chatId,
+      npcId: input.npcId,
+      regenerateAvatar: input.avatar !== false,
+      regenerateSprite: input.sprite !== false,
+    });
+
+    return result;
   });
 
   // ── POST /game/checkpoint ──

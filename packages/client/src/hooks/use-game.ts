@@ -1,7 +1,7 @@
 // ──────────────────────────────────────────────
 // Hook: Game Mode API
 // ──────────────────────────────────────────────
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api } from "../lib/api-client";
@@ -404,6 +404,96 @@ export function useSyncGameState(activeChatId: string, chatMeta: Record<string, 
       }
     }
   }, [activeChatId, chatMeta]);
+}
+
+/**
+ * Polls `chatKeys.detail(activeChatId)` while at least one materialised game
+ * NPC is missing its `avatarUrl` or has a `pending` sprite status. The Auto
+ * NPC Materialiser kicks off avatar/sprite generation as fire-and-forget
+ * background tasks that can finish AFTER the streaming `done` event closes
+ * the SSE reply, so a single invalidation on `done` only catches assets that
+ * happen to be ready already. This watcher fills the gap by re-fetching
+ * metadata every few seconds (capped) until every NPC has its assets, then
+ * tears down the interval automatically.
+ */
+export function useNpcAssetWatcher(activeChatId: string | null) {
+  const qc = useQueryClient();
+  const npcs = useGameModeStore((s) => s.npcs);
+
+  const hasPendingAssets = useMemo(() => {
+    if (npcs.length === 0) return false;
+    return npcs.some((n) => !n.avatarUrl || n.spriteStatus === "pending");
+  }, [npcs]);
+
+  useEffect(() => {
+    if (!activeChatId || !hasPendingAssets) return;
+
+    let attempts = 0;
+    const MAX_ATTEMPTS = 12; // 12 × 5s = 60s ceiling
+    const interval = window.setInterval(() => {
+      attempts += 1;
+      qc.invalidateQueries({ queryKey: chatKeys.detail(activeChatId) });
+      if (attempts >= MAX_ATTEMPTS) {
+        window.clearInterval(interval);
+      }
+    }, 5000);
+
+    return () => window.clearInterval(interval);
+  }, [activeChatId, hasPendingAssets, qc]);
+}
+
+interface RegenerateNpcAssetsRequest {
+  chatId: string;
+  npcId: string;
+  /** Defaults to true on the server. Pass `false` to skip avatar regeneration. */
+  avatar?: boolean;
+  /** Defaults to true on the server. Pass `false` to skip sprite regeneration. */
+  sprite?: boolean;
+}
+
+interface RegenerateNpcAssetsResponse {
+  ok: boolean;
+  npcId: string;
+  npcName: string | null;
+  regenerated: { avatar: boolean; sprite: boolean };
+  reason?: "npc-not-found" | "no-image-connection" | "nothing-to-do";
+}
+
+/**
+ * Manually regenerate an NPC's avatar and/or sprite. The server deletes the
+ * existing on-disk artifacts (otherwise the existsSync short-circuits in the
+ * generators would skip work), resets metadata fields, and re-runs the
+ * unified asset pipeline. We invalidate `chatKeys.detail` on success so the
+ * NPC's cleared-out `avatarUrl` is reflected immediately, then the existing
+ * `useNpcAssetWatcher` polling picks up the regenerated assets.
+ */
+export function useRegenerateNpcAssets() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: RegenerateNpcAssetsRequest) =>
+      api.post<RegenerateNpcAssetsResponse>("/game/npc/regenerate", data),
+    onSuccess: (res, vars) => {
+      qc.invalidateQueries({ queryKey: chatKeys.detail(vars.chatId) });
+      if (!res.ok) {
+        const msg =
+          res.reason === "no-image-connection"
+            ? "Image generation is not configured for this game"
+            : res.reason === "npc-not-found"
+              ? "NPC not found"
+              : res.reason === "nothing-to-do"
+                ? "Nothing selected to regenerate"
+                : "Could not start regeneration";
+        toast.error(msg);
+        return;
+      }
+      const { avatar, sprite } = res.regenerated;
+      const what = avatar && sprite ? "avatar & sprite" : avatar ? "avatar" : "sprite";
+      toast.success(`Regenerating ${what} for ${res.npcName ?? "NPC"}…`);
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Regeneration failed");
+    },
+  });
 }
 
 // ── New Game Mechanics Hooks ──

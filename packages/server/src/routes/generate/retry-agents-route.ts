@@ -18,6 +18,7 @@ import { createConnectionsStorage } from "../../services/storage/connections.sto
 import { createGameStateStorage } from "../../services/storage/game-state.storage.js";
 import { createLorebooksStorage } from "../../services/storage/lorebooks.storage.js";
 import { syncGameMapPartyPosition } from "../../services/game/map-position.service.js";
+import { materializeGameNpcs } from "../../services/game/npc-materializer.service.js";
 import { gameStateSnapshots as gameStateSnapshotsTable } from "../../db/schema/index.js";
 import { parseExtra, parseGameStateRow, resolveBaseUrl } from "./generate-route-utils.js";
 import {
@@ -29,7 +30,7 @@ import {
   resolveLorebookKeeperTarget,
 } from "./lorebook-keeper-utils.js";
 import { sendSseEvent, startSseReply } from "./sse.js";
-import type { GameMap } from "@marinara-engine/shared";
+import type { GameMap, PresentCharacter } from "@marinara-engine/shared";
 
 type PersonaContext = {
   personaName: string;
@@ -539,12 +540,47 @@ async function applyRetryResultEffects(args: {
       try {
         const ctData = result.data as Record<string, unknown>;
         const presentCharacters = (ctData.presentCharacters as any[]) ?? [];
+        logger.debug(
+          "[retry-agents] character-tracker: %d characters to persist (chat=%s, msg=%s)",
+          presentCharacters.length,
+          chatId,
+          retryMessageId,
+        );
         await gameStateStore.updateByMessage(retryMessageId, retrySwipeIndex, chatId, {
           presentCharacters,
         });
         sendSseEvent(reply, { type: "game_state_patch", data: { presentCharacters } });
-      } catch {
-        // Non-critical patching failure.
+
+        const trackerAgent = resolvedAgents.find((entry) => entry.resolved.type === "character-tracker");
+        const trackerSettings = trackerAgent?.resolved.settings ?? {};
+        await materializeGameNpcs({
+          db: app.db,
+          connections: conns,
+          chatId,
+          presentCharacters: presentCharacters as PresentCharacter[],
+          existingCharacterNames: agentContext.characters.map((character) => character.name),
+          personaName: agentContext.persona?.name ?? null,
+          gameMap: (chatMeta.gameMap as GameMap | null) ?? null,
+          currentLocation:
+            agentContext.gameState && typeof agentContext.gameState.location === "string"
+              ? agentContext.gameState.location
+              : null,
+          artStylePrompt:
+            ((chatMeta.gameSetupConfig as Record<string, unknown> | null)?.artStylePrompt as string | undefined) ??
+            null,
+          settings: {
+            autoMaterializeNpcs: trackerSettings.autoMaterializeNpcs === true,
+            autoGenerateNpcAvatars:
+              trackerSettings.autoGenerateNpcAvatars === true || trackerSettings.autoGenerateAvatars === true,
+            autoGenerateNpcSprites: trackerSettings.autoGenerateNpcSprites === true,
+            npcSpriteExpressions: Array.isArray(trackerSettings.npcSpriteExpressions)
+              ? (trackerSettings.npcSpriteExpressions as string[])
+              : undefined,
+            imageConnectionId: (trackerSettings.imageConnectionId as string | undefined) ?? null,
+          },
+        });
+      } catch (err) {
+        logger.error(err, "[retry-agents] character-tracker / NPC materialization failed");
       }
     }
 

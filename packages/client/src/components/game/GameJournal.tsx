@@ -6,10 +6,11 @@
 // all assembled from committed snapshots, no LLM.
 // ──────────────────────────────────────────────
 import { useState, useEffect, useRef, useCallback } from "react";
-import { X, MapPin, Swords, ScrollText, Package, Users, PenLine, BookOpen } from "lucide-react";
+import { X, MapPin, Swords, ScrollText, Package, Users, PenLine, BookOpen, RotateCw } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { api } from "../../lib/api-client";
 import { AnimatedText } from "./AnimatedText";
+import { useRegenerateNpcAssets } from "../../hooks/use-game";
 
 import type { GameNpc } from "@marinara-engine/shared";
 
@@ -166,7 +167,7 @@ export function GameJournal({ chatId, npcs, onClose, onNpcPortraitClick }: GameJ
       <div className="flex-1 overflow-y-auto p-4">
         {activeTab === "all" && <TimelineView entries={journal.entries} />}
         {activeTab === "npcs" && (
-          <NpcsView npcLog={journal.npcLog} npcs={npcs} onNpcPortraitClick={onNpcPortraitClick} />
+          <NpcsView chatId={chatId} npcLog={journal.npcLog} npcs={npcs} onNpcPortraitClick={onNpcPortraitClick} />
         )}
         {activeTab === "locations" && <LocationsView locations={journal.locations} />}
         {activeTab === "inventory" && <InventoryView items={journal.inventoryLog} />}
@@ -211,14 +212,17 @@ function reputationLabel(rep: number): { text: string; color: string } {
 }
 
 function NpcsView({
+  chatId,
   npcLog,
   npcs,
   onNpcPortraitClick,
 }: {
+  chatId: string;
   npcLog: Array<{ npcName: string; interactions: string[] }>;
   npcs?: GameNpc[];
   onNpcPortraitClick?: (npcName: string) => void;
 }) {
+  const regenerate = useRegenerateNpcAssets();
   const metNpcs = npcs?.filter((n) => n.met) ?? [];
   const hasContent = metNpcs.length > 0 || npcLog.length > 0;
 
@@ -241,12 +245,25 @@ function NpcsView({
     }
   }
 
+  // Track which NPC's regen button is currently busy so we can show a spinner
+  // even while the upstream `regenerate` mutation is shared across all rows.
+  const busyNpcId = regenerate.isPending ? regenerate.variables?.npcId : null;
+
   return (
     <div className="flex flex-col gap-2">
       {[...npcMap.values()].map((entry, i) => {
         const name = entry.npc?.name ?? entry.displayName;
         const rep = entry.npc ? reputationLabel(entry.npc.reputation) : null;
         const canUploadPortrait = !!entry.npc && !!onNpcPortraitClick;
+        // Two distinct UI states:
+        //   - `isRegenInFlight`: user clicked Regenerate and the mutation
+        //     is running. Spinner animates, button disabled.
+        //   - `isAssetPending`: the auto-pipeline is still producing the
+        //     avatar/sprite (no regen click yet). Button stays clickable
+        //     so the user can force a retry; we just dim the icon.
+        const isRegenInFlight = !!entry.npc && busyNpcId === entry.npc.id;
+        const isAssetPending =
+          !!entry.npc && (!entry.npc.avatarUrl || entry.npc.spriteStatus === "pending");
         return (
           <div key={i} className="rounded-lg border border-white/5 bg-white/3 px-3 py-2">
             <div className="flex items-center gap-2">
@@ -262,18 +279,35 @@ function NpcsView({
                       <img
                         src={entry.npc.avatarUrl}
                         alt={name}
-                        className="h-6 w-6 rounded-full object-cover ring-1 ring-white/10 transition-colors hover:ring-white/25"
+                        className={cn(
+                          "h-6 w-6 rounded-full object-cover ring-1 ring-white/10 transition-colors hover:ring-white/25",
+                          isAssetPending && "animate-pulse",
+                        )}
                       />
                     ) : (
-                      <div className="flex h-6 w-6 items-center justify-center rounded-full bg-white/10 text-[0.6rem] font-semibold text-white/60 ring-1 ring-white/10 transition-colors hover:ring-white/25">
+                      <div
+                        className={cn(
+                          "flex h-6 w-6 items-center justify-center rounded-full bg-white/10 text-[0.6rem] font-semibold text-white/60 ring-1 ring-white/10 transition-colors hover:ring-white/25",
+                          isAssetPending && "animate-pulse",
+                        )}
+                      >
                         {name[0]?.toUpperCase() ?? "?"}
                       </div>
                     )}
                   </button>
                 ) : entry.npc.avatarUrl ? (
-                  <img src={entry.npc.avatarUrl} alt={name} className="h-6 w-6 shrink-0 rounded-full object-cover" />
+                  <img
+                    src={entry.npc.avatarUrl}
+                    alt={name}
+                    className={cn("h-6 w-6 shrink-0 rounded-full object-cover", isAssetPending && "animate-pulse")}
+                  />
                 ) : (
-                  <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/10 text-[0.6rem] font-semibold text-white/60">
+                  <div
+                    className={cn(
+                      "flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/10 text-[0.6rem] font-semibold text-white/60",
+                      isAssetPending && "animate-pulse",
+                    )}
+                  >
                     {name[0]?.toUpperCase() ?? "?"}
                   </div>
                 ))}
@@ -282,6 +316,28 @@ function NpcsView({
                 {name}
               </span>
               {rep && <span className={cn("text-[10px] font-medium", rep.color)}>{rep.text}</span>}
+              {entry.npc?.id && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    regenerate.mutate({ chatId, npcId: entry.npc!.id, avatar: true, sprite: true })
+                  }
+                  disabled={isRegenInFlight}
+                  title={
+                    isRegenInFlight
+                      ? "Regeneration in progress…"
+                      : isAssetPending
+                        ? "Asset generation in progress — click to force regenerate"
+                        : "Regenerate avatar and sprite for this NPC"
+                  }
+                  className={cn(
+                    "flex h-5 w-5 shrink-0 items-center justify-center rounded text-white/40 transition-colors hover:bg-white/10 hover:text-white/80 disabled:cursor-not-allowed disabled:opacity-60",
+                    isAssetPending && !isRegenInFlight && "text-white/25",
+                  )}
+                >
+                  <RotateCw size={11} className={cn(isRegenInFlight && "animate-spin")} />
+                </button>
+              )}
             </div>
             {entry.npc?.description && <div className="mt-1 text-[0.6rem] text-white/40">{entry.npc.description}</div>}
             {entry.npc?.location && <div className="mt-0.5 text-[0.6rem] text-white/30">📍 {entry.npc.location}</div>}

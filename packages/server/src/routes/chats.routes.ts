@@ -22,7 +22,9 @@ import { characters } from "../db/schema/index.js";
 import { eq, inArray } from "drizzle-orm";
 import { existsSync } from "fs";
 import { join } from "path";
+import type { GameNpc } from "@marinara-engine/shared";
 import { DATA_DIR } from "../utils/data-dir.js";
+import { safeName as slugifyName } from "../services/game/game-asset-generation.js";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
 
 export async function chatsRoutes(app: FastifyInstance) {
@@ -282,7 +284,11 @@ export async function chatsRoutes(app: FastifyInstance) {
     const personaStats = row.personaStats ? JSON.parse(row.personaStats as string) : null;
 
     // ── Enrich present characters with avatar paths ──
-    // Match NPC names against the chat's known character cards, then fall back to stored NPC avatars on disk.
+    // Resolution order:
+    //   1. Known character cards (chat.characterIds → characters.avatarPath)
+    //   2. Game-mode materialized NPCs (chat.metadata.gameNpcs[].avatarUrl) — canonical source
+    //   3. Legacy filesystem fallback (slugified name → /data/avatars/npc/<chatId>/<slug>.png)
+    //      for chats that pre-date Auto NPC Materializer.
     const charsNeedingAvatar = presentCharacters.filter((c) => !c.avatarPath && c.name);
     if (charsNeedingAvatar.length > 0) {
       const chat = await storage.getById(req.params.id);
@@ -293,7 +299,6 @@ export async function chatsRoutes(app: FastifyInstance) {
           return [];
         }
       })();
-      // Build a name → avatarPath map from the chat's character records
       const nameToAvatar = new Map<string, string>();
       if (chatCharIds.length > 0) {
         const charRows = await app.db
@@ -309,23 +314,36 @@ export async function chatsRoutes(app: FastifyInstance) {
           }
         }
       }
+      const gameNpcs: GameNpc[] = (() => {
+        try {
+          const raw = chat?.metadata;
+          const meta = typeof raw === "string" ? JSON.parse(raw) : (raw ?? {});
+          return Array.isArray(meta?.gameNpcs) ? (meta.gameNpcs as GameNpc[]) : [];
+        } catch {
+          return [];
+        }
+      })();
+      const npcByLowerName = new Map<string, GameNpc>();
+      for (const npc of gameNpcs) {
+        if (npc?.name) npcByLowerName.set(npc.name.normalize("NFKC").trim().toLowerCase(), npc);
+      }
       const NPC_AVATAR_DIR = join(DATA_DIR, "avatars", "npc");
       for (const char of charsNeedingAvatar) {
         const name = char.name as string;
-        // 1. Try matching a known character card by name
         const knownAvatar = nameToAvatar.get(name.toLowerCase());
         if (knownAvatar) {
           char.avatarPath = knownAvatar;
           continue;
         }
-        // 2. Try loading a stored NPC avatar from disk
-        const safeName = name
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, "-")
-          .replace(/(^-|-$)/g, "");
-        if (safeName) {
-          const npcPath = join(NPC_AVATAR_DIR, req.params.id, `${safeName}.png`);
-          if (existsSync(npcPath)) char.avatarPath = `/api/avatars/npc/${req.params.id}/${safeName}.png`;
+        const matchedNpc = npcByLowerName.get(name.normalize("NFKC").trim().toLowerCase());
+        if (matchedNpc?.avatarUrl) {
+          char.avatarPath = matchedNpc.avatarUrl;
+          continue;
+        }
+        const slug = slugifyName(name);
+        if (slug) {
+          const npcPath = join(NPC_AVATAR_DIR, req.params.id, `${slug}.png`);
+          if (existsSync(npcPath)) char.avatarPath = `/api/avatars/npc/${req.params.id}/${slug}.png`;
         }
       }
     }

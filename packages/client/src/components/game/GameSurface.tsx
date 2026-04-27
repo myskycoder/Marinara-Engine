@@ -11,6 +11,7 @@ import { useUIStore } from "../../stores/ui.store";
 import { useGameStateStore } from "../../stores/game-state.store";
 import {
   useSyncGameState,
+  useNpcAssetWatcher,
   useCreateGame,
   useGameSetup,
   useStartGame,
@@ -569,6 +570,9 @@ export function GameSurface({
 }: GameSurfaceProps) {
   // Sync game metadata → store
   useSyncGameState(activeChatId, chatMeta);
+  // Poll chat metadata while any materialised NPC is still waiting on its
+  // async avatar/sprite generation. Stops automatically once everyone is ready.
+  useNpcAssetWatcher(activeChatId);
 
   const {
     gameState,
@@ -864,7 +868,7 @@ export function GameSurface({
   const [pendingAssetGeneration, setPendingAssetGeneration] = useState<{
     chatId: string;
     backgroundTag?: string;
-    npcsNeedingAvatars?: Array<{ name: string; description: string }>;
+    npcsNeedingAvatars?: Array<{ id: string; name: string; description: string }>;
   } | null>(null);
   const [assetGenerationFailed, setAssetGenerationFailed] = useState(false);
   const [volumePopoverOpen, setVolumePopoverOpen] = useState(false);
@@ -1109,6 +1113,23 @@ export function GameSurface({
     })),
   });
 
+  const npcSpriteEntries = useMemo(
+    () =>
+      npcs
+        .filter((npc) => npc.spriteId && npc.spriteStatus === "ready")
+        .map((npc) => ({ id: npc.spriteId!, name: npc.name })),
+    [npcs],
+  );
+
+  const npcSpriteQueries = useQueries({
+    queries: npcSpriteEntries.map((npc) => ({
+      queryKey: spriteKeys.list(npc.id),
+      queryFn: () => api.get<SpriteInfo[]>(`/sprites/${npc.id}`),
+      enabled: !!npc.id,
+      staleTime: 5 * 60 * 1000,
+    })),
+  });
+
   const personaSpriteQuery = useQuery({
     queryKey: spriteKeys.list(personaSpriteId ?? ""),
     queryFn: () => api.get<SpriteInfo[]>(`/sprites/${personaSpriteId}`),
@@ -1130,29 +1151,55 @@ export function GameSurface({
     if (personaInfo?.name && personaSpriteQuery.data?.length) {
       map.set(personaInfo.name.toLowerCase(), personaSpriteQuery.data);
     }
+    npcSpriteEntries.forEach((npc, i) => {
+      const data = npcSpriteQueries[i]?.data;
+      if (data?.length) {
+        map.set(npc.name.toLowerCase(), data);
+      }
+    });
     return map;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [characterIds, characterMap, personaInfo, ...spriteQueries.map((q) => q.data), personaSpriteQuery.data]);
+  }, [
+    characterIds,
+    characterMap,
+    personaInfo,
+    npcSpriteEntries,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    ...spriteQueries.map((q) => q.data),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    ...npcSpriteQueries.map((q) => q.data),
+    personaSpriteQuery.data,
+  ]);
+
+  const activeSpriteEntity = useMemo(() => {
+    if (!activeSpeaker) return null;
+    const characterEntry = findNamedEntry(characterMap.entries(), activeSpeaker.name, ([, character]) => character.name);
+    if (characterEntry) {
+      const idx = characterIds.indexOf(characterEntry[0]);
+      return { id: characterEntry[0], sprites: spriteQueries[idx]?.data };
+    }
+    const npcEntry = findNamedEntry(npcSpriteEntries.entries(), activeSpeaker.name, ([, npc]) => npc.name);
+    if (npcEntry) {
+      return { id: npcEntry[1].id, sprites: npcSpriteQueries[npcEntry[0]]?.data };
+    }
+    return null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSpeaker, characterMap, characterIds, npcSpriteEntries, ...spriteQueries.map((q) => q.data), ...npcSpriteQueries.map((q) => q.data)]);
 
   // Build sprite expression map from activeSpeaker for SpriteOverlay
   const gameSpriteExpressions = useMemo(() => {
-    if (!activeSpeaker?.expression) return undefined;
-    const entry = findNamedEntry(characterMap.entries(), activeSpeaker.name, ([, character]) => character.name);
-    if (!entry) return undefined;
-    return { [entry[0]]: activeSpeaker.expression };
-  }, [activeSpeaker, characterMap]);
+    if (!activeSpeaker?.expression || !activeSpriteEntity) return undefined;
+    return { [activeSpriteEntity.id]: activeSpeaker.expression };
+  }, [activeSpeaker, activeSpriteEntity]);
 
   // Only show the active speaker's sprite (not all party members at once)
   // Must have full-body sprites (full_ prefix) to appear
   const activeSpriteIds = useMemo(() => {
-    if (!activeSpeaker) return [];
-    const entry = findNamedEntry(characterMap.entries(), activeSpeaker.name, ([, character]) => character.name);
-    if (!entry) return [];
-    const idx = characterIds.indexOf(entry[0]);
-    const sprites = spriteQueries[idx]?.data;
+    if (!activeSpriteEntity) return [];
+    const sprites = activeSpriteEntity.sprites;
     const hasFullBody = sprites?.some((s) => s.expression.toLowerCase().startsWith("full_"));
-    return hasFullBody ? [entry[0]] : [];
-  }, [activeSpeaker, characterMap, characterIds, spriteQueries]);
+    return hasFullBody ? [activeSpriteEntity.id] : [];
+  }, [activeSpriteEntity]);
 
   // Keep previous sprite IDs around during fade-out so the component stays mounted
   const prevSpriteIdsRef = useRef<string[]>([]);
@@ -1198,7 +1245,7 @@ export function GameSurface({
   const npcsNeedingAvatars = useMemo(() => {
     const npcsNeedingAvatars = npcs
       .filter((npc) => !npc.avatarUrl && npc.description && npc.name)
-      .map((npc) => ({ name: npc.name, description: npc.description }))
+      .map((npc) => ({ id: npc.id, name: npc.name, description: npc.description }))
       .slice(0, 10);
 
     return npcsNeedingAvatars;
@@ -1933,7 +1980,7 @@ export function GameSurface({
       // /generate-assets schema already caps this at 10 per turn so cost stays bounded.
       const npcsNeedingAvatars = npcs
         .filter((n) => !n.avatarUrl && n.description && n.name)
-        .map((n) => ({ name: n.name, description: n.description }))
+        .map((n) => ({ id: n.id, name: n.name, description: n.description }))
         .slice(0, 10);
 
       if (unresolvedBg || npcsNeedingAvatars.length > 0) {
@@ -2007,7 +2054,7 @@ export function GameSurface({
       assetPayload: {
         chatId: string;
         backgroundTag?: string;
-        npcsNeedingAvatars?: Array<{ name: string; description: string }>;
+        npcsNeedingAvatars?: Array<{ id: string; name: string; description: string }>;
       },
       options?: { showSuccessToast?: boolean },
     ) => {
@@ -2277,6 +2324,7 @@ export function GameSurface({
       try {
         const avatar = await readFileAsDataUrl(file);
         const response = await api.post<{ avatarPath: string }>(`/avatars/npc/${activeChatId}`, {
+          id: targetNpc.id,
           name: targetNpc.name,
           avatar,
         });

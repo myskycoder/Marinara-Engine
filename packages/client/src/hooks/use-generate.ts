@@ -1132,6 +1132,12 @@ export function useGenerate() {
             case "done": {
               if (isActiveChat()) setProcessing(false);
               clearMariPhaseForThisChat();
+              // Server-side post-processing (NPC materializer, journal entries,
+              // lorebook keeper, …) writes to chat.metadata after streaming
+              // tokens but before this `done` event. Re-fetch the chat detail
+              // so React Query's cached metadata picks up new gameNpcs entries
+              // (and downstream useSyncGameState pushes them into the store).
+              qc.invalidateQueries({ queryKey: chatKeys.detail(params.chatId) });
               break;
             }
 
@@ -1607,6 +1613,10 @@ export function useGenerate() {
               break;
             }
             case "done": {
+              // Same as the main generate flow: refresh metadata so any
+              // post-processing (e.g. NPC materializer when user retries the
+              // Character Tracker) surfaces in the UI.
+              qc.invalidateQueries({ queryKey: chatKeys.detail(chatId) });
               break;
             }
           }

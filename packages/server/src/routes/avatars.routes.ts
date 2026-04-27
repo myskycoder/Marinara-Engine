@@ -4,10 +4,40 @@
 import type { FastifyInstance } from "fastify";
 import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { join, extname } from "path";
+import type { GameNpc } from "@marinara-engine/shared";
 import { DATA_DIR } from "../utils/data-dir.js";
+import { logger } from "../lib/logger.js";
+import { createChatsStorage } from "../services/storage/chats.storage.js";
+import {
+  npcAvatarFilename,
+  npcAvatarUrl,
+  safeName as slugifyName,
+} from "../services/game/game-asset-generation.js";
 
 const AVATAR_DIR = join(DATA_DIR, "avatars");
 const NPC_AVATAR_DIR = join(AVATAR_DIR, "npc");
+
+function parseChatMetadata(raw: unknown): Record<string, unknown> {
+  if (!raw) return {};
+  if (typeof raw === "string") {
+    try {
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+  if (typeof raw === "object") return raw as Record<string, unknown>;
+  return {};
+}
+
+function findGameNpcByName(
+  npcs: GameNpc[],
+  name: string,
+): GameNpc | null {
+  const target = name.normalize("NFKC").trim().toLowerCase();
+  if (!target) return null;
+  return npcs.find((npc) => npc.name?.normalize("NFKC").trim().toLowerCase() === target) ?? null;
+}
 
 function ensureDir() {
   if (!existsSync(AVATAR_DIR)) {
@@ -74,38 +104,90 @@ export async function avatarsRoutes(app: FastifyInstance) {
       .send(stream);
   });
 
-  /** Upload an NPC avatar (base64 data URL). */
+  /**
+   * Upload an NPC avatar (base64 data URL).
+   *
+   * Filename strategy (in order of precedence):
+   *   1. Caller provides `id` → save as `<id>.png` (preferred for Game-mode NPCs).
+   *   2. Caller provides `name` only → look it up in `chat.metadata.gameNpcs`
+   *      and use the matched `npc.id`. If the chat is in Game mode the
+   *      materializer guarantees an entry exists. Also patches gameNpcs[].avatarUrl
+   *      so the URL becomes the canonical source of truth on subsequent reads.
+   *   3. No game-NPC match → fall back to a robust `slugifyName(name)` (NFKD
+   *      + SHA-1 hash for non-Latin scripts). Used by Roleplay-mode HUD which
+   *      has no `gameNpcs` table.
+   */
   app.post("/npc/:chatId", async (req, reply) => {
     const { chatId } = req.params as { chatId: string };
-    const { name, avatar } = req.body as { name: string; avatar: string };
+    const body = req.body as { id?: string; name?: string; avatar?: string };
+    const { id: providedId, name, avatar } = body;
 
     if (!isValidFilename(chatId)) {
       return reply.status(400).send({ error: "Invalid chatId" });
     }
-    if (!name || !avatar) {
-      return reply.status(400).send({ error: "Missing name or avatar" });
+    if (!avatar) {
+      return reply.status(400).send({ error: "Missing avatar" });
+    }
+    if (!providedId && !name) {
+      return reply.status(400).send({ error: "Provide either `id` or `name`" });
     }
 
-    // Extract base64 data from data URL
     const match = avatar.match(/^data:image\/\w+;base64,(.+)$/);
     if (!match) {
       return reply.status(400).send({ error: "Invalid avatar format — expected base64 data URL" });
     }
 
-    const safeName = name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/(^-|-$)/g, "");
-    if (!safeName) {
-      return reply.status(400).send({ error: "Invalid character name" });
+    let resolvedId: string | null = providedId?.trim() || null;
+    let matchedNpc: GameNpc | null = null;
+
+    if (!resolvedId && name) {
+      try {
+        const chats = createChatsStorage(app.db);
+        const chat = await chats.getById(chatId);
+        if (chat) {
+          const meta = parseChatMetadata(chat.metadata);
+          const npcs = Array.isArray(meta.gameNpcs) ? (meta.gameNpcs as GameNpc[]) : [];
+          matchedNpc = findGameNpcByName(npcs, name);
+          if (matchedNpc) resolvedId = matchedNpc.id;
+        }
+      } catch (err) {
+        logger.warn(err, "[avatars] Failed to resolve gameNpc id for chat=%s name=%s", chatId, name);
+      }
+    }
+
+    if (!resolvedId) {
+      if (!name) {
+        return reply.status(400).send({ error: "Cannot resolve NPC id without `name`" });
+      }
+      resolvedId = slugifyName(name);
+    }
+
+    if (!isValidFilename(resolvedId)) {
+      return reply.status(400).send({ error: "Resolved NPC id contains unsafe characters" });
     }
 
     const npcDir = join(NPC_AVATAR_DIR, chatId);
     if (!existsSync(npcDir)) mkdirSync(npcDir, { recursive: true });
 
-    const filePath = join(npcDir, `${safeName}.png`);
+    const filePath = join(npcDir, npcAvatarFilename(resolvedId));
     writeFileSync(filePath, Buffer.from(match[1]!, "base64"));
+    const avatarPath = npcAvatarUrl(chatId, resolvedId);
 
-    return reply.send({ avatarPath: `/api/avatars/npc/${chatId}/${safeName}.png` });
+    if (matchedNpc) {
+      try {
+        const chats = createChatsStorage(app.db);
+        const chat = await chats.getById(chatId);
+        if (chat) {
+          const meta = parseChatMetadata(chat.metadata);
+          const npcs = Array.isArray(meta.gameNpcs) ? (meta.gameNpcs as GameNpc[]) : [];
+          const nextNpcs = npcs.map((npc) => (npc.id === resolvedId ? { ...npc, avatarUrl: avatarPath } : npc));
+          await chats.updateMetadata(chatId, { ...meta, gameNpcs: nextNpcs });
+        }
+      } catch (err) {
+        logger.warn(err, "[avatars] Failed to patch gameNpcs avatarUrl for chat=%s id=%s", chatId, resolvedId);
+      }
+    }
+
+    return reply.send({ avatarPath });
   });
 }

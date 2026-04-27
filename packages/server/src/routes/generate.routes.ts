@@ -104,7 +104,6 @@ import {
   addEventEntry,
   addInventoryEntry,
   upsertQuest,
-  addNpcEntry,
   type Journal,
 } from "../services/game/journal.service.js";
 import {
@@ -116,13 +115,15 @@ import {
 import { syncGameMapPartyPosition } from "../services/game/map-position.service.js";
 import { applyAllSegmentEdits, stripGmCommandTags } from "../services/game/segment-edits.js";
 import { listPartySprites } from "../services/game/sprite.service.js";
+import { materializeGameNpcs } from "../services/game/npc-materializer.service.js";
+import { safeName as slugifyName } from "../services/game/game-asset-generation.js";
 import {
   generatePerceptionHints,
   formatPerceptionHints,
   type PerceptionContext,
 } from "../services/game/perception.service.js";
 import { getMoraleTier, formatMoraleContext } from "../services/game/morale.service.js";
-import type { GameMap, GameNpc } from "@marinara-engine/shared";
+import type { GameMap, PresentCharacter } from "@marinara-engine/shared";
 import { sidecarModelService } from "../services/sidecar/sidecar-model.service.js";
 
 function sanitizeConnectedGameTranscript(content: string): string {
@@ -131,7 +132,7 @@ function sanitizeConnectedGameTranscript(content: string): string {
     .trim();
 }
 import { isInferenceAvailable as isSidecarInferenceAvailable } from "../services/sidecar/sidecar-inference.service.js";
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 
 /**
@@ -2270,6 +2271,34 @@ export async function generateRoutes(app: FastifyInstance) {
         chatActiveAgentIds.join(","),
         resolvedAgents.map((a) => `${a.type}(${a.phase})`).join(", "),
       );
+
+      // ── Diagnostic: character-tracker presence is critical for NPC materialization ──
+      const charTrackerInPipeline = resolvedAgents.find((a) => a.type === "character-tracker");
+      if (chatEnableAgents) {
+        if (!charTrackerInPipeline) {
+          logger.warn(
+            "[generate] character-tracker NOT in pipeline for chat %s (enableAgents=%s, activeIds=[%s]). NPC materialization will not run.",
+            input.chatId,
+            chatEnableAgents,
+            chatActiveAgentIds.join(","),
+          );
+        } else {
+          const settingsRaw = charTrackerInPipeline.settings ?? {};
+          logger.debug(
+            "[generate] character-tracker active for chat %s (id=%s, phase=%s, settings={materialize:%s, avatars:%s, sprites:%s, imageConn:%s})",
+            input.chatId,
+            charTrackerInPipeline.id,
+            charTrackerInPipeline.phase,
+            (settingsRaw as Record<string, unknown>).autoMaterializeNpcs === true ? "on" : "off",
+            (settingsRaw as Record<string, unknown>).autoGenerateNpcAvatars === true ||
+              (settingsRaw as Record<string, unknown>).autoGenerateAvatars === true
+              ? "on"
+              : "off",
+            (settingsRaw as Record<string, unknown>).autoGenerateNpcSprites === true ? "on" : "off",
+            ((settingsRaw as Record<string, unknown>).imageConnectionId as string | undefined) ?? "—",
+          );
+        }
+      }
 
       // Resolve character info (used for agent context AND prompt fallback)
       const charInfo: Array<{
@@ -5391,117 +5420,41 @@ export async function generateRoutes(app: FastifyInstance) {
               const chars = (ctData.presentCharacters as any[]) ?? [];
 
               // ── Enrich with avatar paths ──
-              // 1. Match against known character records in this chat
-              // 2. Fall back to stored NPC avatars (per-chat generated/uploaded)
+              // Resolution order:
+              //   1. Known character cards (case-insensitive name match → charInfo)
+              //   2. Game-mode materialized NPCs (chatMeta.gameNpcs[].avatarUrl) — canonical
+              //   3. Legacy filesystem fallback (slugified name) for pre-materializer chats
               const NPC_AVATAR_DIR = join(DATA_DIR, "avatars", "npc");
+              const gameNpcsForAvatar = (chatMeta.gameNpcs as import("@marinara-engine/shared").GameNpc[] | undefined) ?? [];
+              const npcByLowerName = new Map<string, import("@marinara-engine/shared").GameNpc>();
+              for (const n of gameNpcsForAvatar) {
+                if (n?.name) npcByLowerName.set(n.name.normalize("NFKC").trim().toLowerCase(), n);
+              }
               for (const char of chars) {
                 if (char.avatarPath) continue; // already set
                 const name = (char.name as string) ?? "";
-                // Try matching against the chat's character cards (case-insensitive)
                 const matched = charInfo.find((c) => c.name.toLowerCase() === name.toLowerCase());
                 if (matched?.avatarPath) {
                   char.avatarPath = matched.avatarPath;
                   continue;
                 }
-                // Try loading a stored NPC avatar from disk
-                const safeName = name
-                  .toLowerCase()
-                  .replace(/[^a-z0-9]+/g, "-")
-                  .replace(/(^-|-$)/g, "");
-                if (safeName) {
-                  const npcAvatarPath = join(NPC_AVATAR_DIR, input.chatId, `${safeName}.png`);
+                const matchedNpc = npcByLowerName.get(name.normalize("NFKC").trim().toLowerCase());
+                if (matchedNpc?.avatarUrl) {
+                  char.avatarPath = matchedNpc.avatarUrl;
+                  continue;
+                }
+                const slug = slugifyName(name);
+                if (slug) {
+                  const npcAvatarPath = join(NPC_AVATAR_DIR, input.chatId, `${slug}.png`);
                   if (existsSync(npcAvatarPath)) {
-                    char.avatarPath = `/api/avatars/npc/${input.chatId}/${safeName}.png`;
+                    char.avatarPath = `/api/avatars/npc/${input.chatId}/${slug}.png`;
                   }
                 }
               }
 
-              logger.info(
-                `[generate] character-tracker: ${chars.length} characters to persist (msg=${messageId}, swipe=${targetSwipeIndex})`,
+              logger.debug(
+                `[generate] character-tracker: ${chars.length} characters to persist (chat=${input.chatId}, msg=${messageId}, swipe=${targetSwipeIndex})`,
               );
-
-              // ── Auto-generate NPC avatars if enabled ──
-              const charTrackerAgent = resolvedAgents.find((a) => a.type === "character-tracker");
-              const autoGenAvatars = !!charTrackerAgent?.settings?.autoGenerateAvatars;
-              const npcImgConnId = (charTrackerAgent?.settings?.imageConnectionId as string) ?? null;
-              if (autoGenAvatars && npcImgConnId) {
-                const charsNeedingAvatars = chars.filter(
-                  (c: any) => !c.avatarPath && (c.name as string) && (c.appearance as string),
-                );
-                if (charsNeedingAvatars.length > 0) {
-                  // Fire-and-forget: generate avatars in background so we don't block
-                  (async () => {
-                    try {
-                      const imgConnFull = await connections.getWithKey(npcImgConnId);
-                      if (!imgConnFull) return;
-                      const { generateImage } = await import("../services/image/image-generation.js");
-                      const imgModel = imgConnFull.model || "";
-                      const imgBaseUrl = imgConnFull.baseUrl || "https://image.pollinations.ai";
-                      const imgApiKey = imgConnFull.apiKey || "";
-                      const imgSource = (imgConnFull as any).imageGenerationSource || imgModel;
-                      const imgServiceHint = imgConnFull.imageService || imgSource;
-
-                      for (const npc of charsNeedingAvatars) {
-                        try {
-                          const npcName = npc.name as string;
-                          const appearance = (npc.appearance as string) || "";
-                          const outfit = (npc.outfit as string) || "";
-                          const prompt =
-                            `Portrait of ${npcName}, ${appearance}${outfit ? `, wearing ${outfit}` : ""}. Character portrait, head and shoulders, detailed face, high quality`.slice(
-                              0,
-                              1000,
-                            );
-
-                          const imageResult = await generateImage(imgModel, imgBaseUrl, imgApiKey, imgServiceHint, {
-                            prompt,
-                            model: imgModel,
-                            width: 512,
-                            height: 512,
-                          });
-
-                          // Save to NPC avatars directory
-                          const safeName = npcName
-                            .toLowerCase()
-                            .replace(/[^a-z0-9]+/g, "-")
-                            .replace(/(^-|-$)/g, "");
-                          const npcDir = join(NPC_AVATAR_DIR, input.chatId);
-                          if (!existsSync(npcDir)) mkdirSync(npcDir, { recursive: true });
-                          writeFileSync(join(npcDir, `${safeName}.png`), Buffer.from(imageResult.base64, "base64"));
-
-                          // Update the character's avatarPath and stream to client
-                          npc.avatarPath = `/api/avatars/npc/${input.chatId}/${safeName}.png`;
-                          logger.info(`[character-tracker] Generated avatar for NPC "${npcName}"`);
-                        } catch (err) {
-                          logger.warn(err, '[character-tracker] Failed to generate avatar for "%s"', npc.name);
-                        }
-                      }
-
-                      // Re-persist with avatar paths and notify client
-                      await gameStateStore.updateByMessage(messageId, targetSwipeIndex, input.chatId, {
-                        presentCharacters: chars,
-                      });
-                      try {
-                        logger.debug("[game_state_patch] character-tracker (avatar update): %d chars", chars.length);
-                        reply.raw.write(
-                          `data: ${JSON.stringify({ type: "game_state_patch", data: { presentCharacters: chars } })}\n\n`,
-                        );
-                      } catch {
-                        /* stream closed */
-                      }
-                    } catch (err) {
-                      logger.warn(err, "[character-tracker] Avatar generation error");
-                    }
-                  })();
-                }
-              }
-
-              // Read old characters before updating so we can detect newly-appearing NPCs
-              const snapBeforeUpdate = await gameStateStore.getByMessage(messageId, targetSwipeIndex);
-              const oldChars: any[] = snapBeforeUpdate?.presentCharacters
-                ? typeof snapBeforeUpdate.presentCharacters === "string"
-                  ? JSON.parse(snapBeforeUpdate.presentCharacters)
-                  : snapBeforeUpdate.presentCharacters
-                : [];
 
               const updated = await gameStateStore.updateByMessage(messageId, targetSwipeIndex, input.chatId, {
                 presentCharacters: chars,
@@ -5519,31 +5472,34 @@ export async function generateRoutes(app: FastifyInstance) {
                 /* stream closed */
               }
 
-              // Auto-populate journal: NPC encounters
+              const charTrackerAgent = resolvedAgents.find((a) => a.type === "character-tracker");
+              const charTrackerSettings = charTrackerAgent?.settings ?? {};
               try {
-                const prevNames = new Set(oldChars.map((c: any) => ((c.name as string) ?? "").toLowerCase()));
-                for (const char of chars) {
-                  const name = (char.name as string) ?? "";
-                  if (!name || prevNames.has(name.toLowerCase())) continue;
-                  // Skip player-character cards — only track NPCs
-                  if (charInfo.some((c) => c.name.toLowerCase() === name.toLowerCase())) continue;
-                  const appearance = (char.appearance as string) || "";
-                  const mood = (char.mood as string) || "";
-                  const npc: GameNpc = {
-                    id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
-                    name,
-                    emoji: "👤",
-                    description: appearance,
-                    location: "",
-                    reputation: 0,
-                    met: true,
-                    notes: [],
-                  };
-                  const interaction = mood ? `Encountered (${mood})` : "Encountered";
-                  updateJournal(app.db, input.chatId, (j) => addNpcEntry(j, npc, interaction));
-                }
-              } catch {
-                // Non-critical
+                await materializeGameNpcs({
+                  db: app.db,
+                  connections,
+                  chatId: input.chatId,
+                  presentCharacters: chars as PresentCharacter[],
+                  existingCharacterNames: charInfo.map((c) => c.name),
+                  personaName,
+                  gameMap: (chatMeta.gameMap as GameMap | null) ?? null,
+                  artStylePrompt:
+                    ((chatMeta.gameSetupConfig as Record<string, unknown> | null)?.artStylePrompt as string | undefined) ??
+                    null,
+                  settings: {
+                    autoMaterializeNpcs: charTrackerSettings.autoMaterializeNpcs === true,
+                    autoGenerateNpcAvatars:
+                      charTrackerSettings.autoGenerateNpcAvatars === true ||
+                      charTrackerSettings.autoGenerateAvatars === true,
+                    autoGenerateNpcSprites: charTrackerSettings.autoGenerateNpcSprites === true,
+                    npcSpriteExpressions: Array.isArray(charTrackerSettings.npcSpriteExpressions)
+                      ? (charTrackerSettings.npcSpriteExpressions as string[])
+                      : undefined,
+                    imageConnectionId: (charTrackerSettings.imageConnectionId as string | undefined) ?? null,
+                  },
+                });
+              } catch (err) {
+                logger.warn(err, "[generate] NPC materialization failed");
               }
             } catch (err) {
               logger.error(err, "[generate] character-tracker persistence error");

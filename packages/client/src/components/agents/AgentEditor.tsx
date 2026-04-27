@@ -121,7 +121,10 @@ export function AgentEditor() {
   const [localSpotifyClientId, setLocalSpotifyClientId] = useState("");
   const [localSourceLorebookIds, setLocalSourceLorebookIds] = useState<string[]>([]);
   const [localSourceFileIds, setLocalSourceFileIds] = useState<string[]>([]);
+  const [localAutoMaterializeNpcs, setLocalAutoMaterializeNpcs] = useState(false);
   const [localAutoGenerateAvatars, setLocalAutoGenerateAvatars] = useState(false);
+  const [localAutoGenerateNpcSprites, setLocalAutoGenerateNpcSprites] = useState(false);
+  const [localNpcSpriteExpressions, setLocalNpcSpriteExpressions] = useState("neutral, happy, sad, angry, surprised, thinking");
   const [localUseAvatarReferences, setLocalUseAvatarReferences] = useState(false);
   const [spotifyStatus, setSpotifyStatus] = useState<{
     connected: boolean;
@@ -167,7 +170,14 @@ export function AgentEditor() {
       setLocalSpotifyClientId(settings.spotifyClientId ?? "");
       setLocalSourceLorebookIds(settings.sourceLorebookIds ?? []);
       setLocalSourceFileIds(settings.sourceFileIds ?? []);
-      setLocalAutoGenerateAvatars(settings.autoGenerateAvatars ?? false);
+      setLocalAutoMaterializeNpcs(settings.autoMaterializeNpcs ?? false);
+      setLocalAutoGenerateAvatars(settings.autoGenerateNpcAvatars ?? settings.autoGenerateAvatars ?? false);
+      setLocalAutoGenerateNpcSprites(settings.autoGenerateNpcSprites ?? false);
+      setLocalNpcSpriteExpressions(
+        Array.isArray(settings.npcSpriteExpressions)
+          ? settings.npcSpriteExpressions.join(", ")
+          : "neutral, happy, sad, angry, surprised, thinking",
+      );
       setLocalUseAvatarReferences(settings.useAvatarReferences ?? false);
       setLocalPrompt(dbConfig.promptTemplate || "");
     } else if (builtIn) {
@@ -183,7 +193,10 @@ export function AgentEditor() {
       setLocalSpotifyClientId("");
       setLocalSourceLorebookIds([]);
       setLocalSourceFileIds([]);
+      setLocalAutoMaterializeNpcs(false);
       setLocalAutoGenerateAvatars(false);
+      setLocalAutoGenerateNpcSprites(false);
+      setLocalNpcSpriteExpressions("neutral, happy, sad, angry, surprised, thinking");
       setLocalUseAvatarReferences(false);
       setLocalPrompt("");
     } else {
@@ -200,7 +213,10 @@ export function AgentEditor() {
       setLocalSpotifyClientId("");
       setLocalSourceLorebookIds([]);
       setLocalSourceFileIds([]);
+      setLocalAutoMaterializeNpcs(false);
       setLocalAutoGenerateAvatars(false);
+      setLocalAutoGenerateNpcSprites(false);
+      setLocalNpcSpriteExpressions("neutral, happy, sad, angry, surprised, thinking");
       setLocalUseAvatarReferences(false);
       setLocalPrompt("");
     }
@@ -222,6 +238,7 @@ export function AgentEditor() {
 
   // Knowledge Retrieval agent — lorebook source selector
   const isKnowledgeRetrievalAgent = agentDetailId === "knowledge-retrieval" || dbConfig?.type === "knowledge-retrieval";
+  const isCharacterTrackerAgent = agentDetailId === "character-tracker" || dbConfig?.type === "character-tracker";
   const { data: allLorebooks } = useLorebooks();
   const { data: allKnowledgeSources } = useKnowledgeSources();
   const uploadSource = useUploadKnowledgeSource();
@@ -288,6 +305,10 @@ export function AgentEditor() {
   const handleSave = useCallback(async () => {
     if (!agentDetailId) return;
     setSaveError(null);
+    const npcSpriteExpressions = localNpcSpriteExpressions
+      .split(",")
+      .map((expression) => expression.trim())
+      .filter(Boolean);
 
     const payload = {
       name: localName,
@@ -305,7 +326,13 @@ export function AgentEditor() {
         ...(localSourceLorebookIds.length > 0 ? { sourceLorebookIds: localSourceLorebookIds } : {}),
         ...(localSourceFileIds.length > 0 ? { sourceFileIds: localSourceFileIds } : {}),
         ...(localImageConnectionId ? { imageConnectionId: localImageConnectionId } : {}),
-        ...(localAutoGenerateAvatars ? { autoGenerateAvatars: true } : {}),
+        ...(isCharacterTrackerAgent && localAutoMaterializeNpcs ? { autoMaterializeNpcs: true } : {}),
+        ...(isCharacterTrackerAgent && localAutoGenerateAvatars ? { autoGenerateNpcAvatars: true } : {}),
+        ...(isCharacterTrackerAgent && localAutoGenerateNpcSprites ? { autoGenerateNpcSprites: true } : {}),
+        ...(isCharacterTrackerAgent && localAutoGenerateNpcSprites && npcSpriteExpressions.length > 0
+          ? { npcSpriteExpressions }
+          : {}),
+        ...(!isCharacterTrackerAgent && localAutoGenerateAvatars ? { autoGenerateAvatars: true } : {}),
         ...(localUseAvatarReferences ? { useAvatarReferences: true } : {}),
       },
     };
@@ -351,8 +378,12 @@ export function AgentEditor() {
     localSpotifyClientId,
     localSourceLorebookIds,
     localSourceFileIds,
+    localAutoMaterializeNpcs,
     localAutoGenerateAvatars,
+    localAutoGenerateNpcSprites,
+    localNpcSpriteExpressions,
     localUseAvatarReferences,
+    isCharacterTrackerAgent,
     dbConfig,
     builtIn,
     updateAgent,
@@ -630,47 +661,99 @@ export function AgentEditor() {
             </FieldGroup>
           )}
 
-          {/* ── NPC Avatar Generation (Character Tracker only) ── */}
-          {(agentDetailId === "character-tracker" || dbConfig?.type === "character-tracker") && (
+          {/* ── NPC Materialization (Character Tracker only) ── */}
+          {isCharacterTrackerAgent && (
             <FieldGroup
-              label="Auto-Generate NPC Avatars"
+              label="Game Mode NPCs"
               icon={<Sparkles size="0.875rem" className="text-[var(--primary)]" />}
-              help="When enabled, the Character Tracker will automatically generate portrait images for NPCs that don't have an avatar, using their appearance description."
+              help="Controls how Character Tracker turns newly detected Game Mode NPCs into persistent gameNpcs, portraits, and optional sprites."
             >
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={localAutoGenerateAvatars}
-                  onChange={(e) => {
-                    setLocalAutoGenerateAvatars(e.target.checked);
-                    markDirty();
-                  }}
-                  className="rounded border-[var(--border)] bg-[var(--secondary)] text-[var(--primary)] focus:ring-[var(--ring)]"
-                />
-                <span className="text-sm">Generate avatar portraits for new NPCs</span>
-              </label>
-              {localAutoGenerateAvatars && (
-                <div className="mt-2">
-                  <label className="block text-xs text-[var(--muted-foreground)] mb-1">
-                    Image Generation Connection
-                  </label>
-                  <select
-                    value={localImageConnectionId}
+              <div className="space-y-3">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={localAutoMaterializeNpcs}
                     onChange={(e) => {
-                      setLocalImageConnectionId(e.target.value);
+                      setLocalAutoMaterializeNpcs(e.target.checked);
                       markDirty();
                     }}
-                    className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
-                  >
-                    <option value="">None (select a connection)</option>
-                    {imageConnections.map((conn) => (
-                      <option key={conn.id} value={conn.id}>
-                        {conn.name} ({conn.provider})
-                      </option>
-                    ))}
-                  </select>
+                    className="rounded border-[var(--border)] bg-[var(--secondary)] text-[var(--primary)] focus:ring-[var(--ring)]"
+                  />
+                  <span className="text-sm">Materialize new tracked NPCs into Game Mode NPCs</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={localAutoGenerateAvatars}
+                    onChange={(e) => {
+                      setLocalAutoGenerateAvatars(e.target.checked);
+                      markDirty();
+                    }}
+                    className="rounded border-[var(--border)] bg-[var(--secondary)] text-[var(--primary)] focus:ring-[var(--ring)]"
+                  />
+                  <span className="text-sm">Generate avatar portraits for new NPCs</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={localAutoGenerateNpcSprites}
+                    onChange={(e) => {
+                      setLocalAutoGenerateNpcSprites(e.target.checked);
+                      markDirty();
+                    }}
+                    className="rounded border-[var(--border)] bg-[var(--secondary)] text-[var(--primary)] focus:ring-[var(--ring)]"
+                  />
+                  <span className="text-sm">Generate expression and full-body sprites for new NPCs</span>
+                </label>
+                {(localAutoGenerateAvatars || localAutoGenerateNpcSprites) && (
+                  <div className="rounded-xl bg-[var(--secondary)] p-3 ring-1 ring-[var(--border)]">
+                    <label className="block text-xs text-[var(--muted-foreground)] mb-1">
+                      Image Generation Connection
+                    </label>
+                    <select
+                      value={localImageConnectionId}
+                      onChange={(e) => {
+                        setLocalImageConnectionId(e.target.value);
+                        markDirty();
+                      }}
+                      className="w-full rounded-xl bg-[var(--background)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                    >
+                      <option value="">Use game image connection / none selected</option>
+                      {imageConnections.map((conn) => (
+                        <option key={conn.id} value={conn.id}>
+                          {conn.name} ({conn.provider})
+                        </option>
+                      ))}
+                    </select>
+                    <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
+                      When empty, Game Mode falls back to the game setup image connection if one exists.
+                    </p>
+                  </div>
+                )}
+                {localAutoGenerateNpcSprites && (
+                  <div>
+                    <label className="block text-xs text-[var(--muted-foreground)] mb-1">
+                      Sprite Expressions
+                    </label>
+                    <input
+                      value={localNpcSpriteExpressions}
+                      onChange={(e) => {
+                        setLocalNpcSpriteExpressions(e.target.value);
+                        markDirty();
+                      }}
+                      placeholder="neutral, happy, sad, angry, surprised, thinking"
+                      className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                    />
+                    <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
+                      Comma-separated. The generator uses up to six expressions and also creates a full-body idle sprite.
+                    </p>
+                  </div>
+                )}
+                <div className="rounded-lg bg-[var(--accent)]/40 px-3 py-2 text-[0.625rem] text-[var(--muted-foreground)]">
+                  These options are only used by Game Mode after Character Tracker successfully updates present
+                  characters.
                 </div>
-              )}
+              </div>
             </FieldGroup>
           )}
 

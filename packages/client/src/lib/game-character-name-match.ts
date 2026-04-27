@@ -20,11 +20,16 @@ const NAME_STOP_WORDS = new Set([
 ]);
 
 function normalizeCharacterName(name: string): string {
+  // NOTE: We deliberately keep all Unicode letters (Cyrillic, CJK, etc.) instead
+  // of stripping non-ASCII characters. Replacing `[^a-z0-9]+` with a space
+  // collapses Cyrillic names like "Корчмарь" to an empty string, which breaks
+  // every name match (avatars, dialogue colors, sprites). The combining-mark
+  // strip after NFKD still removes Latin diacritics without harming Cyrillic.
   return name
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
     .trim();
 }
 

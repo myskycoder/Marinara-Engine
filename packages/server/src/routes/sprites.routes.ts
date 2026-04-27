@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, createReadStream, readdirSync, unlinkSync, statS
 import { writeFile, mkdir, readdir, unlink } from "fs/promises";
 import { join, extname } from "path";
 import { DATA_DIR } from "../utils/data-dir.js";
+import { removeNearWhiteBackgroundPng } from "../services/image/sprite-bg-removal.js";
 
 // sharp is an optional dependency — native prebuilds don't exist for all platforms
 // (e.g. Android/Termux). Lazy-load so the server boots even when sharp is missing;
@@ -61,84 +62,6 @@ function ensureDir(dir: string) {
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
-}
-
-/**
- * Convert near-white background pixels to transparency.
- * This works best when the model renders on a solid white backdrop.
- */
-async function removeNearWhiteBackgroundPng(input: Buffer, cleanupStrength = 50): Promise<Buffer> {
-  const sharp = await getSharp();
-  const { data, info } = await sharp(input).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-
-  if (!info.width || !info.height) {
-    return sharp(input).png().toBuffer();
-  }
-
-  const rgba = Buffer.from(data);
-  const channels = info.channels;
-  const strength = Math.max(0, Math.min(100, cleanupStrength));
-
-  // 0 = very soft, 100 = very aggressive
-  // Keep the low end conservative so strength=0 only removes almost-pure white.
-  const hardCutoff = Math.round(1 + (strength / 100) * 7); // 1..8
-  const fadeWindow = Math.round(6 + (strength / 100) * 24); // 6..30
-  const softCutoff = hardCutoff + fadeWindow;
-
-  // Extra guards to avoid deleting light skin/highlights:
-  // - Only affect very bright pixels (high min channel)
-  // - Only affect near-neutral pixels (small RGB channel spread)
-  const minChannelFloor = Math.round(242 + (strength / 100) * 8); // 242..250
-  const spreadHardLimit = Math.round(5 + (strength / 100) * 8); // 5..13
-  const spreadSoftWindow = 10;
-  const spreadSoftLimit = spreadHardLimit + spreadSoftWindow;
-
-  for (let i = 0; i < rgba.length; i += channels) {
-    const r = rgba[i] ?? 255;
-    const g = rgba[i + 1] ?? 255;
-    const b = rgba[i + 2] ?? 255;
-    const a = rgba[i + 3] ?? 255;
-
-    const minChannel = Math.min(r, g, b);
-    const maxChannel = Math.max(r, g, b);
-    const spread = maxChannel - minChannel;
-
-    // Skip colored / not-bright-enough pixels entirely.
-    if (minChannel < minChannelFloor || spread > spreadSoftLimit) {
-      continue;
-    }
-
-    // Use Euclidean distance from pure white (255,255,255) once the neutral+bright guards pass.
-    const distanceFromWhite = Math.sqrt((255 - r) * (255 - r) + (255 - g) * (255 - g) + (255 - b) * (255 - b));
-
-    let alphaFactor = 1;
-
-    if (spread > spreadHardLimit) {
-      const spreadT = (spread - spreadHardLimit) / Math.max(1, spreadSoftWindow);
-      alphaFactor *= 1 - Math.max(0, Math.min(1, spreadT));
-    }
-
-    if (distanceFromWhite <= hardCutoff) {
-      rgba[i + 3] = Math.max(0, Math.min(a, Math.round(a * (1 - alphaFactor))));
-      continue;
-    }
-
-    if (distanceFromWhite <= softCutoff) {
-      const t = (distanceFromWhite - hardCutoff) / Math.max(1, fadeWindow);
-      const keep = Math.max(0, Math.min(1, t));
-      rgba[i + 3] = Math.max(0, Math.min(a, Math.round(a * (keep + (1 - keep) * (1 - alphaFactor)))));
-    }
-  }
-
-  return sharp(rgba, {
-    raw: {
-      width: info.width,
-      height: info.height,
-      channels: 4,
-    },
-  })
-    .png()
-    .toBuffer();
 }
 
 function looksLikeBase64(input: string): boolean {

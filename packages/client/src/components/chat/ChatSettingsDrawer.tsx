@@ -91,6 +91,7 @@ import {
   BUILT_IN_AGENTS,
   BUILT_IN_TOOLS,
   DEFAULT_AGENT_TOOLS,
+  GAME_MODE_DEFAULT_AGENT_IDS,
   getDefaultBuiltInAgentSettings,
 } from "@marinara-engine/shared";
 import type { Chat, CharacterGroup } from "@marinara-engine/shared";
@@ -641,7 +642,29 @@ export function ChatSettingsDrawer({
   const [scenePromptDraft, setScenePromptDraft] = useState(metadata.sceneSystemPrompt ?? "");
   const [groupScenarioDraft, setGroupScenarioDraft] = useState((metadata.groupScenarioText as string) ?? "");
   const [groupScenarioExpanded, setGroupScenarioExpanded] = useState(false);
-  const [gameAgentPool] = useState<string[]>(() => Array.from(new Set(activeAgentIds)));
+  // Game-mode agent pool — visible toggles in the drawer. The pool only grows so
+  // toggled-off agents stay visible and re-enableable. We extend it whenever
+  // `activeAgentIds` gains new entries (e.g. after seeding defaults via the
+  // "Add Game Mode Agents" migration button), so new tracker toggles appear
+  // without a full remount of the drawer.
+  const [gameAgentPool, setGameAgentPool] = useState<string[]>(() => Array.from(new Set(activeAgentIds)));
+  // Stable key avoids re-running the effect every render — `activeAgentIds`
+  // is recomputed via `?? []` upstream and would have a fresh reference each pass.
+  const activeAgentIdsKey = activeAgentIds.join(",");
+  useEffect(() => {
+    setGameAgentPool((current) => {
+      const next = new Set(current);
+      let changed = false;
+      for (const id of activeAgentIds) {
+        if (!next.has(id)) {
+          next.add(id);
+          changed = true;
+        }
+      }
+      return changed ? Array.from(next) : current;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeAgentIdsKey]);
   const [extraPromptDraft, setExtraPromptDraft] = useState((metadata.gameExtraPrompt as string) ?? "");
   const [extraPromptExpanded, setExtraPromptExpanded] = useState(false);
 
@@ -2812,6 +2835,37 @@ export function ChatSettingsDrawer({
                   <>
                     {isGame ? (
                       <div className="space-y-1">
+                        {(() => {
+                          const missingDefaults = GAME_MODE_DEFAULT_AGENT_IDS.filter(
+                            (id) => !activeAgentIds.includes(id),
+                          );
+                          if (missingDefaults.length === 0) return null;
+                          return (
+                            <button
+                              onClick={() =>
+                                updateMeta.mutate({
+                                  id: chat.id,
+                                  activeAgentIds: Array.from(
+                                    new Set([...activeAgentIds, ...GAME_MODE_DEFAULT_AGENT_IDS]),
+                                  ),
+                                })
+                              }
+                              className="flex w-full items-start gap-2 rounded-lg border border-dashed border-[var(--primary)]/40 bg-[var(--primary)]/5 px-3 py-2.5 text-left transition-all hover:bg-[var(--primary)]/10 active:scale-[0.99]"
+                            >
+                              <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--primary)]/15 text-[var(--primary)]">
+                                <Plus size="0.75rem" />
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <span className="block text-xs font-semibold text-[var(--primary)]">
+                                  Add Game Mode Agents
+                                </span>
+                                <span className="block text-[0.625rem] leading-snug text-[var(--muted-foreground)]">
+                                  Adds Character Tracker, World State, and Persona Stats — required for HUD and NPC tracking.
+                                </span>
+                              </div>
+                            </button>
+                          );
+                        })()}
                         {gameAgentPool.map((agentId) => {
                           const agent =
                             availableAgents.find((a) => a.id === agentId) ??

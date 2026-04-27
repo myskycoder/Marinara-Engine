@@ -437,14 +437,34 @@ export function CharactersPanel({ characters, onUpdate, chatId }: CharactersPane
       return {} as Record<string, unknown>;
     }
   }, [trackerConfig]);
-  const autoGenEnabled = !!(trackerSettings as Record<string, unknown>).autoGenerateAvatars;
+  const autoMaterializeEnabled = !!(trackerSettings as Record<string, unknown>).autoMaterializeNpcs;
+  const autoGenEnabled =
+    !!(trackerSettings as Record<string, unknown>).autoGenerateNpcAvatars ||
+    !!(trackerSettings as Record<string, unknown>).autoGenerateAvatars;
+  const autoSpriteEnabled = !!(trackerSettings as Record<string, unknown>).autoGenerateNpcSprites;
+  const toggleAutoMaterialize = useCallback(() => {
+    if (!trackerConfig) return;
+    const newVal = !autoMaterializeEnabled;
+    const { autoMaterializeNpcs: _, ...rest } = trackerSettings as Record<string, unknown>;
+    const newSettings = newVal ? { ...rest, autoMaterializeNpcs: true } : rest;
+    updateAgent.mutate({ id: trackerConfig.id, settings: newSettings });
+  }, [trackerConfig, autoMaterializeEnabled, trackerSettings, updateAgent]);
   const toggleAutoGenerate = useCallback(() => {
     if (!trackerConfig) return;
     const newVal = !autoGenEnabled;
-    const { autoGenerateAvatars: _, ...rest } = trackerSettings as Record<string, unknown>;
-    const newSettings = newVal ? { ...rest, autoGenerateAvatars: true } : rest;
+    const { autoGenerateAvatars: _, autoGenerateNpcAvatars: __, ...rest } = trackerSettings as Record<string, unknown>;
+    const newSettings = newVal ? { ...rest, autoGenerateNpcAvatars: true } : rest;
     updateAgent.mutate({ id: trackerConfig.id, settings: newSettings });
   }, [trackerConfig, autoGenEnabled, trackerSettings, updateAgent]);
+  const toggleAutoSprites = useCallback(() => {
+    if (!trackerConfig) return;
+    const newVal = !autoSpriteEnabled;
+    const { autoGenerateNpcSprites: _, npcSpriteExpressions: __, ...rest } = trackerSettings as Record<string, unknown>;
+    const newSettings = newVal
+      ? { ...rest, autoGenerateNpcSprites: true, npcSpriteExpressions: ["neutral", "happy", "sad", "angry", "surprised", "thinking"] }
+      : rest;
+    updateAgent.mutate({ id: trackerConfig.id, settings: newSettings });
+  }, [trackerConfig, autoSpriteEnabled, trackerSettings, updateAgent]);
 
   const handleAvatarUpload = useCallback(
     async (idx: number, file: File) => {
@@ -505,17 +525,41 @@ export function CharactersPanel({ characters, onUpdate, chatId }: CharactersPane
         </span>
         <div className="flex items-center gap-2">
           {trackerConfig && (
-            <button
-              onClick={toggleAutoGenerate}
-              className={cn(
-                "flex items-center gap-1 text-[0.5625rem] transition-colors",
-                autoGenEnabled ? "text-purple-400" : "text-white/30 hover:text-white/50",
-              )}
-              title={autoGenEnabled ? "Auto-generate avatars: ON" : "Auto-generate avatars: OFF"}
-            >
-              <Sparkles size="0.5625rem" />
-              <span className="hidden sm:inline">Auto</span>
-            </button>
+            <>
+              <button
+                onClick={toggleAutoMaterialize}
+                className={cn(
+                  "flex items-center gap-1 text-[0.5625rem] transition-colors",
+                  autoMaterializeEnabled ? "text-emerald-400" : "text-white/30 hover:text-white/50",
+                )}
+                title={autoMaterializeEnabled ? "Auto-materialize NPCs: ON" : "Auto-materialize NPCs: OFF"}
+              >
+                <Users size="0.5625rem" />
+                <span className="hidden sm:inline">NPCs</span>
+              </button>
+              <button
+                onClick={toggleAutoGenerate}
+                className={cn(
+                  "flex items-center gap-1 text-[0.5625rem] transition-colors",
+                  autoGenEnabled ? "text-purple-400" : "text-white/30 hover:text-white/50",
+                )}
+                title={autoGenEnabled ? "Auto-generate NPC avatars: ON" : "Auto-generate NPC avatars: OFF"}
+              >
+                <Sparkles size="0.5625rem" />
+                <span className="hidden sm:inline">Auto</span>
+              </button>
+              <button
+                onClick={toggleAutoSprites}
+                className={cn(
+                  "flex items-center gap-1 text-[0.5625rem] transition-colors",
+                  autoSpriteEnabled ? "text-cyan-400" : "text-white/30 hover:text-white/50",
+                )}
+                title={autoSpriteEnabled ? "Auto-generate NPC sprites: ON" : "Auto-generate NPC sprites: OFF"}
+              >
+                <Circle size="0.5625rem" />
+                <span className="hidden sm:inline">Sprites</span>
+              </button>
+            </>
           )}
           <button
             onClick={addCharacter}
