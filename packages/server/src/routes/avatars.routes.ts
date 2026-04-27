@@ -8,11 +8,8 @@ import type { GameNpc } from "@marinara-engine/shared";
 import { DATA_DIR } from "../utils/data-dir.js";
 import { logger } from "../lib/logger.js";
 import { createChatsStorage } from "../services/storage/chats.storage.js";
-import {
-  npcAvatarFilename,
-  npcAvatarUrl,
-  safeName as slugifyName,
-} from "../services/game/game-asset-generation.js";
+import { npcAvatarFilename, npcAvatarUrl } from "../services/game/game-asset-generation.js";
+import { isSameNpcName, sha1HexLegacy, slugifyForFs } from "../services/game/npc-name-server.js";
 
 const AVATAR_DIR = join(DATA_DIR, "avatars");
 const NPC_AVATAR_DIR = join(AVATAR_DIR, "npc");
@@ -30,13 +27,9 @@ function parseChatMetadata(raw: unknown): Record<string, unknown> {
   return {};
 }
 
-function findGameNpcByName(
-  npcs: GameNpc[],
-  name: string,
-): GameNpc | null {
-  const target = name.normalize("NFKC").trim().toLowerCase();
-  if (!target) return null;
-  return npcs.find((npc) => npc.name?.normalize("NFKC").trim().toLowerCase() === target) ?? null;
+function findGameNpcByName(npcs: GameNpc[], name: string): GameNpc | null {
+  if (!name?.trim()) return null;
+  return npcs.find((npc) => isSameNpcName(npc.name ?? "", name)) ?? null;
 }
 
 function ensureDir() {
@@ -159,7 +152,9 @@ export async function avatarsRoutes(app: FastifyInstance) {
       if (!name) {
         return reply.status(400).send({ error: "Cannot resolve NPC id without `name`" });
       }
-      resolvedId = slugifyName(name);
+      // Legacy s-<sha1> prefix kept for backwards compatibility with files
+      // already on disk for non-Latin names.
+      resolvedId = slugifyForFs(name, { prefix: "s", hashHex: sha1HexLegacy });
     }
 
     if (!isValidFilename(resolvedId)) {
@@ -176,13 +171,17 @@ export async function avatarsRoutes(app: FastifyInstance) {
     if (matchedNpc) {
       try {
         const chats = createChatsStorage(app.db);
-        const chat = await chats.getById(chatId);
-        if (chat) {
-          const meta = parseChatMetadata(chat.metadata);
+        await chats.updateMetadataWithMerge(chatId, (meta) => {
           const npcs = Array.isArray(meta.gameNpcs) ? (meta.gameNpcs as GameNpc[]) : [];
-          const nextNpcs = npcs.map((npc) => (npc.id === resolvedId ? { ...npc, avatarUrl: avatarPath } : npc));
-          await chats.updateMetadata(chatId, { ...meta, gameNpcs: nextNpcs });
-        }
+          let changed = false;
+          const nextNpcs = npcs.map((npc) => {
+            if (npc.id !== resolvedId) return npc;
+            changed = true;
+            return { ...npc, avatarUrl: avatarPath };
+          });
+          if (!changed) return null;
+          return { ...meta, gameNpcs: nextNpcs };
+        });
       } catch (err) {
         logger.warn(err, "[avatars] Failed to patch gameNpcs avatarUrl for chat=%s id=%s", chatId, resolvedId);
       }

@@ -25,6 +25,35 @@ import {
 
 const GALLERY_DIR = join(DATA_DIR, "gallery");
 
+/**
+ * Per-chat mutex used by `updateMetadataWithMerge` to serialize
+ * read-modify-write cycles on `chat.metadata`. The map stores a chain promise
+ * for each chatId; new tasks await the existing promise and replace it. Once
+ * a task settles, if no follow-up task was queued the entry is removed so the
+ * map doesn't grow unbounded.
+ *
+ * In-process scope is sufficient — the Fastify server is single-process and
+ * the only writers to `chat.metadata` go through this storage module.
+ */
+const chatLocks = new Map<string, Promise<unknown>>();
+
+async function withChatLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
+  const previous = chatLocks.get(id);
+  let resolveCurrent: () => void;
+  const current = new Promise<void>((resolve) => {
+    resolveCurrent = resolve;
+  });
+  const next = (previous ? previous.catch(() => undefined) : Promise.resolve()).then(() => current);
+  chatLocks.set(id, next);
+  try {
+    if (previous) await previous.catch(() => undefined);
+    return await fn();
+  } finally {
+    resolveCurrent!();
+    if (chatLocks.get(id) === next) chatLocks.delete(id);
+  }
+}
+
 function resolveTimestamps(overrides?: TimestampOverrides | null) {
   const normalized = normalizeTimestampOverrides(overrides);
   const createdAt = normalized?.createdAt ?? now();
@@ -101,6 +130,55 @@ export function createChatsStorage(db: DB) {
         .set({ metadata: JSON.stringify(metadata), updatedAt: now() })
         .where(eq(chats.id, id));
       return this.getById(id);
+    },
+
+    /**
+     * Atomic read-modify-write of `chat.metadata` under a per-chat mutex.
+     *
+     * `updateMetadata` is a full-overwrite write, and most callers do
+     * `getById → JSON.parse → mutate → updateMetadata`. Multiple concurrent
+     * writers (NPC pipeline + manual regenerate + scene-wrap) race on the same
+     * row and one path's update can silently overwrite another's. This helper
+     * serializes the whole RMW step per `chatId` so each `mergeFn` sees the
+     * latest persisted metadata.
+     *
+     * `mergeFn` may return:
+     *   - the next metadata object (will be persisted)
+     *   - `null` to skip the write (e.g. nothing to change after re-reading)
+     *
+     * The mutex is in-process only — fine for our single-node Fastify server.
+     * SQLite's own locking guarantees row-level write atomicity, but it does
+     * NOT serialize JS-side reads against later JS-side writes; that's the
+     * gap this lock closes.
+     */
+    async updateMetadataWithMerge(
+      id: string,
+      mergeFn: (current: Record<string, unknown>) => Record<string, unknown> | null | Promise<Record<string, unknown> | null>,
+    ) {
+      return withChatLock(id, async () => {
+        const row = await this.getById(id);
+        if (!row) return null;
+        const current: Record<string, unknown> = (() => {
+          const raw = row.metadata;
+          if (!raw) return {};
+          if (typeof raw === "string") {
+            try {
+              return JSON.parse(raw) as Record<string, unknown>;
+            } catch {
+              return {};
+            }
+          }
+          if (typeof raw === "object") return raw as Record<string, unknown>;
+          return {};
+        })();
+        const next = await mergeFn(current);
+        if (!next) return row;
+        await db
+          .update(chats)
+          .set({ metadata: JSON.stringify(next), updatedAt: now() })
+          .where(eq(chats.id, id));
+        return this.getById(id);
+      });
     },
 
     async remove(id: string) {

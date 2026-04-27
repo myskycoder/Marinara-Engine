@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { GameMap, GameNpc, PresentCharacter } from "@marinara-engine/shared";
 import type { DB } from "../../db/connection.js";
 import { logger } from "../../lib/logger.js";
@@ -12,6 +11,7 @@ import {
 } from "./game-asset-generation.js";
 import { deleteNpcSpriteFolder, generateNpcSprites } from "./npc-sprite-generation.service.js";
 import { addNpcEntry, createJournal, type Journal } from "./journal.service.js";
+import { isSameNpcName, npcNameKey, sha1HexLegacy, slugifyForFs } from "./npc-name-server.js";
 
 type ConnectionsStorage = ReturnType<typeof createConnectionsStorage>;
 
@@ -74,32 +74,6 @@ function parseMetadata(raw: unknown): Record<string, unknown> {
   return {};
 }
 
-function normalizeNameKey(name: string): string {
-  return name
-    .normalize("NFKC")
-    .trim()
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function compactNameKey(name: string): string {
-  return normalizeNameKey(name).replace(/\s+/g, "");
-}
-
-function slugifyName(name: string): string {
-  const asciiSlug = name
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "");
-  if (asciiSlug) return asciiSlug;
-  const hash = createHash("sha1").update(name).digest("hex").slice(0, 10);
-  return `npc-${hash}`;
-}
-
 function ensureUniqueNpcId(baseId: string, existingIds: Set<string>): string {
   if (!existingIds.has(baseId)) return baseId;
   let index = 2;
@@ -107,16 +81,8 @@ function ensureUniqueNpcId(baseId: string, existingIds: Set<string>): string {
   return `${baseId}-${index}`;
 }
 
-function isSameNpcName(left: string, right: string): boolean {
-  const leftKey = normalizeNameKey(left);
-  const rightKey = normalizeNameKey(right);
-  if (!leftKey || !rightKey) return false;
-  return leftKey === rightKey || compactNameKey(leftKey) === compactNameKey(rightKey);
-}
-
 function isGenericName(name: string): boolean {
-  const key = normalizeNameKey(name);
-  return GENERIC_NAME_KEYS.has(key);
+  return GENERIC_NAME_KEYS.has(npcNameKey(name));
 }
 
 function describePresentCharacter(char: PresentCharacter): string {
@@ -204,7 +170,7 @@ function shouldMaterializeCharacter(args: {
 }
 
 function makeGameNpc(char: PresentCharacter, location: string, existingIds: Set<string>): GameNpc {
-  const id = ensureUniqueNpcId(slugifyName(char.name), existingIds);
+  const id = ensureUniqueNpcId(slugifyForFs(char.name, { prefix: "npc", hashHex: sha1HexLegacy }), existingIds);
   existingIds.add(id);
   return {
     id,
@@ -242,18 +208,20 @@ function resolveImageConnectionId(settings: NpcMaterializerSettings, meta: Recor
 
 async function patchNpcAvatarUrl(db: DB, chatId: string, npcId: string, avatarUrl: string): Promise<void> {
   const chats = createChatsStorage(db);
-  const chat = await chats.getById(chatId);
-  if (!chat) return;
-  const meta = parseMetadata(chat.metadata);
-  const npcs = Array.isArray(meta.gameNpcs) ? ([...(meta.gameNpcs as GameNpc[])] as GameNpc[]) : [];
-  let changed = false;
-  const nextNpcs = npcs.map((npc) => {
-    if (npc.id !== npcId || npc.avatarUrl) return npc;
-    changed = true;
-    return { ...npc, avatarUrl };
+  let stored = false;
+  await chats.updateMetadataWithMerge(chatId, (meta) => {
+    const npcs = Array.isArray(meta.gameNpcs) ? ([...(meta.gameNpcs as GameNpc[])] as GameNpc[]) : [];
+    let changed = false;
+    const nextNpcs = npcs.map((npc) => {
+      if (npc.id !== npcId || npc.avatarUrl) return npc;
+      changed = true;
+      return { ...npc, avatarUrl };
+    });
+    if (!changed) return null;
+    stored = true;
+    return { ...meta, gameNpcs: nextNpcs };
   });
-  if (changed) {
-    await chats.updateMetadata(chatId, { ...meta, gameNpcs: nextNpcs });
+  if (stored) {
     logger.info("[npc-materializer] Stored avatarUrl for npc id=%s in chat %s → %s", npcId, chatId, avatarUrl);
   } else {
     logger.debug(
@@ -272,23 +240,21 @@ async function patchNpcSpriteStatus(
   spriteStatus: NonNullable<GameNpc["spriteStatus"]>,
 ): Promise<void> {
   const chats = createChatsStorage(db);
-  const chat = await chats.getById(chatId);
-  if (!chat) return;
-  const meta = parseMetadata(chat.metadata);
-  const npcs = Array.isArray(meta.gameNpcs) ? ([...(meta.gameNpcs as GameNpc[])] as GameNpc[]) : [];
-  let changed = false;
-  const nextNpcs = npcs.map((npc) => {
-    if (npc.id !== npcId) return npc;
-    changed = true;
-    return {
-      ...npc,
-      spriteId: npc.spriteId || spriteId,
-      spriteStatus,
-    };
+  await chats.updateMetadataWithMerge(chatId, (meta) => {
+    const npcs = Array.isArray(meta.gameNpcs) ? ([...(meta.gameNpcs as GameNpc[])] as GameNpc[]) : [];
+    let changed = false;
+    const nextNpcs = npcs.map((npc) => {
+      if (npc.id !== npcId) return npc;
+      changed = true;
+      return {
+        ...npc,
+        spriteId: npc.spriteId || spriteId,
+        spriteStatus,
+      };
+    });
+    if (!changed) return null;
+    return { ...meta, gameNpcs: nextNpcs };
   });
-  if (changed) {
-    await chats.updateMetadata(chatId, { ...meta, gameNpcs: nextNpcs });
-  }
 }
 
 /**
@@ -507,23 +473,45 @@ export async function regenerateNpcAssets(
   }
 
   const chats = createChatsStorage(input.db);
-  const chat = await chats.getById(input.chatId);
-  if (!chat) {
-    logger.warn("[npc-materializer] regenerate: chat %s not found", input.chatId);
-    return { ok: false, npcId: input.npcId, npcName: null, regenerated: { avatar: false, sprite: false }, reason: "npc-not-found" };
-  }
 
-  const meta = parseMetadata(chat.metadata);
-  const npcs = Array.isArray(meta.gameNpcs) ? ([...(meta.gameNpcs as GameNpc[])] as GameNpc[]) : [];
-  const npc = npcs.find((candidate) => candidate.id === input.npcId);
-  if (!npc) {
+  // Atomic read-modify-write: another writer (auto pipeline, scene-wrap,
+  // concurrent regenerate) may have updated the same NPC entry between
+  // our read and write. Holder is a property-typed object so TS keeps the
+  // declared union types after the merge callback executes.
+  const holder: {
+    npc: GameNpc | null;
+    imageConnectionId: string | null;
+    next: GameNpc | null;
+    meta: Record<string, unknown> | null;
+  } = { npc: null, imageConnectionId: null, next: null, meta: null };
+  await chats.updateMetadataWithMerge(input.chatId, (meta) => {
+    const npcs = Array.isArray(meta.gameNpcs) ? ([...(meta.gameNpcs as GameNpc[])] as GameNpc[]) : [];
+    const found = npcs.find((candidate) => candidate.id === input.npcId);
+    if (!found) return null;
+    const imageConnectionId = (meta.gameImageConnectionId as string | null | undefined) || null;
+    holder.npc = found;
+    holder.imageConnectionId = imageConnectionId;
+    holder.meta = meta;
+    if (!imageConnectionId) return null;
+
+    const next: GameNpc = { ...found };
+    if (wantAvatar) {
+      next.avatarUrl = undefined;
+    }
+    if (wantSprite) {
+      next.spriteId = found.spriteId || `game-npc-${input.chatId}-${found.id}`;
+      next.spriteStatus = "pending";
+    }
+    holder.next = next;
+    const nextNpcs = npcs.map((n) => (n.id === found.id ? next : n));
+    return { ...meta, gameNpcs: nextNpcs };
+  });
+
+  if (!holder.npc) {
     logger.warn("[npc-materializer] regenerate: npc %s not found in chat %s", input.npcId, input.chatId);
     return { ok: false, npcId: input.npcId, npcName: null, regenerated: { avatar: false, sprite: false }, reason: "npc-not-found" };
   }
-
-  // Resolve image connection (settings → chat metadata fallback chain).
-  const imageConnectionId = (meta.gameImageConnectionId as string | null | undefined) || null;
-  if (!imageConnectionId) {
+  if (!holder.imageConnectionId || !holder.next || !holder.meta) {
     logger.warn(
       "[npc-materializer] regenerate: no image connection configured for chat %s — cannot regenerate assets",
       input.chatId,
@@ -531,25 +519,15 @@ export async function regenerateNpcAssets(
     return {
       ok: false,
       npcId: input.npcId,
-      npcName: npc.name,
+      npcName: holder.npc.name,
       regenerated: { avatar: false, sprite: false },
       reason: "no-image-connection",
     };
   }
-
-  // Reset metadata up-front. The watcher polls `chat.detail` and the NPC list
-  // mirror in the client store will flip `avatarUrl` to undefined immediately,
-  // which is the user-visible "regenerating…" signal.
-  const next: GameNpc = { ...npc };
-  if (wantAvatar) {
-    next.avatarUrl = undefined;
-  }
-  if (wantSprite) {
-    next.spriteId = npc.spriteId || `game-npc-${input.chatId}-${npc.id}`;
-    next.spriteStatus = "pending";
-  }
-  const nextNpcs = npcs.map((n) => (n.id === npc.id ? next : n));
-  await chats.updateMetadata(input.chatId, { ...meta, gameNpcs: nextNpcs });
+  const npc = holder.npc;
+  const imageConnectionId = holder.imageConnectionId;
+  const next = holder.next;
+  const meta = holder.meta;
 
   // Now nuke the on-disk artifacts so the generators won't short-circuit.
   if (wantAvatar) {
@@ -611,99 +589,118 @@ export async function materializeGameNpcs(input: MaterializeGameNpcsInput): Prom
   }
 
   const chats = createChatsStorage(input.db);
-  const chat = await chats.getById(input.chatId);
-  if (!chat) {
+
+  // Atomic RMW: existing NPCs may grow between our snapshot and the write
+  // (concurrent turn finishing, manual regenerate). We do candidate selection
+  // inside the merge callback against the freshest metadata. Property-typed
+  // holder keeps TS narrowing stable across the callback boundary.
+  const resultHolder: {
+    value: {
+      created: GameNpc[];
+      skipped: number;
+      nextNpcs: GameNpc[];
+      imageConnectionId: string | null;
+    } | null;
+  } = { value: null };
+
+  const updated = await chats.updateMetadataWithMerge(input.chatId, (meta) => {
+    const existingNpcs = Array.isArray(meta.gameNpcs) ? ([...(meta.gameNpcs as GameNpc[])] as GameNpc[]) : [];
+    const imageConnectionId = resolveImageConnectionId(input.settings, meta);
+    const location = input.currentLocation?.trim() || getCurrentMapLocation(input.gameMap) || "";
+    const protectedNames = [input.personaName, ...(input.partyCharacterNames ?? [])]
+      .filter((name): name is string => !!name?.trim())
+      .map((name) => name.trim());
+    const existingIds = new Set(existingNpcs.map((npc) => npc.id).filter(Boolean));
+
+    logger.debug(
+      "[npc-materializer] chat=%s presentCharacters=%d (%s); existingNpcs=%d; existingCharacters=%d; persona=%s; imageConn=%s; flags={avatars:%s, sprites:%s}",
+      input.chatId,
+      input.presentCharacters.length,
+      presentNames.join(", ") || "—",
+      existingNpcs.length,
+      input.existingCharacterNames.length,
+      input.personaName ?? "—",
+      imageConnectionId ?? "—",
+      input.settings.autoGenerateNpcAvatars ? "on" : "off",
+      input.settings.autoGenerateNpcSprites ? "on" : "off",
+    );
+
+    const created: GameNpc[] = [];
+    let skipped = 0;
+    for (const char of input.presentCharacters) {
+      const decision = shouldMaterializeCharacter({
+        char,
+        existingNpcs: [...existingNpcs, ...created],
+        existingCharacterNames: input.existingCharacterNames,
+        protectedNames,
+      });
+      if (!decision.ok) {
+        skipped += 1;
+        logger.debug(
+          "[npc-materializer] Skipping '%s' — %s%s",
+          char.name?.trim() || "<unnamed>",
+          decision.reason,
+          decision.detail ? ` (matched: ${decision.detail})` : "",
+        );
+        continue;
+      }
+      const npc = makeGameNpc(char, location, existingIds);
+      if (input.settings.autoGenerateNpcSprites && imageConnectionId) {
+        npc.spriteId = `game-npc-${input.chatId}-${npc.id}`;
+        npc.spriteStatus = "pending";
+      }
+      created.push(npc);
+      logger.info("[npc-materializer] Materializing new NPC '%s' (id=%s) in chat %s", npc.name, npc.id, input.chatId);
+    }
+
+    const existingJournal = (meta.gameJournal as Journal | undefined) ?? createJournal();
+    const nextJournal = created.reduce((journal, npc) => {
+      const mood = input.presentCharacters.find((char) => isSameNpcName(char.name, npc.name))?.mood?.trim();
+      const interaction = mood ? `Encountered (${mood})` : "Encountered";
+      return addNpcEntry(journal, npc, interaction);
+    }, existingJournal);
+
+    const nextNpcs = [...existingNpcs, ...created].map((npc) => {
+      if (!isPresentNpc(npc, input.presentCharacters)) return npc;
+      let next = ensureNpcAssetDescription(npc);
+      if (
+        input.settings.autoGenerateNpcSprites &&
+        imageConnectionId &&
+        !next.spriteId &&
+        next.spriteStatus !== "ready" &&
+        next.spriteStatus !== "pending"
+      ) {
+        next = {
+          ...next,
+          spriteId: `game-npc-${input.chatId}-${next.id}`,
+          spriteStatus: "pending",
+        };
+      }
+      return next;
+    });
+    const hasNpcChanges =
+      created.length > 0 ||
+      JSON.stringify(nextNpcs.map((npc) => [npc.id, npc.description, npc.spriteId, npc.spriteStatus])) !==
+        JSON.stringify([...existingNpcs, ...created].map((npc) => [npc.id, npc.description, npc.spriteId, npc.spriteStatus]));
+
+    resultHolder.value = { created, skipped, nextNpcs, imageConnectionId };
+
+    if (!hasNpcChanges) return null;
+    return {
+      ...meta,
+      gameNpcs: nextNpcs,
+      ...(created.length > 0 ? { gameJournal: nextJournal } : {}),
+    };
+  });
+
+  if (!updated || !resultHolder.value) {
     logger.warn("[npc-materializer] Chat %s not found while materializing NPCs", input.chatId);
     return { created: [], skipped: input.presentCharacters.length };
   }
 
-  const meta = parseMetadata(chat.metadata);
-  const existingNpcs = Array.isArray(meta.gameNpcs) ? ([...(meta.gameNpcs as GameNpc[])] as GameNpc[]) : [];
-  const imageConnectionId = resolveImageConnectionId(input.settings, meta);
-  const location = input.currentLocation?.trim() || getCurrentMapLocation(input.gameMap) || "";
-  const protectedNames = [input.personaName, ...(input.partyCharacterNames ?? [])]
-    .filter((name): name is string => !!name?.trim())
-    .map((name) => name.trim());
-  const existingIds = new Set(existingNpcs.map((npc) => npc.id).filter(Boolean));
-
-  logger.debug(
-    "[npc-materializer] chat=%s presentCharacters=%d (%s); existingNpcs=%d; existingCharacters=%d; persona=%s; imageConn=%s; flags={avatars:%s, sprites:%s}",
-    input.chatId,
-    input.presentCharacters.length,
-    presentNames.join(", ") || "—",
-    existingNpcs.length,
-    input.existingCharacterNames.length,
-    input.personaName ?? "—",
-    imageConnectionId ?? "—",
-    input.settings.autoGenerateNpcAvatars ? "on" : "off",
-    input.settings.autoGenerateNpcSprites ? "on" : "off",
-  );
-
-  const created: GameNpc[] = [];
-  let skipped = 0;
-  for (const char of input.presentCharacters) {
-    const decision = shouldMaterializeCharacter({
-      char,
-      existingNpcs: [...existingNpcs, ...created],
-      existingCharacterNames: input.existingCharacterNames,
-      protectedNames,
-    });
-    if (!decision.ok) {
-      skipped += 1;
-      logger.debug(
-        "[npc-materializer] Skipping '%s' — %s%s",
-        char.name?.trim() || "<unnamed>",
-        decision.reason,
-        decision.detail ? ` (matched: ${decision.detail})` : "",
-      );
-      continue;
-    }
-    const npc = makeGameNpc(char, location, existingIds);
-    if (input.settings.autoGenerateNpcSprites && imageConnectionId) {
-      npc.spriteId = `game-npc-${input.chatId}-${npc.id}`;
-      npc.spriteStatus = "pending";
-    }
-    created.push(npc);
-    logger.info("[npc-materializer] Materializing new NPC '%s' (id=%s) in chat %s", npc.name, npc.id, input.chatId);
-  }
-
-  const existingJournal = (meta.gameJournal as Journal | undefined) ?? createJournal();
-  const nextJournal = created.reduce((journal, npc) => {
-    const mood = input.presentCharacters.find((char) => isSameNpcName(char.name, npc.name))?.mood?.trim();
-    const interaction = mood ? `Encountered (${mood})` : "Encountered";
-    return addNpcEntry(journal, npc, interaction);
-  }, existingJournal);
-
+  const { created, skipped, nextNpcs, imageConnectionId } = resultHolder.value;
   const createdIds = new Set(created.map((npc) => npc.id));
-  const nextNpcs = [...existingNpcs, ...created].map((npc) => {
-    if (!isPresentNpc(npc, input.presentCharacters)) return npc;
-    let next = ensureNpcAssetDescription(npc);
-    if (
-      input.settings.autoGenerateNpcSprites &&
-      imageConnectionId &&
-      !next.spriteId &&
-      next.spriteStatus !== "ready" &&
-      next.spriteStatus !== "pending"
-    ) {
-      next = {
-        ...next,
-        spriteId: `game-npc-${input.chatId}-${next.id}`,
-        spriteStatus: "pending",
-      };
-    }
-    return next;
-  });
-  const hasNpcChanges =
-    created.length > 0 ||
-    JSON.stringify(nextNpcs.map((npc) => [npc.id, npc.description, npc.spriteId, npc.spriteStatus])) !==
-      JSON.stringify([...existingNpcs, ...created].map((npc) => [npc.id, npc.description, npc.spriteId, npc.spriteStatus]));
-  if (hasNpcChanges) {
-    await chats.updateMetadata(input.chatId, {
-      ...meta,
-      gameNpcs: nextNpcs,
-      ...(created.length > 0 ? { gameJournal: nextJournal } : {}),
-    });
-  }
+
   logger.debug(
     "[npc-materializer] chat=%s done: created=%d, skipped=%d, totalNpcs=%d",
     input.chatId,

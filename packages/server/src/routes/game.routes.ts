@@ -84,9 +84,9 @@ import { getAssetManifest } from "../services/game/asset-manifest.service.js";
 import {
   generateNpcPortrait,
   generateBackground,
-  safeName as slugifyNpcName,
 } from "../services/game/game-asset-generation.js";
 import { regenerateNpcAssets } from "../services/game/npc-materializer.service.js";
+import { npcNameKey, sha1HexLegacy, slugifyForFs } from "../services/game/npc-name-server.js";
 
 // ──────────────────────────────────────────────
 // Helpers
@@ -1011,15 +1011,20 @@ export async function gameRoutes(app: FastifyInstance) {
       gameSceneConnectionId: setupConfig.sceneConnectionId || null,
       gameNpcs: [],
       enableAgents: true,
-      // Game Mode requires Character Tracker / World State / Persona Stats trackers
-      // for HUD injection and NPC materialization. Seed defaults while preserving
-      // any agents the chat may already have (e.g. user-added before this hook).
+      // Game Mode requires Character Tracker / World State / Persona Stats
+      // trackers for HUD injection and NPC materialization. We seed them
+      // ONCE on first createGame, then leave the user free to remove any
+      // tracker they don't want — `gameModeAutoSeeded` records that the
+      // seeding already happened so subsequent code paths (follow-up
+      // sessions, settings drawer migration button) don't re-add removed
+      // trackers behind the user's back.
       activeAgentIds: Array.from(
         new Set([
           ...((sessionMeta.activeAgentIds as string[] | undefined) ?? []),
           ...GAME_MODE_DEFAULT_AGENT_IDS,
         ]),
       ),
+      gameModeAutoSeeded: true,
       enableSpriteGeneration: setupConfig.enableSpriteGeneration || false,
       gameImageConnectionId: setupConfig.imageConnectionId || null,
       activeLorebookIds: setupConfig.activeLorebookIds || [],
@@ -1612,6 +1617,22 @@ export async function gameRoutes(app: FastifyInstance) {
       );
 
       const newMeta = parseMeta(newChat.metadata);
+      // `gameModeAutoSeeded` records that the trio of trackers
+      // (character-tracker, world-state, persona-stats) has been seeded at
+      // least once for this game. Two distinct cases:
+      //
+      //   1. Previous session has the flag → user has had the chance to
+      //      curate `activeAgentIds`. Carry the list verbatim — if they
+      //      removed `world-state` we MUST NOT silently re-add it.
+      //   2. Previous session pre-dates the flag (legacy chat) → migrate
+      //      once: merge defaults + set the flag, so future follow-ups
+      //      respect the user's choices going forward.
+      const prevAutoSeeded = prevMeta.gameModeAutoSeeded === true;
+      const prevActiveAgentIds = (prevMeta.activeAgentIds as string[] | undefined) ?? [];
+      const nextActiveAgentIds = prevAutoSeeded
+        ? prevActiveAgentIds
+        : Array.from(new Set([...prevActiveAgentIds, ...GAME_MODE_DEFAULT_AGENT_IDS]));
+
       const updatedNewMeta = {
         ...newMeta,
         ...prevMeta,
@@ -1624,15 +1645,8 @@ export async function gameRoutes(app: FastifyInstance) {
         gameDialogueChatId: null,
         gameCombatChatId: null,
         enableAgents: true,
-        // Defensive merge: even if previous session was created before defaults were
-        // seeded (or had its activeAgentIds emptied), make sure follow-up sessions
-        // always carry the Game-mode tracker trio so HUD injection / NPC materialization run.
-        activeAgentIds: Array.from(
-          new Set([
-            ...((prevMeta.activeAgentIds as string[] | undefined) ?? []),
-            ...GAME_MODE_DEFAULT_AGENT_IDS,
-          ]),
-        ),
+        activeAgentIds: nextActiveAgentIds,
+        gameModeAutoSeeded: true,
         ...(carriedInventory.length > 0 ? { gameInventory: carriedInventory } : {}),
       };
       await chats.updateMetadata(newChat.id, updatedNewMeta);
@@ -3009,12 +3023,11 @@ export async function gameRoutes(app: FastifyInstance) {
     }
     if (repActions.length > 0) {
       try {
-        const currentNpcs = (meta.gameNpcs as GameNpc[]) ?? [];
-        const { npcs: updatedNpcs } = processReputationActions(currentNpcs, repActions);
-        // Re-read metadata to avoid clobbering concurrent scene asset updates
-        const freshChat = await chats.getById(input.chatId);
-        const freshMeta = freshChat ? parseMeta(freshChat.metadata) : meta;
-        await chats.updateMetadata(input.chatId, { ...freshMeta, gameNpcs: updatedNpcs });
+        await chats.updateMetadataWithMerge(input.chatId, (freshMeta) => {
+          const currentNpcs = (freshMeta.gameNpcs as GameNpc[] | undefined) ?? [];
+          const { npcs: updatedNpcs } = processReputationActions(currentNpcs, repActions);
+          return { ...freshMeta, gameNpcs: updatedNpcs };
+        });
         logger.info(`[party-turn] Applied ${repActions.length} reputation change(s)`);
       } catch (err) {
         logger.warn(err, "[party-turn] Failed to apply reputation");
@@ -3341,22 +3354,21 @@ export async function gameRoutes(app: FastifyInstance) {
             // Persist any library-resolved avatars to chat metadata (no image gen involved)
             if (libResolvedNpcs.length > 0) {
               const chatsStore = createChatsStorage(app.db);
-              const latestChat = await chatsStore.getById(input.chatId);
-              if (latestChat) {
-                const latestMeta = parseMeta(latestChat.metadata);
-                const currentNpcs = (latestMeta.gameNpcs as GameNpc[]) ?? [];
+              await chatsStore.updateMetadataWithMerge(input.chatId, (latestMeta) => {
+                const currentNpcs = (latestMeta.gameNpcs as GameNpc[] | undefined) ?? [];
                 let changed = false;
-                for (const resolved of libResolvedNpcs) {
-                  const existing = currentNpcs.find((n) => n.name.toLowerCase() === resolved.name.toLowerCase());
-                  if (existing && !existing.avatarUrl) {
-                    existing.avatarUrl = resolved.avatarUrl;
-                    changed = true;
-                  }
-                }
-                if (changed) {
-                  await chatsStore.updateMetadata(input.chatId, { ...latestMeta, gameNpcs: currentNpcs });
-                }
-              }
+                const nextNpcs = currentNpcs.map((existing) => {
+                  if (existing.avatarUrl) return existing;
+                  const resolved = libResolvedNpcs.find(
+                    (r) => r.name.toLowerCase() === existing.name.toLowerCase(),
+                  );
+                  if (!resolved) return existing;
+                  changed = true;
+                  return { ...existing, avatarUrl: resolved.avatarUrl };
+                });
+                if (!changed) return null;
+                return { ...latestMeta, gameNpcs: nextNpcs };
+              });
               (sceneResult as Record<string, unknown>).generatedNpcAvatars = libResolvedNpcs;
             }
 
@@ -3375,11 +3387,10 @@ export async function gameRoutes(app: FastifyInstance) {
       // Persist the resolved background to metadata so it survives refresh
       if (parsed.background) {
         try {
-          const freshChat = await chats.getById(input.chatId);
-          if (freshChat) {
-            const freshMeta = parseMeta(freshChat.metadata);
-            await chats.updateMetadata(input.chatId, { ...freshMeta, gameSceneBackground: parsed.background });
-          }
+          await chats.updateMetadataWithMerge(input.chatId, (freshMeta) => ({
+            ...freshMeta,
+            gameSceneBackground: parsed.background,
+          }));
         } catch {
           /* non-fatal */
         }
@@ -3499,10 +3510,10 @@ export async function gameRoutes(app: FastifyInstance) {
       // Build name→id lookup from currently materialized NPCs so we can
       // resolve a stable filesystem id even when the client doesn't pass one.
       const existingGameNpcs = (meta.gameNpcs as GameNpc[]) ?? [];
-      const idByLowerName = new Map<string, string>();
+      const idByKey = new Map<string, string>();
       for (const n of existingGameNpcs) {
         if (n?.name && n?.id) {
-          idByLowerName.set(n.name.normalize("NFKC").trim().toLowerCase(), n.id);
+          idByKey.set(npcNameKey(n.name), n.id);
         }
       }
 
@@ -3513,7 +3524,9 @@ export async function gameRoutes(app: FastifyInstance) {
           continue;
         }
         const npcId =
-          npc.id?.trim() || idByLowerName.get(npc.name.normalize("NFKC").trim().toLowerCase()) || slugifyNpcName(npc.name);
+          npc.id?.trim() ||
+          idByKey.get(npcNameKey(npc.name)) ||
+          slugifyForFs(npc.name, { prefix: "s", hashHex: sha1HexLegacy });
         const avatarUrl = await generateNpcPortrait({
           chatId: input.chatId,
           npcId,
@@ -3534,22 +3547,21 @@ export async function gameRoutes(app: FastifyInstance) {
 
       // Persist avatar URLs to NPC list in metadata
       if (generatedNpcAvatars.length > 0) {
-        const latestChat = await chats.getById(input.chatId);
-        if (latestChat) {
-          const latestMeta = parseMeta(latestChat.metadata);
-          const currentNpcs = (latestMeta.gameNpcs as GameNpc[]) ?? [];
+        await chats.updateMetadataWithMerge(input.chatId, (latestMeta) => {
+          const currentNpcs = (latestMeta.gameNpcs as GameNpc[] | undefined) ?? [];
           let changed = false;
-          for (const gen of generatedNpcAvatars) {
-            const existing = currentNpcs.find((n) => n.name.toLowerCase() === gen.name.toLowerCase());
-            if (existing && !existing.avatarUrl) {
-              existing.avatarUrl = gen.avatarUrl;
-              changed = true;
-            }
-          }
-          if (changed) {
-            await chats.updateMetadata(input.chatId, { ...latestMeta, gameNpcs: currentNpcs });
-          }
-        }
+          const nextNpcs = currentNpcs.map((existing) => {
+            if (existing.avatarUrl) return existing;
+            const gen = generatedNpcAvatars.find(
+              (g) => g.name.toLowerCase() === existing.name.toLowerCase(),
+            );
+            if (!gen) return existing;
+            changed = true;
+            return { ...existing, avatarUrl: gen.avatarUrl };
+          });
+          if (!changed) return null;
+          return { ...latestMeta, gameNpcs: nextNpcs };
+        });
       }
     }
 

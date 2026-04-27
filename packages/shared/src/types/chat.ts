@@ -155,6 +155,17 @@ export interface ChatMetadata {
   gameSetupConfig?: import("./game.js").GameSetupConfig | null;
   /** Tracked NPCs with reputation */
   gameNpcs?: import("./game.js").GameNpc[];
+  /**
+   * `true` after Game-mode default agents (character-tracker, world-state,
+   * persona-stats) have been auto-seeded at least once for this chat. Once
+   * set, the server never re-merges defaults into `activeAgentIds` — so if
+   * the user removes a tracker, the choice sticks across follow-up sessions.
+   * Set on:
+   *   - first `POST /game/create` for this chat
+   *   - first follow-up session derived from a legacy chat (back-compat)
+   *   - the "Add Game Mode Agents" migration button in ChatSettingsDrawer
+   */
+  gameModeAutoSeeded?: boolean;
 
   // ── Conversation-Mode Auto-Summarization ──
   /** Per-day auto-generated conversation summaries (key: "DD.MM.YYYY"). */

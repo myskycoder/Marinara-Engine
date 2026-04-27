@@ -6,24 +6,12 @@ import { logger } from "../../lib/logger.js";
 import { DATA_DIR } from "../../utils/data-dir.js";
 import { generateImage } from "../image/image-generation.js";
 import { removeNearWhiteBackgroundPng } from "../image/sprite-bg-removal.js";
+import { getSharp } from "../image/sharp-loader.js";
 
 // Auto-generated NPC sprites are rendered on a solid white background (it's
 // in the prompt). Match the default cleanup strength used by the manual
 // `POST /api/sprites/generate-sheet` endpoint so users see the same result.
 const NPC_SPRITE_BG_CLEANUP_STRENGTH = 50;
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type SharpFn = any;
-let sharpModule: SharpFn | null = null;
-
-async function getSharp(): Promise<SharpFn> {
-  if (sharpModule) return sharpModule;
-  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-  // @ts-ignore - optional native dependency; sprite generation can fail gracefully.
-  const mod = await import("sharp");
-  sharpModule = (mod.default ?? mod) as SharpFn;
-  return sharpModule;
-}
 
 export interface NpcSpriteGenerationRequest {
   chatId: string;
@@ -211,6 +199,27 @@ async function generateFullBodyIdle(req: NpcSpriteGenerationRequest): Promise<vo
   await saveSprite(req.spriteId, "full_idle", spriteBuffer.toString("base64"));
 }
 
+/**
+ * In-flight sprite generations keyed by `spriteId`.
+ *
+ * Mirror of `inFlightNpcPortraits` in `game-asset-generation.ts`. Without
+ * this, two concurrent triggers for the same NPC (e.g. user clicks
+ * "Regenerate sprite" while the auto pipeline is already mid-flight, or two
+ * simultaneous turns both observe the same `spriteStatus = "pending"` row)
+ * would each spend a full image-API call and race on the on-disk PNG writes.
+ *
+ * The disk pre-check below (`existsSync(full_idle.png)`) stays outside the
+ * coalescing map because it's both cheap and the common short-circuit; only
+ * when we're actually going to call the image API do we register the
+ * promise.
+ */
+const inFlightNpcSprites = new Map<string, Promise<boolean>>();
+
+/** Inspect whether a sprite generation is already running for `spriteId`. */
+export function getInFlightNpcSprite(spriteId: string): Promise<boolean> | undefined {
+  return inFlightNpcSprites.get(spriteId);
+}
+
 export async function generateNpcSprites(req: NpcSpriteGenerationRequest): Promise<boolean> {
   const spriteDir = join(SPRITES_ROOT, req.spriteId);
   const existingFullIdle = join(spriteDir, "full_idle.png");
@@ -218,15 +227,33 @@ export async function generateNpcSprites(req: NpcSpriteGenerationRequest): Promi
     return true;
   }
 
+  const inFlight = inFlightNpcSprites.get(req.spriteId);
+  if (inFlight) {
+    logger.debug(
+      "[npc-sprite-gen] Sprite generation already in-flight for %s — coalescing",
+      req.spriteId,
+    );
+    return inFlight;
+  }
+
   const expressions = normalizeExpressions(req.expressions);
+  const promise = (async () => {
+    try {
+      await generateExpressionSprites(req, expressions);
+      await generateFullBodyIdle(req);
+      const generated = existsSync(existingFullIdle) ? statSync(existingFullIdle).isFile() : false;
+      logger.info("[npc-sprite-gen] Generated sprites for %s (%s)", req.npc.name, req.spriteId);
+      return generated;
+    } catch (err) {
+      logger.warn(err, '[npc-sprite-gen] Failed to generate sprites for "%s"', req.npc.name);
+      return false;
+    }
+  })();
+
+  inFlightNpcSprites.set(req.spriteId, promise);
   try {
-    await generateExpressionSprites(req, expressions);
-    await generateFullBodyIdle(req);
-    const generated = existsSync(existingFullIdle) ? statSync(existingFullIdle).isFile() : false;
-    logger.info("[npc-sprite-gen] Generated sprites for %s (%s)", req.npc.name, req.spriteId);
-    return generated;
-  } catch (err) {
-    logger.warn(err, '[npc-sprite-gen] Failed to generate sprites for "%s"', req.npc.name);
-    return false;
+    return await promise;
+  } finally {
+    inFlightNpcSprites.delete(req.spriteId);
   }
 }

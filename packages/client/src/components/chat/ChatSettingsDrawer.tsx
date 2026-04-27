@@ -2843,11 +2843,15 @@ export function ChatSettingsDrawer({
                           return (
                             <button
                               onClick={() =>
+                                // Pair the merge with `gameModeAutoSeeded: true` so the
+                                // server's follow-up-session logic respects this explicit
+                                // user action and never silently re-adds removed trackers.
                                 updateMeta.mutate({
                                   id: chat.id,
                                   activeAgentIds: Array.from(
                                     new Set([...activeAgentIds, ...GAME_MODE_DEFAULT_AGENT_IDS]),
                                   ),
+                                  gameModeAutoSeeded: true,
                                 })
                               }
                               className="flex w-full items-start gap-2 rounded-lg border border-dashed border-[var(--primary)]/40 bg-[var(--primary)]/5 px-3 py-2.5 text-left transition-all hover:bg-[var(--primary)]/10 active:scale-[0.99]"

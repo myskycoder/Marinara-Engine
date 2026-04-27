@@ -12,28 +12,7 @@
 // the pixel-walk logic.
 // ──────────────────────────────────────────────
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type SharpFn = any;
-let sharpModule: SharpFn | null = null;
-let sharpLoadError: Error | null = null;
-
-async function getSharp(): Promise<SharpFn> {
-  if (sharpModule) return sharpModule;
-  if (sharpLoadError) throw sharpLoadError;
-  try {
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore - optional native dep, may not be installed on some platforms
-    const mod = await import("sharp");
-    sharpModule = (mod.default ?? mod) as SharpFn;
-    return sharpModule;
-  } catch (err) {
-    sharpLoadError =
-      err instanceof Error
-        ? err
-        : new Error("sharp is not available; sprite background removal is disabled");
-    throw sharpLoadError;
-  }
-}
+import { getSharp } from "./sharp-loader.js";
 
 /**
  * Convert near-white background pixels to transparency.

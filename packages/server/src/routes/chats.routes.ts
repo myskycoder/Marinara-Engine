@@ -20,11 +20,8 @@ import { wrapContent } from "../services/prompt/format-engine.js";
 import { newId } from "../utils/id-generator.js";
 import { characters } from "../db/schema/index.js";
 import { eq, inArray } from "drizzle-orm";
-import { existsSync } from "fs";
-import { join } from "path";
 import type { GameNpc } from "@marinara-engine/shared";
-import { DATA_DIR } from "../utils/data-dir.js";
-import { safeName as slugifyName } from "../services/game/game-asset-generation.js";
+import { resolvePresentCharacterAvatars } from "../services/game/npc-avatar-resolver.js";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
 
 export async function chatsRoutes(app: FastifyInstance) {
@@ -284,11 +281,8 @@ export async function chatsRoutes(app: FastifyInstance) {
     const personaStats = row.personaStats ? JSON.parse(row.personaStats as string) : null;
 
     // ── Enrich present characters with avatar paths ──
-    // Resolution order:
-    //   1. Known character cards (chat.characterIds → characters.avatarPath)
-    //   2. Game-mode materialized NPCs (chat.metadata.gameNpcs[].avatarUrl) — canonical source
-    //   3. Legacy filesystem fallback (slugified name → /data/avatars/npc/<chatId>/<slug>.png)
-    //      for chats that pre-date Auto NPC Materializer.
+    // Three-phase fallback (character cards → gameNpcs[].avatarUrl → legacy
+    // filesystem slug) lives in `npc-avatar-resolver.ts`.
     const charsNeedingAvatar = presentCharacters.filter((c) => !c.avatarPath && c.name);
     if (charsNeedingAvatar.length > 0) {
       const chat = await storage.getById(req.params.id);
@@ -308,7 +302,7 @@ export async function chatsRoutes(app: FastifyInstance) {
         for (const cr of charRows) {
           try {
             const d = typeof cr.data === "string" ? JSON.parse(cr.data) : cr.data;
-            if (d?.name && cr.avatarPath) nameToAvatar.set((d.name as string).toLowerCase(), cr.avatarPath as string);
+            if (d?.name && cr.avatarPath) nameToAvatar.set(d.name as string, cr.avatarPath as string);
           } catch {
             /* skip */
           }
@@ -323,29 +317,11 @@ export async function chatsRoutes(app: FastifyInstance) {
           return [];
         }
       })();
-      const npcByLowerName = new Map<string, GameNpc>();
-      for (const npc of gameNpcs) {
-        if (npc?.name) npcByLowerName.set(npc.name.normalize("NFKC").trim().toLowerCase(), npc);
-      }
-      const NPC_AVATAR_DIR = join(DATA_DIR, "avatars", "npc");
-      for (const char of charsNeedingAvatar) {
-        const name = char.name as string;
-        const knownAvatar = nameToAvatar.get(name.toLowerCase());
-        if (knownAvatar) {
-          char.avatarPath = knownAvatar;
-          continue;
-        }
-        const matchedNpc = npcByLowerName.get(name.normalize("NFKC").trim().toLowerCase());
-        if (matchedNpc?.avatarUrl) {
-          char.avatarPath = matchedNpc.avatarUrl;
-          continue;
-        }
-        const slug = slugifyName(name);
-        if (slug) {
-          const npcPath = join(NPC_AVATAR_DIR, req.params.id, `${slug}.png`);
-          if (existsSync(npcPath)) char.avatarPath = `/api/avatars/npc/${req.params.id}/${slug}.png`;
-        }
-      }
+      resolvePresentCharacterAvatars(presentCharacters, {
+        chatId: req.params.id,
+        knownCharacterAvatars: nameToAvatar,
+        gameNpcs,
+      });
     }
 
     return {

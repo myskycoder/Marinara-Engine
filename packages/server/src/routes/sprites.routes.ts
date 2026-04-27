@@ -7,33 +7,7 @@ import { writeFile, mkdir, readdir, unlink } from "fs/promises";
 import { join, extname } from "path";
 import { DATA_DIR } from "../utils/data-dir.js";
 import { removeNearWhiteBackgroundPng } from "../services/image/sprite-bg-removal.js";
-
-// sharp is an optional dependency — native prebuilds don't exist for all platforms
-// (e.g. Android/Termux). Lazy-load so the server boots even when sharp is missing;
-// sprite-generation routes will return a clear error instead of crashing the process.
-// We intentionally avoid `import type` from "sharp" so tsc succeeds on platforms
-// where the package isn't installed at all.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type SharpFn = any;
-let _sharp: SharpFn | null = null;
-let _sharpLoadError: Error | null = null;
-async function getSharp(): Promise<SharpFn> {
-  if (_sharp) return _sharp;
-  if (_sharpLoadError) throw _sharpLoadError;
-  try {
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore - optional native dep, may not be installed on some platforms
-    const mod = await import("sharp");
-    _sharp = (mod.default ?? mod) as SharpFn;
-    return _sharp;
-  } catch {
-    _sharpLoadError = new Error(
-      "Image processing is unavailable on this platform (native 'sharp' module could not be loaded). " +
-        "Sprite generation and background removal are disabled.",
-    );
-    throw _sharpLoadError;
-  }
-}
+import { getSharp } from "../services/image/sharp-loader.js";
 
 async function getSpriteCapabilities() {
   try {

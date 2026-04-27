@@ -116,7 +116,7 @@ import { syncGameMapPartyPosition } from "../services/game/map-position.service.
 import { applyAllSegmentEdits, stripGmCommandTags } from "../services/game/segment-edits.js";
 import { listPartySprites } from "../services/game/sprite.service.js";
 import { materializeGameNpcs } from "../services/game/npc-materializer.service.js";
-import { safeName as slugifyName } from "../services/game/game-asset-generation.js";
+import { resolvePresentCharacterAvatars } from "../services/game/npc-avatar-resolver.js";
 import {
   generatePerceptionHints,
   formatPerceptionHints,
@@ -5419,38 +5419,19 @@ export async function generateRoutes(app: FastifyInstance) {
               const ctData = result.data as Record<string, unknown>;
               const chars = (ctData.presentCharacters as any[]) ?? [];
 
-              // ── Enrich with avatar paths ──
-              // Resolution order:
-              //   1. Known character cards (case-insensitive name match → charInfo)
-              //   2. Game-mode materialized NPCs (chatMeta.gameNpcs[].avatarUrl) — canonical
-              //   3. Legacy filesystem fallback (slugified name) for pre-materializer chats
-              const NPC_AVATAR_DIR = join(DATA_DIR, "avatars", "npc");
-              const gameNpcsForAvatar = (chatMeta.gameNpcs as import("@marinara-engine/shared").GameNpc[] | undefined) ?? [];
-              const npcByLowerName = new Map<string, import("@marinara-engine/shared").GameNpc>();
-              for (const n of gameNpcsForAvatar) {
-                if (n?.name) npcByLowerName.set(n.name.normalize("NFKC").trim().toLowerCase(), n);
+              // Three-phase fallback (character cards → gameNpcs[].avatarUrl
+              // → legacy filesystem slug) lives in `npc-avatar-resolver.ts`.
+              const knownCharacterAvatars = new Map<string, string>();
+              for (const c of charInfo) {
+                if (c.name && c.avatarPath) knownCharacterAvatars.set(c.name, c.avatarPath);
               }
-              for (const char of chars) {
-                if (char.avatarPath) continue; // already set
-                const name = (char.name as string) ?? "";
-                const matched = charInfo.find((c) => c.name.toLowerCase() === name.toLowerCase());
-                if (matched?.avatarPath) {
-                  char.avatarPath = matched.avatarPath;
-                  continue;
-                }
-                const matchedNpc = npcByLowerName.get(name.normalize("NFKC").trim().toLowerCase());
-                if (matchedNpc?.avatarUrl) {
-                  char.avatarPath = matchedNpc.avatarUrl;
-                  continue;
-                }
-                const slug = slugifyName(name);
-                if (slug) {
-                  const npcAvatarPath = join(NPC_AVATAR_DIR, input.chatId, `${slug}.png`);
-                  if (existsSync(npcAvatarPath)) {
-                    char.avatarPath = `/api/avatars/npc/${input.chatId}/${slug}.png`;
-                  }
-                }
-              }
+              const gameNpcsForAvatar =
+                (chatMeta.gameNpcs as import("@marinara-engine/shared").GameNpc[] | undefined) ?? [];
+              resolvePresentCharacterAvatars(chars, {
+                chatId: input.chatId,
+                knownCharacterAvatars,
+                gameNpcs: gameNpcsForAvatar,
+              });
 
               logger.debug(
                 `[generate] character-tracker: ${chars.length} characters to persist (chat=${input.chatId}, msg=${messageId}, swipe=${targetSwipeIndex})`,

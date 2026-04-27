@@ -413,8 +413,24 @@ export function useSyncGameState(activeChatId: string, chatMeta: Record<string, 
  * background tasks that can finish AFTER the streaming `done` event closes
  * the SSE reply, so a single invalidation on `done` only catches assets that
  * happen to be ready already. This watcher fills the gap by re-fetching
- * metadata every few seconds (capped) until every NPC has its assets, then
- * tears down the interval automatically.
+ * metadata until every NPC has its assets, then tears down automatically.
+ *
+ * Strategy:
+ *   - Recursive `setTimeout` chain instead of `setInterval`. Each tick
+ *     reschedules itself with the next delay, so the cadence can grow.
+ *   - Exponential backoff: ~3s → 5s → 8s → 13s → 21s → 34s → 55s, capped
+ *     at 60s. Image generation on slow image providers can take >30s for
+ *     a single NPC; backing off avoids hammering the server with cheap
+ *     metadata fetches that almost certainly haven't observed any change
+ *     yet.
+ *   - Visibility-aware pause: when the tab is hidden we re-poll every 5s
+ *     just to keep the timer alive, but skip the expensive `invalidate`.
+ *     `document.visibilitychange` resets the attempt counter so the user
+ *     gets a fresh fast poll right after re-focusing.
+ *   - No hard ceiling. The previous 60s cutoff would silently abandon
+ *     long-running generations; under backoff each later poll is cheap
+ *     enough to keep going indefinitely. Cleanup happens via the existing
+ *     `hasPendingAssets` guard once everything resolves.
  */
 export function useNpcAssetWatcher(activeChatId: string | null) {
   const qc = useQueryClient();
@@ -428,17 +444,59 @@ export function useNpcAssetWatcher(activeChatId: string | null) {
   useEffect(() => {
     if (!activeChatId || !hasPendingAssets) return;
 
-    let attempts = 0;
-    const MAX_ATTEMPTS = 12; // 12 × 5s = 60s ceiling
-    const interval = window.setInterval(() => {
-      attempts += 1;
-      qc.invalidateQueries({ queryKey: chatKeys.detail(activeChatId) });
-      if (attempts >= MAX_ATTEMPTS) {
-        window.clearInterval(interval);
-      }
-    }, 5000);
+    let cancelled = false;
+    let timer: number | undefined;
+    let attempt = 0;
+    const FIRST_DELAY_MS = 3000;
+    const MAX_DELAY_MS = 60_000;
+    const HIDDEN_RECHECK_MS = 5000;
 
-    return () => window.clearInterval(interval);
+    const computeDelay = (n: number): number => {
+      const grown = FIRST_DELAY_MS * Math.pow(1.6, n);
+      return Math.min(MAX_DELAY_MS, grown);
+    };
+
+    const schedule = (delayMs: number) => {
+      if (cancelled) return;
+      timer = window.setTimeout(tick, delayMs);
+    };
+
+    const tick = () => {
+      if (cancelled) return;
+      // Tab is hidden — skip the network round-trip but keep the timer
+      // alive so we resume promptly when the user comes back.
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+        schedule(HIDDEN_RECHECK_MS);
+        return;
+      }
+      qc.invalidateQueries({ queryKey: chatKeys.detail(activeChatId) });
+      attempt += 1;
+      schedule(computeDelay(attempt));
+    };
+
+    const onVisibility = () => {
+      if (cancelled) return;
+      if (document.visibilityState === "visible") {
+        // Reset backoff and poll right away — there may be assets the user
+        // can finally see now that they've come back.
+        attempt = 0;
+        if (timer !== undefined) window.clearTimeout(timer);
+        schedule(0);
+      }
+    };
+
+    schedule(FIRST_DELAY_MS);
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibility);
+    }
+
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibility);
+      }
+    };
   }, [activeChatId, hasPendingAssets, qc]);
 }
 

@@ -8,39 +8,29 @@
 // ──────────────────────────────────────────────
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
-import { createHash } from "node:crypto";
 import { logger } from "../../lib/logger.js";
 import { join } from "path";
+import { slugifyForFs } from "@marinara-engine/shared";
 import { DATA_DIR } from "../../utils/data-dir.js";
 import { generateImage, type ImageGenRequest } from "../image/image-generation.js";
 import { buildAssetManifest, GAME_ASSETS_DIR } from "./asset-manifest.service.js";
+import { sha1HexLegacy } from "./npc-name-server.js";
 
 const NPC_AVATAR_DIR = join(DATA_DIR, "avatars", "npc");
 
 /**
  * Robust slugifier for arbitrary user-provided names (NPCs, locations, …).
- * Used for *legacy* name-based lookups in non-Game contexts (Roleplay HUD
- * upload, character-card avatar resolution for chats that pre-date Auto NPC
- * Materializer) and for background-image filenames. Game-mode auto-generated
- * portraits sidestep this entirely by using `npc.id` directly.
+ * Thin wrapper around the shared `slugifyForFs` that pins the legacy
+ * `prefix: "s"` and SHA-1 hash to keep filenames stable for chats whose
+ * avatars are already on disk (any non-Latin NPC name relied on the SHA-1
+ * fallback). New code should prefer `npcAvatarFilename(npc.id)` which
+ * sidesteps slug logic entirely.
  *
- * The previous implementation used `/[^a-z0-9]+/g`, which silently produced
- * an empty slug for any non-Latin name (Cyrillic, CJK, etc.) and broke the
- * entire avatar pipeline. We now strip combining marks first (NFKD) so
- * accented Latin characters fold to ASCII, then fall back to a SHA-1 prefix
- * when no Latin/digits remain — guaranteeing a deterministic ASCII filename
- * for any input.
+ * @deprecated Use `slugifyForFs` from `@marinara-engine/shared` directly for
+ * new code, or `npcAvatarFilename(npc.id)` for Game-mode NPCs.
  */
 export function safeName(name: string): string {
-  const ascii = name
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "");
-  if (ascii) return ascii;
-  const hash = createHash("sha1").update(name).digest("hex").slice(0, 10);
-  return `s-${hash}`;
+  return slugifyForFs(name, { prefix: "s", hashHex: sha1HexLegacy });
 }
 
 /**
