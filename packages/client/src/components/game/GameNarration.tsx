@@ -3,7 +3,19 @@
 // ──────────────────────────────────────────────
 import { useEffect, useMemo, useState, useCallback, useRef, type ReactNode } from "react";
 import DOMPurify from "dompurify";
-import { MessageCircle, RefreshCw, ScrollText, X, Package, Pencil, Check, Play, Pause, Trash2 } from "lucide-react";
+import {
+  MessageCircle,
+  RefreshCw,
+  RotateCcw,
+  ScrollText,
+  X,
+  Package,
+  Pencil,
+  Check,
+  Play,
+  Pause,
+  Trash2,
+} from "lucide-react";
 import { cn } from "../../lib/utils";
 import { findNamedMapValue } from "../../lib/game-character-name-match";
 import type { GameSegmentEdit } from "../../lib/game-segment-edits";
@@ -152,6 +164,8 @@ interface GameNarrationProps {
   onNpcPortraitClick?: (npcName: string) => void;
   /** Pause auto-play while a blocking game overlay is open. */
   autoPlayBlocked?: boolean;
+  /** Called synchronously before rewinding to the first segment so the parent can reset segment-tied scene state (e.g. applied segment effects). */
+  onPrepareNarrationRestart?: () => void;
 }
 
 /** Regex matching explicit {effect:text} tags used by AnimatedText. */
@@ -304,6 +318,7 @@ export function GameNarration({
   onReadable,
   onNpcPortraitClick,
   autoPlayBlocked,
+  onPrepareNarrationRestart,
 }: GameNarrationProps) {
   const { translations, translating } = useTranslate();
   const [activeIndex, setActiveIndex] = useState(0);
@@ -1285,6 +1300,39 @@ export function GameNarration({
     }
   };
 
+  const restartFromSceneStart = useCallback(() => {
+    if (isStreaming || scenePreparing || !latestAssistant || segments.length === 0) return;
+    if (editingContent !== null) return;
+    const startChars = getSegmentStartVisibleChars(playerSegmentOffset);
+    if (
+      activeIndex === playerSegmentOffset &&
+      doneTyping &&
+      visibleChars === startChars
+    ) {
+      return;
+    }
+    onPrepareNarrationRestart?.();
+    readableFiredRef.current.clear();
+    setAutoPlay(false);
+    twRef.current.pos = startChars;
+    setVisibleChars(startChars);
+    setActiveIndex(playerSegmentOffset);
+    playClickSfx();
+  }, [
+    activeIndex,
+    doneTyping,
+    editingContent,
+    getSegmentStartVisibleChars,
+    isStreaming,
+    latestAssistant,
+    onPrepareNarrationRestart,
+    playClickSfx,
+    playerSegmentOffset,
+    scenePreparing,
+    segments.length,
+    visibleChars,
+  ]);
+
   // Auto-advance to the next segment after a delay when auto-play is on
   useEffect(() => {
     if (!autoPlay) return;
@@ -1345,9 +1393,35 @@ export function GameNarration({
   // Side lines paired with the active segment
   const activeSideLines = sideLineMap.get(activeIndex) ?? [];
 
+  const sceneStartVisibleChars = getSegmentStartVisibleChars(playerSegmentOffset);
+  const atSceneStart =
+    segments.length > 0 &&
+    activeIndex === playerSegmentOffset &&
+    doneTyping &&
+    visibleChars === sceneStartVisibleChars;
+  const restartFromStartDisabled =
+    isStreaming ||
+    scenePreparing ||
+    !latestAssistant ||
+    segments.length === 0 ||
+    editingContent !== null ||
+    atSceneStart;
+
   // Shared Next + auto-play control group used by dialogue, narration, and readable boxes
   const navControls = (
     <div className="flex items-stretch gap-1">
+      <button
+        type="button"
+        onClick={restartFromSceneStart}
+        disabled={restartFromStartDisabled}
+        className={cn(
+          "flex items-center justify-center gap-1 self-stretch rounded-lg border border-white/10 bg-white/5 px-2 text-xs font-medium text-white/75 transition-colors hover:bg-white/10 disabled:pointer-events-none disabled:opacity-40",
+        )}
+        title="Jump to the first line of this scene and replay segment effects as you advance"
+      >
+        <RotateCcw size={12} />
+        <span className="hidden sm:inline">From start</span>
+      </button>
       <button
         onClick={() => setAutoPlay((v) => !v)}
         className={cn(

@@ -198,6 +198,13 @@ export interface ChatMetadata {
    */
   currentLocationId?: string | null;
   /**
+   * Incremented when a per-chat background PNG is actually regenerated on disk
+   * (new image API paint). Clients append this to `/api/game-assets/file/...`
+   * as a cache-bust query param so browser HTTP cache does not show a stale
+   * image after refresh when the asset tag is unchanged.
+   */
+  gameBackgroundAssetRevision?: number;
+  /**
    * `true` after Game-mode default agents (character-tracker, world-state,
    * persona-stats) have been auto-seeded at least once for this chat. Once
    * set, the server never re-merges defaults into `activeAgentIds` — so if

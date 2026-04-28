@@ -68,6 +68,7 @@ import {
   scoreMusic,
   scoreAmbient,
   GAME_MODE_DEFAULT_AGENT_IDS,
+  stripGameInlineTagsForContext,
 } from "@marinara-engine/shared";
 import { postToDiscordWebhook } from "../services/discord-webhook.js";
 import type {
@@ -187,6 +188,62 @@ function upsertLocationCatalogVariant(
     variants: [...filtered, newVariant],
   };
   return { ...existing, [locationId]: nextEntry };
+}
+
+/**
+ * Find a catalog variant whose asset tag matches the current scene background,
+ * so the stored scene `prompt` can be reused for forced regeneration.
+ */
+function findCatalogBackgroundRegeneratePayload(
+  meta: Record<string, unknown>,
+  sceneBackgroundTag: string | null | undefined,
+): { locationId: string; backgroundPrompt: string; conditions: BackgroundConditions } | null {
+  if (!sceneBackgroundTag || sceneBackgroundTag === "black" || sceneBackgroundTag === "none") {
+    return null;
+  }
+  const catalog = (meta.locationCatalog as Record<string, LocationCatalogEntry> | undefined) ?? {};
+  for (const [mapKey, entry] of Object.entries(catalog)) {
+    const variants = entry?.variants ?? [];
+    if (!variants.length) continue;
+    const locId = entry.locationId || mapKey;
+    for (const v of variants) {
+      if (v.tag === sceneBackgroundTag && typeof v.prompt === "string" && v.prompt.trim()) {
+        return {
+          locationId: locId,
+          backgroundPrompt: v.prompt.trim(),
+          conditions: {
+            weather: v.weather ?? null,
+            timeOfDay: v.timeOfDay ?? null,
+            season: v.season ?? null,
+          },
+        };
+      }
+    }
+  }
+  return null;
+}
+
+/** Normalize plain-text output from the background-brief LLM. */
+function normalizeBackgroundBriefFromLlm(raw: string): string {
+  let t = raw.trim();
+  if (t.startsWith("```")) {
+    t = t.replace(/^```(?:\w*)?\r?\n?/, "").replace(/\r?\n?```\s*$/u, "");
+  }
+  t = t.trim();
+  if (
+    (t.startsWith('"') && t.endsWith('"') && t.length >= 2) ||
+    (t.startsWith("'") && t.endsWith("'") && t.length >= 2)
+  ) {
+    t = t.slice(1, -1).trim();
+  }
+  return t.replace(/\s+/g, " ").trim().slice(0, 2000);
+}
+
+/** Bump when a new background image was written (not a disk cache hit). */
+function bumpGameBackgroundAssetRevisionMerge(latestMeta: Record<string, unknown>): Record<string, unknown> {
+  const prev = latestMeta.gameBackgroundAssetRevision;
+  const n = typeof prev === "number" && Number.isFinite(prev) ? prev + 1 : 1;
+  return { gameBackgroundAssetRevision: n };
 }
 
 // ──────────────────────────────────────────────
@@ -3306,6 +3363,9 @@ export async function gameRoutes(app: FastifyInstance) {
         );
       }
 
+      /** True if any `generateBackground` call in this scene-wrap wrote a new PNG (not disk cache hit). */
+      let sceneWrapBackgroundFreshPaint = false;
+
       if (enableGen && imgConnId && parsed && typeof parsed === "object") {
         const sceneResult = parsed as unknown as Record<string, unknown>;
 
@@ -3438,6 +3498,7 @@ export async function gameRoutes(app: FastifyInstance) {
                   sceneResult.background = result.tag;
                   topLevelGeneratedTag = result.tag;
                   topLevelGeneratedPrompt = topLevelBgPrompt;
+                  if (!result.reusedCache) sceneWrapBackgroundFreshPaint = true;
                 }
               } else {
                 logger.info(
@@ -3543,6 +3604,7 @@ export async function gameRoutes(app: FastifyInstance) {
                 });
                 if (segResult) {
                   fx.background = segResult.tag;
+                  if (!segResult.reusedCache) sceneWrapBackgroundFreshPaint = true;
                   // Persist this variant into the catalog right away.
                   await chats.updateMetadataWithMerge(input.chatId, (latestMeta) => ({
                     ...latestMeta,
@@ -3666,6 +3728,7 @@ export async function gameRoutes(app: FastifyInstance) {
           await chats.updateMetadataWithMerge(input.chatId, (freshMeta) => ({
             ...freshMeta,
             gameSceneBackground: parsed.background,
+            ...(sceneWrapBackgroundFreshPaint ? bumpGameBackgroundAssetRevisionMerge(freshMeta) : {}),
           }));
         } catch {
           /* non-fatal */
@@ -3722,19 +3785,32 @@ export async function gameRoutes(app: FastifyInstance) {
       )
       .max(10)
       .optional(),
+    /**
+     * Resolve `locationId` / `backgroundPrompt` / `conditions` from
+     * `locationCatalog` for the current `gameSceneBackground` and call the
+     * image API even if the PNG already exists (`skipDiskCache`).
+     */
+    forceRegenerateBackground: z.boolean().optional(),
+    /**
+     * Like catalog-backed regeneration, but first rewrites `backgroundPrompt`
+     * with the scene LLM using recent narration + setup context.
+     */
+    refreshBackgroundPrompt: z.boolean().optional(),
   });
 
-  app.post("/generate-assets", async (req) => {
+  app.post("/generate-assets", async (req, reply) => {
     const input = generateAssetsSchema.parse(req.body);
     const chats = createChatsStorage(app.db);
     const connections = createConnectionsStorage(app.db);
 
     logger.info(
-      "[game/generate-assets][bg] CALLED — chatId=%s, locationId=%s, backgroundTag=%s, hasPrompt=%s, npcsNeedingAvatars=%d",
+      "[game/generate-assets][bg] CALLED — chatId=%s, locationId=%s, backgroundTag=%s, hasPrompt=%s, forceRegenerate=%s, refreshPrompt=%s, npcsNeedingAvatars=%d",
       input.chatId,
       input.locationId ?? "null",
       input.backgroundTag ?? "null",
       !!input.backgroundPrompt,
+      !!input.forceRegenerateBackground,
+      !!input.refreshBackgroundPrompt,
       input.npcsNeedingAvatars?.length ?? 0,
     );
 
@@ -3744,6 +3820,37 @@ export async function gameRoutes(app: FastifyInstance) {
     const meta = parseMeta(chat.metadata);
     const enableGen = !!meta.enableSpriteGeneration;
     const imgConnId = (meta.gameImageConnectionId as string) || null;
+
+    const wantsCatalogBackedBg = !!(input.forceRegenerateBackground || input.refreshBackgroundPrompt);
+    let forceRichBg: { locationId: string; backgroundPrompt: string; conditions: BackgroundConditions } | null = null;
+    if (wantsCatalogBackedBg) {
+      forceRichBg = findCatalogBackgroundRegeneratePayload(meta, meta.gameSceneBackground as string | undefined);
+      if (!forceRichBg) {
+        logger.info(
+          "[game/generate-assets][bg][catalog] miss for gameSceneBackground=%s chatId=%s",
+          (meta.gameSceneBackground as string | undefined) ?? "null",
+          input.chatId,
+        );
+        return reply.code(400).send({
+          error:
+            "No stored background prompt for the current scene. Move to this location with sprite generation on so the catalog can record a variant.",
+          generatedBackground: null,
+          generatedNpcAvatars: [],
+        });
+      }
+      if (!enableGen || !imgConnId) {
+        logger.info(
+          "[game/generate-assets][bg][catalog] rejected — sprite gen off or no image connection (force=%s refresh=%s)",
+          !!input.forceRegenerateBackground,
+          !!input.refreshBackgroundPrompt,
+        );
+        return reply.code(400).send({
+          error: "Sprite generation is disabled or no image connection is configured.",
+          generatedBackground: null,
+          generatedNpcAvatars: [],
+        });
+      }
+    }
 
     if (!enableGen || !imgConnId) {
       logger.info(
@@ -3757,6 +3864,13 @@ export async function gameRoutes(app: FastifyInstance) {
     const imgConn = await connections.getWithKey(imgConnId);
     if (!imgConn) {
       logger.warn("[game/generate-assets][bg] ABORTED — image connection id=%s not found in DB", imgConnId);
+      if (wantsCatalogBackedBg) {
+        return reply.code(400).send({
+          error: "Image generation connection not found.",
+          generatedBackground: null,
+          generatedNpcAvatars: [],
+        });
+      }
       return { generatedBackground: null, generatedNpcAvatars: [] };
     }
 
@@ -3772,6 +3886,113 @@ export async function gameRoutes(app: FastifyInstance) {
     const setting = (setupCfg?.setting as string) || "";
     const artStyle = (setupCfg?.artStylePrompt as string) || "";
 
+    if (input.refreshBackgroundPrompt && forceRichBg) {
+      const sceneConnId = (meta.gameSceneConnectionId as string) || null;
+      let textConn: Awaited<ReturnType<typeof resolveConnection>>;
+      try {
+        textConn = await resolveConnection(connections, sceneConnId, chat.connectionId);
+      } catch (err) {
+        logger.warn(err, "[game/generate-assets][bg][refresh-prompt] resolveConnection failed chatId=%s", input.chatId);
+        return reply.code(400).send({
+          error:
+            "No LLM connection configured for this chat. Set the main chat connection or the game scene connection in game settings.",
+          generatedBackground: null,
+          generatedNpcAvatars: [],
+        });
+      }
+
+      const gameGenerationParameters = resolveStoredGameGenerationParameters(
+        meta,
+        textConn.defaultGenerationParameters,
+      );
+      const allMsgs = await chats.listMessages(input.chatId);
+      let narrationExcerpt = "";
+      for (let i = allMsgs.length - 1; i >= 0; i--) {
+        const row = allMsgs[i]!;
+        if (row.role !== "assistant" && row.role !== "narrator") continue;
+        const cleaned = stripGameInlineTagsForContext(row.content ?? "").trim();
+        if (!cleaned) continue;
+        narrationExcerpt = cleaned.slice(0, 5000);
+        break;
+      }
+
+      const condLine = [
+        forceRichBg.conditions.weather && `weather: ${forceRichBg.conditions.weather}`,
+        forceRichBg.conditions.timeOfDay && `time of day: ${forceRichBg.conditions.timeOfDay}`,
+        forceRichBg.conditions.season && `season: ${forceRichBg.conditions.season}`,
+      ]
+        .filter(Boolean)
+        .join(", ");
+
+      const systemPrompt =
+        "You write concise English visual briefs for fantasy and realistic environment illustrations. " +
+        "Output ONLY the new brief as 1–2 plain sentences — no JSON, no markdown fences, no bullet list, no preamble. " +
+        "Describe only the environment: architecture, landscape, lighting, weather, props. " +
+        "Never include people, figures, faces, crowds, text, UI, logos, or watermarks.";
+
+      const userBody = [
+        `Technical location id (context only, do not paste verbatim): ${forceRichBg.locationId}`,
+        `Previous image brief to improve or replace: ${forceRichBg.backgroundPrompt}`,
+        setting.trim() ? `Game world setting: ${setting.trim()}` : null,
+        artStyle.trim() ? `Art direction: ${artStyle.trim()}` : null,
+        condLine ? `Variant atmosphere: ${condLine}` : null,
+        narrationExcerpt
+          ? `Latest narration (excerpt):\n${narrationExcerpt}`
+          : "No narration excerpt is available — infer a richer brief from the previous brief and location id alone.",
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+
+      const provider = createLLMProvider(
+        textConn.conn.provider,
+        textConn.baseUrl,
+        textConn.conn.apiKey!,
+        textConn.conn.maxContext,
+        textConn.conn.openrouterProvider,
+        textConn.conn.maxTokensOverride,
+      );
+
+      let llmContent = "";
+      try {
+        const llmResult = await provider.chatComplete(
+          [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userBody },
+          ],
+          gameGenOptions(textConn.conn.model ?? "", { temperature: 0.55, maxTokens: 400 }, gameGenerationParameters),
+        );
+        llmContent = llmResult.content ?? "";
+      } catch (err) {
+        logger.warn(err, "[game/generate-assets][bg][refresh-prompt] chatComplete failed chatId=%s", input.chatId);
+        return reply.code(502).send({
+          error: "Failed to rewrite the background brief with the language model.",
+          generatedBackground: null,
+          generatedNpcAvatars: [],
+        });
+      }
+
+      const newPrompt = normalizeBackgroundBriefFromLlm(llmContent);
+      if (!newPrompt) {
+        logger.warn("[game/generate-assets][bg][refresh-prompt] empty brief chatId=%s", input.chatId);
+        return reply.code(400).send({
+          error: "The model returned an empty background brief. Try again.",
+          generatedBackground: null,
+          generatedNpcAvatars: [],
+        });
+      }
+
+      logger.info(
+        "[game/generate-assets][bg][refresh-prompt] ok chatId=%s oldLen=%d newLen=%d excerptLen=%d",
+        input.chatId,
+        forceRichBg.backgroundPrompt.length,
+        newPrompt.length,
+        narrationExcerpt.length,
+      );
+      logger.debug("[game/generate-assets][bg][refresh-prompt] newBrief=%s", newPrompt.slice(0, 400));
+
+      forceRichBg = { ...forceRichBg, backgroundPrompt: newPrompt };
+    }
+
     let generatedBackground: string | null = null;
     const generatedNpcAvatars: Array<{ name: string; avatarUrl: string }> = [];
 
@@ -3783,23 +4004,50 @@ export async function gameRoutes(app: FastifyInstance) {
     // key the next scene-wrap turn will probe. Older clients may still POST
     // the legacy `backgroundTag`-only form; we keep that working but log a
     // warning because the resulting prompt is just a slug → poor quality.
-    const conditions: BackgroundConditions = {
-      weather: input.conditions?.weather ?? null,
-      timeOfDay: input.conditions?.timeOfDay ?? null,
-      season: input.conditions?.season ?? null,
-    };
+    const conditions: BackgroundConditions = forceRichBg
+      ? forceRichBg.conditions
+      : {
+          weather: input.conditions?.weather ?? null,
+          timeOfDay: input.conditions?.timeOfDay ?? null,
+          season: input.conditions?.season ?? null,
+        };
 
-    if (input.locationId && input.backgroundPrompt) {
-      logger.info(
-        '[game/generate-assets][bg] rich-path locationId="%s" conditions=%s — invoking generateBackground()',
-        input.locationId,
-        buildConditionsKey(conditions),
-      );
+    const richLocationId = forceRichBg?.locationId ?? input.locationId;
+    const richBackgroundPrompt = forceRichBg?.backgroundPrompt ?? input.backgroundPrompt;
+    const skipDiskCache = !!forceRichBg;
+
+    if (richLocationId && richBackgroundPrompt) {
+      if (forceRichBg) {
+        const catalogLogLabel = input.refreshBackgroundPrompt ? "refresh-prompt" : "force";
+        logger.info(
+          '[game/generate-assets][bg][%s] resolved from catalog chatId=%s gameSceneBackground=%s locationId="%s" conditionsKey=%s backgroundPrompt="%s" settingLen=%d artStyleLen=%d',
+          catalogLogLabel,
+          input.chatId,
+          (meta.gameSceneBackground as string | undefined) ?? "null",
+          richLocationId,
+          buildConditionsKey(conditions),
+          richBackgroundPrompt,
+          setting.length,
+          artStyle.length,
+        );
+        logger.debug(
+          '[game/generate-assets][bg][%s] setting="%s" artStyle="%s"',
+          catalogLogLabel,
+          setting.slice(0, 200),
+          artStyle.slice(0, 200),
+        );
+      } else {
+        logger.info(
+          '[game/generate-assets][bg] rich-path locationId="%s" conditions=%s — invoking generateBackground()',
+          richLocationId,
+          buildConditionsKey(conditions),
+        );
+      }
       const result = await generateBackground({
         chatId: input.chatId,
-        locationId: input.locationId,
+        locationId: richLocationId,
         conditions,
-        backgroundPrompt: input.backgroundPrompt,
+        backgroundPrompt: richBackgroundPrompt,
         setting,
         artStyle,
         imgSource,
@@ -3808,19 +4056,21 @@ export async function gameRoutes(app: FastifyInstance) {
         imgApiKey,
         imgService: imgServiceHint,
         imgComfyWorkflow,
+        skipDiskCache,
       });
       logger.info(
-        "[game/generate-assets][bg] generateBackground() returned: %s (cache=%s, locationId=%s)",
+        "[game/generate-assets][bg] generateBackground() returned: %s (cache=%s, locationId=%s, catalogBacked=%s)",
         result?.tag ?? "null (failed)",
         result?.reusedCache ? "hit" : "miss",
-        input.locationId,
+        richLocationId,
+        !!forceRichBg,
       );
       if (result) {
         generatedBackground = result.tag;
         // Persist new variant + advance scene background pointer so the
         // client's `gameSceneBackground` mirror picks up the real tag.
-        const locationId = input.locationId;
-        const backgroundPrompt = input.backgroundPrompt;
+        const locationId = richLocationId;
+        const backgroundPrompt = richBackgroundPrompt;
         await chats.updateMetadataWithMerge(input.chatId, (latestMeta) => ({
           ...latestMeta,
           locationCatalog: upsertLocationCatalogVariant(
@@ -3833,9 +4083,10 @@ export async function gameRoutes(app: FastifyInstance) {
           currentLocationId: locationId,
           gameSceneBackground: result.tag,
           ...(conditions.season ? { gameCurrentSeason: conditions.season } : {}),
+          ...(!result.reusedCache ? bumpGameBackgroundAssetRevisionMerge(latestMeta) : {}),
         }));
       }
-    } else if (input.backgroundTag) {
+    } else if (input.backgroundTag && !input.forceRegenerateBackground && !input.refreshBackgroundPrompt) {
       // Legacy path — derive the prompt from the tag slug. This mode loses
       // narrative context and produces lower-fidelity images; new clients
       // should ALWAYS use the rich-path above. Kept for backwards-compat.
@@ -3889,6 +4140,7 @@ export async function gameRoutes(app: FastifyInstance) {
           currentLocationId: derivedLocationId,
           gameSceneBackground: result.tag,
           ...(conditions.season ? { gameCurrentSeason: conditions.season } : {}),
+          ...(!result.reusedCache ? bumpGameBackgroundAssetRevisionMerge(latestMeta) : {}),
         }));
       }
     }

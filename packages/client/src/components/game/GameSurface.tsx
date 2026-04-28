@@ -12,6 +12,7 @@ import { useGameStateStore } from "../../stores/game-state.store";
 import {
   useSyncGameState,
   useNpcAssetWatcher,
+  useInvalidateNpcSpriteListOnReady,
   useCreateGame,
   useGameSetup,
   useStartGame,
@@ -29,11 +30,11 @@ import {
   useTransitionGameState,
   useRecruitPartyMember,
 } from "../../hooks/use-game";
-import { useDeleteChat, useUpdateChatMetadata, useUpdateMessage } from "../../hooks/use-chats";
+import { chatKeys, useDeleteChat, useUpdateChatMetadata, useUpdateMessage } from "../../hooks/use-chats";
 import { useGenerate } from "../../hooks/use-generate";
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { spriteKeys, type SpriteInfo } from "../../hooks/use-characters";
-import { api } from "../../lib/api-client";
+import { api, ApiError } from "../../lib/api-client";
 import { cn } from "../../lib/utils";
 import { audioManager } from "../../lib/game-audio";
 import {
@@ -485,6 +486,8 @@ import {
   History,
   Image,
   Loader2,
+  Sparkles,
+  Wand2,
   MoreHorizontal,
   Play,
   RefreshCw,
@@ -527,6 +530,48 @@ function buildSegmentDeleteSet(chatMeta: Record<string, unknown>): Set<string> {
     }
   }
   return deleted;
+}
+
+/** Persist segment index with GM message id so restore cannot apply a stale index after a new turn. */
+function serializeNarrationSegmentLocalStorage(messageId: string, index: number): string {
+  return JSON.stringify({ m: messageId, i: index });
+}
+
+/**
+ * Parse v2 localStorage payload. Legacy plain-number values are ignored for instant restore
+ * (they race the new message before processScene clears storage).
+ */
+function parseNarrationSegmentLocalStorage(
+  raw: string | null,
+  latestAssistantId: string | null | undefined,
+): { index: number; hasStoredPosition: true } | null {
+  if (raw == null || !latestAssistantId) return null;
+  try {
+    if (!raw.startsWith("{")) return null;
+    const parsed = JSON.parse(raw) as { m?: unknown; i?: unknown };
+    if (typeof parsed.m !== "string" || parsed.m !== latestAssistantId) return null;
+    const idx = typeof parsed.i === "number" ? parsed.i : Number(parsed.i);
+    if (!Number.isFinite(idx) || idx < 0) return null;
+    return { index: Math.floor(idx), hasStoredPosition: true };
+  } catch {
+    return null;
+  }
+}
+
+/** Numeric index for flushing to server (supports v2 JSON or legacy plain number). */
+function narrationIndexForMetadataPatch(raw: string | null): number | null {
+  if (raw == null) return null;
+  try {
+    if (raw.startsWith("{")) {
+      const parsed = JSON.parse(raw) as { i?: unknown };
+      const idx = typeof parsed.i === "number" ? parsed.i : Number(parsed.i);
+      return Number.isFinite(idx) && idx >= 0 ? Math.floor(idx) : null;
+    }
+    const idx = Number(raw);
+    return Number.isFinite(idx) && idx >= 0 ? Math.floor(idx) : null;
+  } catch {
+    return null;
+  }
 }
 
 interface GameSurfaceProps {
@@ -573,6 +618,7 @@ export function GameSurface({
   // Poll chat metadata while any materialised NPC is still waiting on its
   // async avatar/sprite generation. Stops automatically once everyone is ready.
   useNpcAssetWatcher(activeChatId);
+  const queryClient = useQueryClient();
 
   const {
     gameState,
@@ -599,6 +645,8 @@ export function GameSurface({
       characterSheetCharId: s.characterSheetCharId,
     })),
   );
+
+  useInvalidateNpcSpriteListOnReady(npcs);
 
   const closeCharacterSheet = useGameModeStore((s) => s.closeCharacterSheet);
   const applyWidgetUpdate = useGameModeStore((s) => s.applyWidgetUpdate);
@@ -886,6 +934,10 @@ export function GameSurface({
   const [assetGenerationFailed, setAssetGenerationFailed] = useState(false);
   const [volumePopoverOpen, setVolumePopoverOpen] = useState(false);
   const [retryMenuOpen, setRetryMenuOpen] = useState(false);
+  /** Bumped after background PNG is overwritten so the browser refetches despite long Cache-Control on game-assets. */
+  const [backgroundUrlCacheBust, setBackgroundUrlCacheBust] = useState(0);
+  const [regenerateBackgroundPending, setRegenerateBackgroundPending] = useState(false);
+  const [refreshBackgroundPromptPending, setRefreshBackgroundPromptPending] = useState(false);
   const [persistedGameAudioSettings] = useState(readPersistedGameAudioSettings);
   const [masterVolume, setMasterVolume] = useState(persistedGameAudioSettings.masterVolume);
   const [audioSettingsHydrated, setAudioSettingsHydrated] = useState(false);
@@ -958,6 +1010,7 @@ export function GameSurface({
     appliedInventorySegmentsRef.current = new Set();
     // Allow the auto-tutorial to re-evaluate for the new chat (guard still gates on disabled flag)
     tutorialAutoTriggeredRef.current = false;
+    setBackgroundUrlCacheBust(0);
   }, [activeChatId, chatMeta.gameInventory]);
 
   const handleActiveSpeakerChange = useCallback(
@@ -966,6 +1019,13 @@ export function GameSurface({
     },
     [],
   );
+
+  /** VN «from start»: replay segment-tied bg/music/sfx when advancing; do not clear appliedInventorySegmentsRef (would duplicate inventory deltas). */
+  const prepareNarrationRestart = useCallback(() => {
+    appliedSegmentsRef.current = new Set();
+    setActiveReadable(null);
+    readableQueueRef.current = [];
+  }, []);
 
   const applyInventoryUpdates = useCallback(
     (updates: InventoryTag[]) => {
@@ -1475,8 +1535,10 @@ export function GameSurface({
   const segmentPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleSegmentChange = useCallback(
     (index: number) => {
+      const messageId = latestAssistantMsgRef.current?.id;
+      if (!messageId) return;
       try {
-        localStorage.setItem(segmentStorageKey, String(index));
+        localStorage.setItem(segmentStorageKey, serializeNarrationSegmentLocalStorage(messageId, index));
       } catch {
         /* storage unavailable */
       }
@@ -1494,8 +1556,9 @@ export function GameSurface({
         clearTimeout(segmentPersistTimer.current);
         try {
           const saved = localStorage.getItem(segmentStorageKey);
-          if (saved != null) {
-            api.patch(`/chats/${activeChatId}/metadata`, { gameNarrationIndex: Number(saved) }).catch(() => {});
+          const idx = narrationIndexForMetadataPatch(saved);
+          if (idx != null) {
+            api.patch(`/chats/${activeChatId}/metadata`, { gameNarrationIndex: idx }).catch(() => {});
           }
         } catch {
           /* */
@@ -1509,10 +1572,8 @@ export function GameSurface({
   const restoredNarrationState = useMemo(() => {
     try {
       const saved = localStorage.getItem(segmentStorageKey);
-      if (saved != null) {
-        const idx = Number(saved);
-        if (Number.isFinite(idx) && idx >= 0) return { index: idx, hasStoredPosition: true };
-      }
+      const fromLs = parseNarrationSegmentLocalStorage(saved, latestAssistantMsg?.id);
+      if (fromLs) return fromLs;
     } catch {
       /* storage unavailable */
     }
@@ -1522,7 +1583,7 @@ export function GameSurface({
       return { index: serverIdx, hasStoredPosition: false };
     }
     return { index: 0, hasStoredPosition: false };
-  }, [segmentStorageKey, chatMeta.gameNarrationIndex]);
+  }, [segmentStorageKey, chatMeta.gameNarrationIndex, latestAssistantMsg?.id]);
 
   const restoredSegmentIndex = restoredNarrationState.index;
 
@@ -1541,6 +1602,33 @@ export function GameSurface({
     latestAssistantMsg != null &&
     sceneReadyMsgIdRef.current !== latestAssistantMsg.id &&
     !sceneAnalysisFailed;
+
+  const gameSessionStatusEarly = (chatMeta.gameSessionStatus as string) || "active";
+
+  const hasCatalogVariantForCurrentSceneBg = useMemo(() => {
+    const tag = chatMeta.gameSceneBackground as string | undefined;
+    if (!tag || tag === "black" || tag === "none") return false;
+    const catalog =
+      (chatMeta.locationCatalog as Record<string, { variants?: Array<{ tag: string; prompt?: string }> }> | undefined) ??
+      {};
+    for (const entry of Object.values(catalog)) {
+      for (const v of entry?.variants ?? []) {
+        if (v.tag === tag && typeof v.prompt === "string" && v.prompt.trim()) return true;
+      }
+    }
+    return false;
+  }, [chatMeta.gameSceneBackground, chatMeta.locationCatalog]);
+
+  const canRegenerateBackground =
+    gameSessionStatusEarly === "active" &&
+    !!activeChatId &&
+    !isStreaming &&
+    !scenePreparing &&
+    !!(chatMeta.enableSpriteGeneration as boolean | undefined) &&
+    !!String((chatMeta.gameImageConnectionId as string | undefined) ?? "").trim() &&
+    hasCatalogVariantForCurrentSceneBg;
+
+  const bgCatalogActionPending = regenerateBackgroundPending || refreshBackgroundPromptPending;
 
   // Show retry/skip buttons only after being stuck for 15 seconds (avoid showing during normal processing)
   const sceneProcessed = latestAssistantMsg == null || sceneReadyMsgIdRef.current === latestAssistantMsg?.id;
@@ -2134,8 +2222,9 @@ export function GameSurface({
 
         setPendingAssetGeneration(null);
         if (res.generatedBackground) {
-          fetchManifest().then(() => {
+          void fetchManifest().then(async () => {
             useGameAssetStore.getState().setCurrentBackground(res.generatedBackground!);
+            await queryClient.invalidateQueries({ queryKey: chatKeys.detail(assetPayload.chatId) });
           });
         }
         if (res.generatedNpcAvatars?.length) {
@@ -2151,7 +2240,7 @@ export function GameSurface({
         return null;
       }
     },
-    [fetchManifest],
+    [fetchManifest, queryClient],
   );
 
   const retryAssetGeneration = useCallback(
@@ -2162,6 +2251,64 @@ export function GameSurface({
     },
     [pendingAssetGeneration, missingSceneAssetGeneration, requestAssetGeneration],
   );
+
+  const handleRegenerateBackground = useCallback(async () => {
+    if (!activeChatId || !canRegenerateBackground) return;
+    setRegenerateBackgroundPending(true);
+    setRetryMenuOpen(false);
+    try {
+      const res = await api.post<{
+        generatedBackground: string | null;
+        generatedNpcAvatars: Array<{ name: string; avatarUrl: string }>;
+      }>("/game/generate-assets", {
+        chatId: activeChatId,
+        forceRegenerateBackground: true,
+      });
+      await fetchManifest();
+      if (res.generatedBackground) {
+        useGameAssetStore.getState().setCurrentBackground(res.generatedBackground);
+        await queryClient.invalidateQueries({ queryKey: chatKeys.detail(activeChatId) });
+        setBackgroundUrlCacheBust((n) => n + 1);
+        toast.success("Background regenerated.", { duration: 2000 });
+      } else {
+        toast.error("Regeneration did not return a background.");
+      }
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : "Failed to regenerate background.";
+      toast.error(msg);
+    } finally {
+      setRegenerateBackgroundPending(false);
+    }
+  }, [activeChatId, canRegenerateBackground, fetchManifest, queryClient]);
+
+  const handleRefreshBackgroundPrompt = useCallback(async () => {
+    if (!activeChatId || !canRegenerateBackground) return;
+    setRefreshBackgroundPromptPending(true);
+    setRetryMenuOpen(false);
+    try {
+      const res = await api.post<{
+        generatedBackground: string | null;
+        generatedNpcAvatars: Array<{ name: string; avatarUrl: string }>;
+      }>("/game/generate-assets", {
+        chatId: activeChatId,
+        refreshBackgroundPrompt: true,
+      });
+      await fetchManifest();
+      if (res.generatedBackground) {
+        useGameAssetStore.getState().setCurrentBackground(res.generatedBackground);
+        await queryClient.invalidateQueries({ queryKey: chatKeys.detail(activeChatId) });
+        setBackgroundUrlCacheBust((n) => n + 1);
+        toast.success("Background prompt refreshed and image regenerated.", { duration: 2200 });
+      } else {
+        toast.error("Regeneration did not return a background.");
+      }
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : "Failed to refresh background prompt.";
+      toast.error(msg);
+    } finally {
+      setRefreshBackgroundPromptPending(false);
+    }
+  }, [activeChatId, canRegenerateBackground, fetchManifest, queryClient]);
 
   useEffect(() => {
     if (!assetManifest) return;
@@ -3710,13 +3857,18 @@ export function GameSurface({
           const filename = entry.path.replace("__user_bg__/", "");
           return `/api/backgrounds/file/${encodeURIComponent(filename)}`;
         }
-        return `/api/game-assets/file/${entry.path}`;
+        const base = `/api/game-assets/file/${entry.path}`;
+        const metaRevRaw = chatMeta.gameBackgroundAssetRevision;
+        const metaRev =
+          typeof metaRevRaw === "number" && Number.isFinite(metaRevRaw) && metaRevRaw > 0 ? metaRevRaw : 0;
+        const bust = Math.max(metaRev, backgroundUrlCacheBust);
+        return bust > 0 ? `${base}?v=${bust}` : base;
       }
       console.warn("[bg-resolve] No asset match for background tag:", currentBackground);
     }
     // In game mode, do NOT fall back to the roleplay chat background — use black instead
     return undefined;
-  }, [currentBackground, assetManifest]);
+  }, [currentBackground, assetManifest, backgroundUrlCacheBust, chatMeta.gameBackgroundAssetRevision]);
 
   // ONLY gate on the first turn — once any assistant content has been received,
   // the game is in-progress and the "adventure begins" screen should never reappear.
@@ -4090,6 +4242,40 @@ export function GameSurface({
                           <span>Retry Scene Analysis</span>
                         </button>
                         <button
+                          onClick={() => void handleRegenerateBackground()}
+                          disabled={!canRegenerateBackground || bgCatalogActionPending}
+                          title={
+                            canRegenerateBackground
+                              ? "Regenerate the current location background using the saved scene prompt"
+                              : "Requires sprite generation, an image connection, and a catalog entry for this background"
+                          }
+                          className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-white/85 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
+                        >
+                          {regenerateBackgroundPending ? (
+                            <Loader2 size={13} className="animate-spin" />
+                          ) : (
+                            <Sparkles size={13} />
+                          )}
+                          <span>Regenerate Background</span>
+                        </button>
+                        <button
+                          onClick={() => void handleRefreshBackgroundPrompt()}
+                          disabled={!canRegenerateBackground || bgCatalogActionPending}
+                          title={
+                            canRegenerateBackground
+                              ? "Rewrite the scene brief with the LLM from latest narration, then regenerate the image"
+                              : "Requires sprite generation, an image connection, and a catalog entry for this background"
+                          }
+                          className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-white/85 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
+                        >
+                          {refreshBackgroundPromptPending ? (
+                            <Loader2 size={13} className="animate-spin" />
+                          ) : (
+                            <Wand2 size={13} />
+                          )}
+                          <span>{"Refresh prompt & regenerate"}</span>
+                        </button>
+                        <button
                           onClick={() => {
                             setRetryMenuOpen(false);
                             retryAssetGeneration({ showSuccessToast: true });
@@ -4222,6 +4408,46 @@ export function GameSurface({
                         >
                           <RefreshCw size={14} className={sceneAnalysis.isPending ? "animate-spin" : ""} />
                           <span>Retry Scene Analysis</span>
+                        </button>
+                        <button
+                          onClick={() => {
+                            setMobileActionsOpen(false);
+                            void handleRegenerateBackground();
+                          }}
+                          disabled={!canRegenerateBackground || bgCatalogActionPending}
+                          className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-white/80 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
+                          title={
+                            canRegenerateBackground
+                              ? "Regenerate the current location background"
+                              : "Requires sprite generation, an image connection, and a catalog entry for this background"
+                          }
+                        >
+                          {regenerateBackgroundPending ? (
+                            <Loader2 size={14} className="animate-spin" />
+                          ) : (
+                            <Sparkles size={14} />
+                          )}
+                          <span>Regenerate Background</span>
+                        </button>
+                        <button
+                          onClick={() => {
+                            setMobileActionsOpen(false);
+                            void handleRefreshBackgroundPrompt();
+                          }}
+                          disabled={!canRegenerateBackground || bgCatalogActionPending}
+                          className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-white/80 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
+                          title={
+                            canRegenerateBackground
+                              ? "Rewrite the scene brief with the LLM, then regenerate the image"
+                              : "Requires sprite generation, an image connection, and a catalog entry for this background"
+                          }
+                        >
+                          {refreshBackgroundPromptPending ? (
+                            <Loader2 size={14} className="animate-spin" />
+                          ) : (
+                            <Wand2 size={14} />
+                          )}
+                          <span>{"Refresh prompt & regenerate"}</span>
                         </button>
                         <button
                           onClick={() => {
@@ -4457,6 +4683,7 @@ export function GameSurface({
                           onReadable={handleReadable}
                           onNpcPortraitClick={handleNpcPortraitClick}
                           autoPlayBlocked={narrationAutoPlayBlocked}
+                          onPrepareNarrationRestart={prepareNarrationRestart}
                           directionsActive={directionsPlaying}
                           widgetSlot={mobileWidgetSlot}
                           choicesSlot={choicesSlot}
@@ -4512,6 +4739,7 @@ export function GameSurface({
                       onReadable={handleReadable}
                       onNpcPortraitClick={handleNpcPortraitClick}
                       autoPlayBlocked={narrationAutoPlayBlocked}
+                      onPrepareNarrationRestart={prepareNarrationRestart}
                       directionsActive={directionsPlaying}
                       widgetSlot={mobileWidgetSlot}
                       choicesSlot={choicesSlot}

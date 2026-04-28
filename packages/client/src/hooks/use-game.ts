@@ -20,8 +20,10 @@ import type {
   CombatRoundResult,
   CombatPlayerAction,
   HudWidget,
+  GameNpc,
 } from "@marinara-engine/shared";
 import type { Chat } from "@marinara-engine/shared";
+import { spriteKeys } from "./use-characters";
 
 // ── Query Keys ──
 
@@ -498,6 +500,33 @@ export function useNpcAssetWatcher(activeChatId: string | null) {
       }
     };
   }, [activeChatId, hasPendingAssets, qc]);
+}
+
+/**
+ * After NPC sprite generation completes (`pending` → `ready`), invalidate
+ * `spriteKeys.list(spriteId)` so dialogue avatars and VN overlays refetch
+ * fresh `?v=mtime` URLs instead of a still-fresh 5-minute React Query cache.
+ * Also clears stale lists on `pending` → `failed` after a regen wiped files.
+ */
+export function useInvalidateNpcSpriteListOnReady(npcs: GameNpc[]) {
+  const qc = useQueryClient();
+  const prevByNpcIdRef = useRef<Map<string, string>>(new Map());
+  useEffect(() => {
+    const prev = prevByNpcIdRef.current;
+    for (const npc of npcs) {
+      const spriteId = npc.spriteId?.trim();
+      if (!spriteId) continue;
+      const was = prev.get(npc.id);
+      const now = npc.spriteStatus ?? "";
+      if (was === "pending" && (now === "ready" || now === "failed")) {
+        void qc.invalidateQueries({ queryKey: spriteKeys.list(spriteId) });
+      }
+      prev.set(npc.id, now);
+    }
+    for (const id of [...prev.keys()]) {
+      if (!npcs.some((n) => n.id === id)) prev.delete(id);
+    }
+  }, [npcs, qc]);
 }
 
 interface RegenerateNpcAssetsRequest {

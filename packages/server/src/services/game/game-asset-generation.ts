@@ -361,6 +361,11 @@ export interface BackgroundGenRequest {
   imgApiKey: string;
   imgService?: string | null;
   imgComfyWorkflow?: string | undefined;
+  /**
+   * When true, do not reuse an existing PNG on disk — call the image API and
+   * overwrite the file (used for user-triggered background regeneration).
+   */
+  skipDiskCache?: boolean;
 }
 
 export interface BackgroundGenResult {
@@ -434,7 +439,7 @@ export async function generateBackground(req: BackgroundGenRequest): Promise<Bac
     key,
   );
   logger.debug(
-    '[game-asset-gen][bg] request details: conditions=%o, backgroundPrompt="%s", setting="%s", artStyle="%s", imgSource="%s", imgModel="%s", imgService="%s", baseUrl="%s", hasComfyWorkflow=%s',
+    '[game-asset-gen][bg] request details: conditions=%o, backgroundPrompt="%s", setting="%s", artStyle="%s", imgSource="%s", imgModel="%s", imgService="%s", baseUrl="%s", hasComfyWorkflow=%s, skipDiskCache=%s',
     req.conditions,
     req.backgroundPrompt,
     req.setting ?? "",
@@ -444,16 +449,24 @@ export async function generateBackground(req: BackgroundGenRequest): Promise<Bac
     req.imgService ?? "",
     req.imgBaseUrl ?? "",
     !!req.imgComfyWorkflow,
+    !!req.skipDiskCache,
   );
 
   // Cache hit — file already exists on disk for this exact (location, conditions) combo.
-  if (existsSync(targetPath)) {
+  if (existsSync(targetPath) && !req.skipDiskCache) {
     logger.info(
       '[game-asset-gen][bg][cache-hit] file already on disk → reusing tag "%s" (path=%s) — NO image API call',
       tag,
       targetPath,
     );
     return { tag, path: targetPath, key, reusedCache: true };
+  }
+
+  if (existsSync(targetPath) && req.skipDiskCache) {
+    logger.info(
+      '[game-asset-gen][bg][skip-disk-cache] existing file at %s will be overwritten after image API call',
+      targetPath,
+    );
   }
 
   const prompt = buildBackgroundImagePrompt(req);
