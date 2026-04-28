@@ -3877,6 +3877,19 @@ export async function gameRoutes(app: FastifyInstance) {
       );
       if (result) {
         generatedBackground = result.tag;
+        await chats.updateMetadataWithMerge(input.chatId, (latestMeta) => ({
+          ...latestMeta,
+          locationCatalog: upsertLocationCatalogVariant(
+            latestMeta,
+            derivedLocationId,
+            conditions,
+            result.tag,
+            derivedPrompt,
+          ),
+          currentLocationId: derivedLocationId,
+          gameSceneBackground: result.tag,
+          ...(conditions.season ? { gameCurrentSeason: conditions.season } : {}),
+        }));
       }
     }
 

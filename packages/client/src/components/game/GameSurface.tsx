@@ -1968,6 +1968,12 @@ export function GameSurface({
         appliedSegmentsRef.current.add(0);
         for (const fx of seg0) {
           if (fx.background) {
+            // Match top-level `skipBgUpdate`: do not fuzzy-resolve an unresolved
+            // or placeholder generated tag while async /generate-assets is pending.
+            const skipSegBg =
+              skipBgUpdate &&
+              (!assetMap?.[fx.background] || fx.background.startsWith("backgrounds:generated:"));
+            if (skipSegBg) continue;
             const resolved = resolveAssetTag(fx.background, "backgrounds", assetMap);
             useGameAssetStore.getState().setCurrentBackground(resolved);
           }
@@ -1977,10 +1983,16 @@ export function GameSurface({
       }
     }
 
-    const hasGeneratedBg =
-      result.segmentEffects?.some((fx) => fx.background && fx.background.includes("generated-")) ||
-      result.background?.includes("generated-");
-    if (hasGeneratedBg) {
+    const needsManifestRefresh =
+      !!result.pendingBackgroundGeneration ||
+      (result.background &&
+        (result.background.includes("backgrounds:generated:") || result.background.startsWith("backgrounds:chat:"))) ||
+      result.segmentEffects?.some(
+        (fx) =>
+          !!fx.background &&
+          (fx.background.includes("backgrounds:generated:") || fx.background.startsWith("backgrounds:chat:")),
+      );
+    if (needsManifestRefresh) {
       fetchManifest();
     }
     if (result.generatedNpcAvatars?.length) {
