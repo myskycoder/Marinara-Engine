@@ -867,7 +867,20 @@ export function GameSurface({
   const [generationFailed, setGenerationFailed] = useState(false);
   const [pendingAssetGeneration, setPendingAssetGeneration] = useState<{
     chatId: string;
+    /** Legacy unresolved tag — kept for backward-compat with the auto-retry path. */
     backgroundTag?: string;
+    /** Stable location id (rich path — preferred for new requests). */
+    locationId?: string;
+    /** Visual brief from the scene-analyzer (rich path). */
+    backgroundPrompt?: string;
+    /** Conditions that key the cached variant. */
+    conditions?: {
+      weather?: string | null;
+      timeOfDay?: string | null;
+      season?: "spring" | "summer" | "autumn" | "winter" | null;
+    };
+    /** Placeholder tag the UI is currently rendering as fallback. */
+    placeholderTag?: string;
     npcsNeedingAvatars?: Array<{ id: string; name: string; description: string }>;
   } | null>(null);
   const [assetGenerationFailed, setAssetGenerationFailed] = useState(false);
@@ -1919,10 +1932,17 @@ export function GameSurface({
       _updateReputation.mutate({ chatId: activeChatId, actions: repActions });
     }
     const assetMap = useGameAssetStore.getState().manifest?.assets ?? null;
-    if (result.background) {
+    // When the server signalled async background generation, keep showing the
+    // previous background until /generate-assets returns the real tag —
+    // otherwise resolveAssetTag's fuzzy-match would pick a random
+    // semantically-near bg from the library, which is the very issue this
+    // pipeline was built to avoid.
+    const skipBgUpdate =
+      !!result.pendingBackgroundGeneration && (!result.background || result.background.startsWith("backgrounds:generated:"));
+    if (result.background && !skipBgUpdate) {
       const resolved = resolveAssetTag(result.background, "backgrounds", assetMap);
       useGameAssetStore.getState().setCurrentBackground(resolved);
-    } else if (!useGameAssetStore.getState().currentBackground) {
+    } else if (!useGameAssetStore.getState().currentBackground && !skipBgUpdate) {
       const bgKeys = Object.keys(assetMap ?? {}).filter((k) => k.startsWith("backgrounds:"));
       if (bgKeys.length > 0) {
         const pick = bgKeys.find((k) => /town|village|forest|field|default|start/i.test(k)) ?? bgKeys[0]!;
@@ -1983,12 +2003,37 @@ export function GameSurface({
         .map((n) => ({ id: n.id, name: n.name, description: n.description }))
         .slice(0, 10);
 
-      if (unresolvedBg || npcsNeedingAvatars.length > 0) {
-        const assetPayload = {
+      // Server may signal that scene-wrap deferred background generation
+      // (cache-miss-async path). When `pendingBackgroundGeneration` is set,
+      // forward the rich payload — the slug-only `backgroundTag` legacy
+      // fallback would otherwise discard the LLM's visual brief.
+      const pendingBg = result.pendingBackgroundGeneration ?? null;
+
+      if (pendingBg || unresolvedBg || npcsNeedingAvatars.length > 0) {
+        const assetPayload: {
+          chatId: string;
+          backgroundTag?: string;
+          locationId?: string;
+          backgroundPrompt?: string;
+          conditions?: {
+            weather?: string | null;
+            timeOfDay?: string | null;
+            season?: "spring" | "summer" | "autumn" | "winter" | null;
+          };
+          placeholderTag?: string;
+          npcsNeedingAvatars?: Array<{ id: string; name: string; description: string }>;
+        } = {
           chatId: activeChatId,
-          backgroundTag: unresolvedBg || undefined,
           npcsNeedingAvatars: npcsNeedingAvatars.length > 0 ? npcsNeedingAvatars : undefined,
         };
+        if (pendingBg) {
+          assetPayload.locationId = pendingBg.locationId;
+          assetPayload.backgroundPrompt = pendingBg.backgroundPrompt;
+          assetPayload.conditions = pendingBg.conditions;
+          if (pendingBg.placeholderTag) assetPayload.placeholderTag = pendingBg.placeholderTag;
+        } else if (unresolvedBg) {
+          assetPayload.backgroundTag = unresolvedBg;
+        }
         setPendingAssetGeneration(assetPayload);
         setAssetGenerationFailed(false);
         api
@@ -2054,6 +2099,14 @@ export function GameSurface({
       assetPayload: {
         chatId: string;
         backgroundTag?: string;
+        locationId?: string;
+        backgroundPrompt?: string;
+        conditions?: {
+          weather?: string | null;
+          timeOfDay?: string | null;
+          season?: "spring" | "summer" | "autumn" | "winter" | null;
+        };
+        placeholderTag?: string;
         npcsNeedingAvatars?: Array<{ id: string; name: string; description: string }>;
       },
       options?: { showSuccessToast?: boolean },

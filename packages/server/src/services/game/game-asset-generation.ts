@@ -270,25 +270,89 @@ export async function generateNpcPortrait(req: NpcPortraitRequest): Promise<stri
 
 // ── Background Generation ──
 
-/** Map a game genre string to one of the canonical background folders. */
-function genreToFolder(genre?: string): string {
-  if (!genre) return "fantasy";
-  const g = genre.toLowerCase();
-  if (g.includes("sci") || g.includes("cyber") || g.includes("space") || g.includes("futur")) return "scifi";
-  if (g.includes("modern") || g.includes("contemporary") || g.includes("urban") || g.includes("real")) return "modern";
-  return "fantasy";
+/**
+ * Visual conditions that, combined with `locationId`, define a unique
+ * cached background variant. `null` is normalised to the literal `"none"`
+ * inside the cache key so the resulting filename is always stable.
+ */
+export interface BackgroundConditions {
+  weather: string | null;
+  timeOfDay: string | null;
+  season: string | null;
+}
+
+/** Sanitise a string to ASCII kebab-case suitable for a filename component. */
+function kebabForFs(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+}
+
+/** Stringify a single condition slot for the cache key (`null` → `"none"`). */
+function conditionSlot(value: string | null): string {
+  if (!value) return "none";
+  const cleaned = kebabForFs(String(value));
+  return cleaned || "none";
+}
+
+/**
+ * Build the deterministic cache key used as both the filename stem and the
+ * tail of the asset tag.
+ *
+ * `<locationId>__<weather>__<timeOfDay>__<season>` — separator is double
+ * underscore so single hyphens inside slugs (e.g. `chernorechye-village-edge`)
+ * stay readable.
+ */
+export function buildBackgroundCacheKey(locationId: string, conditions: BackgroundConditions): string {
+  const loc = kebabForFs(locationId) || "unknown";
+  return `${loc}__${conditionSlot(conditions.weather)}__${conditionSlot(conditions.timeOfDay)}__${conditionSlot(conditions.season)}`;
+}
+
+/** Asset tag for a per-chat generated background, e.g.
+ *  `backgrounds:chat:<chatId>:<key>`. The pathToTag scanner derives the same
+ *  string from `backgrounds/chat/<chatId>/<key>.png`, so both sides agree. */
+export function backgroundTagForChat(chatId: string, key: string): string {
+  return `backgrounds:chat:${chatId}:${key}`;
+}
+
+/** Absolute filesystem path for a per-chat generated background. */
+export function backgroundFilePath(chatId: string, key: string): string {
+  return join(GAME_ASSETS_DIR, "backgrounds", "chat", chatId, `${key}.png`);
+}
+
+/**
+ * Look up a previously-generated background for `(chatId, locationId,
+ * conditions)`. Returns `null` if no matching file exists yet.
+ */
+export function findCachedBackground(
+  chatId: string,
+  locationId: string,
+  conditions: BackgroundConditions,
+): { tag: string; path: string; key: string } | null {
+  const key = buildBackgroundCacheKey(locationId, conditions);
+  const path = backgroundFilePath(chatId, key);
+  if (!existsSync(path)) return null;
+  return { tag: backgroundTagForChat(chatId, key), path, key };
 }
 
 export interface BackgroundGenRequest {
   chatId: string;
-  /** Short slug for the location, e.g. "dark-forest-clearing" */
-  locationSlug: string;
-  /** Scene description used as the image prompt. */
-  sceneDescription: string;
-  /** The game's genre/setting/tone for style guidance. */
-  genre?: string;
+  /** Stable kebab-case id for the location (e.g. `chernorechye-village-edge`). */
+  locationId: string;
+  /** Visual conditions that vary the cache key (weather × timeOfDay × season). */
+  conditions: BackgroundConditions;
+  /**
+   * Rich 1–2 sentence visual brief from the scene-analyzer. This is the
+   * primary description fed to the image model — NOT the location id.
+   */
+  backgroundPrompt: string;
+  /** The game's broader cultural/era context (e.g. "Snowy Russian village, 1992"). */
   setting?: string;
-  /** Unified art style prompt for visual consistency. */
+  /** Unified art-style prompt for visual consistency. */
   artStyle?: string;
   /** Connection credentials. */
   imgSource?: string | null;
@@ -299,34 +363,110 @@ export interface BackgroundGenRequest {
   imgComfyWorkflow?: string | undefined;
 }
 
+export interface BackgroundGenResult {
+  tag: string;
+  /** True when an existing on-disk cache entry was reused (no API call). */
+  reusedCache: boolean;
+  /** Cache key (filename stem) for diagnostics. */
+  key: string;
+  /** Absolute path to the file (for debugging only). */
+  path: string;
+  /** The full prompt actually sent to the image model (only set on miss). */
+  prompt?: string;
+}
+
 /**
- * Generate a background image for a game location and add it to the
- * asset manifest. Returns the asset tag on success, or null on failure.
+ * Build the image-generation prompt from the LLM's `backgroundPrompt`,
+ * environmental conditions, and global style hints. Adds a strong
+ * "no people" negative tail to keep characters out of the background plate.
  */
-export async function generateBackground(req: BackgroundGenRequest): Promise<string | null> {
-  const slug = safeName(req.locationSlug);
-  if (!slug) return null;
+function buildBackgroundImagePrompt(req: BackgroundGenRequest): string {
+  const conditionParts = [
+    req.conditions.timeOfDay && `time of day: ${req.conditions.timeOfDay}`,
+    req.conditions.weather && `weather: ${req.conditions.weather}`,
+    req.conditions.season && `season: ${req.conditions.season}`,
+  ].filter(Boolean);
 
-  const subcategory = genreToFolder(req.genre);
-  const filename = `${slug}.png`;
-  const targetDir = join(GAME_ASSETS_DIR, "backgrounds", subcategory);
-  const targetPath = join(targetDir, filename);
+  const sentences: string[] = [req.backgroundPrompt.trim().replace(/\s+/g, " ")];
+  if (conditionParts.length) sentences.push(`Atmosphere — ${conditionParts.join(", ")}.`);
+  if (req.setting?.trim()) sentences.push(`Setting: ${req.setting.trim()}.`);
+  if (req.artStyle?.trim()) sentences.push(`Style: ${req.artStyle.trim()}.`);
+  // Hard negative — repeated multi-phrase form because diffusion models
+  // respond better to several restatements than to a single "no characters".
+  sentences.push(
+    "Empty environment plate — no people, no figures, no characters, no humans, no faces, no text, no UI, no logos, no watermarks. Wide establishing shot, cinematic composition, atmospheric, high detail, high quality.",
+  );
 
-  // Build asset tag: backgrounds:<category>:<slug>
-  const tag = `backgrounds:${subcategory}:${slug}`;
+  return sentences.join(" ").slice(0, 1500);
+}
 
-  // Skip if already generated
-  if (existsSync(targetPath)) {
-    return tag;
+/**
+ * Generate (or reuse) a per-chat, location-aware background image and add it
+ * to the asset manifest. Returns the asset tag plus diagnostics, or `null`
+ * on failure.
+ *
+ * Cache: files are stored at `GAME_ASSETS_DIR/backgrounds/chat/<chatId>/
+ * <locationId>__<weather>__<timeOfDay>__<season>.png`. When the same key
+ * already exists on disk the function short-circuits without any API call.
+ */
+export async function generateBackground(req: BackgroundGenRequest): Promise<BackgroundGenResult | null> {
+  if (!req.locationId) {
+    logger.warn("[game-asset-gen][bg] generateBackground called without locationId — aborting");
+    return null;
+  }
+  if (!req.backgroundPrompt?.trim()) {
+    logger.warn(
+      '[game-asset-gen][bg] generateBackground called with empty backgroundPrompt for locationId="%s" — aborting',
+      req.locationId,
+    );
+    return null;
   }
 
-  const styleHint = [req.artStyle, req.genre, req.setting].filter(Boolean).join(", ");
-  const prompt =
-    `${req.sceneDescription}. ${styleHint ? `Style: ${styleHint}.` : ""} Wide-angle landscape, detailed environment, no characters, no text, no UI, game background art, high quality`.slice(
-      0,
-      1000,
-    );
+  const key = buildBackgroundCacheKey(req.locationId, req.conditions);
+  const targetDir = join(GAME_ASSETS_DIR, "backgrounds", "chat", req.chatId);
+  const targetPath = join(targetDir, `${key}.png`);
+  const tag = backgroundTagForChat(req.chatId, key);
 
+  logger.info(
+    '[game-asset-gen][bg] generateBackground() CALLED — chatId=%s, locationId="%s", key="%s"',
+    req.chatId,
+    req.locationId,
+    key,
+  );
+  logger.debug(
+    '[game-asset-gen][bg] request details: conditions=%o, backgroundPrompt="%s", setting="%s", artStyle="%s", imgSource="%s", imgModel="%s", imgService="%s", baseUrl="%s", hasComfyWorkflow=%s',
+    req.conditions,
+    req.backgroundPrompt,
+    req.setting ?? "",
+    req.artStyle ?? "",
+    req.imgSource ?? "",
+    req.imgModel ?? "",
+    req.imgService ?? "",
+    req.imgBaseUrl ?? "",
+    !!req.imgComfyWorkflow,
+  );
+
+  // Cache hit — file already exists on disk for this exact (location, conditions) combo.
+  if (existsSync(targetPath)) {
+    logger.info(
+      '[game-asset-gen][bg][cache-hit] file already on disk → reusing tag "%s" (path=%s) — NO image API call',
+      tag,
+      targetPath,
+    );
+    return { tag, path: targetPath, key, reusedCache: true };
+  }
+
+  const prompt = buildBackgroundImagePrompt(req);
+  logger.info(
+    '[game-asset-gen][bg] FINAL PROMPT (%d chars, target tag=%s, %dx%d): %s',
+    prompt.length,
+    tag,
+    1024,
+    576,
+    prompt,
+  );
+
+  const startedAt = Date.now();
   try {
     const result = await generateImage(
       req.imgModel,
@@ -348,10 +488,23 @@ export async function generateBackground(req: BackgroundGenRequest): Promise<str
     // Rebuild manifest so the new tag is available immediately
     buildAssetManifest();
 
-    logger.info(`[game-asset-gen] Generated background "${slug}" → tag: ${tag}`);
-    return tag;
+    logger.info(
+      '[game-asset-gen][bg] SUCCESS: generated key="%s" in %dms → tag=%s, file=%s, bytes=%d',
+      key,
+      Date.now() - startedAt,
+      tag,
+      targetPath,
+      result.base64 ? Math.floor((result.base64.length * 3) / 4) : 0,
+    );
+    return { tag, path: targetPath, key, reusedCache: false, prompt };
   } catch (err) {
-    logger.warn(err, '[game-asset-gen] Failed to generate background "%s"', slug);
+    logger.warn(
+      err,
+      '[game-asset-gen][bg] FAILED for key="%s" after %dms (tag would have been %s)',
+      key,
+      Date.now() - startedAt,
+      tag,
+    );
     return null;
   }
 }

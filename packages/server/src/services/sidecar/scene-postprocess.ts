@@ -187,6 +187,52 @@ export function postProcessSceneResult(raw: SceneAnalysis, ctx: PostProcessConte
   if (result.ambient === "null") result.ambient = null;
   if (result.weather === "null") result.weather = null;
   if (result.timeOfDay === "null") result.timeOfDay = null;
+  if ((result.season as unknown) === "null") result.season = null;
+  if ((result.locationId as unknown) === "null") result.locationId = null;
+  if ((result.backgroundPrompt as unknown) === "null") result.backgroundPrompt = null;
+
+  // ── Season — clamp to known values ──
+  if (result.season) {
+    const s = String(result.season).toLowerCase().trim();
+    if (s === "spring" || s === "summer" || s === "autumn" || s === "winter") {
+      result.season = s;
+    } else if (s === "fall") {
+      result.season = "autumn";
+    } else {
+      logger.debug(`[postprocess] season: invalid "${result.season}" → null`);
+      result.season = null;
+    }
+  }
+
+  // ── locationId — normalise to kebab-case (LLM occasionally drifts) ──
+  if (result.locationId) {
+    const cleaned = String(result.locationId)
+      .toLowerCase()
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "") // strip combining marks
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80);
+    if (!cleaned) {
+      logger.debug(`[postprocess] locationId: empty after normalisation, dropping ("${result.locationId}")`);
+      result.locationId = null;
+    } else if (cleaned !== result.locationId) {
+      logger.debug(`[postprocess] locationId: "${result.locationId}" → "${cleaned}"`);
+      result.locationId = cleaned;
+    }
+  }
+
+  // ── backgroundPrompt — only meaningful when background is generated:* ──
+  if (result.backgroundPrompt && typeof result.backgroundPrompt === "string") {
+    const trimmed = result.backgroundPrompt.trim();
+    if (!trimmed) {
+      result.backgroundPrompt = null;
+    } else if (trimmed.length > 1000) {
+      result.backgroundPrompt = trimmed.slice(0, 1000);
+    } else {
+      result.backgroundPrompt = trimmed;
+    }
+  }
 
   // ── Background ──
   if (result.background && !ctx.availableBackgrounds.includes(result.background)) {
@@ -241,6 +287,21 @@ export function postProcessSceneResult(raw: SceneAnalysis, ctx: PostProcessConte
   // ── Segment Effects (per-beat) ──
   if (result.segmentEffects?.length) {
     result.segmentEffects = result.segmentEffects.map((seg) => postProcessSegment(seg, ctx));
+  }
+
+  // ── backgroundPrompt only valid when the chosen background is a generated tag ──
+  if (result.backgroundPrompt && (!result.background || !result.background.startsWith("backgrounds:generated:"))) {
+    logger.debug(
+      `[postprocess] dropping backgroundPrompt because background="${result.background ?? "null"}" is not generated:*`,
+    );
+    result.backgroundPrompt = null;
+  }
+  if (result.segmentEffects?.length) {
+    for (const seg of result.segmentEffects) {
+      if (seg.backgroundPrompt && (!seg.background || !seg.background.startsWith("backgrounds:generated:"))) {
+        seg.backgroundPrompt = null;
+      }
+    }
   }
 
   return result;

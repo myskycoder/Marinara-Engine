@@ -128,11 +128,33 @@ export interface SidecarStatusResponse {
 
 // ── Scene Analysis Output ──
 
+/** Coarse-grained season label used to vary visual cache for the same location. */
+export type Season = "spring" | "summer" | "autumn" | "winter";
+
+/** Visual conditions that, together with locationId, key the per-chat background cache. */
+export interface SceneVisualConditions {
+  weather: string | null;
+  timeOfDay: string | null;
+  season: Season | null;
+}
+
 /** A single segment-tied effect batch. Applied when the user reaches this segment. */
 export interface SceneSegmentEffect {
   /** 0-based index of the narration segment this effect triggers on. */
   segment: number;
   background?: string | null;
+  /**
+   * Stable kebab-case id for the place depicted in this segment. Reused
+   * across turns when characters return to the same location.
+   * Required when `background` is `backgrounds:generated:*`; optional otherwise.
+   */
+  locationId?: string | null;
+  /**
+   * Rich 1–2 sentence visual brief for image generation. Set when the LLM
+   * couldn't find a strong match in `availableBackgrounds` and fell back to
+   * `backgrounds:generated:*`. `null` when reusing an existing tag.
+   */
+  backgroundPrompt?: string | null;
   music?: string | null;
   sfx?: string[];
   ambient?: string | null;
@@ -145,6 +167,20 @@ export interface SceneSegmentEffect {
 export interface SceneAnalysis {
   /** Background tag from the asset manifest to display. */
   background: string | null;
+  /**
+   * Stable kebab-case id for the location currently in frame (e.g.
+   * `chernorechye-village-edge`, `aunt-zoya-izba-kitchen`). The LLM is
+   * instructed to reuse the SAME id when characters return to a previously
+   * visited place, even if narration phrasing differs. Used as part of the
+   * per-chat background cache key.
+   */
+  locationId?: string | null;
+  /**
+   * Rich 1–2 sentence visual description for image generation. Set when
+   * `background` is `backgrounds:generated:*` (LLM couldn't match an
+   * existing tag); `null` when reusing an existing tag.
+   */
+  backgroundPrompt?: string | null;
   /** Music tag to play. */
   music: string | null;
   /** Ambient loop tag. */
@@ -153,6 +189,8 @@ export interface SceneAnalysis {
   weather: string | null;
   /** Time of day update — applied immediately. */
   timeOfDay: string | null;
+  /** Season — derived from narration cues; varies background cache key alongside weather/timeOfDay. */
+  season?: Season | null;
   /** NPC reputation changes — applied immediately. */
   reputationChanges: SceneReputationChange[];
   /** Scene-wide widget updates — applied immediately after the turn. */
@@ -161,6 +199,30 @@ export interface SceneAnalysis {
   segmentEffects?: SceneSegmentEffect[];
   /** NPC avatars generated during this scene wrap (populated by server when image gen is enabled). */
   generatedNpcAvatars?: Array<{ name: string; avatarUrl: string }>;
+  /**
+   * Populated by the server when the new scene introduced a fresh location/conditions
+   * combo and background generation was deferred to the client's follow-up
+   * `/generate-assets` call (async path). When present, the client should POST
+   * these fields back so the server can produce the matching image.
+   */
+  pendingBackgroundGeneration?: PendingBackgroundGeneration | null;
+}
+
+/**
+ * Server → client signal that scene-wrap deferred a background generation
+ * because it wasn't the first turn of the session. The client mirrors these
+ * fields back on a follow-up `POST /game/generate-assets`.
+ */
+export interface PendingBackgroundGeneration {
+  locationId: string;
+  backgroundPrompt: string;
+  conditions: SceneVisualConditions;
+  /**
+   * The placeholder tag scene-wrap returned in `background` (e.g.
+   * `backgrounds:generated:<llm-slug>`). Echoed back so the client can
+   * report which placeholder was active when the request started.
+   */
+  placeholderTag: string | null;
 }
 
 /** A single widget update from scene analysis. */

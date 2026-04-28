@@ -79,11 +79,19 @@ import type {
   QuestProgress,
   SessionSummary,
   PartyArc,
+  LocationCatalogEntry,
+  LocationCatalogVariant,
+  Season,
+  PendingBackgroundGeneration,
 } from "@marinara-engine/shared";
 import { getAssetManifest } from "../services/game/asset-manifest.service.js";
 import {
   generateNpcPortrait,
   generateBackground,
+  findCachedBackground,
+  buildBackgroundCacheKey,
+  backgroundTagForChat,
+  type BackgroundConditions,
 } from "../services/game/game-asset-generation.js";
 import { regenerateNpcAssets } from "../services/game/npc-materializer.service.js";
 import { npcNameKey, sha1HexLegacy, slugifyForFs } from "../services/game/npc-name-server.js";
@@ -126,6 +134,59 @@ function findCharAvatarFuzzy(npcName: string, charAvatarByName: Map<string, stri
   }
 
   return undefined;
+}
+
+// ──────────────────────────────────────────────
+// Background cache helpers (per-chat locationCatalog)
+// ──────────────────────────────────────────────
+
+/** Cast unknown season-like values to the canonical `Season` literal or null. */
+function coerceSeason(value: unknown): Season | null {
+  if (typeof value !== "string") return null;
+  const v = value.toLowerCase().trim();
+  if (v === "spring" || v === "summer" || v === "autumn" || v === "winter") return v;
+  if (v === "fall") return "autumn";
+  return null;
+}
+
+/** Stringified conditions key for catalog lookups (`null` → `"none"`). */
+function buildConditionsKey(conditions: BackgroundConditions): string {
+  return `${conditions.weather ?? "none"}__${conditions.timeOfDay ?? "none"}__${conditions.season ?? "none"}`;
+}
+
+/**
+ * Append a freshly-generated variant to the per-chat locationCatalog. Returns
+ * a new metadata patch object (caller should merge it into the latest meta
+ * via `updateMetadataWithMerge`).
+ */
+function upsertLocationCatalogVariant(
+  meta: Record<string, unknown>,
+  locationId: string,
+  conditions: BackgroundConditions,
+  tag: string,
+  prompt: string,
+  description?: string,
+): Record<string, LocationCatalogEntry> {
+  const existing = (meta.locationCatalog as Record<string, LocationCatalogEntry> | undefined) ?? {};
+  const conditionsKey = buildConditionsKey(conditions);
+  const prevEntry = existing[locationId];
+  const existingVariants = prevEntry?.variants ?? [];
+  const filtered = existingVariants.filter((v) => v.conditionsKey !== conditionsKey);
+  const newVariant: LocationCatalogVariant = {
+    conditionsKey,
+    weather: conditions.weather,
+    timeOfDay: conditions.timeOfDay,
+    season: conditions.season as Season | null,
+    tag,
+    prompt,
+    generatedAt: new Date().toISOString(),
+  };
+  const nextEntry: LocationCatalogEntry = {
+    locationId,
+    description: description ?? prevEntry?.description,
+    variants: [...filtered, newVariant],
+  };
+  return { ...existing, [locationId]: nextEntry };
 }
 
 // ──────────────────────────────────────────────
@@ -3096,7 +3157,36 @@ export async function gameRoutes(app: FastifyInstance) {
     // Compute approximate turn number: count user messages + 1 (current turn)
     const allMsgs = await chats.listMessages(input.chatId);
     const approxTurnNumber = Math.max(1, allMsgs.filter((m) => m.role === "user").length + 1);
-    const sceneCtx = { ...(input.context as unknown as SceneAnalyzerContext), turnNumber: approxTurnNumber };
+
+    // Strip cross-chat per-chat backgrounds from the LLM-visible list so the
+    // model never picks `backgrounds:chat:<otherChatId>:*` from a different
+    // session. Per-chat tags from THIS chat stay in.
+    const myChatPrefix = `backgrounds:chat:${input.chatId}:`;
+    const filteredBackgrounds = input.context.availableBackgrounds.filter(
+      (t) => !t.startsWith("backgrounds:chat:") || t.startsWith(myChatPrefix),
+    );
+    if (filteredBackgrounds.length !== input.context.availableBackgrounds.length) {
+      logger.debug(
+        "[game/scene-wrap][bg] filtered %d cross-chat tags from availableBackgrounds (kept %d)",
+        input.context.availableBackgrounds.length - filteredBackgrounds.length,
+        filteredBackgrounds.length,
+      );
+    }
+
+    const knownLocationIds = Object.keys(
+      (meta.locationCatalog as Record<string, LocationCatalogEntry> | undefined) ?? {},
+    );
+    const currentLocationId = (meta.currentLocationId as string | null | undefined) ?? null;
+    const currentSeason = coerceSeason(meta.gameCurrentSeason);
+
+    const sceneCtx: SceneAnalyzerContext = {
+      ...(input.context as unknown as SceneAnalyzerContext),
+      availableBackgrounds: filteredBackgrounds,
+      turnNumber: approxTurnNumber,
+      currentLocationId,
+      knownLocationIds,
+      currentSeason,
+    };
 
     const systemPrompt = buildSceneAnalyzerSystemPrompt(sceneCtx);
     const userPrompt = buildSceneAnalyzerUserPrompt(input.narration, input.playerAction, sceneCtx);
@@ -3153,7 +3243,7 @@ export async function gameRoutes(app: FastifyInstance) {
       // and filter widget updates to valid IDs (same as sidecar route).
       const widgets = (input.context.activeWidgets ?? []) as { id?: string }[];
       const ppCtx: PostProcessContext = {
-        availableBackgrounds: input.context.availableBackgrounds,
+        availableBackgrounds: filteredBackgrounds,
         availableSfx: input.context.availableSfx,
         validWidgetIds: new Set(widgets.map((w) => w.id).filter(Boolean) as string[]),
         characterNames: input.context.characterNames ?? [],
@@ -3201,10 +3291,19 @@ export async function gameRoutes(app: FastifyInstance) {
       const enableGen = !!meta.enableSpriteGeneration;
       const imgConnId = (meta.gameImageConnectionId as string) || null;
 
+      logger.info(
+        "[game/scene-wrap][bg] asset-gen gate: enableSpriteGeneration=%s, gameImageConnectionId=%s, parsed.background=%s",
+        enableGen,
+        imgConnId ?? "null",
+        (parsed as { background?: string | null } | null)?.background ?? "null",
+      );
+
       if (!enableGen) {
-        logger.debug("[game/scene-wrap] asset-gen skipped: enableSpriteGeneration=false");
+        logger.info("[game/scene-wrap][bg] asset-gen SKIPPED: enableSpriteGeneration=false (toggle in chat settings)");
       } else if (!imgConnId) {
-        logger.debug("[game/scene-wrap] asset-gen skipped: no gameImageConnectionId configured");
+        logger.info(
+          "[game/scene-wrap][bg] asset-gen SKIPPED: no gameImageConnectionId configured (set image connection in chat settings)",
+        );
       }
 
       if (enableGen && imgConnId && parsed && typeof parsed === "object") {
@@ -3212,6 +3311,12 @@ export async function gameRoutes(app: FastifyInstance) {
 
         try {
           const imgConn = await connections.getWithKey(imgConnId);
+          if (!imgConn) {
+            logger.warn(
+              "[game/scene-wrap][bg] asset-gen ABORTED: image connection id=%s not found in DB",
+              imgConnId,
+            );
+          }
           if (imgConn) {
             const imgModel = imgConn.model || "";
             const imgBaseUrl = imgConn.baseUrl || "https://image.pollinations.ai";
@@ -3224,38 +3329,98 @@ export async function gameRoutes(app: FastifyInstance) {
             const setting = (setupCfg?.setting as string) || "";
             const artStyle = (setupCfg?.artStylePrompt as string) || "";
 
-            // ── Background generation ──
-            // Check if the scene analysis picked a bg tag that doesn't exist
+            logger.debug(
+              '[game/scene-wrap][bg] using imgConnection name="%s" provider=%s model=%s source=%s baseUrl=%s; setupCfg genre="%s" setting="%s" artStyle="%s"',
+              imgConn.name ?? "",
+              imgConn.provider ?? "",
+              imgModel,
+              imgSource,
+              imgBaseUrl,
+              genre,
+              setting,
+              artStyle,
+            );
+
+            // ── Background resolution (cache → sync/async generation) ──
+            //
+            // Three outcomes per location:
+            //   1. cache-hit       → reuse existing chat/<chatId>/<key>.png, NO API call
+            //   2. cache-miss-sync → first turn of the session (no gameSceneBackground yet),
+            //                        block until the image is ready so the player sees
+            //                        it before narration paints
+            //   3. cache-miss-async → subsequent transition; defer to client's
+            //                         /generate-assets call so narration shows immediately
+            const imgComfyWorkflow = imgConn.comfyuiWorkflow || undefined;
+
+            const previousSceneBg = (meta.gameSceneBackground as string | null | undefined) ?? null;
+            const isFirstTurnOfSession = !previousSceneBg;
+
             const chosenBg = (sceneResult.background as string) ?? null;
-            if (chosenBg && chosenBg !== "black" && chosenBg !== "none") {
-              const manifest = getAssetManifest();
-              const tagExists =
-                !!manifest.assets[chosenBg] ||
-                Object.keys(manifest.assets).some(
-                  (k) => k.startsWith("backgrounds:") && k.toLowerCase().includes(chosenBg.toLowerCase()),
+            const topLevelLocationId =
+              ((sceneResult as Record<string, unknown>).locationId as string | null | undefined) ?? null;
+            const topLevelBgPrompt =
+              ((sceneResult as Record<string, unknown>).backgroundPrompt as string | null | undefined) ?? null;
+            const sceneSeason = coerceSeason((sceneResult as Record<string, unknown>).season);
+            const conditions: BackgroundConditions = {
+              weather: (sceneResult.weather as string | null | undefined) ?? input.context.currentWeather ?? null,
+              timeOfDay:
+                (sceneResult.timeOfDay as string | null | undefined) ?? input.context.currentTimeOfDay ?? null,
+              season: sceneSeason,
+            };
+
+            let topLevelGeneratedTag: string | null = null;
+            let topLevelGeneratedPrompt: string | null = null;
+            let pendingBackgroundGeneration: PendingBackgroundGeneration | null = null;
+
+            if (!chosenBg) {
+              logger.info(
+                "[game/scene-wrap][bg] LLM returned no background (parsed.background=null) — nothing to resolve at top-level",
+              );
+            } else if (chosenBg === "black" || chosenBg === "none") {
+              logger.info(
+                '[game/scene-wrap][bg] LLM picked sentinel bg="%s" — skipping generation by design',
+                chosenBg,
+              );
+            } else if (!chosenBg.startsWith("backgrounds:generated:")) {
+              // LLM picked a real existing tag from availableBackgrounds — nothing to do.
+              logger.info(
+                '[game/scene-wrap][bg] LLM chose existing tag bg="%s" (not generated) — REUSING, no image API call',
+                chosenBg,
+              );
+            } else if (!topLevelLocationId) {
+              logger.warn(
+                '[game/scene-wrap][bg] LLM returned generated bg="%s" but no locationId — cannot cache, dropping back to async-only path',
+                chosenBg,
+              );
+            } else {
+              // Generated tag with a locationId — apply cache → sync/async logic.
+              const cached = findCachedBackground(input.chatId, topLevelLocationId, conditions);
+              if (cached) {
+                logger.info(
+                  '[game/scene-wrap][bg][cache-hit] locationId="%s" conditions=%s → reusing tag "%s" (NO API call)',
+                  topLevelLocationId,
+                  buildConditionsKey(conditions),
+                  cached.tag,
                 );
-
-              if (tagExists) {
-                logger.debug(`[game/scene-wrap] bg "${chosenBg}" already in manifest, skipping generation`);
-              } else {
-                logger.debug(`[game/scene-wrap] bg "${chosenBg}" not in manifest, generating…`);
-              }
-
-              if (!tagExists) {
-                // The scene model wanted a bg that doesn't exist — generate one
-                const slug =
-                  chosenBg
-                    .replace(/^backgrounds:/i, "")
-                    .replace(/:/g, "-")
-                    .toLowerCase()
-                    .replace(/[^a-z0-9-]+/g, "-")
-                    .replace(/(^-|-$)/g, "") || "scene";
-
-                const generatedTag = await generateBackground({
+                sceneResult.background = cached.tag;
+                topLevelGeneratedTag = cached.tag;
+              } else if (!topLevelBgPrompt) {
+                logger.warn(
+                  '[game/scene-wrap][bg] cache-miss for locationId="%s" but LLM omitted backgroundPrompt — cannot generate; leaving placeholder "%s"',
+                  topLevelLocationId,
+                  chosenBg,
+                );
+              } else if (isFirstTurnOfSession) {
+                logger.info(
+                  '[game/scene-wrap][bg][cache-miss-sync] first turn of session — generating inline for locationId="%s", conditionsKey=%s',
+                  topLevelLocationId,
+                  buildConditionsKey(conditions),
+                );
+                const result = await generateBackground({
                   chatId: input.chatId,
-                  locationSlug: slug,
-                  sceneDescription: chosenBg.replace(/:/g, " ").replace(/-/g, " "),
-                  genre,
+                  locationId: topLevelLocationId,
+                  conditions,
+                  backgroundPrompt: topLevelBgPrompt,
                   setting,
                   artStyle,
                   imgSource,
@@ -3263,61 +3428,172 @@ export async function gameRoutes(app: FastifyInstance) {
                   imgBaseUrl,
                   imgApiKey,
                   imgService: imgServiceHint,
+                  imgComfyWorkflow,
                 });
+                logger.info(
+                  "[game/scene-wrap][bg][cache-miss-sync] generateBackground() returned: %s",
+                  result?.tag ?? "null (failed)",
+                );
+                if (result) {
+                  sceneResult.background = result.tag;
+                  topLevelGeneratedTag = result.tag;
+                  topLevelGeneratedPrompt = topLevelBgPrompt;
+                }
+              } else {
+                logger.info(
+                  '[game/scene-wrap][bg][cache-miss-async] subsequent transition — deferring to /generate-assets for locationId="%s", conditionsKey=%s',
+                  topLevelLocationId,
+                  buildConditionsKey(conditions),
+                );
+                // Pre-compute the deterministic tag so the client can match
+                // against it once the file is on disk after async gen.
+                const futureKey = buildBackgroundCacheKey(topLevelLocationId, conditions);
+                pendingBackgroundGeneration = {
+                  locationId: topLevelLocationId,
+                  backgroundPrompt: topLevelBgPrompt,
+                  conditions: {
+                    weather: conditions.weather,
+                    timeOfDay: conditions.timeOfDay,
+                    season: conditions.season as Season | null,
+                  },
+                  placeholderTag: chosenBg,
+                };
+                logger.debug(
+                  "[game/scene-wrap][bg][cache-miss-async] future tag will be %s",
+                  backgroundTagForChat(input.chatId, futureKey),
+                );
+                // Leave sceneResult.background as-is (placeholder generated:slug);
+                // client renders fallback until /generate-assets returns the real tag.
+              }
+            }
 
-                if (generatedTag) {
-                  // Rewrite the scene result to use the generated tag
-                  sceneResult.background = generatedTag;
-                  // Also patch segmentEffects
-                  if (Array.isArray(sceneResult.segmentEffects)) {
-                    for (const fx of sceneResult.segmentEffects as Record<string, unknown>[]) {
-                      if (fx.background === chosenBg) {
-                        fx.background = generatedTag;
-                      }
-                    }
-                  }
+            // ── Per-segment backgrounds (always sync; usually a cache hit) ──
+            if (Array.isArray(sceneResult.segmentEffects)) {
+              const segments = sceneResult.segmentEffects as Record<string, unknown>[];
+              logger.debug(
+                "[game/scene-wrap][bg] scanning %d segmentEffects for additional bg tags",
+                segments.length,
+              );
+              for (const fx of segments) {
+                const segBg = fx.background as string | null;
+                if (!segBg || segBg === "black" || segBg === "none") continue;
+
+                // Patch top-level placeholder rewrite into matching segments first
+                if (topLevelGeneratedTag && segBg === chosenBg) {
+                  fx.background = topLevelGeneratedTag;
+                  continue;
+                }
+
+                if (!segBg.startsWith("backgrounds:generated:")) {
+                  logger.debug('[game/scene-wrap][bg] segment bg="%s" is existing tag — reuse', segBg);
+                  continue;
+                }
+
+                const segLocationId = (fx.locationId as string | null | undefined) ?? null;
+                const segBgPrompt = (fx.backgroundPrompt as string | null | undefined) ?? null;
+                if (!segLocationId) {
+                  logger.warn(
+                    '[game/scene-wrap][bg] segment[%s] generated bg="%s" without locationId — skipping',
+                    String(fx.segment ?? "?"),
+                    segBg,
+                  );
+                  continue;
+                }
+
+                const cachedSeg = findCachedBackground(input.chatId, segLocationId, conditions);
+                if (cachedSeg) {
+                  logger.info(
+                    '[game/scene-wrap][bg][cache-hit] segment[%s] locationId="%s" → reusing "%s"',
+                    String(fx.segment ?? "?"),
+                    segLocationId,
+                    cachedSeg.tag,
+                  );
+                  fx.background = cachedSeg.tag;
+                  continue;
+                }
+
+                if (!segBgPrompt) {
+                  logger.warn(
+                    '[game/scene-wrap][bg] segment[%s] cache-miss for locationId="%s" but no backgroundPrompt — leaving placeholder',
+                    String(fx.segment ?? "?"),
+                    segLocationId,
+                  );
+                  continue;
+                }
+
+                logger.info(
+                  '[game/scene-wrap][bg][cache-miss-sync] segment[%s] generating inline for locationId="%s", conditionsKey=%s',
+                  String(fx.segment ?? "?"),
+                  segLocationId,
+                  buildConditionsKey(conditions),
+                );
+                const segResult = await generateBackground({
+                  chatId: input.chatId,
+                  locationId: segLocationId,
+                  conditions,
+                  backgroundPrompt: segBgPrompt,
+                  setting,
+                  artStyle,
+                  imgSource,
+                  imgModel,
+                  imgBaseUrl,
+                  imgApiKey,
+                  imgService: imgServiceHint,
+                  imgComfyWorkflow,
+                });
+                if (segResult) {
+                  fx.background = segResult.tag;
+                  // Persist this variant into the catalog right away.
+                  await chats.updateMetadataWithMerge(input.chatId, (latestMeta) => ({
+                    ...latestMeta,
+                    locationCatalog: upsertLocationCatalogVariant(
+                      latestMeta,
+                      segLocationId,
+                      conditions,
+                      segResult.tag,
+                      segBgPrompt,
+                    ),
+                  }));
                 }
               }
             }
 
-            // Also check segmentEffects for additional bg tags
-            if (Array.isArray(sceneResult.segmentEffects)) {
-              const manifest = getAssetManifest();
-              for (const fx of sceneResult.segmentEffects as Record<string, unknown>[]) {
-                const segBg = fx.background as string | null;
-                if (!segBg || segBg === "black" || segBg === "none") continue;
-                if (manifest.assets[segBg]) continue;
-                const segTagExists = Object.keys(manifest.assets).some(
-                  (k) => k.startsWith("backgrounds:") && k.toLowerCase().includes(segBg.toLowerCase()),
-                );
-                if (segTagExists) continue;
-
-                const slug =
-                  segBg
-                    .replace(/^backgrounds:/i, "")
-                    .replace(/:/g, "-")
-                    .toLowerCase()
-                    .replace(/[^a-z0-9-]+/g, "-")
-                    .replace(/(^-|-$)/g, "") || "scene";
-
-                const generatedTag = await generateBackground({
-                  chatId: input.chatId,
-                  locationSlug: slug,
-                  sceneDescription: segBg.replace(/:/g, " ").replace(/-/g, " "),
-                  genre,
-                  setting,
-                  artStyle,
-                  imgSource,
-                  imgModel,
-                  imgBaseUrl,
-                  imgApiKey,
-                  imgService: imgServiceHint,
-                });
-
-                if (generatedTag) {
-                  fx.background = generatedTag;
+            // Persist top-level catalog/locationId updates after sync gen.
+            if (topLevelGeneratedTag && topLevelLocationId) {
+              await chats.updateMetadataWithMerge(input.chatId, (latestMeta) => {
+                const next: Record<string, unknown> = {
+                  ...latestMeta,
+                  currentLocationId: topLevelLocationId,
+                };
+                if (topLevelGeneratedPrompt) {
+                  next.locationCatalog = upsertLocationCatalogVariant(
+                    latestMeta,
+                    topLevelLocationId,
+                    conditions,
+                    topLevelGeneratedTag,
+                    topLevelGeneratedPrompt,
+                  );
                 }
-              }
+                if (sceneSeason) {
+                  next.gameCurrentSeason = sceneSeason;
+                }
+                return next;
+              });
+            } else if (topLevelLocationId) {
+              // Even on cache-hit / async-deferred we want to remember the
+              // narrative location so the next turn's prompt sees it.
+              await chats.updateMetadataWithMerge(input.chatId, (latestMeta) => {
+                const next: Record<string, unknown> = {
+                  ...latestMeta,
+                  currentLocationId: topLevelLocationId,
+                };
+                if (sceneSeason) next.gameCurrentSeason = sceneSeason;
+                return next;
+              });
+            }
+
+            if (pendingBackgroundGeneration) {
+              (sceneResult as Record<string, unknown>).pendingBackgroundGeneration = pendingBackgroundGeneration;
             }
 
             // ── NPC portrait generation ──
@@ -3406,10 +3682,30 @@ export async function gameRoutes(app: FastifyInstance) {
   // ── POST /game/generate-assets ──
   // Fire-and-forget asset generation for the sidecar path.
   // The client calls this after receiving a scene result with unresolvable tags.
+  const generateAssetsConditionsSchema = z
+    .object({
+      weather: z.string().max(60).nullable().optional(),
+      timeOfDay: z.string().max(60).nullable().optional(),
+      season: z.enum(["spring", "summer", "autumn", "winter"]).nullable().optional(),
+    })
+    .optional();
+
   const generateAssetsSchema = z.object({
     chatId: z.string().min(1),
-    /** Background tag that didn't resolve (the scene model suggested it). */
+    /**
+     * Legacy: a background tag that didn't resolve. Still accepted so older
+     * clients keep working — but new clients should populate the richer
+     * `locationId` + `backgroundPrompt` + `conditions` triple instead.
+     */
     backgroundTag: z.string().max(500).optional(),
+    /** Stable kebab-case id for the location to render. */
+    locationId: z.string().max(120).optional(),
+    /** Rich 1–2 sentence visual brief for the image model. */
+    backgroundPrompt: z.string().max(2000).optional(),
+    /** Visual conditions (varies the cache key alongside locationId). */
+    conditions: generateAssetsConditionsSchema,
+    /** Placeholder tag the client is currently rendering as fallback. */
+    placeholderTag: z.string().max(500).optional(),
     /**
      * NPCs needing portraits. `id` is the materializer-issued stable id
      * (`npc-...`); when supplied it's used as the on-disk filename. Older
@@ -3433,6 +3729,15 @@ export async function gameRoutes(app: FastifyInstance) {
     const chats = createChatsStorage(app.db);
     const connections = createConnectionsStorage(app.db);
 
+    logger.info(
+      "[game/generate-assets][bg] CALLED — chatId=%s, locationId=%s, backgroundTag=%s, hasPrompt=%s, npcsNeedingAvatars=%d",
+      input.chatId,
+      input.locationId ?? "null",
+      input.backgroundTag ?? "null",
+      !!input.backgroundPrompt,
+      input.npcsNeedingAvatars?.length ?? 0,
+    );
+
     const chat = await chats.getById(input.chatId);
     if (!chat) throw new Error("Chat not found");
 
@@ -3441,11 +3746,17 @@ export async function gameRoutes(app: FastifyInstance) {
     const imgConnId = (meta.gameImageConnectionId as string) || null;
 
     if (!enableGen || !imgConnId) {
+      logger.info(
+        "[game/generate-assets][bg] SKIPPED — enableSpriteGeneration=%s, gameImageConnectionId=%s",
+        enableGen,
+        imgConnId ?? "null",
+      );
       return { generatedBackground: null, generatedNpcAvatars: [] };
     }
 
     const imgConn = await connections.getWithKey(imgConnId);
     if (!imgConn) {
+      logger.warn("[game/generate-assets][bg] ABORTED — image connection id=%s not found in DB", imgConnId);
       return { generatedBackground: null, generatedNpcAvatars: [] };
     }
 
@@ -3465,20 +3776,30 @@ export async function gameRoutes(app: FastifyInstance) {
     const generatedNpcAvatars: Array<{ name: string; avatarUrl: string }> = [];
 
     // ── Generate background ──
-    if (input.backgroundTag) {
-      const slug =
-        input.backgroundTag
-          .replace(/^backgrounds:/i, "")
-          .replace(/:/g, "-")
-          .toLowerCase()
-          .replace(/[^a-z0-9-]+/g, "-")
-          .replace(/(^-|-$)/g, "") || "scene";
+    //
+    // New rich path: the client sends `locationId` + `backgroundPrompt` +
+    // `conditions` (mirrored from the scene-wrap response's
+    // `pendingBackgroundGeneration` field) so the server uses the SAME cache
+    // key the next scene-wrap turn will probe. Older clients may still POST
+    // the legacy `backgroundTag`-only form; we keep that working but log a
+    // warning because the resulting prompt is just a slug → poor quality.
+    const conditions: BackgroundConditions = {
+      weather: input.conditions?.weather ?? null,
+      timeOfDay: input.conditions?.timeOfDay ?? null,
+      season: input.conditions?.season ?? null,
+    };
 
-      const tag = await generateBackground({
+    if (input.locationId && input.backgroundPrompt) {
+      logger.info(
+        '[game/generate-assets][bg] rich-path locationId="%s" conditions=%s — invoking generateBackground()',
+        input.locationId,
+        buildConditionsKey(conditions),
+      );
+      const result = await generateBackground({
         chatId: input.chatId,
-        locationSlug: slug,
-        sceneDescription: input.backgroundTag.replace(/:/g, " ").replace(/-/g, " "),
-        genre,
+        locationId: input.locationId,
+        conditions,
+        backgroundPrompt: input.backgroundPrompt,
         setting,
         artStyle,
         imgSource,
@@ -3488,7 +3809,75 @@ export async function gameRoutes(app: FastifyInstance) {
         imgService: imgServiceHint,
         imgComfyWorkflow,
       });
-      generatedBackground = tag;
+      logger.info(
+        "[game/generate-assets][bg] generateBackground() returned: %s (cache=%s, locationId=%s)",
+        result?.tag ?? "null (failed)",
+        result?.reusedCache ? "hit" : "miss",
+        input.locationId,
+      );
+      if (result) {
+        generatedBackground = result.tag;
+        // Persist new variant + advance scene background pointer so the
+        // client's `gameSceneBackground` mirror picks up the real tag.
+        const locationId = input.locationId;
+        const backgroundPrompt = input.backgroundPrompt;
+        await chats.updateMetadataWithMerge(input.chatId, (latestMeta) => ({
+          ...latestMeta,
+          locationCatalog: upsertLocationCatalogVariant(
+            latestMeta,
+            locationId,
+            conditions,
+            result.tag,
+            backgroundPrompt,
+          ),
+          currentLocationId: locationId,
+          gameSceneBackground: result.tag,
+          ...(conditions.season ? { gameCurrentSeason: conditions.season } : {}),
+        }));
+      }
+    } else if (input.backgroundTag) {
+      // Legacy path — derive the prompt from the tag slug. This mode loses
+      // narrative context and produces lower-fidelity images; new clients
+      // should ALWAYS use the rich-path above. Kept for backwards-compat.
+      logger.warn(
+        '[game/generate-assets][bg] legacy path (no locationId/backgroundPrompt) — falling back to slug-derived prompt for tag="%s"',
+        input.backgroundTag,
+      );
+
+      // Derive a usable locationId from the tag for cache key stability.
+      const derivedLocationId =
+        input.backgroundTag
+          .replace(/^backgrounds:/i, "")
+          .replace(/:/g, "-")
+          .toLowerCase()
+          .replace(/[^a-z0-9-]+/g, "-")
+          .replace(/(^-|-$)/g, "")
+          .slice(0, 80) || "legacy-scene";
+      const derivedPrompt =
+        input.backgroundTag.replace(/^backgrounds:/i, "").replace(/[:_-]+/g, " ").trim() || "generic environment";
+
+      const result = await generateBackground({
+        chatId: input.chatId,
+        locationId: derivedLocationId,
+        conditions,
+        backgroundPrompt: derivedPrompt,
+        setting,
+        artStyle,
+        imgSource,
+        imgModel,
+        imgBaseUrl,
+        imgApiKey,
+        imgService: imgServiceHint,
+        imgComfyWorkflow,
+      });
+      logger.info(
+        '[game/generate-assets][bg] (legacy) generateBackground() returned: %s (backgroundTag was "%s")',
+        result?.tag ?? "null (failed)",
+        input.backgroundTag,
+      );
+      if (result) {
+        generatedBackground = result.tag;
+      }
     }
 
     // ── Generate NPC avatars ──

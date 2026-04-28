@@ -75,6 +75,30 @@ export interface WeekSummaryEntry {
   keyDetails: string[];
 }
 
+/** A single rendered visual variant of a known location. */
+export interface LocationCatalogVariant {
+  /** Composite key derived from conditions (e.g. `snowy__evening__winter`). */
+  conditionsKey: string;
+  weather: string | null;
+  timeOfDay: string | null;
+  season: import("./sidecar.js").Season | null;
+  /** Asset tag pointing to the generated PNG, e.g. `backgrounds:chat:<chatId>:<key>`. */
+  tag: string;
+  /** Prompt used to generate this variant — kept for debugging and re-generation. */
+  prompt: string;
+  /** ISO timestamp of when the variant was generated. */
+  generatedAt: string;
+}
+
+/** Catalog entry for a single location across all its rendered variants. */
+export interface LocationCatalogEntry {
+  locationId: string;
+  /** Optional human-readable description (first-seen brief from the LLM). */
+  description?: string;
+  /** All rendered visual variants of this location, keyed by conditions. */
+  variants: LocationCatalogVariant[];
+}
+
 /** Extra metadata stored on a chat. */
 export interface ChatMetadata {
   /** Summary text for context injection */
@@ -155,6 +179,24 @@ export interface ChatMetadata {
   gameSetupConfig?: import("./game.js").GameSetupConfig | null;
   /** Tracked NPCs with reputation */
   gameNpcs?: import("./game.js").GameNpc[];
+  /**
+   * Per-chat catalog of generated location backgrounds. Keyed by stable
+   * `locationId`. Each entry caches all rendered visual variants (one per
+   * weather × timeOfDay × season combo), so when the party returns to a
+   * known location with the same conditions, the cached PNG is reused
+   * instead of paying for a fresh image-API call. New conditions for an
+   * existing location trigger a new variant without invalidating the old
+   * ones — the player gets a different cadre for "same village at dawn"
+   * vs "same village at midnight" while still seeing the same image when
+   * they come back during the same time/weather combo.
+   */
+  locationCatalog?: Record<string, LocationCatalogEntry>;
+  /**
+   * The `locationId` of the most-recent scene. Used by scene-analyzer
+   * prompts so the LLM can reuse the same id when the narrative continues
+   * in the same place (instead of inventing a fresh id every turn).
+   */
+  currentLocationId?: string | null;
   /**
    * `true` after Game-mode default agents (character-tracker, world-state,
    * persona-stats) have been auto-seeded at least once for this chat. Once
