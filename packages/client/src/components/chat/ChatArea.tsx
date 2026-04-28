@@ -98,6 +98,7 @@ export function ChatArea() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const [galleryOpen, setGalleryOpen] = useState(false);
+  const [sceneJournalOpen, setSceneJournalOpen] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [spriteArrangeMode, setSpriteArrangeMode] = useState(false);
 
@@ -1226,6 +1227,7 @@ export function ChatArea() {
             settingsOpen={settingsOpen}
             filesOpen={filesOpen}
             galleryOpen={galleryOpen}
+            sceneJournalOpen={false}
             wizardOpen={wizardOpen}
             peekPromptData={peekPromptData}
             deleteDialogMessageId={deleteDialogMessageId}
@@ -1243,6 +1245,7 @@ export function ChatArea() {
             onCloseSettings={() => setSettingsOpen(false)}
             onCloseFiles={() => setFilesOpen(false)}
             onCloseGallery={() => setGalleryOpen(false)}
+            onCloseSceneJournal={() => {}}
             onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
             onWizardFinish={() => {
               setWizardOpen(false);
@@ -1291,6 +1294,7 @@ export function ChatArea() {
             settingsOpen={settingsOpen}
             filesOpen={filesOpen}
             galleryOpen={galleryOpen}
+            sceneJournalOpen={sceneJournalOpen}
             wizardOpen={wizardOpen}
             peekPromptData={peekPromptData}
             deleteDialogMessageId={deleteDialogMessageId}
@@ -1312,9 +1316,13 @@ export function ChatArea() {
             onOpenSettings={() => setSettingsOpen(true)}
             onOpenFiles={() => setFilesOpen(true)}
             onOpenGallery={() => setGalleryOpen(true)}
+            onOpenSceneJournal={() => setSceneJournalOpen(true)}
             onCloseSettings={() => setSettingsOpen(false)}
             onCloseFiles={() => setFilesOpen(false)}
             onCloseGallery={() => setGalleryOpen(false)}
+            onCloseSceneJournal={() => setSceneJournalOpen(false)}
+            onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
+            onPaintScene={() => retryAgents(activeChatId, ["scene-painter"])}
             onWizardFinish={() => {
               setWizardOpen(false);
               setSettingsOpen(true);
@@ -1392,6 +1400,7 @@ export function ChatArea() {
           settingsOpen={settingsOpen}
           filesOpen={filesOpen}
           galleryOpen={galleryOpen}
+          sceneJournalOpen={sceneJournalOpen}
           wizardOpen={wizardOpen}
           peekPromptData={peekPromptData}
           deleteDialogMessageId={deleteDialogMessageId}
@@ -1420,10 +1429,13 @@ export function ChatArea() {
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenFiles={() => setFilesOpen(true)}
           onOpenGallery={() => setGalleryOpen(true)}
+          onOpenSceneJournal={() => setSceneJournalOpen(true)}
           onCloseSettings={() => setSettingsOpen(false)}
           onCloseFiles={() => setFilesOpen(false)}
           onCloseGallery={() => setGalleryOpen(false)}
+          onCloseSceneJournal={() => setSceneJournalOpen(false)}
           onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
+          onPaintScene={() => retryAgents(activeChatId, ["scene-painter"])}
           onWizardFinish={() => {
             setWizardOpen(false);
             setSettingsOpen(true);

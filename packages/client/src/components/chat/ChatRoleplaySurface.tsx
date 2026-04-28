@@ -576,6 +576,7 @@ type RoleplaySurfaceProps = {
   settingsOpen: boolean;
   filesOpen: boolean;
   galleryOpen: boolean;
+  sceneJournalOpen: boolean;
   wizardOpen: boolean;
   peekPromptData: PeekPromptData | null;
   deleteDialogMessageId: string | null;
@@ -605,10 +606,13 @@ type RoleplaySurfaceProps = {
   onOpenSettings: () => void;
   onOpenFiles: () => void;
   onOpenGallery: () => void;
+  onOpenSceneJournal: () => void;
   onCloseSettings: () => void;
   onCloseFiles: () => void;
   onCloseGallery: () => void;
+  onCloseSceneJournal: () => void;
   onIllustrate?: () => void;
+  onPaintScene?: () => void;
   onWizardFinish: () => void;
   onClosePeekPrompt: () => void;
   onResetSpritePlacements: () => void;
@@ -667,6 +671,7 @@ export function ChatRoleplaySurface({
   settingsOpen,
   filesOpen,
   galleryOpen,
+  sceneJournalOpen,
   wizardOpen,
   peekPromptData,
   deleteDialogMessageId,
@@ -696,10 +701,13 @@ export function ChatRoleplaySurface({
   onOpenSettings,
   onOpenFiles,
   onOpenGallery,
+  onOpenSceneJournal,
   onCloseSettings,
   onCloseFiles,
   onCloseGallery,
+  onCloseSceneJournal,
   onIllustrate,
+  onPaintScene,
   onWizardFinish,
   onClosePeekPrompt,
   onResetSpritePlacements,
@@ -723,7 +731,13 @@ export function ChatRoleplaySurface({
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const rightPanelOpen = useUIStore((s) => s.rightPanelOpen);
   const hideEchoChamberOnMobile =
-    sidebarOpen || rightPanelOpen || settingsOpen || filesOpen || galleryOpen || wizardOpen;
+    sidebarOpen ||
+    rightPanelOpen ||
+    settingsOpen ||
+    filesOpen ||
+    galleryOpen ||
+    sceneJournalOpen ||
+    wizardOpen;
 
   return (
     <div data-component="ChatArea.Roleplay" className="flex flex-1 overflow-hidden">
@@ -811,6 +825,11 @@ export function ChatRoleplaySurface({
                       />
                     )}
                     <RpToolbarButton icon={<Image size="0.875rem" />} title="Gallery" onClick={onOpenGallery} />
+                    <RpToolbarButton
+                      icon={<ScrollText size="0.875rem" />}
+                      title="Scene descriptions"
+                      onClick={onOpenSceneJournal}
+                    />
                     {chat?.connectedChatId && (
                       <RpToolbarButton
                         icon={<ArrowRightLeft size="0.875rem" />}
@@ -886,6 +905,11 @@ export function ChatRoleplaySurface({
                           />
                         )}
                         <RpToolbarButton icon={<Image size="0.875rem" />} title="Gallery" onClick={onOpenGallery} />
+                        <RpToolbarButton
+                          icon={<ScrollText size="0.875rem" />}
+                          title="Scene descriptions"
+                          onClick={onOpenSceneJournal}
+                        />
                         {chat?.connectedChatId && (
                           <RpToolbarButton
                             icon={<ArrowRightLeft size="0.875rem" />}
@@ -925,6 +949,11 @@ export function ChatRoleplaySurface({
                         onClick={onOpenFiles}
                       />
                       <RpToolbarButton icon={<Image size="0.875rem" />} title="Gallery" onClick={onOpenGallery} />
+                      <RpToolbarButton
+                        icon={<ScrollText size="0.875rem" />}
+                        title="Scene descriptions"
+                        onClick={onOpenSceneJournal}
+                      />
                       {chat?.connectedChatId && (
                         <RpToolbarButton
                           icon={<ArrowRightLeft size="0.875rem" />}
@@ -1120,6 +1149,7 @@ export function ChatRoleplaySurface({
         settingsOpen={settingsOpen}
         filesOpen={filesOpen}
         galleryOpen={galleryOpen}
+        sceneJournalOpen={sceneJournalOpen}
         wizardOpen={wizardOpen}
         peekPromptData={peekPromptData}
         deleteDialogMessageId={deleteDialogMessageId}
@@ -1137,7 +1167,9 @@ export function ChatRoleplaySurface({
         onCloseSettings={onCloseSettings}
         onCloseFiles={onCloseFiles}
         onCloseGallery={onCloseGallery}
+        onCloseSceneJournal={onCloseSceneJournal}
         onIllustrate={onIllustrate}
+        onPaintScene={onPaintScene}
         onWizardFinish={onWizardFinish}
         onClosePeekPrompt={onClosePeekPrompt}
         onDeleteConfirm={onDeleteConfirm}

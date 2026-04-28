@@ -65,6 +65,11 @@ export async function agentsRoutes(app: FastifyInstance) {
     });
   });
 
+  /** Scene Painter literary descriptions for a chat (from agent_runs). */
+  app.get<{ Params: { chatId: string } }>("/scene-descriptions/:chatId", async (req) => {
+    return storage.getSceneDescriptions(req.params.chatId);
+  });
+
   /** Get echo chamber messages for a chat (for persistence across refreshes). */
   app.get<{ Params: { chatId: string } }>("/echo-messages/:chatId", async (req) => {
     return storage.getEchoMessages(req.params.chatId);

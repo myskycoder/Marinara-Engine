@@ -12,6 +12,7 @@ export const agentResultTypeSchema = z.enum([
   "echo_message",
   "quest_update",
   "image_prompt",
+  "scene_description",
   "context_injection",
   "continuity_check",
   "director_event",

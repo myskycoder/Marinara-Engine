@@ -182,6 +182,57 @@ export function createAgentsStorage(db: DB) {
       return rows[0]?.agent_runs ?? null;
     },
 
+    /** Successful Scene Painter runs with a non-empty description, newest first. */
+    async getSceneDescriptions(chatId: string) {
+      const rows = await db
+        .select({
+          id: agentRuns.id,
+          messageId: agentRuns.messageId,
+          resultData: agentRuns.resultData,
+          createdAt: agentRuns.createdAt,
+        })
+        .from(agentRuns)
+        .where(
+          and(
+            eq(agentRuns.chatId, chatId),
+            eq(agentRuns.resultType, "scene_description"),
+            eq(agentRuns.success, "true"),
+          ),
+        )
+        .orderBy(desc(agentRuns.createdAt));
+
+      const out: Array<{
+        id: string;
+        messageId: string;
+        createdAt: string;
+        reason: string;
+        description: string;
+        mood?: string;
+      }> = [];
+
+      for (const row of rows) {
+        try {
+          const data = JSON.parse(row.resultData) as Record<string, unknown>;
+          const sd = data.shouldDescribe;
+          const shouldDescribe = sd === true || sd === "true" || sd === 1 || sd === "1";
+          if (!shouldDescribe) continue;
+          const description = typeof data.description === "string" ? data.description.trim() : "";
+          if (!description) continue;
+          out.push({
+            id: row.id,
+            messageId: row.messageId ?? "",
+            createdAt: row.createdAt,
+            reason: typeof data.reason === "string" ? data.reason : "",
+            description,
+            mood: typeof data.mood === "string" ? data.mood : undefined,
+          });
+        } catch {
+          /* skip malformed */
+        }
+      }
+      return out;
+    },
+
     /** Get all echo chamber messages for a chat, ordered by creation time. */
     async getEchoMessages(chatId: string) {
       const rows = await db

@@ -19,6 +19,11 @@ const ChatGalleryDrawer = lazy(async () => {
   return { default: module.ChatGalleryDrawer };
 });
 
+const ChatSceneJournalDrawer = lazy(async () => {
+  const module = await import("./ChatSceneJournalDrawer");
+  return { default: module.ChatSceneJournalDrawer };
+});
+
 const ChatSetupWizard = lazy(async () => {
   const module = await import("./ChatSetupWizard");
   return { default: module.ChatSetupWizard };
@@ -178,6 +183,7 @@ type ChatCommonOverlaysProps = {
   settingsOpen: boolean;
   filesOpen: boolean;
   galleryOpen: boolean;
+  sceneJournalOpen: boolean;
   wizardOpen: boolean;
   peekPromptData: PeekPromptData | null;
   deleteDialogMessageId: string | null;
@@ -190,8 +196,11 @@ type ChatCommonOverlaysProps = {
   onCloseSettings: () => void;
   onCloseFiles: () => void;
   onCloseGallery: () => void;
+  onCloseSceneJournal: () => void;
   /** Manually trigger the Illustrator agent */
   onIllustrate?: () => void;
+  /** Manually trigger the Scene Painter agent */
+  onPaintScene?: () => void;
   onWizardFinish: () => void;
   onClosePeekPrompt: () => void;
   onDeleteConfirm: () => void;
@@ -211,6 +220,7 @@ export function ChatCommonOverlays({
   settingsOpen,
   filesOpen,
   galleryOpen,
+  sceneJournalOpen,
   wizardOpen,
   peekPromptData,
   deleteDialogMessageId,
@@ -223,7 +233,9 @@ export function ChatCommonOverlays({
   onCloseSettings,
   onCloseFiles,
   onCloseGallery,
+  onCloseSceneJournal,
   onIllustrate,
+  onPaintScene,
   onWizardFinish,
   onClosePeekPrompt,
   onDeleteConfirm,
@@ -262,6 +274,18 @@ export function ChatCommonOverlays({
         <Suspense fallback={null}>
           {galleryOpen && (
             <ChatGalleryDrawer chat={chat} open={galleryOpen} onClose={onCloseGallery} onIllustrate={onIllustrate} />
+          )}
+        </Suspense>
+      )}
+      {chat && (
+        <Suspense fallback={null}>
+          {sceneJournalOpen && (
+            <ChatSceneJournalDrawer
+              chat={chat}
+              open={sceneJournalOpen}
+              onClose={onCloseSceneJournal}
+              onPaintScene={onPaintScene}
+            />
           )}
         </Suspense>
       )}

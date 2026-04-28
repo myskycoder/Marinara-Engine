@@ -3,6 +3,7 @@
 // ──────────────────────────────────────────────
 import { useCallback } from "react";
 import { useQueryClient, type InfiniteData, type QueryClient } from "@tanstack/react-query";
+import { sceneDescriptionKeys } from "./use-scene-descriptions";
 import { toast } from "sonner";
 import { api } from "../lib/api-client";
 import type { PendingCardUpdate } from "../stores/agent.store";
@@ -730,6 +731,10 @@ export function useGenerate() {
                   if (choices.length > 0) {
                     setCyoaChoices(choices);
                   }
+                }
+
+                if (result.success && result.agentType === "scene-painter") {
+                  qc.invalidateQueries({ queryKey: sceneDescriptionKeys.chat(params.chatId) });
                 }
               }
 
@@ -1512,6 +1517,10 @@ export function useGenerate() {
                   }
                 }
                 // Apply quest updates directly so the widget updates immediately
+                if (result.success && result.agentType === "scene-painter") {
+                  qc.invalidateQueries({ queryKey: sceneDescriptionKeys.chat(chatId) });
+                }
+
                 if (result.agentType === "quest") {
                   const qd = result.data as Record<string, unknown>;
                   const updates = (qd.updates as any[]) ?? [];
@@ -1794,6 +1803,15 @@ function formatAgentBubble(agentType: string, agentName: string, data: unknown):
       const style = d.style as string;
       const reason = d.reason as string;
       return `🎨 ${reason || "Generating scene illustration"}${style ? ` (${style})` : ""}`;
+    }
+
+    case "scene-painter": {
+      const shouldDescribe = d.shouldDescribe as boolean;
+      if (!shouldDescribe) return null;
+      const reason = (d.reason as string) || "Scene description";
+      const desc = typeof d.description === "string" ? d.description.trim() : "";
+      const preview = desc.length > 200 ? desc.slice(0, 200) + "…" : desc;
+      return `📜 ${reason}${preview ? `\n${preview}` : ""}`;
     }
 
     case "lorebook-keeper": {

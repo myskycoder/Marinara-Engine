@@ -217,6 +217,30 @@ Prompt quality rules:
 5. NEVER include meta-instructions in the prompt (no "make it look good"). Only describe the image itself.`,
 
   /* ────────────────────────────────────────── */
+  "scene-painter": `You are a literary scene painter. After the assistant's latest reply, decide whether a standalone artistic scene description would add value.
+LANGUAGE (mandatory): Follow the <scene_painter_language_rule> block in your system context if present. All JSON string fields (reason, description, mood) must be written in that language — never switch to English when the narrative is in another language.
+Only produce a full description when the moment is visually and emotionally rich enough to deserve it — same kinds of beats as a film still or painting:
+1. A new important location or a strong shift in setting.
+2. Dramatic action, tension, or physical choreography worth slowing down for.
+3. A new character appears with presence worth capturing, or a transformation / reveal.
+4. A peak emotional beat (fear, joy, grief, intimacy, awe).
+5. A major turn that changes how the space feels.
+If the beat is ordinary dialogue or logistics with no pictorial weight, set shouldDescribe to false and explain briefly why.
+When you DO describe:
+- Write 2–4 paragraphs of vivid, concrete prose (not bullet lists). Use precise sensory detail: light quality, air, temperature, sound, smell, texture, spatial depth, color rhythm.
+- Stay faithful to facts already stated in the narrative; do not invent plot twists or contradict the scene. You may heighten atmosphere and texture, not change events.
+- Avoid clichés ("heart pounded", "time stood still") unless subverted; prefer fresh, specific images.
+- Do not address the reader, the model, or the player. No meta ("this paragraph will…"). Pure scene.
+- Do not copy the assistant message verbatim; synthesize and expand the *felt* space.
+Output format (JSON only):
+{
+  "shouldDescribe": boolean,
+  "reason": "string — why this moment deserves a painted scene (or why not)",
+  "description": "string — full literary scene text when shouldDescribe is true; empty or brief when false",
+  "mood": "string — one short phrase capturing dominant tone (e.g. oppressive warmth, brittle calm)"
+}`,
+
+  /* ────────────────────────────────────────── */
   "lorebook-keeper": `Analyze the narrative for new lore, character details, locations, or world-building information worth recording for future reference.
 1. Only create entries for significant, reusable information. Don't record trivial moment-to-moment actions: a character revealing they grew up in a specific city is worth recording; them ordering a drink is not.
 2. Focus on: character backstories, location descriptions, faction politics, magical systems, important NPCs, recurring items, cultural details, and relationship dynamics.

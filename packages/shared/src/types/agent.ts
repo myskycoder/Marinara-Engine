@@ -19,6 +19,7 @@ export type AgentResultType =
   | "echo_message"
   | "quest_update"
   | "image_prompt"
+  | "scene_description"
   | "context_injection"
   | "continuity_check"
   | "director_event"
@@ -140,6 +141,11 @@ export interface AgentContext {
   writableLorebookIds: string[] | null;
   /** Chat summary text (if any) — helps agents avoid duplicating summarized info */
   chatSummary: string | null;
+  /**
+   * Preferred language label for generated agent text (e.g. Game Setup "language").
+   * When null, agents that care should infer from recent messages.
+   */
+  narrationLanguage?: string | null;
   /** Whether internal agent LLM calls should use transport streaming. */
   streaming?: boolean;
   /** Abort signal — when triggered, agent execution should stop. Typed as `any` to avoid DOM/Node lib dependency. */
@@ -157,6 +163,7 @@ export const BUILT_IN_AGENT_IDS = {
   DIRECTOR: "director",
   QUEST: "quest",
   ILLUSTRATOR: "illustrator",
+  SCENE_PAINTER: "scene-painter",
   LOREBOOK_KEEPER: "lorebook-keeper",
   CARD_EVOLUTION_AUDITOR: "card-evolution-auditor",
   PROMPT_REVIEWER: "prompt-reviewer",
@@ -310,6 +317,15 @@ export const BUILT_IN_AGENTS: BuiltInAgentMeta[] = [
     id: "illustrator",
     name: "Illustrator",
     description: "Generates image prompts for key scenes (requires image generation API).",
+    phase: "post_processing",
+    enabledByDefault: false,
+    category: "misc",
+  },
+  {
+    id: "scene-painter",
+    name: "Scene Painter",
+    description:
+      "Writes rich literary scene descriptions — lighting, space, texture, mood, and character presence — as a separate layer from the main narration.",
     phase: "post_processing",
     enabledByDefault: false,
     category: "misc",
@@ -509,6 +525,7 @@ export const DEFAULT_AGENT_TOOLS: Record<string, string[]> = {
   director: ["trigger_event"],
   quest: ["update_game_state"],
   illustrator: [],
+  "scene-painter": [],
   "lorebook-keeper": ["search_lorebook"],
   "card-evolution-auditor": [],
   "prompt-reviewer": [],

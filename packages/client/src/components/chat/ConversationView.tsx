@@ -3,7 +3,15 @@
 // ──────────────────────────────────────────────
 import { Suspense, lazy, useRef, useEffect, useLayoutEffect, useCallback, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Loader2, ChevronUp, Settings2, FolderOpen, Image as ImageIcon, ArrowRightLeft } from "lucide-react";
+import {
+  Loader2,
+  ChevronUp,
+  Settings2,
+  FolderOpen,
+  Image as ImageIcon,
+  ArrowRightLeft,
+  ScrollText,
+} from "lucide-react";
 import { ConversationMessage } from "./ConversationMessage";
 import { ConversationInput } from "./ConversationInput";
 import { SceneBanner, EndSceneBar } from "./SceneBanner";
@@ -46,6 +54,7 @@ interface ConversationViewProps {
   onOpenSettings: () => void;
   onOpenFiles: () => void;
   onOpenGallery: () => void;
+  onOpenSceneJournal: () => void;
   multiSelectMode?: boolean;
   selectedMessageIds?: Set<string>;
   onToggleSelectMessage?: (toggle: MessageSelectionToggle) => void;
@@ -127,6 +136,7 @@ export function ConversationView({
   onOpenSettings,
   onOpenFiles,
   onOpenGallery,
+  onOpenSceneJournal,
   multiSelectMode,
   selectedMessageIds,
   onToggleSelectMessage,
@@ -637,6 +647,14 @@ export function ConversationView({
               title="Gallery"
             >
               <ImageIcon size="0.875rem" />
+            </button>
+            <button
+              type="button"
+              onClick={onOpenSceneJournal}
+              className="flex items-center justify-center rounded-lg bg-black/30 p-1.5 text-foreground/80 backdrop-blur-sm transition-colors hover:bg-black/50 hover:text-foreground"
+              title="Scene descriptions"
+            >
+              <ScrollText size="0.875rem" />
             </button>
             {onSwitchChat && (
               <button

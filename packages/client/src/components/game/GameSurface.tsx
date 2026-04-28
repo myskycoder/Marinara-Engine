@@ -77,6 +77,7 @@ import { WeatherEffects } from "../chat/WeatherEffects";
 import { GameInventory } from "./GameInventory";
 import { GameReadableDisplay } from "./GameReadableDisplay";
 import { ChatGalleryDrawer } from "../chat/ChatGalleryDrawer";
+import { ChatSceneJournalDrawer } from "../chat/ChatSceneJournalDrawer";
 import type { ReadableTag } from "../../lib/game-tag-parser";
 
 type JournalReadable = ReadableTag & {
@@ -492,6 +493,7 @@ import {
   Play,
   RefreshCw,
   RotateCcw,
+  ScrollText,
   Settings2,
   Square,
   Volume2,
@@ -769,6 +771,7 @@ export function GameSurface({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [journalOpen, setJournalOpen] = useState(false);
   const [galleryOpen, setGalleryOpen] = useState(false);
+  const [sceneJournalOpen, setSceneJournalOpen] = useState(false);
   const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
   const [confirmEndSessionOpen, setConfirmEndSessionOpen] = useState(false);
   const [prepareSessionWidgetsOpen, setPrepareSessionWidgetsOpen] = useState(false);
@@ -965,6 +968,7 @@ export function GameSurface({
     historyOpen ||
     journalOpen ||
     galleryOpen ||
+    sceneJournalOpen ||
     inventoryOpen ||
     tutorialOpen ||
     confirmEndSessionOpen ||
@@ -4212,6 +4216,14 @@ export function GameSurface({
                   >
                     <Image size={14} />
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setSceneJournalOpen(true)}
+                    className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white"
+                    title="Scene descriptions"
+                  >
+                    <ScrollText size={14} />
+                  </button>
                   <div className="relative" ref={retryMenuRef}>
                     <button
                       onClick={() => setRetryMenuOpen((open) => !open)}
@@ -4384,6 +4396,17 @@ export function GameSurface({
                           title="Gallery"
                         >
                           <Image size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSceneJournalOpen(true);
+                            setMobileActionsOpen(false);
+                          }}
+                          className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+                          title="Scene descriptions"
+                        >
+                          <ScrollText size={14} />
                         </button>
                         <button
                           onClick={() => {
@@ -4824,6 +4847,13 @@ export function GameSurface({
                 open={galleryOpen}
                 onClose={() => setGalleryOpen(false)}
                 onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
+              />
+
+              <ChatSceneJournalDrawer
+                chat={chat}
+                open={sceneJournalOpen}
+                onClose={() => setSceneJournalOpen(false)}
+                onPaintScene={() => retryAgents(activeChatId, ["scene-painter"])}
               />
 
               {/* Inventory overlay */}

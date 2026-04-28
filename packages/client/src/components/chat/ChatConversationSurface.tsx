@@ -36,6 +36,7 @@ type ConversationSurfaceProps = {
   settingsOpen: boolean;
   filesOpen: boolean;
   galleryOpen: boolean;
+  sceneJournalOpen: boolean;
   wizardOpen: boolean;
   peekPromptData: PeekPromptData | null;
   deleteDialogMessageId: string | null;
@@ -57,10 +58,13 @@ type ConversationSurfaceProps = {
   onOpenSettings: () => void;
   onOpenFiles: () => void;
   onOpenGallery: () => void;
+  onOpenSceneJournal: () => void;
   onCloseSettings: () => void;
   onCloseFiles: () => void;
   onCloseGallery: () => void;
+  onCloseSceneJournal: () => void;
   onIllustrate?: () => void;
+  onPaintScene?: () => void;
   onWizardFinish: () => void;
   onClosePeekPrompt: () => void;
   onResetSpritePlacements: () => void;
@@ -98,6 +102,7 @@ export function ChatConversationSurface({
   settingsOpen,
   filesOpen,
   galleryOpen,
+  sceneJournalOpen,
   wizardOpen,
   peekPromptData,
   deleteDialogMessageId,
@@ -119,10 +124,13 @@ export function ChatConversationSurface({
   onOpenSettings,
   onOpenFiles,
   onOpenGallery,
+  onOpenSceneJournal,
   onCloseSettings,
   onCloseFiles,
   onCloseGallery,
+  onCloseSceneJournal,
   onIllustrate,
+  onPaintScene,
   onWizardFinish,
   onClosePeekPrompt,
   onResetSpritePlacements,
@@ -167,6 +175,7 @@ export function ChatConversationSurface({
           onOpenSettings={onOpenSettings}
           onOpenFiles={onOpenFiles}
           onOpenGallery={onOpenGallery}
+          onOpenSceneJournal={onOpenSceneJournal}
           multiSelectMode={multiSelectMode}
           selectedMessageIds={selectedMessageIds}
           onToggleSelectMessage={onToggleSelectMessage}
@@ -184,6 +193,7 @@ export function ChatConversationSurface({
         settingsOpen={settingsOpen}
         filesOpen={filesOpen}
         galleryOpen={galleryOpen}
+        sceneJournalOpen={sceneJournalOpen}
         wizardOpen={wizardOpen}
         peekPromptData={peekPromptData}
         deleteDialogMessageId={deleteDialogMessageId}
@@ -201,7 +211,9 @@ export function ChatConversationSurface({
         onCloseSettings={onCloseSettings}
         onCloseFiles={onCloseFiles}
         onCloseGallery={onCloseGallery}
+        onCloseSceneJournal={onCloseSceneJournal}
         onIllustrate={onIllustrate}
+        onPaintScene={onPaintScene}
         onWizardFinish={onWizardFinish}
         onClosePeekPrompt={onClosePeekPrompt}
         onDeleteConfirm={onDeleteConfirm}

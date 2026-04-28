@@ -3173,6 +3173,12 @@ export async function generateRoutes(app: FastifyInstance) {
         activatedLorebookEntries: null,
         writableLorebookIds: null,
         chatSummary: ((chatMeta.summary as string) ?? "").trim() || null,
+        narrationLanguage: (() => {
+          if (chatMode !== "game") return null;
+          const setup = chatMeta.gameSetupConfig as Record<string, unknown> | undefined | null;
+          const lang = setup && typeof setup.language === "string" ? setup.language.trim() : "";
+          return lang.length > 0 ? lang : null;
+        })(),
         streaming: input.streaming,
         signal: abortController.signal,
       };

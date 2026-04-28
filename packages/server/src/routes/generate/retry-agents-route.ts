@@ -200,6 +200,13 @@ async function buildRetryAgentContext(args: {
     activatedLorebookEntries: null,
     writableLorebookIds: null,
     chatSummary: ((chatMeta.summary as string) ?? "").trim() || null,
+    narrationLanguage: (() => {
+      const mode = (chat as { mode?: string }).mode ?? "conversation";
+      if (mode !== "game") return null;
+      const setup = chatMeta.gameSetupConfig as Record<string, unknown> | undefined | null;
+      const lang = setup && typeof setup.language === "string" ? setup.language.trim() : "";
+      return lang.length > 0 ? lang : null;
+    })(),
     streaming,
     memory: {},
   };

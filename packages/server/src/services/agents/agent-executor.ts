@@ -717,6 +717,21 @@ function buildAgentExtras(context: AgentContext, agentTypes: string[] = []): str
     parts.push(`</current_game_state>`);
   }
 
+  if (agentTypes.includes("scene-painter")) {
+    parts.push(`<scene_painter_language_rule>`);
+    const lang = context.narrationLanguage?.trim();
+    if (lang) {
+      parts.push(
+        `The session is configured for narrative output in **${escapeXml(lang)}**. Write every user-facing string in the JSON output (reason, description, mood) entirely in that language. Do not translate into English unless the in-character messages you see are clearly English.`,
+      );
+    } else {
+      parts.push(
+        `Infer the dominant natural language from the assistant's latest reply and the surrounding recent messages. All JSON string values (reason, description, mood) must be in that same language. Do not default to English when the roleplay is not English.`,
+      );
+    }
+    parts.push(`</scene_painter_language_rule>`);
+  }
+
   if (context.memory._availableSprites) {
     const sprites = context.memory._availableSprites as Array<{
       characterId: string;
@@ -850,6 +865,7 @@ const AGENT_RESULT_TYPE_MAP: Record<string, AgentResultType> = {
   director: "director_event",
   quest: "quest_update",
   illustrator: "image_prompt",
+  "scene-painter": "scene_description",
   "lorebook-keeper": "lorebook_update",
   "card-evolution-auditor": "character_card_update",
   "prompt-reviewer": "prompt_review",
@@ -875,6 +891,7 @@ const JSON_AGENTS = new Set([
   "echo-chamber",
   "quest",
   "illustrator",
+  "scene-painter",
   "lorebook-keeper",
   "card-evolution-auditor",
   "prompt-reviewer",
