@@ -16,6 +16,8 @@ interface GameCheckpointsProps {
   chatId: string;
   onClose: () => void;
   onLoaded?: () => void;
+  /** Omit outer title bar when wrapped in a parent `Modal` that already has a header + close. */
+  embedInModal?: boolean;
 }
 
 const TRIGGER_ICONS: Record<CheckpointTrigger, typeof Save> = {
@@ -47,7 +49,7 @@ function formatDate(iso: string): string {
   );
 }
 
-export function GameCheckpoints({ chatId, onClose, onLoaded }: GameCheckpointsProps) {
+export function GameCheckpoints({ chatId, onClose, onLoaded, embedInModal }: GameCheckpointsProps) {
   const { data: checkpoints, refetch } = useGameCheckpoints(chatId);
   const createCheckpoint = useCreateCheckpoint();
   const loadCheckpoint = useLoadCheckpoint();
@@ -98,21 +100,15 @@ export function GameCheckpoints({ chatId, onClose, onLoaded }: GameCheckpointsPr
     [deleteCheckpoint, refetch],
   );
 
-  return (
-    <div className="flex h-full flex-col bg-background">
-      {/* Header */}
-      <div className="flex items-center justify-between border-b px-4 py-3">
-        <h2 className="flex items-center gap-2 text-sm font-semibold">
-          <Save className="h-4 w-4" />
-          Checkpoints
-        </h2>
-        <button onClick={onClose} className="rounded p-1 hover:bg-muted">
-          <X className="h-4 w-4" />
-        </button>
-      </div>
-
+  const body = (
+    <>
       {/* Quick save input */}
-      <div className="flex items-center gap-2 border-b px-4 py-2">
+      <div
+        className={cn(
+          "flex items-center gap-2 border-b py-2",
+          embedInModal ? "border-[var(--border)]/60" : "border-b px-4",
+        )}
+      >
         <input
           type="text"
           placeholder="Save label (optional)"
@@ -133,7 +129,7 @@ export function GameCheckpoints({ chatId, onClose, onLoaded }: GameCheckpointsPr
       </div>
 
       {/* Checkpoint list */}
-      <div className="flex-1 overflow-y-auto px-2 py-2">
+      <div className={cn("flex-1 overflow-y-auto py-2", embedInModal ? "" : "px-2")}>
         {!checkpoints?.length ? (
           <p className="py-8 text-center text-xs text-muted-foreground">
             No checkpoints yet. Auto-saves are created at session boundaries and combat transitions.
@@ -206,6 +202,25 @@ export function GameCheckpoints({ chatId, onClose, onLoaded }: GameCheckpointsPr
           </div>
         )}
       </div>
+    </>
+  );
+
+  if (embedInModal) {
+    return <div className="flex max-h-[min(70vh,520px)] min-h-0 flex-col">{body}</div>;
+  }
+
+  return (
+    <div className="flex h-full flex-col bg-background">
+      <div className="flex items-center justify-between border-b px-4 py-3">
+        <h2 className="flex items-center gap-2 text-sm font-semibold">
+          <Save className="h-4 w-4" />
+          Checkpoints
+        </h2>
+        <button type="button" onClick={onClose} className="rounded p-1 hover:bg-muted">
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+      {body}
     </div>
   );
 }

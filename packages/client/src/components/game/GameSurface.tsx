@@ -29,6 +29,7 @@ import {
   useJournalEntry,
   useTransitionGameState,
   useRecruitPartyMember,
+  gameKeys,
 } from "../../hooks/use-game";
 import { chatKeys, useDeleteChat, useUpdateChatMetadata, useUpdateMessage } from "../../hooks/use-chats";
 import { useGenerate } from "../../hooks/use-generate";
@@ -66,6 +67,7 @@ import { GameElementReaction } from "./GameElementReaction";
 import { GameTravelView } from "./GameTravelView";
 import { GameSessionHistory } from "./GameSessionHistory";
 import { GameForkTimelineModal } from "./GameForkTimelineModal";
+import { GameCheckpoints } from "./GameCheckpoints";
 import { GameTransitionManager } from "./GameTransitionManager";
 import { GameChoiceCards } from "./GameChoiceCards";
 import { GameQteOverlay } from "./GameQteOverlay";
@@ -484,6 +486,7 @@ function renameInventoryItem<T extends { name: string; quantity: number }>(
 import {
   AlertTriangle,
   BookOpen,
+  Bookmark,
   GitBranch,
   HelpCircle,
   History,
@@ -777,6 +780,7 @@ export function GameSurface({
 
   const [historyOpen, setHistoryOpen] = useState(false);
   const [forkTimelineOpen, setForkTimelineOpen] = useState(false);
+  const [checkpointsOpen, setCheckpointsOpen] = useState(false);
   const [journalOpen, setJournalOpen] = useState(false);
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [sceneJournalOpen, setSceneJournalOpen] = useState(false);
@@ -4158,6 +4162,14 @@ export function GameSurface({
                   >
                     <GitBranch size={14} />
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setCheckpointsOpen(true)}
+                    className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white"
+                    title="Checkpoints — save points and restore"
+                  >
+                    <Bookmark size={14} />
+                  </button>
                   {sessionStatus === "active" ? (
                     <button
                       onClick={handleRequestEndSession}
@@ -4371,6 +4383,17 @@ export function GameSurface({
                           title="Fork timeline"
                         >
                           <GitBranch size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCheckpointsOpen(true);
+                            setMobileActionsOpen(false);
+                          }}
+                          className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+                          title="Checkpoints"
+                        >
+                          <Bookmark size={14} />
                         </button>
                         {sessionStatus === "active" ? (
                           <button
@@ -4850,6 +4873,26 @@ export function GameSurface({
                   lineageRootGameId={lineageRootGameId}
                   messages={messages}
                 />
+
+                <Modal
+                  open={checkpointsOpen}
+                  onClose={() => setCheckpointsOpen(false)}
+                  title="Checkpoints"
+                  width="max-w-lg"
+                >
+                  <GameCheckpoints
+                    embedInModal
+                    chatId={activeChatId}
+                    onClose={() => setCheckpointsOpen(false)}
+                    onLoaded={() => {
+                      void queryClient.invalidateQueries({ queryKey: chatKeys.messages(activeChatId) });
+                      void queryClient.invalidateQueries({ queryKey: chatKeys.detail(activeChatId) });
+                      void queryClient.invalidateQueries({
+                        queryKey: [...gameKeys.all, "checkpoints", activeChatId],
+                      });
+                    }}
+                  />
+                </Modal>
               </div>
 
               {/* Journal overlay — positioned on the outer column so it covers state indicator + content */}
