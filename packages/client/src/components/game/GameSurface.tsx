@@ -65,6 +65,7 @@ import { GameSkillCheckResult } from "./GameSkillCheckResult";
 import { GameElementReaction } from "./GameElementReaction";
 import { GameTravelView } from "./GameTravelView";
 import { GameSessionHistory } from "./GameSessionHistory";
+import { GameForkTimelineModal } from "./GameForkTimelineModal";
 import { GameTransitionManager } from "./GameTransitionManager";
 import { GameChoiceCards } from "./GameChoiceCards";
 import { GameQteOverlay } from "./GameQteOverlay";
@@ -483,6 +484,7 @@ function renameInventoryItem<T extends { name: string; quantity: number }>(
 import {
   AlertTriangle,
   BookOpen,
+  GitBranch,
   HelpCircle,
   History,
   Image,
@@ -621,6 +623,11 @@ export function GameSurface({
   // async avatar/sprite generation. Stops automatically once everyone is ready.
   useNpcAssetWatcher(activeChatId);
   const queryClient = useQueryClient();
+
+  const lineageRootGameId =
+    (chatMeta.forkLineageRootGameId as string | undefined) ||
+    (chatMeta.gameId as string | undefined) ||
+    null;
 
   const {
     gameState,
@@ -769,6 +776,7 @@ export function GameSurface({
   const fetchManifest = useGameAssetStore((s) => s.fetchManifest);
 
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [forkTimelineOpen, setForkTimelineOpen] = useState(false);
   const [journalOpen, setJournalOpen] = useState(false);
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [sceneJournalOpen, setSceneJournalOpen] = useState(false);
@@ -4141,6 +4149,15 @@ export function GameSurface({
                   >
                     <History size={14} />
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setForkTimelineOpen(true)}
+                    disabled={isMessagesLoading || messages.length === 0}
+                    className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                    title="Fork timeline — new game from an earlier message"
+                  >
+                    <GitBranch size={14} />
+                  </button>
                   {sessionStatus === "active" ? (
                     <button
                       onClick={handleRequestEndSession}
@@ -4342,6 +4359,18 @@ export function GameSurface({
                           title="History"
                         >
                           <History size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setForkTimelineOpen(true);
+                            setMobileActionsOpen(false);
+                          }}
+                          disabled={isMessagesLoading || messages.length === 0}
+                          className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                          title="Fork timeline"
+                        >
+                          <GitBranch size={14} />
                         </button>
                         {sessionStatus === "active" ? (
                           <button
@@ -4813,6 +4842,14 @@ export function GameSurface({
                     onClose={() => setHistoryOpen(false)}
                   />
                 )}
+
+                <GameForkTimelineModal
+                  open={forkTimelineOpen}
+                  onClose={() => setForkTimelineOpen(false)}
+                  chatId={activeChatId}
+                  lineageRootGameId={lineageRootGameId}
+                  messages={messages}
+                />
               </div>
 
               {/* Journal overlay — positioned on the outer column so it covers state indicator + content */}

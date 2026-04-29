@@ -42,6 +42,9 @@ import { generateWeather, inferBiome, shouldWeatherChange } from "../services/ga
 import { rollEncounter, rollEnemyCount } from "../services/game/encounter.service.js";
 import { processReputationActions } from "../services/game/reputation.service.js";
 import { createCheckpointService, type CheckpointTrigger } from "../services/game/checkpoint.service.js";
+import { copyBranchMessagesAndSnapshots } from "../services/chats/branch-chat-copy.service.js";
+import { remapBackgroundChatTagsInMetadata } from "../services/game/game-fork-metadata.service.js";
+import { copyGameCheckpointsForFork } from "../services/game/copy-checkpoints-for-fork.service.js";
 import { resolveSkillCheck, attributeModifier, getGoverningAttribute } from "../services/game/skill-check.service.js";
 import { applyAllSegmentEdits, stripGmCommandTags } from "../services/game/segment-edits.js";
 import { processLorebooks } from "../services/lorebook/index.js";
@@ -1111,6 +1114,7 @@ export async function gameRoutes(app: FastifyInstance) {
     await chats.updateMetadata(sessionChat.id, {
       ...sessionMeta,
       gameId,
+      forkLineageRootGameId: gameId,
       gameSessionNumber: 1,
       gameSessionStatus: "setup",
       gameActiveState: "exploration",
@@ -1751,10 +1755,13 @@ export async function gameRoutes(app: FastifyInstance) {
         ? prevActiveAgentIds
         : Array.from(new Set([...prevActiveAgentIds, ...GAME_MODE_DEFAULT_AGENT_IDS]));
 
+      const lineageRoot =
+        (prevMeta.forkLineageRootGameId as string | undefined) || (prevMeta.gameId as string | undefined) || gameId;
       const updatedNewMeta = {
         ...newMeta,
         ...prevMeta,
         gameId,
+        forkLineageRootGameId: lineageRoot,
         gameSessionNumber: sessionNumber,
         gameSessionStatus: "ready",
         gameActiveState: "exploration",
@@ -2570,6 +2577,42 @@ export async function gameRoutes(app: FastifyInstance) {
         const mb = parseMeta(b.metadata);
         return ((ma.gameSessionNumber as number) || 0) - ((mb.gameSessionNumber as number) || 0);
       });
+  });
+
+  // ── GET /game/:gameId/related-timelines ──
+  // Lists all game-mode chats whose fork lineage root matches this id (same campaign branches).
+  app.get<{ Params: { gameId: string } }>("/:gameId/related-timelines", async (req) => {
+    const rootGameId = req.params.gameId;
+    const chats = createChatsStorage(app.db);
+    const rows = await chats.list();
+    const timelines: Array<{
+      chatId: string;
+      name: string;
+      gameId: string | undefined;
+      forkLabel?: string;
+      forkedFromMessageId?: string;
+      updatedAt: string;
+    }> = [];
+
+    for (const c of rows) {
+      if ((c.mode as string) !== "game") continue;
+      const m = parseMeta(c.metadata);
+      const lineage = (m.forkLineageRootGameId as string | undefined) || (m.gameId as string | undefined);
+      const gid = m.gameId as string | undefined;
+      if (lineage === rootGameId || gid === rootGameId) {
+        timelines.push({
+          chatId: c.id,
+          name: c.name,
+          gameId: gid,
+          forkLabel: m.forkLabel as string | undefined,
+          forkedFromMessageId: m.forkedFromMessageId as string | undefined,
+          updatedAt: c.updatedAt as string,
+        });
+      }
+    }
+
+    timelines.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    return { timelines };
   });
 
   // ── POST /game/combat/round ──
@@ -4252,6 +4295,96 @@ export async function gameRoutes(app: FastifyInstance) {
     });
 
     return result;
+  });
+
+  // ── POST /game/:chatId/fork-timeline ──
+  // Copy GM chat messages up to a message into a new game (new gameId) for a clean LLM branch.
+  const forkTimelineSchema = z.object({
+    upToMessageId: z.string().min(1),
+    name: z.string().min(1).max(200).optional(),
+    forkLabel: z.string().max(200).optional(),
+  });
+
+  app.post<{ Params: { chatId: string } }>("/:chatId/fork-timeline", async (req, reply) => {
+    const chats = createChatsStorage(app.db);
+    const sourceChat = await chats.getById(req.params.chatId);
+    if (!sourceChat) return reply.status(404).send({ error: "Chat not found" });
+    if ((sourceChat.mode as string) !== "game") {
+      return reply.status(400).send({ error: "Only game mode chats can fork the timeline" });
+    }
+
+    const body = forkTimelineSchema.parse(req.body ?? {});
+    const msgs = await chats.listMessages(req.params.chatId);
+    if (!msgs.some((m) => m.id === body.upToMessageId)) {
+      return reply.status(400).send({ error: "upToMessageId not found in this chat" });
+    }
+
+    const sourceMeta = parseMeta(sourceChat.metadata);
+    const oldGameId = sourceMeta.gameId as string | undefined;
+    if (!oldGameId) return reply.status(400).send({ error: "Source chat has no gameId metadata" });
+
+    const lineageRoot = (sourceMeta.forkLineageRootGameId as string | undefined) || oldGameId;
+    const newGameId = randomUUID();
+
+    const { summary: _sum, daySummaries: _day, weekSummaries: _week, ...settingsToKeep } = sourceMeta;
+
+    let characterIds: string[] = [];
+    try {
+      characterIds = JSON.parse(sourceChat.characterIds as string) as string[];
+    } catch {
+      characterIds = [];
+    }
+
+    const branchName = body.name?.trim() || `${sourceChat.name} (fork)`;
+    const newChat = await chats.create({
+      name: branchName,
+      mode: "game",
+      characterIds,
+      groupId: newGameId,
+      personaId: sourceChat.personaId,
+      promptPresetId: sourceChat.promptPresetId,
+      connectionId: sourceChat.connectionId,
+    });
+    if (!newChat) return reply.status(500).send({ error: "Failed to create fork chat" });
+
+    let nextMeta: Record<string, unknown> = {
+      ...settingsToKeep,
+      gameId: newGameId,
+      forkLineageRootGameId: lineageRoot,
+      forkedFromGameId: oldGameId,
+      forkedFromChatId: req.params.chatId,
+      forkedFromMessageId: body.upToMessageId,
+      ...(body.forkLabel?.trim() ? { forkLabel: body.forkLabel.trim() } : {}),
+      gameSessionNumber: 1,
+      gameSessionStatus: "active",
+      gameDialogueChatId: null,
+      gameCombatChatId: null,
+      gamePartyChatId: null,
+      gamePreviousSessionSummaries: [],
+    };
+
+    nextMeta = remapBackgroundChatTagsInMetadata(nextMeta, req.params.chatId, newChat.id);
+
+    await chats.updateMetadata(newChat.id, nextMeta);
+
+    const { sourceToBranchedMessageId, snapshotIdMap } = await copyBranchMessagesAndSnapshots(
+      app.db,
+      chats,
+      req.params.chatId,
+      newChat.id,
+      { upToMessageId: body.upToMessageId },
+    );
+
+    await copyGameCheckpointsForFork(app.db, req.params.chatId, newChat.id, sourceToBranchedMessageId, snapshotIdMap);
+
+    const hydrated = await buildHydratedGameMeta(newChat.id, parseMeta((await chats.getById(newChat.id))!.metadata));
+    await chats.updateMetadata(newChat.id, hydrated);
+
+    await chats.update(newChat.id, {});
+
+    logger.info("[game/fork-timeline] Forked chat %s → %s (gameId %s)", req.params.chatId, newChat.id, newGameId);
+
+    return chats.getById(newChat.id);
   });
 
   // ── POST /game/checkpoint ──

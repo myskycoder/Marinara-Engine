@@ -1,0 +1,387 @@
+{
+  "last_node_id": 8,
+  "last_link_id": 11,
+  "version": 0.4,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [100, 200],
+      "size": [315, 314],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [1],
+          "slot_index": 0
+        }
+      ],
+      "properties": { "Node name for S&R": "LoadImage" },
+      "widgets_values": ["input.png"]
+    },
+    {
+      "id": 2,
+      "type": "CheckpointLoaderSimple",
+      "pos": [100, 50],
+      "size": [315, 98],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [3],
+          "slot_index": 0
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [10, 11],
+          "slot_index": 1
+        },
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [2, 8],
+          "slot_index": 2
+        }
+      ],
+      "properties": { "Node name for S&R": "CheckpointLoaderSimple" },
+      "widgets_values": ["wan2.2-enhanced.safetensors"]
+    },
+    {
+      "id": 3,
+      "type": "CLIPTextEncode",
+      "pos": [450, 50],
+      "size": [400, 200],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 10
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [4],
+          "slot_index": 0
+        }
+      ],
+      "properties": { "Node name for S&R": "CLIPTextEncode" },
+      "widgets_values": [
+        "3 characters, beach scene, man standing awkwardly with glasses holding bag, woman sitting reading under umbrella, teenage girl lying on towel smirking, bright sunlight, summer, cinematic composition"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "CLIPTextEncode",
+      "pos": [450, 250],
+      "size": [400, 200],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 11
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [5],
+          "slot_index": 0
+        }
+      ],
+      "properties": { "Node name for S&R": "CLIPTextEncode" },
+      "widgets_values": [
+        "worst quality, low quality, blurry, bad anatomy, extra limbs, distorted face"
+      ]
+    },
+    {
+      "id": 5,
+      "type": "VAEEncode",
+      "pos": [450, 450],
+      "size": [210, 46],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "pixels",
+          "type": "IMAGE",
+          "link": 1
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [6],
+          "slot_index": 0
+        }
+      ],
+      "properties": { "Node name for S&R": "VAEEncode" },
+      "widgets_values": []
+    },
+    {
+      "id": 6,
+      "type": "KSampler",
+      "pos": [800, 200],
+      "size": [315, 262],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 3
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 4
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 5
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [7],
+          "slot_index": 0
+        }
+      ],
+      "properties": { "Node name for S&R": "KSampler" },
+      "widgets_values": [
+        123456,
+        "fixed",
+        30,
+        6,
+        "dpmpp_2m",
+        "karras",
+        0.55
+      ]
+    },
+    {
+      "id": 7,
+      "type": "VAEDecode",
+      "pos": [1150, 200],
+      "size": [210, 46],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 7
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 8
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [9],
+          "slot_index": 0
+        }
+      ],
+      "properties": { "Node name for S&R": "VAEDecode" },
+      "widgets_values": []
+    },
+    {
+      "id": 8,
+      "type": "SaveImage",
+      "pos": [1400, 200],
+      "size": [315, 270],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 9
+        }
+      ],
+      "outputs": [],
+      "properties": { "Node name for S&R": "SaveImage" },
+      "widgets_values": ["img2img_wan"]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 5, 0, "IMAGE"],
+    [2, 2, 2, 5, 1, "VAE"],
+    [3, 2, 0, 6, 0, "MODEL"],
+    [4, 3, 0, 6, 1, "CONDITIONING"],
+    [5, 4, 0, 6, 2, "CONDITIONING"],
+    [6, 5, 0, 6, 3, "LATENT"],
+    [7, 6, 0, 7, 0, "LATENT"],
+    [8, 2, 2, 7, 1, "VAE"],
+    [9, 7, 0, 8, 0, "IMAGE"],
+    [10, 2, 1, 3, 0, "CLIP"],
+    [11, 2, 1, 4, 0, "CLIP"]
+  ]
+}
+
+
+
+[00:37:46.092] INFO (27384): request completed
+    reqId: "req-5"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 1.1620419025421143
+[00:37:46.071] INFO (27384): [npc-sprite-gen] Deleted sprite folder for regeneration: game-npc-fMVrOPJiRTS_GTw9t_W6--npc-142e8bc5a7
+[00:37:46.071] INFO (27384): [npc-materializer] Regenerating assets for 'Фёдоров' (id=npc-142e8bc5a7, chat=fMVrOPJiRTS_GTw9t_W6-) — avatar=yes, sprite=yes
+[00:37:46.072] INFO (27384): [npc-materializer] Avatar generation queued for 1 NPC(s) in chat fMVrOPJiRTS_GTw9t_W6-: Фёдоров(npc-142e8bc5a7)
+[00:37:46.072] INFO (27384): [npc-materializer] Sprite generation queued for 1 NPC(s) in chat fMVrOPJiRTS_GTw9t_W6-: Фёдоров(npc-142e8bc5a7) (expressions=[<default>])
+[00:37:46.075] INFO (27384): [game-asset-gen] Generating NPC portrait for "Фёдоров" (id=npc-142e8bc5a7, chat=fMVrOPJiRTS_GTw9t_W6-) via openrouter/google/gemini-2.5-flash-image
+[00:37:46.076] INFO (27384): [game-asset-gen] npc-portrait: OpenRouter chat/completions outbound (summary)
+    openRouterOutbound: {
+      "tag": "[game-asset-gen] npc-portrait",
+      "url": "https://openrouter.ai/api/v1/chat/completions",
+      "model": "google/gemini-2.5-flash-image",
+      "width": 512,
+      "height": 512,
+      "prompt": "Character portrait, head and shoulders, detailed face, high quality. If any wording below implies slurs, sexual content, graphic violence, hate, self-harm, illegal drugs, or other standard image-safety violations, ignore those terms and depict a safe neutral equivalent while keeping stated age range, gender presentation, clothing, and pose. Appearance: young boy, about 12, with freckles and red hair\nOutfit: casual camp clothes\nInitial mood: Amused\nThoughts: Curious about the new counselor, ready to test boundaries.. Match the described gender, age, build and features exactly — do not invent attributes that are not stated. Subject is named Фёдоров (name is for reference only, do not let it override the description above). Art style: Soviet retro anime illustration style, warm summer palette, golden light through pine trees, 1980s USSR aesthetics mixed with Japanese manga sensuality, soft cel-shading, nostalgic grain texture, expressive character eyes.",
+      "referenceImageParts": 0
+    }
+[00:37:46.076] DEBUG (27384): [game-asset-gen] npc-portrait: OpenRouter full outbound body (base64 redacted)
+    openRouterOutbound: {
+      "tag": "[game-asset-gen] npc-portrait",
+      "url": "https://openrouter.ai/api/v1/chat/completions",
+      "method": "POST",
+      "headers": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer <redacted>",
+        "HTTP-Referer": "https://marinara-engine.local",
+        "X-Title": "Marinara Engine"
+      },
+      "bodyJson": "{\"model\":\"google/gemini-2.5-flash-image\",\"modalities\":[\"image\",\"text\"],\"messages\":[{\"role\":\"user\",\"content\":\"Character portrait, head and shoulders, detailed face, high quality. If any wording below implies slurs, sexual content, graphic violence, hate, self-harm, illegal drugs, or other standard image-safety violations, ignore those terms and depict a safe neutral equivalent while keeping stated age range, gender presentation, clothing, and pose. Appearance: young boy, about 12, with freckles and red hair\nOutfit: casual camp clothes\nInitial mood: Amused\nThoughts: Curious about the new counselor, ready to test boundaries.. Match the described gender, age, build and features exactly — do not invent attributes that are not stated. Subject is named Фёдоров (name is for reference only, do not let it override the description above). Art style: Soviet retro anime illustration style, warm summer palette, golden light through pine trees, 1980s USSR aesthetics mixed with Japanese manga sensuality, soft cel-shading, nostalgic grain texture, expressive character eyes.\"}],\"stream\":false}"
+    }
+[00:37:48.569] INFO (27384): incoming request
+    reqId: "req-6"
+    req: {
+      "method": "GET",
+      "url": "/api/chats/fMVrOPJiRTS_GTw9t_W6-",
+      "host": "127.0.0.1:7860",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 55895
+    }
+[00:37:48.571] INFO (27384): request completed
+    reqId: "req-6"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 2.4205408096313477
+[00:37:48.279] WARN (27384): [game-asset-gen] Failed to generate portrait for "Фёдоров" (id=npc-142e8bc5a7)
+    err: {
+      "type": "Error",
+      "message": "No image found in OpenRouter response: {}",
+      "stack":
+          Error: No image found in OpenRouter response: {}
+              at generateOpenRouter (/Users/ymenkov/myskycoder/Marinara-Engine/packages/server/src/services/image/image-generation.ts:668:11)
+              at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+              at async <anonymous> (/Users/ymenkov/myskycoder/Marinara-Engine/packages/server/src/services/game/game-asset-generation.ts:237:22)
+              at async generateNpcPortrait (/Users/ymenkov/myskycoder/Marinara-Engine/packages/server/src/services/game/game-asset-generation.ts:266:12)
+              at async <anonymous> (/Users/ymenkov/myskycoder/Marinara-Engine/packages/server/src/services/game/npc-materializer.service.ts:341:31)
+    }
+[00:37:48.285] DEBUG (27384): [npc-materializer] Generating sprites for 'Фёдоров' (id=npc-142e8bc5a7, sprite=game-npc-fMVrOPJiRTS_GTw9t_W6--npc-142e8bc5a7, ref=no-avatar)
+[00:37:48.286] INFO (27384): [npc-sprite-gen] expression-sheet spriteId=game-npc-fMVrOPJiRTS_GTw9t_W6--npc-142e8bc5a7: OpenRouter chat/completions outbound (summary)
+    openRouterOutbound: {
+      "tag": "[npc-sprite-gen] expression-sheet spriteId=game-npc-fMVrOPJiRTS_GTw9t_W6--npc-142e8bc5a7",
+      "url": "https://openrouter.ai/api/v1/chat/completions",
+      "model": "google/gemini-2.5-flash-image",
+      "width": 1024,
+      "height": 1536,
+      "prompt": "character expression sheet, strict 2 columns by 3 rows grid, 6 equally sized square cells arranged in a perfectly uniform grid, solid white background, thin straight lines separating each cell, same character in every cell, consistent art style, expressions left-to-right top-to-bottom: neutral, happy, sad, angry, surprised, thinking, If any wording below implies slurs, sexual content, graphic violence, hate, self-harm, illegal drugs, or other standard image-safety violations, ignore those terms and depict a safe neutral equivalent while keeping stated age range, gender presentation, clothing, and pose. Appearance: young boy, about 12, with freckles and red hair\nOutfit: casual camp clothes\nInitial mood: Amused\nThoughts: Curious about the new counselor, ready to test boundaries.. Match the described gender, age, build, hair, and features exactly — do not invent attributes. Current location context: Столовая. Art style: Soviet retro anime illustration style, warm summer palette, golden light through pine trees, 1980s USSR aesthetics mixed with Japanese manga sensuality, soft cel-shading, nostalgic grain texture, expressive character eyes. Subject is named Фёдоров (name is for reference only, the description above is authoritative). each cell shows head and shoulders portrait with a different facial expression, all cells same size, perfectly aligned, no overlapping, no merged cells, no text, no labels, no numbers",
+      "referenceImageParts": 0
+    }
+[00:37:48.286] DEBUG (27384): [npc-sprite-gen] expression-sheet spriteId=game-npc-fMVrOPJiRTS_GTw9t_W6--npc-142e8bc5a7: OpenRouter full outbound body (base64 redacted)
+    openRouterOutbound: {
+      "tag": "[npc-sprite-gen] expression-sheet spriteId=game-npc-fMVrOPJiRTS_GTw9t_W6--npc-142e8bc5a7",
+      "url": "https://openrouter.ai/api/v1/chat/completions",
+      "method": "POST",
+      "headers": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer <redacted>",
+        "HTTP-Referer": "https://marinara-engine.local",
+        "X-Title": "Marinara Engine"
+      },
+      "bodyJson": "{\"model\":\"google/gemini-2.5-flash-image\",\"modalities\":[\"image\",\"text\"],\"messages\":[{\"role\":\"user\",\"content\":\"character expression sheet, strict 2 columns by 3 rows grid, 6 equally sized square cells arranged in a perfectly uniform grid, solid white background, thin straight lines separating each cell, same character in every cell, consistent art style, expressions left-to-right top-to-bottom: neutral, happy, sad, angry, surprised, thinking, If any wording below implies slurs, sexual content, graphic violence, hate, self-harm, illegal drugs, or other standard image-safety violations, ignore those terms and depict a safe neutral equivalent while keeping stated age range, gender presentation, clothing, and pose. Appearance: young boy, about 12, with freckles and red hair\nOutfit: casual camp clothes\nInitial mood: Amused\nThoughts: Curious about the new counselor, ready to test boundaries.. Match the described gender, age, build, hair, and features exactly — do not invent attributes. Current location context: Столовая. Art style: Soviet retro anime illustration style, warm summer palette, golden light through pine trees, 1980s USSR aesthetics mixed with Japanese manga sensuality, soft cel-shading, nostalgic grain texture, expressive character eyes. Subject is named Фёдоров (name is for reference only, the description above is authoritative). each cell shows head and shoulders portrait with a different facial expression, all cells same size, perfectly aligned, no overlapping, no merged cells, no text, no labels, no numbers\"}],\"stream\":false}"
+    }
+[00:37:55.733] INFO (27384): [npc-sprite-gen] full-idle spriteId=game-npc-fMVrOPJiRTS_GTw9t_W6--npc-142e8bc5a7: OpenRouter chat/completions outbound (summary)
+    openRouterOutbound: {
+      "tag": "[npc-sprite-gen] full-idle spriteId=game-npc-fMVrOPJiRTS_GTw9t_W6--npc-142e8bc5a7",
+      "url": "https://openrouter.ai/api/v1/chat/completions",
+      "model": "google/gemini-2.5-flash-image",
+      "width": 832,
+      "height": 1216,
+      "prompt": "single full-body character sprite, one character only, entire body visible from head to toe, centered in frame, solid white studio background, If any wording below implies slurs, sexual content, graphic violence, hate, self-harm, illegal drugs, or other standard image-safety violations, ignore those terms and depict a safe neutral equivalent while keeping stated age range, gender presentation, clothing, and pose. Appearance: young boy, about 12, with freckles and red hair\nOutfit: casual camp clothes\nInitial mood: Amused\nThoughts: Curious about the new counselor, ready to test boundaries.. Match the described gender, age, build, hair, and features exactly — do not invent attributes. Current location context: Столовая. Art style: Soviet retro anime illustration style, warm summer palette, golden light through pine trees, 1980s USSR aesthetics mixed with Japanese manga sensuality, soft cel-shading, nostalgic grain texture, expressive character eyes. Subject is named Фёдоров (name is for reference only, the description above is authoritative)., general standing idle game pose, no text, no watermark",
+      "referenceImageParts": 0
+    }
+[00:37:55.733] DEBUG (27384): [npc-sprite-gen] full-idle spriteId=game-npc-fMVrOPJiRTS_GTw9t_W6--npc-142e8bc5a7: OpenRouter full outbound body (base64 redacted)
+    openRouterOutbound: {
+      "tag": "[npc-sprite-gen] full-idle spriteId=game-npc-fMVrOPJiRTS_GTw9t_W6--npc-142e8bc5a7",
+      "url": "https://openrouter.ai/api/v1/chat/completions",
+      "method": "POST",
+      "headers": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer <redacted>",
+        "HTTP-Referer": "https://marinara-engine.local",
+        "X-Title": "Marinara Engine"
+      },
+      "bodyJson": "{\"model\":\"google/gemini-2.5-flash-image\",\"modalities\":[\"image\",\"text\"],\"messages\":[{\"role\":\"user\",\"content\":\"single full-body character sprite, one character only, entire body visible from head to toe, centered in frame, solid white studio background, If any wording below implies slurs, sexual content, graphic violence, hate, self-harm, illegal drugs, or other standard image-safety violations, ignore those terms and depict a safe neutral equivalent while keeping stated age range, gender presentation, clothing, and pose. Appearance: young boy, about 12, with freckles and red hair\nOutfit: casual camp clothes\nInitial mood: Amused\nThoughts: Curious about the new counselor, ready to test boundaries.. Match the described gender, age, build, hair, and features exactly — do not invent attributes. Current location context: Столовая. Art style: Soviet retro anime illustration style, warm summer palette, golden light through pine trees, 1980s USSR aesthetics mixed with Japanese manga sensuality, soft cel-shading, nostalgic grain texture, expressive character eyes. Subject is named Фёдоров (name is for reference only, the description above is authoritative)., general standing idle game pose, no text, no watermark\"}],\"stream\":false}"
+    }
+[00:37:57.567] WARN (27384): [npc-sprite-gen] Failed to generate sprites for "Фёдоров"
+    err: {
+      "type": "Error",
+      "message": "No image found in OpenRouter response: Here's your character sprite!\n",
+      "stack":
+          Error: No image found in OpenRouter response: Here's your character sprite!
+          
+              at generateOpenRouter (/Users/ymenkov/myskycoder/Marinara-Engine/packages/server/src/services/image/image-generation.ts:668:11)
+              at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+              at async generateFullBodyIdle (/Users/ymenkov/myskycoder/Marinara-Engine/packages/server/src/services/game/npc-sprite-generation.service.ts:180:23)
+              at async <anonymous> (/Users/ymenkov/myskycoder/Marinara-Engine/packages/server/src/services/game/npc-sprite-generation.service.ts:248:7)
+              at async generateNpcSprites (/Users/ymenkov/myskycoder/Marinara-Engine/packages/server/src/services/game/npc-sprite-generation.service.ts:260:12)
+              at async <anonymous> (/Users/ymenkov/myskycoder/Marinara-Engine/packages/server/src/services/game/npc-materializer.service.ts:396:22)
+    }
+[00:37:57.573] WARN (27384): [npc-materializer] Sprite generation failed for 'Фёдоров' (id=npc-142e8bc5a7)
+
+
+почему не генерится?

@@ -30,6 +30,7 @@ import { spriteKeys } from "./use-characters";
 export const gameKeys = {
   all: ["game"] as const,
   sessions: (gameId: string) => [...gameKeys.all, "sessions", gameId] as const,
+  relatedTimelines: (gameId: string) => [...gameKeys.all, "related-timelines", gameId] as const,
 };
 
 // ── Types ──
@@ -734,5 +735,51 @@ export function useLoadCheckpoint() {
 export function useDeleteCheckpoint() {
   return useMutation({
     mutationFn: (id: string) => api.delete<{ ok: boolean }>(`/game/checkpoint/${id}`),
+  });
+}
+
+export interface GameTimelineForkRow {
+  chatId: string;
+  name: string;
+  gameId?: string;
+  forkLabel?: string;
+  forkedFromMessageId?: string;
+  updatedAt: string;
+}
+
+export function useRelatedGameTimelines(gameId: string | null) {
+  return useQuery({
+    queryKey: gameId ? gameKeys.relatedTimelines(gameId) : [...gameKeys.all, "related-timelines", "none"],
+    queryFn: () => api.get<{ timelines: GameTimelineForkRow[] }>(`/game/${gameId}/related-timelines`),
+    enabled: !!gameId,
+    staleTime: 30_000,
+  });
+}
+
+export function useForkGameTimeline() {
+  const qc = useQueryClient();
+  const store = useGameModeStore;
+  return useMutation({
+    mutationFn: (data: { chatId: string; upToMessageId: string; name?: string; forkLabel?: string }) =>
+      api.post<Chat>(`/game/${data.chatId}/fork-timeline`, {
+        upToMessageId: data.upToMessageId,
+        ...(data.name?.trim() ? { name: data.name.trim() } : {}),
+        ...(data.forkLabel?.trim() ? { forkLabel: data.forkLabel.trim() } : {}),
+      }),
+    onSuccess: (newChat) => {
+      const meta = newChat.metadata as Record<string, unknown> | undefined;
+      const gid = (meta?.gameId as string) || "";
+      const lineage = (meta?.forkLineageRootGameId as string) || gid;
+      store.getState().setActiveGame(gid, newChat.id, (meta?.gamePartyChatId as string | undefined) ?? null);
+      qc.invalidateQueries({ queryKey: chatKeys.list() });
+      qc.invalidateQueries({ queryKey: chatKeys.detail(newChat.id) });
+      qc.invalidateQueries({ queryKey: chatKeys.messages(newChat.id) });
+      if (lineage) {
+        qc.invalidateQueries({ queryKey: gameKeys.relatedTimelines(lineage) });
+      }
+      if (gid) {
+        qc.invalidateQueries({ queryKey: gameKeys.sessions(gid) });
+      }
+    },
   });
 }

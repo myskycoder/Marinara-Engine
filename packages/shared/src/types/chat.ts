@@ -149,6 +149,13 @@ export interface ChatMetadata {
   // ── Game Mode Fields ──
   /** UUID linking all sessions of one game */
   gameId?: string;
+  /** Root `gameId` for all timeline forks from one campaign (set on create + each fork) */
+  forkLineageRootGameId?: string;
+  /** Provenance when this chat was created via timeline fork */
+  forkedFromGameId?: string;
+  forkedFromChatId?: string;
+  forkedFromMessageId?: string;
+  forkLabel?: string;
   /** Session number within a game (1-based) */
   gameSessionNumber?: number;
   /** Current session lifecycle status */

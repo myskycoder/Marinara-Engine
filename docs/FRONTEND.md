@@ -504,6 +504,7 @@ The server (`packages/server`) exposes the following REST API at `/api`:
 | `/api/scene`        | create, plan, conclude           | Scene branching             |
 | `/api/encounter`    | init, action, summary            | Combat encounters           |
 | `/api/translate`    | POST                             | Text translation            |
+| `/api/game`         | setup, sessions, checkpoints, map, journal, … | Game mode (RPG). **Timeline fork**: `POST /api/game/:chatId/fork-timeline` copies messages through `upToMessageId` into a **new** `gameId` (clean LLM context); `GET /api/game/:gameId/related-timelines` lists chats sharing `forkLineageRootGameId`. In-game UI: branch icon in `GameSurface` top controls. |
 
 ### Media & Assets
 
