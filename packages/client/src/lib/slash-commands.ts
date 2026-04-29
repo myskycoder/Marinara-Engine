@@ -95,7 +95,7 @@ function buildMacroHelpText(): string {
 
   for (const macro of SUPPORTED_MACROS) {
     const lines = sections.get(macro.category) ?? [];
-    lines.push(`  ${macro.syntax} — ${macro.description}`);
+    lines.push(`${macro.syntax} - ${macro.description}`);
     sections.set(macro.category, lines);
   }
 
@@ -109,6 +109,27 @@ function buildMacroHelpText(): string {
 }
 
 const MACRO_HELP_TEXT = buildMacroHelpText();
+
+function buildSlashHelpText(): string {
+  return ["Available Commands:", "", ...COMMANDS.map((command) => `${command.usage} - ${command.description}`)].join(
+    "\n",
+  );
+}
+
+function parseImpersonatePromptArg(args: string): string {
+  let prompt = args.trim();
+  if (!prompt) return "";
+
+  const quote = prompt[0];
+  if (quote === '"' || quote === "'") {
+    prompt = prompt.slice(1);
+    if (prompt.endsWith(quote)) {
+      prompt = prompt.slice(0, -1);
+    }
+  }
+
+  return prompt.trim();
+}
 
 // ── Command definitions ────────────────
 
@@ -207,6 +228,38 @@ const COMMANDS: SlashCommand[] = [
         ...(direction ? { userMessage: direction } : {}),
       });
       return { handled: true };
+    },
+  },
+  {
+    name: "impersonate_prompt",
+    aliases: ["imp_prompt"],
+    description: "Set the prompt prefix used by /impersonate in this chat",
+    usage: '/impersonate_prompt <prompt|reset>  (e.g. /impersonate_prompt "You will now play as my OC:")',
+    local: true,
+    async execute(args, ctx) {
+      const raw = args.trim();
+      if (!raw) {
+        return {
+          handled: true,
+          feedback:
+            'Usage: /impersonate_prompt "You will now play as my OC:"\nUse /impersonate_prompt reset to return to the default impersonation prompt.',
+        };
+      }
+
+      if (/^(reset|clear|default)$/i.test(raw)) {
+        await api.patch(`/chats/${ctx.chatId}/metadata`, { impersonatePrompt: null });
+        ctx.invalidate();
+        return { handled: true, feedback: "Impersonate prompt reset to the default." };
+      }
+
+      const prompt = parseImpersonatePromptArg(raw);
+      if (!prompt) {
+        return { handled: true, feedback: "Please provide a prompt, or use /impersonate_prompt reset." };
+      }
+
+      await api.patch(`/chats/${ctx.chatId}/metadata`, { impersonatePrompt: prompt });
+      ctx.invalidate();
+      return { handled: true, feedback: `Impersonate prompt updated:\n${prompt}` };
     },
   },
   {
@@ -356,8 +409,7 @@ const COMMANDS: SlashCommand[] = [
     usage: "/help",
     local: true,
     async execute(_args, _ctx) {
-      const lines = COMMANDS.map((c) => `${c.usage} — ${c.description}`);
-      return { handled: true, feedback: `Available Commands:\n${lines.join("\n")}` };
+      return { handled: true, feedback: buildSlashHelpText() };
     },
   },
   {

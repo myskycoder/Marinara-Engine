@@ -1,7 +1,7 @@
 // ──────────────────────────────────────────────
 // Hook: Scene API calls
 // ──────────────────────────────────────────────
-import { useCallback } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api } from "../lib/api-client";
@@ -12,15 +12,21 @@ import type {
   SceneCreateResponse,
   SceneConcludeRequest,
   SceneConcludeResponse,
+  SceneForkMode,
+  SceneForkRequest,
+  SceneForkResponse,
   ScenePlanRequest,
   ScenePlanResponse,
   SceneFullPlan,
 } from "@marinara-engine/shared";
 
+/** Provides scene lifecycle mutations and the scene-to-roleplay fork action. */
 export function useScene() {
   const qc = useQueryClient();
   const setActiveChatId = useChatStore((s) => s.setActiveChatId);
   const activeChatId = useChatStore((s) => s.activeChatId);
+  const isForkingRef = useRef(false);
+  const [isForking, setIsForking] = useState(false);
 
   /** Plan a scene from a user prompt (used by /scene slash command). */
   const planScene = useCallback(
@@ -133,5 +139,57 @@ export function useScene() {
     [qc, setActiveChatId],
   );
 
-  return { planScene, createScene, concludeScene, abandonScene };
+  /**
+   * Fork a scene into a standalone roleplay chat.
+   *
+   * The ref guard prevents duplicate clone/convert requests from rapid clicks
+   * while `isForking` lets the UI disable the relevant controls.
+   */
+  const forkScene = useCallback(
+    async (
+      sceneChatId: string,
+      mode: SceneForkMode,
+      opts?: { upToMessageId?: string },
+    ): Promise<SceneForkResponse | null> => {
+      if (isForkingRef.current) return null;
+      isForkingRef.current = true;
+      setIsForking(true);
+      try {
+        const res = await api.post<SceneForkResponse>("/scene/fork", {
+          sceneChatId,
+          mode,
+          upToMessageId: opts?.upToMessageId,
+          includePreSceneSummary: true,
+          includeParticipationGuide: true,
+        } satisfies SceneForkRequest);
+
+        qc.invalidateQueries({ queryKey: chatKeys.all });
+        qc.invalidateQueries({ queryKey: chatKeys.messages(sceneChatId) });
+        if (res.originChatId) qc.invalidateQueries({ queryKey: chatKeys.detail(res.originChatId) });
+        qc.invalidateQueries({ queryKey: chatKeys.detail(res.chatId) });
+        qc.invalidateQueries({ queryKey: chatKeys.messages(res.chatId) });
+        qc.invalidateQueries({ queryKey: chatKeys.messageCount(res.chatId) });
+
+        if (mode === "convert") {
+          qc.removeQueries({ queryKey: chatKeys.detail(sceneChatId) });
+        }
+
+        setActiveChatId(res.chatId);
+        toast.success(mode === "convert" ? "Scene converted to roleplay" : "Scene cloned as roleplay", {
+          icon: "RP",
+        });
+        return res;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to fork scene";
+        toast.error(msg);
+        return null;
+      } finally {
+        isForkingRef.current = false;
+        setIsForking(false);
+      }
+    },
+    [qc, setActiveChatId],
+  );
+
+  return { planScene, createScene, concludeScene, abandonScene, forkScene, isForking };
 }

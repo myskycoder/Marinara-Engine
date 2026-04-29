@@ -79,6 +79,33 @@ export function readNpcAvatarBase64(chatId: string, npcId: string): string | und
   }
 }
 
+export function readAvatarBase64(avatarPath: string | null | undefined): string | undefined {
+  if (!avatarPath) return undefined;
+  const cleanAvatarPath = avatarPath.split("?")[0] ?? avatarPath;
+  const parts = cleanAvatarPath.split("/").filter(Boolean);
+  if (parts.some((part) => part === ".." || part.includes("\\"))) return undefined;
+
+  let diskPath: string | null = null;
+  if (cleanAvatarPath.startsWith("/api/avatars/file/")) {
+    const filename = parts.at(-1);
+    if (filename) diskPath = join(DATA_DIR, "avatars", filename);
+  } else if (cleanAvatarPath.startsWith("/api/avatars/npc/")) {
+    const chatId = parts.at(-2);
+    const filename = parts.at(-1);
+    if (chatId && filename) diskPath = join(DATA_DIR, "avatars", "npc", chatId, filename);
+  } else if (cleanAvatarPath.startsWith("avatars/")) {
+    diskPath = join(DATA_DIR, ...parts);
+  }
+
+  if (!diskPath) return undefined;
+  try {
+    if (!existsSync(diskPath)) return undefined;
+    return readFileSync(diskPath).toString("base64");
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Delete an NPC portrait file from disk so the next generation pass will
  * actually re-run (the existsSync guard in `generateNpcPortrait` short-circuits
@@ -100,6 +127,32 @@ export function deleteNpcAvatar(chatId: string, npcId: string): boolean {
     logger.warn(err, "[game-asset-gen] Failed to delete NPC avatar for regeneration: %s/%s", chatId, npcId);
     return false;
   }
+}
+
+function hasExplicitNonHumanCue(value: string): boolean {
+  return /\b(?:animal|cat|kitten|dog|puppy|wolf|fox|bird|raven|crow|owl|horse|deer|rabbit|rat|mouse|snake|lizard|dragon|beast|creature|monster|spirit|ghost|construct|golem|doll|object|statue|mascot|non[-\s]?human|anthropomorphic|feral|quadruped)\b/i.test(
+    value,
+  );
+}
+
+function buildNpcPortraitPrompt(req: NpcPortraitRequest): string {
+  const context = req.appearance.trim();
+  const explicitNonHuman = hasExplicitNonHumanCue(`${req.npcName} ${context}`);
+  return [
+    `NPC portrait for ${req.npcName}.`,
+    context ? `Canonical visual description from the current game: ${context}.` : "",
+    explicitNonHuman
+      ? "The description explicitly indicates a non-human subject. Preserve that exact species, body plan, age category, and silhouette; do not turn it into a human or kemonomimi character unless the description says humanoid."
+      : "Unless the description explicitly says otherwise, depict this NPC as a human or humanoid person. Do not infer an animal species from the name, mood, speech verbs, or setting.",
+    req.artStyle ? `Art style: ${req.artStyle}.` : "",
+    explicitNonHuman
+      ? "Use a centered avatar composition appropriate to the subject, including a creature portrait or full head-and-body crop only when that best preserves the described non-human form."
+      : "Use a centered human/humanoid avatar composition: face and shoulders, readable expression, clear outfit cues.",
+    "High quality game avatar, clear readable design, no text, no UI, no watermark.",
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .slice(0, 1400);
 }
 
 // ── NPC Portrait Generation ──
@@ -380,6 +433,25 @@ export interface BackgroundGenResult {
   prompt?: string;
 }
 
+export interface SceneIllustrationGenRequest {
+  chatId: string;
+  prompt: string;
+  reason?: string;
+  characters?: string[];
+  characterDescriptions?: string[];
+  slug?: string;
+  genre?: string;
+  setting?: string;
+  artStyle?: string;
+  referenceImages?: string[];
+  imgSource?: string | null;
+  imgModel: string;
+  imgBaseUrl: string;
+  imgApiKey: string;
+  imgService?: string | null;
+  imgComfyWorkflow?: string | undefined;
+}
+
 /**
  * Build the image-generation prompt from the LLM's `backgroundPrompt`,
  * environmental conditions, and global style hints. Adds a strong
@@ -518,6 +590,66 @@ export async function generateBackground(req: BackgroundGenRequest): Promise<Bac
       Date.now() - startedAt,
       tag,
     );
+    return null;
+  }
+}
+
+export async function generateSceneIllustration(req: SceneIllustrationGenRequest): Promise<string | null> {
+  const baseSlug = safeName(req.slug || req.reason || req.prompt.slice(0, 80)) || "scene-illustration";
+  const slug = `${baseSlug}-${Date.now().toString(36)}`;
+  const filename = `${slug}.png`;
+  const targetDir = join(GAME_ASSETS_DIR, "backgrounds", "illustrations");
+  const targetPath = join(targetDir, filename);
+  const tag = `backgrounds:illustrations:${slug}`;
+
+  const styleHint = [req.artStyle, req.genre, req.setting].filter(Boolean).join(", ");
+  const characterHint = req.characters?.length ? `Characters: ${req.characters.join(", ")}.` : "";
+  const referenceHint = req.referenceImages?.length
+    ? "Reference handling: attached character reference images are available. Use them to match faces, hair, build, colors, and distinctive features for the referenced characters."
+    : "";
+  const descriptionHint = req.characterDescriptions?.length
+    ? `Appearance notes for visible characters without an attached reference image:\n- ${req.characterDescriptions.join("\n- ")}`
+    : "";
+  const prompt = [
+    "Image type: polished visual novel CG illustration replacing the game background for one important scene.",
+    "Camera / POV: first-person view from the player protagonist's eyes. Do not show the protagonist except hands or arms when the moment explicitly requires them.",
+    `Scene moment: ${req.prompt}`,
+    req.reason ? `Narrative purpose: ${req.reason}.` : "",
+    characterHint,
+    referenceHint,
+    descriptionHint,
+    styleHint ? `Art direction: ${styleHint}.` : "",
+    "Composition: cinematic 16:9 visual novel CG, emotionally specific staging, clear focal point, high-quality finished illustration.",
+    "Avoid: text, UI, captions, speech bubbles, watermarks, and unrelated characters.",
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, 2200);
+
+  try {
+    const result = await generateImage(
+      req.imgModel,
+      req.imgBaseUrl,
+      req.imgApiKey,
+      req.imgSource || req.imgService || "",
+      {
+        prompt,
+        model: req.imgModel,
+        width: 1024,
+        height: 576,
+        comfyWorkflow: req.imgComfyWorkflow || undefined,
+        referenceImages: req.referenceImages?.length ? req.referenceImages.slice(0, 4) : undefined,
+      },
+    );
+
+    if (!existsSync(targetDir)) mkdirSync(targetDir, { recursive: true });
+    writeFileSync(targetPath, Buffer.from(result.base64, "base64"));
+    buildAssetManifest();
+
+    console.log(`[game-asset-gen] Generated scene illustration "${slug}" -> tag: ${tag}`);
+    return tag;
+  } catch (err) {
+    console.warn(`[game-asset-gen] Failed to generate scene illustration "${slug}":`, err);
     return null;
   }
 }

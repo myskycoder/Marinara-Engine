@@ -10,6 +10,7 @@ import {
   useCallback,
   useMemo,
   useRef,
+  type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import {
@@ -20,8 +21,9 @@ import {
   useUpdateLorebookEntry,
   useDeleteLorebookEntry,
   useDeleteLorebook,
+  useReorderLorebookEntries,
 } from "../../hooks/use-lorebooks";
-import { useCharacters } from "../../hooks/use-characters";
+import { useCharacters, usePersonas } from "../../hooks/use-characters";
 import { useConnections } from "../../hooks/use-connections";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { useUIStore } from "../../stores/ui.store";
@@ -45,6 +47,7 @@ import {
   Maximize2,
   X,
   ArrowUpDown,
+  GripVertical,
   Hash,
   Sparkles,
   Loader2,
@@ -95,11 +98,13 @@ export function LorebookEditor() {
   const { data: rawLorebook, isLoading } = useLorebook(lorebookId);
   const { data: rawEntries } = useLorebookEntries(lorebookId);
   const { data: rawCharacters } = useCharacters();
+  const { data: rawPersonas } = usePersonas();
   const updateLorebook = useUpdateLorebook();
   const deleteLorebook = useDeleteLorebook();
   const createEntry = useCreateLorebookEntry();
   const updateEntry = useUpdateLorebookEntry();
   const deleteEntry = useDeleteLorebookEntry();
+  const reorderEntries = useReorderLorebookEntries();
 
   const lorebook = rawLorebook as Lorebook | undefined;
   const entries = useMemo(() => (rawEntries ?? []) as LorebookEntry[], [rawEntries]);
@@ -114,6 +119,14 @@ export function LorebookEditor() {
       }
     });
   }, [rawCharacters]);
+  const personas = useMemo(() => {
+    if (!rawPersonas) return [] as Array<{ id: string; name: string; comment?: string | null }>;
+    return (rawPersonas as Array<{ id: string; name: string; comment?: string | null }>).map((p) => ({
+      id: p.id,
+      name: p.name || "Unknown",
+      comment: p.comment ?? null,
+    }));
+  }, [rawPersonas]);
 
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
@@ -127,6 +140,9 @@ export function LorebookEditor() {
   const [showUnsavedWarning, setShowUnsavedWarning] = useState(false);
   const [entrySearch, setEntrySearch] = useState("");
   const [entrySort, setEntrySort] = useState<EntrySortKey>("order");
+  const [draggingEntryIdx, setDraggingEntryIdx] = useState<number | null>(null);
+  const [entryDragReadyIdx, setEntryDragReadyIdx] = useState<number | null>(null);
+  const [entryDropIdx, setEntryDropIdx] = useState<number | null>(null);
 
   // ── Form state for lorebook overview ──
   const [formName, setFormName] = useState("");
@@ -138,6 +154,7 @@ export function LorebookEditor() {
   const [formRecursive, setFormRecursive] = useState(false);
   const [formMaxRecursionDepth, setFormMaxRecursionDepth] = useState(3);
   const [formCharacterId, setFormCharacterId] = useState<string | null>(null);
+  const [formPersonaId, setFormPersonaId] = useState<string | null>(null);
   const [formTags, setFormTags] = useState<string[]>([]);
   const [newTag, setNewTag] = useState("");
 
@@ -161,6 +178,7 @@ export function LorebookEditor() {
     setFormRecursive(lorebook.recursiveScanning);
     setFormMaxRecursionDepth(lorebook.maxRecursionDepth ?? 3);
     setFormCharacterId(lorebook.characterId ?? null);
+    setFormPersonaId(lorebook.personaId ?? null);
     setFormTags(lorebook.tags ?? []);
     setLorebookDirty(false);
     loadedLorebookIdRef.current = lorebook.id;
@@ -215,6 +233,8 @@ export function LorebookEditor() {
         return [...result].sort((a, b) => a.order - b.order);
     }
   }, [entries, entrySearch, entrySort]);
+  const canReorderEntries =
+    entrySort === "order" && entrySearch.trim().length === 0 && filteredEntries.length > 1 && !reorderEntries.isPending;
 
   // ── Handlers ──
   const markLorebookDirty = useCallback(() => setLorebookDirty(true), []);
@@ -226,6 +246,7 @@ export function LorebookEditor() {
   // Preserve main scroll position across entry editor sub-view so returning
   // from an entry doesn't reset a long entry list (e.g. 250 entries on mobile).
   const mainScrollRef = useRef<HTMLDivElement | null>(null);
+  const entryListRef = useRef<HTMLDivElement | null>(null);
   const savedScrollTopRef = useRef(0);
   const openEntry = useCallback((entryId: string) => {
     savedScrollTopRef.current = mainScrollRef.current?.scrollTop ?? 0;
@@ -235,6 +256,100 @@ export function LorebookEditor() {
     if (editingEntryId || !mainScrollRef.current) return;
     mainScrollRef.current.scrollTop = savedScrollTopRef.current;
   }, [editingEntryId, activeTab]);
+
+  const resetEntryDragState = useCallback(() => {
+    setDraggingEntryIdx(null);
+    setEntryDragReadyIdx(null);
+    setEntryDropIdx(null);
+  }, []);
+
+  const calcEntryDropIdx = useCallback((cardIdx: number, e: ReactDragEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    return e.clientY < midY ? cardIdx : cardIdx + 1;
+  }, []);
+
+  const handleEntryDragStart = useCallback(
+    (idx: number, e: ReactDragEvent<HTMLDivElement>) => {
+      if (!canReorderEntries) {
+        e.preventDefault();
+        return;
+      }
+      setDraggingEntryIdx(idx);
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", filteredEntries[idx]?.id ?? String(idx));
+    },
+    [canReorderEntries, filteredEntries],
+  );
+
+  const handleEntryDragOver = useCallback(
+    (idx: number, e: ReactDragEvent<HTMLDivElement>) => {
+      if (!canReorderEntries || draggingEntryIdx === null) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      setEntryDropIdx(calcEntryDropIdx(idx, e));
+    },
+    [calcEntryDropIdx, canReorderEntries, draggingEntryIdx],
+  );
+
+  const handleEntryListDragOver = useCallback(
+    (e: ReactDragEvent<HTMLDivElement>) => {
+      if (!canReorderEntries || draggingEntryIdx === null) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+
+      const container = entryListRef.current;
+      if (!container || filteredEntries.length === 0) {
+        setEntryDropIdx(filteredEntries.length);
+        return;
+      }
+
+      const firstCard = container.firstElementChild as HTMLElement | null;
+      const lastCard = container.lastElementChild as HTMLElement | null;
+      if (!firstCard || !lastCard) return;
+
+      const firstRect = firstCard.getBoundingClientRect();
+      if (e.clientY < firstRect.top) {
+        setEntryDropIdx(0);
+        return;
+      }
+
+      const lastRect = lastCard.getBoundingClientRect();
+      if (e.clientY > lastRect.bottom) {
+        setEntryDropIdx(filteredEntries.length);
+      }
+    },
+    [canReorderEntries, draggingEntryIdx, filteredEntries.length],
+  );
+
+  const commitEntryDrop = useCallback(
+    (e: ReactDragEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      const sourceIdx = draggingEntryIdx;
+      const targetIdx = entryDropIdx;
+      resetEntryDragState();
+      if (!lorebookId || !canReorderEntries || sourceIdx === null || targetIdx === null) return;
+
+      let insertAt = targetIdx;
+      if (sourceIdx < insertAt) insertAt--;
+      if (sourceIdx === insertAt) return;
+
+      const entryIds = filteredEntries.map((entry) => entry.id);
+      const [movedEntryId] = entryIds.splice(sourceIdx, 1);
+      if (!movedEntryId) return;
+      entryIds.splice(insertAt, 0, movedEntryId);
+      reorderEntries.mutate({ lorebookId, entryIds });
+    },
+    [
+      canReorderEntries,
+      draggingEntryIdx,
+      entryDropIdx,
+      filteredEntries,
+      lorebookId,
+      reorderEntries,
+      resetEntryDragState,
+    ],
+  );
 
   const handleSaveLorebook = useCallback(async () => {
     if (!lorebookId) return;
@@ -251,6 +366,7 @@ export function LorebookEditor() {
         recursiveScanning: formRecursive,
         maxRecursionDepth: formMaxRecursionDepth,
         characterId: formCharacterId,
+        personaId: formPersonaId,
         tags: formTags,
       });
       setLorebookDirty(false);
@@ -268,6 +384,7 @@ export function LorebookEditor() {
     formRecursive,
     formMaxRecursionDepth,
     formCharacterId,
+    formPersonaId,
     formTags,
     updateLorebook,
   ]);
@@ -281,6 +398,7 @@ export function LorebookEditor() {
         entryId: editingEntryId,
         name: entryForm.name,
         content: entryForm.content,
+        description: entryForm.description,
         keys: entryForm.keys,
         secondaryKeys: entryForm.secondaryKeys,
         enabled: entryForm.enabled,
@@ -430,6 +548,21 @@ export function LorebookEditor() {
                 onChange={(e) => updateEntryForm({ name: e.target.value })}
                 className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
                 placeholder="Entry name"
+              />
+            </FieldGroup>
+
+            {/* Description */}
+            <FieldGroup
+              label="Description"
+              icon={FileText}
+              help="Brief summary of what this entry is about. Used by the Knowledge Router agent to decide whether to inject this entry — not sent to the main AI as content."
+            >
+              <textarea
+                value={entryForm.description ?? ""}
+                onChange={(e) => updateEntryForm({ description: e.target.value })}
+                rows={2}
+                className="w-full resize-y rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                placeholder="Brief summary of what this entry is about (used by Knowledge Router agent)."
               />
             </FieldGroup>
 
@@ -890,12 +1023,14 @@ export function LorebookEditor() {
                     <select
                       value={formCharacterId ?? ""}
                       onChange={(e) => {
-                        setFormCharacterId(e.target.value || null);
+                        const nextCharacterId = e.target.value || null;
+                        setFormCharacterId(nextCharacterId);
+                        if (nextCharacterId) setFormPersonaId(null);
                         markLorebookDirty();
                       }}
                       className="flex-1 rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
                     >
-                      <option value="">None (global)</option>
+                      <option value="">None</option>
                       {characters.map((c) => (
                         <option key={c.id} value={c.id}>
                           {c.name}
@@ -910,6 +1045,45 @@ export function LorebookEditor() {
                         }}
                         className="rounded-xl bg-[var(--secondary)] p-2.5 text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:text-[var(--foreground)]"
                         title="Unlink character"
+                      >
+                        <X size="0.875rem" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Persona Link */}
+                <div>
+                  <label className="mb-1.5 flex items-center gap-1 text-xs font-medium">
+                    Linked Persona{" "}
+                    <HelpTooltip text="When linked to a persona, this lorebook will only activate in chats that use that persona." />
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={formPersonaId ?? ""}
+                      onChange={(e) => {
+                        const nextPersonaId = e.target.value || null;
+                        setFormPersonaId(nextPersonaId);
+                        if (nextPersonaId) setFormCharacterId(null);
+                        markLorebookDirty();
+                      }}
+                      className="flex-1 rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                    >
+                      <option value="">None</option>
+                      {personas.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.comment ? `${p.name} — ${p.comment}` : p.name}
+                        </option>
+                      ))}
+                    </select>
+                    {formPersonaId && (
+                      <button
+                        onClick={() => {
+                          setFormPersonaId(null);
+                          markLorebookDirty();
+                        }}
+                        className="rounded-xl bg-[var(--secondary)] p-2.5 text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:text-[var(--foreground)]"
+                        title="Unlink persona"
                       >
                         <X size="0.875rem" />
                       </button>
@@ -1083,64 +1257,128 @@ export function LorebookEditor() {
                   </div>
                 )}
 
-                {filteredEntries.map((entry) => (
+                {filteredEntries.length > 0 && (
                   <div
-                    key={entry.id}
-                    onClick={() => openEntry(entry.id)}
-                    className="group flex cursor-pointer items-center gap-3 rounded-xl bg-[var(--secondary)] p-3 ring-1 ring-[var(--border)] transition-all hover:ring-amber-400/30"
+                    ref={entryListRef}
+                    className="space-y-2"
+                    onDragOver={handleEntryListDragOver}
+                    onDrop={commitEntryDrop}
                   >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={cn("h-2 w-2 rounded-full", entry.enabled ? "bg-emerald-400" : "bg-zinc-500")}
-                        />
-                        <span className="truncate text-sm font-medium">{entry.name}</span>
-                        {entry.constant && (
-                          <span className="rounded bg-amber-400/15 px-1.5 py-0.5 text-[0.5625rem] font-medium text-amber-400">
-                            CONST
-                          </span>
-                        )}
-                        {entry.locked && (
-                          <span className="rounded bg-sky-400/15 px-1.5 py-0.5 text-[0.5625rem] font-medium text-sky-400">
-                            <Lock size="0.5rem" className="inline mr-0.5" />
-                            LOCKED
-                          </span>
-                        )}
-                        {entry.tag && (
-                          <span className="rounded bg-[var(--accent)] px-1.5 py-0.5 text-[0.5625rem] text-[var(--muted-foreground)]">
-                            {entry.tag}
-                          </span>
-                        )}
-                      </div>
-                      <div className="mt-0.5 flex items-center gap-2 text-[0.6875rem] text-[var(--muted-foreground)]">
-                        <span className="flex items-center gap-1">
-                          <Key size="0.625rem" />
-                          {entry.keys.length > 0 ? entry.keys.slice(0, 3).join(", ") : "No keys"}
-                          {entry.keys.length > 3 && ` +${entry.keys.length - 3}`}
-                        </span>
-                        <span>•</span>
-                        <span>Order {entry.order}</span>
-                        <span>•</span>
-                        <span>Depth {entry.depth}</span>
-                        <span>•</span>
-                        <span className="flex items-center gap-0.5">
-                          <Hash size="0.5625rem" />
-                          {estimateTokens(entry.content).toLocaleString()} tk
-                        </span>
-                      </div>
-                    </div>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDeleteEntry(entry.id);
-                      }}
-                      className="rounded-lg p-1.5 opacity-0 transition-all hover:bg-[var(--destructive)]/15 group-hover:opacity-100 max-md:opacity-100"
-                    >
-                      <Trash2 size="0.75rem" className="text-[var(--destructive)]" />
-                    </button>
-                    <ChevronRight size="0.875rem" className="text-[var(--muted-foreground)]" />
+                    {filteredEntries.map((entry, idx) => {
+                      const showDropBefore =
+                        entryDropIdx === idx &&
+                        draggingEntryIdx !== null &&
+                        draggingEntryIdx !== idx &&
+                        draggingEntryIdx !== idx - 1;
+                      const showDropAfter =
+                        idx === filteredEntries.length - 1 &&
+                        entryDropIdx === filteredEntries.length &&
+                        draggingEntryIdx !== null &&
+                        draggingEntryIdx !== idx;
+
+                      return (
+                        <div key={entry.id}>
+                          {showDropBefore && <div className="mx-2 mb-1 h-0.5 rounded-full bg-amber-400" />}
+                          <div
+                            draggable={canReorderEntries && entryDragReadyIdx === idx}
+                            onDragStart={(e) => handleEntryDragStart(idx, e)}
+                            onDragOver={(e) => {
+                              e.stopPropagation();
+                              handleEntryDragOver(idx, e);
+                            }}
+                            onDrop={(e) => {
+                              e.stopPropagation();
+                              commitEntryDrop(e);
+                            }}
+                            onDragEnd={resetEntryDragState}
+                            onClick={() => openEntry(entry.id)}
+                            className={cn(
+                              "group flex cursor-pointer items-center gap-3 rounded-xl bg-[var(--secondary)] p-3 ring-1 ring-[var(--border)] transition-all hover:ring-amber-400/30",
+                              draggingEntryIdx === idx && "opacity-40",
+                            )}
+                          >
+                            <div
+                              className={cn(
+                                "shrink-0 rounded p-0.5 text-[var(--muted-foreground)] transition-colors",
+                                canReorderEntries
+                                  ? "cursor-grab hover:bg-[var(--accent)] hover:text-[var(--foreground)] active:cursor-grabbing"
+                                  : "cursor-not-allowed opacity-40",
+                              )}
+                              title={
+                                canReorderEntries ? "Drag to reorder" : "Use Order sort and clear search to reorder"
+                              }
+                              onClick={(e) => e.stopPropagation()}
+                              onMouseDown={(e) => {
+                                e.stopPropagation();
+                                if (canReorderEntries) setEntryDragReadyIdx(idx);
+                              }}
+                              onMouseUp={(e) => {
+                                e.stopPropagation();
+                                setEntryDragReadyIdx(null);
+                              }}
+                            >
+                              <GripVertical size="0.875rem" />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={cn(
+                                    "h-2 w-2 rounded-full",
+                                    entry.enabled ? "bg-emerald-400" : "bg-zinc-500",
+                                  )}
+                                />
+                                <span className="truncate text-sm font-medium">{entry.name}</span>
+                                {entry.constant && (
+                                  <span className="rounded bg-amber-400/15 px-1.5 py-0.5 text-[0.5625rem] font-medium text-amber-400">
+                                    CONST
+                                  </span>
+                                )}
+                                {entry.locked && (
+                                  <span className="rounded bg-sky-400/15 px-1.5 py-0.5 text-[0.5625rem] font-medium text-sky-400">
+                                    <Lock size="0.5rem" className="inline mr-0.5" />
+                                    LOCKED
+                                  </span>
+                                )}
+                                {entry.tag && (
+                                  <span className="rounded bg-[var(--accent)] px-1.5 py-0.5 text-[0.5625rem] text-[var(--muted-foreground)]">
+                                    {entry.tag}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="mt-0.5 flex items-center gap-2 text-[0.6875rem] text-[var(--muted-foreground)]">
+                                <span className="flex items-center gap-1">
+                                  <Key size="0.625rem" />
+                                  {entry.keys.length > 0 ? entry.keys.slice(0, 3).join(", ") : "No keys"}
+                                  {entry.keys.length > 3 && ` +${entry.keys.length - 3}`}
+                                </span>
+                                <span>•</span>
+                                <span>Order {entry.order}</span>
+                                <span>•</span>
+                                <span>Depth {entry.depth}</span>
+                                <span>•</span>
+                                <span className="flex items-center gap-0.5">
+                                  <Hash size="0.5625rem" />
+                                  {estimateTokens(entry.content).toLocaleString()} tk
+                                </span>
+                              </div>
+                            </div>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteEntry(entry.id);
+                              }}
+                              className="rounded-lg p-1.5 opacity-0 transition-all hover:bg-[var(--destructive)]/15 group-hover:opacity-100 max-md:opacity-100"
+                            >
+                              <Trash2 size="0.75rem" className="text-[var(--destructive)]" />
+                            </button>
+                            <ChevronRight size="0.875rem" className="text-[var(--muted-foreground)]" />
+                          </div>
+                          {showDropAfter && <div className="mx-2 mt-1 h-0.5 rounded-full bg-amber-400" />}
+                        </div>
+                      );
+                    })}
                   </div>
-                ))}
+                )}
               </div>
             )}
           </div>

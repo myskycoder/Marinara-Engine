@@ -32,6 +32,7 @@ function parseLorebookRow(row: Record<string, unknown>) {
     generatedBy: row.generatedBy || null,
     sourceAgentId: row.sourceAgentId || null,
     characterId: row.characterId || null,
+    personaId: row.personaId || null,
     chatId: row.chatId || null,
     tags: JSON.parse((row.tags as string) || "[]"),
   };
@@ -85,6 +86,15 @@ export function createLorebooksStorage(db: DB) {
       return rows.map((r) => parseLorebookRow(r as Record<string, unknown>));
     },
 
+    async listByPersona(personaId: string) {
+      const rows = await db
+        .select()
+        .from(lorebooks)
+        .where(eq(lorebooks.personaId, personaId))
+        .orderBy(desc(lorebooks.updatedAt));
+      return rows.map((r) => parseLorebookRow(r as Record<string, unknown>));
+    },
+
     async listByChat(chatId: string) {
       const rows = await db
         .select()
@@ -113,6 +123,7 @@ export function createLorebooksStorage(db: DB) {
         recursiveScanning: String(input.recursiveScanning ?? false),
         maxRecursionDepth: input.maxRecursionDepth ?? 3,
         characterId: input.characterId ?? null,
+        personaId: input.personaId ?? null,
         chatId: input.chatId ?? null,
         enabled: String(input.enabled ?? true),
         tags: input.tags ? JSON.stringify(input.tags) : "[]",
@@ -134,6 +145,7 @@ export function createLorebooksStorage(db: DB) {
       if (input.recursiveScanning !== undefined) updates.recursiveScanning = String(input.recursiveScanning);
       if (input.maxRecursionDepth !== undefined) updates.maxRecursionDepth = input.maxRecursionDepth;
       if (input.characterId !== undefined) updates.characterId = input.characterId;
+      if (input.personaId !== undefined) updates.personaId = input.personaId;
       if (input.chatId !== undefined) updates.chatId = input.chatId;
       if (input.enabled !== undefined) updates.enabled = String(input.enabled);
       if (input.tags !== undefined) updates.tags = JSON.stringify(input.tags);
@@ -175,10 +187,16 @@ export function createLorebooksStorage(db: DB) {
      * A lorebook is relevant if it's enabled AND one of:
      *  - Its ID is in `activeLorebookIds` (user explicitly added it to this chat)
      *  - Its `characterId` matches one of the chat's active characters
+     *  - Its `personaId` matches the chat's active persona
      *  - Its `chatId` matches the current chat
      * When no filters are provided, returns entries from ALL enabled lorebooks (legacy behavior).
      */
-    async listActiveEntries(filters?: { activeLorebookIds?: string[]; characterIds?: string[]; chatId?: string }) {
+    async listActiveEntries(filters?: {
+      activeLorebookIds?: string[];
+      characterIds?: string[];
+      personaId?: string | null;
+      chatId?: string;
+    }) {
       const enabledBooks = await db.select().from(lorebooks).where(eq(lorebooks.enabled, "true"));
 
       let relevantBooks = enabledBooks;
@@ -188,6 +206,8 @@ export function createLorebooksStorage(db: DB) {
           if (filters.activeLorebookIds?.includes(b.id)) return true;
           // Belongs to one of the active characters
           if (b.characterId && filters.characterIds?.includes(b.characterId)) return true;
+          // Belongs to the active persona
+          if (b.personaId && b.personaId === filters.personaId) return true;
           // Belongs to this chat
           if (b.chatId && b.chatId === filters.chatId) return true;
           return false;
@@ -218,6 +238,7 @@ export function createLorebooksStorage(db: DB) {
         lorebookId: input.lorebookId,
         name: input.name,
         content: input.content ?? "",
+        description: input.description ?? "",
         keys: JSON.stringify(input.keys ?? []),
         secondaryKeys: JSON.stringify(input.secondaryKeys ?? []),
         enabled: String(input.enabled ?? true),
@@ -256,6 +277,7 @@ export function createLorebooksStorage(db: DB) {
       const updates: Record<string, unknown> = { updatedAt: now() };
       if (input.name !== undefined) updates.name = input.name;
       if (input.content !== undefined) updates.content = input.content;
+      if (input.description !== undefined) updates.description = input.description;
       if (input.keys !== undefined) updates.keys = JSON.stringify(input.keys);
       if (input.secondaryKeys !== undefined) updates.secondaryKeys = JSON.stringify(input.secondaryKeys);
       if (input.enabled !== undefined) updates.enabled = String(input.enabled);
@@ -306,6 +328,34 @@ export function createLorebooksStorage(db: DB) {
         results.push(result);
       }
       return results;
+    },
+
+    async reorderEntries(lorebookId: string, entryIds: string[]) {
+      const existingEntries = (await this.listEntries(lorebookId)).map((entry) => {
+        const row = entry as unknown as Record<string, unknown>;
+        return {
+          id: String(row.id),
+          order: typeof row.order === "number" ? row.order : Number(row.order ?? 0),
+        };
+      });
+      const orderById = new Map(existingEntries.map((entry) => [entry.id, entry.order]));
+      const existingIds = new Set(existingEntries.map((entry) => entry.id));
+      const orderedIds = entryIds.filter((id, index, ids) => existingIds.has(id) && ids.indexOf(id) === index);
+      const missingIds = existingEntries
+        .map((entry) => entry.id)
+        .filter((id) => !orderedIds.includes(id))
+        .sort((leftId, rightId) => (orderById.get(leftId) ?? 0) - (orderById.get(rightId) ?? 0));
+      const nextIds = [...orderedIds, ...missingIds];
+      const timestamp = now();
+
+      for (const [index, id] of nextIds.entries()) {
+        await db
+          .update(lorebookEntries)
+          .set({ order: (index + 1) * 10, updatedAt: timestamp })
+          .where(and(eq(lorebookEntries.id, id), eq(lorebookEntries.lorebookId, lorebookId)));
+      }
+
+      return this.listEntries(lorebookId);
     },
 
     async removeEntry(id: string) {

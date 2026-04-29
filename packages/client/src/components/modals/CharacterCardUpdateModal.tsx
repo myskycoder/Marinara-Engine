@@ -145,8 +145,7 @@ export function CharacterCardUpdateModal({ open, onClose }: Props) {
               {(typeof parsedData.name === "string" && parsedData.name) || entry.characterName}
             </p>
             <p className="text-xs text-[var(--muted-foreground)]">
-              {entry.agentName} proposed {entry.updates.length}{" "}
-              {entry.updates.length === 1 ? "change" : "changes"}
+              {entry.agentName} proposed {entry.updates.length} {entry.updates.length === 1 ? "change" : "changes"}
               {queueNote}
             </p>
           </div>
@@ -155,7 +154,8 @@ export function CharacterCardUpdateModal({ open, onClose }: Props) {
         {applicableUpdates.length === 0 && (
           <div className="flex items-center gap-2 rounded-lg bg-[var(--secondary)] p-2.5 text-xs text-[var(--muted-foreground)]">
             <AlertCircle size="0.75rem" className="shrink-0" />
-            None of these proposals still match the current card — the field was probably already edited. Reject to dismiss.
+            None of these proposals still match the current card — the field was probably already edited. Reject to
+            dismiss.
           </div>
         )}
 
@@ -224,11 +224,7 @@ export function CharacterCardUpdateModal({ open, onClose }: Props) {
             disabled={updateCharacter.isPending || applicableUpdates.length === 0}
             className="flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-4 py-2 text-xs font-medium text-[var(--primary-foreground)] transition-all hover:opacity-90 disabled:opacity-50"
           >
-            {updateCharacter.isPending ? (
-              <Loader2 size="0.75rem" className="animate-spin" />
-            ) : (
-              <Check size="0.75rem" />
-            )}
+            {updateCharacter.isPending ? <Loader2 size="0.75rem" className="animate-spin" /> : <Check size="0.75rem" />}
             Approve {applicableUpdates.length > 0 ? `(${applicableUpdates.length})` : ""}
           </button>
         </div>

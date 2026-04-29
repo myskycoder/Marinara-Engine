@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { SessionSummary } from "@marinara-engine/shared";
-import { buildGmSystemPrompt, buildSessionSummaryPrompt } from "../src/services/game/gm-prompts.js";
+import {
+  buildGmFormatReminder,
+  buildGmSystemPrompt,
+  buildSessionConclusionPrompt,
+  buildSessionSummaryPrompt,
+} from "../src/services/game/gm-prompts.js";
 import { buildRecapPrompt } from "../src/services/game/session.service.js";
 
 function makeSummary(overrides: Partial<SessionSummary>): SessionSummary {
@@ -12,8 +17,8 @@ function makeSummary(overrides: Partial<SessionSummary>): SessionSummary {
     partyDynamics: overrides.partyDynamics ?? "Party dynamics.",
     partyState: overrides.partyState ?? "Party state.",
     keyDiscoveries: overrides.keyDiscoveries ?? [],
-    revelations: overrides.revelations ?? [],
     characterMoments: overrides.characterMoments ?? [],
+    littleDetails: overrides.littleDetails ?? [],
     statsSnapshot: overrides.statsSnapshot ?? {},
     npcUpdates: overrides.npcUpdates ?? [],
     timestamp: overrides.timestamp ?? "2026-04-23T00:00:00.000Z",
@@ -34,7 +39,6 @@ test("GM prompt includes every prior session summary but only the latest session
         resumePoint: "Resume from the ruined bridge.",
         partyDynamics: "session-one-dynamics",
         keyDiscoveries: ["session-one-discovery"],
-        revelations: ["session-one-revelation"],
         characterMoments: ["session-one-moment"],
         npcUpdates: ["session-one-npc-update"],
         statsSnapshot: { marker: "session-one-stats" },
@@ -45,7 +49,6 @@ test("GM prompt includes every prior session summary but only the latest session
         resumePoint: "Resume from the archive vault.",
         partyDynamics: "session-two-dynamics",
         keyDiscoveries: ["session-two-discovery"],
-        revelations: ["session-two-revelation"],
         characterMoments: ["session-two-moment"],
         npcUpdates: ["session-two-npc-update"],
         statsSnapshot: { marker: "session-two-stats" },
@@ -56,7 +59,6 @@ test("GM prompt includes every prior session summary but only the latest session
         resumePoint: "Resume with the party hanging from the observatory lift.",
         partyDynamics: "session-three-dynamics",
         keyDiscoveries: ["session-three-discovery"],
-        revelations: ["session-three-revelation"],
         characterMoments: ["session-three-moment"],
         npcUpdates: ["session-three-npc-update"],
         statsSnapshot: { marker: "session-three-stats" },
@@ -83,7 +85,6 @@ test("GM prompt includes every prior session summary but only the latest session
   assert.match(prompt, /Key discoveries: session-three-discovery/);
   assert.doesNotMatch(prompt, /session-one-dynamics/);
   assert.doesNotMatch(prompt, /session-two-discovery/);
-  assert.doesNotMatch(prompt, /session-one-revelation/);
   assert.doesNotMatch(prompt, /session-two-npc-update/);
   assert.doesNotMatch(prompt, /session-one-stats/);
 });
@@ -92,9 +93,134 @@ test("session summary prompt requires a resume point and cross-field dedupe", ()
   const prompt = buildSessionSummaryPrompt("Polish");
 
   assert.match(prompt, /resumePoint/);
+  assert.match(prompt, /key events in 2–4 paragraphs/);
+  assert.match(prompt, /littleDetails/);
+  assert.match(prompt, /small personal details to recall later/);
   assert.match(prompt, /Each fact belongs in the single best category only once\./);
+  assert.match(prompt, /Use this single bucket for both discoveries and reveals\./);
+  assert.doesNotMatch(prompt, /revelations/);
   assert.match(prompt, /Language: write every natural-language value in Polish\./);
   assert.match(prompt, /Output valid JSON only\./);
+});
+
+test("GM prompt normalizes native language labels to canonical English names", () => {
+  const prompt = buildGmSystemPrompt({
+    gameActiveState: "exploration",
+    storyArc: null,
+    plotTwists: null,
+    map: null,
+    npcs: [],
+    sessionSummaries: [],
+    sessionNumber: 1,
+    partyNames: ["Aster"],
+    playerName: "Mari",
+    playerCard: null,
+    gmCharacterCard: null,
+    difficulty: "normal",
+    genre: "fantasy",
+    setting: "original",
+    tone: "balanced",
+    language: "Polski",
+  });
+
+  assert.match(prompt, /Write all narration, dialogue, descriptions, and game text in Polish/);
+  assert.match(
+    prompt,
+    /only XML tags, commands, structured field names, and deliberate proper nouns or code terms may stay in English/,
+  );
+  assert.match(prompt, /The prose must read as native Polish, not translated from English:/);
+  assert.match(
+    prompt,
+    /remove grammar errors, awkward calques, mixed-language scaffolding, and untranslated filler before finalizing\./,
+  );
+  assert.doesNotMatch(prompt, /in Polski/);
+});
+
+test("GM format reminder reinforces native-language output quality near generation", () => {
+  const prompt = buildGmFormatReminder({
+    gameActiveState: "exploration",
+    sessionNumber: 1,
+    partyNames: ["Aster"],
+    playerName: "Mari",
+    language: "Polski",
+  });
+
+  assert.match(prompt, /Write every player-visible line in native Polish\./);
+  assert.match(prompt, /The English examples below are format-only; do not imitate their wording or syntax\./);
+  assert.match(
+    prompt,
+    /Before finalizing, silently copy-edit for grammar, word order, punctuation, orthography, and language-specific agreement, removing calques, mixed-language scaffolding, and untranslated filler\./,
+  );
+  assert.match(
+    prompt,
+    /Only tags, commands, field names, and deliberate proper nouns or code terms may remain in English\./,
+  );
+  assert.doesNotMatch(prompt, /native Polski/);
+});
+
+test("GM format reminder only allows explicit content for NSFW games", () => {
+  const sfwPrompt = buildGmFormatReminder({
+    gameActiveState: "exploration",
+    sessionNumber: 1,
+    partyNames: ["Aster"],
+    playerName: "Mari",
+    rating: "sfw",
+  });
+  const nsfwPrompt = buildGmFormatReminder({
+    gameActiveState: "exploration",
+    sessionNumber: 1,
+    partyNames: ["Aster"],
+    playerName: "Mari",
+    rating: "nsfw",
+  });
+
+  assert.doesNotMatch(sfwPrompt, /Adult mode enabled, explicit content allowed\./);
+  assert.match(nsfwPrompt, /Adult mode enabled, explicit content allowed\./);
+});
+
+test("GM format reminder documents the simplified resolved skill_check command", () => {
+  const prompt = buildGmFormatReminder({
+    gameActiveState: "exploration",
+    sessionNumber: 1,
+    partyNames: ["Aster"],
+    playerName: "Mari",
+  });
+
+  assert.match(
+    prompt,
+    /\[skill_check: skill="Skill Name" dc="1-20" rolls="1-20" modifier="0-10" total="roll \+ modifier \| 1 \| 20" result="critical_success \| success \| failure \| critical_failure"\]/,
+  );
+  assert.match(prompt, /when uncertainty or the player's actions should be resolved mechanically\./);
+  assert.match(prompt, /You choose the roll result fairly, then narrate the consequence in the same turn\./);
+  assert.doesNotMatch(prompt, /Legacy fallback:/);
+  assert.doesNotMatch(prompt, /\bused=/);
+  assert.doesNotMatch(prompt, /\bmode=/);
+});
+
+test("session conclusion prompt combines summary progression and cards in one JSON shape", () => {
+  const promptWithCards = buildSessionConclusionPrompt({ language: "Polish", includeCharacterCards: true });
+  const promptWithoutCards = buildSessionConclusionPrompt({ includeCharacterCards: false });
+
+  assert.match(
+    promptWithCards,
+    /exactly these top-level keys and no others: summary, campaignProgression, characterCards\./,
+  );
+  assert.match(
+    promptWithCards,
+    /summary must be an object with exactly these keys and no others: summary, resumePoint, partyDynamics, partyState, keyDiscoveries, characterMoments, littleDetails, npcUpdates, statsSnapshot\./,
+  );
+  assert.match(promptWithCards, /key events in 2-4 paragraphs/);
+  assert.match(promptWithCards, /summary\.littleDetails/);
+  assert.match(
+    promptWithCards,
+    /campaignProgression must be an object with exactly these keys and no others: storyArc, plotTwists, partyArcs\./,
+  );
+  assert.match(promptWithCards, /Return every supplied character exactly once, even if unchanged\./);
+  assert.match(promptWithCards, /Language: write every natural-language value in Polish\./);
+  assert.match(
+    promptWithoutCards,
+    /characterCards must be an empty JSON array because no current character cards were supplied\./,
+  );
 });
 
 test("recap prompt includes the stored resume point and the final narrated beat", () => {

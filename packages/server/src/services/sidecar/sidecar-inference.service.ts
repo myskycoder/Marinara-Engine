@@ -334,22 +334,6 @@ export async function unloadModel(): Promise<void> {
   await sidecarProcessService.stop();
 }
 
-const SCENE_WIDGET_UPDATE_SCHEMA = {
-  type: "object" as const,
-  properties: {
-    widgetId: { type: "string" as const },
-    value: { type: ["number", "string"] as const },
-    count: { type: "number" as const },
-    add: { type: "string" as const },
-    remove: { type: "string" as const },
-    running: { type: "boolean" as const },
-    seconds: { type: "number" as const },
-    statName: { type: "string" as const },
-  },
-  required: ["widgetId"] as const,
-  additionalProperties: false as const,
-};
-
 const SCENE_ANALYSIS_SCHEMA = {
   type: "object" as const,
   properties: {
@@ -371,11 +355,6 @@ const SCENE_ANALYSIS_SCHEMA = {
         additionalProperties: false as const,
       },
     },
-    widgetUpdates: {
-      type: "array" as const,
-      maxItems: 20,
-      items: SCENE_WIDGET_UPDATE_SCHEMA,
-    },
     segmentEffects: {
       type: "array" as const,
       maxItems: 20,
@@ -391,32 +370,49 @@ const SCENE_ANALYSIS_SCHEMA = {
             items: { type: "string" as const },
             maxItems: 3,
           },
-          expressions: {
-            type: "object" as const,
-            additionalProperties: { type: "string" as const },
-          },
-          widgetUpdates: {
-            type: "array" as const,
-            items: SCENE_WIDGET_UPDATE_SCHEMA,
-            maxItems: 10,
-          },
         },
         required: ["segment"] as const,
         additionalProperties: false as const,
       },
     },
+    directions: {
+      type: "array" as const,
+      maxItems: 8,
+      items: {
+        type: "object" as const,
+        properties: {
+          effect: {
+            type: "string" as const,
+            enum: [
+              "fade_from_black",
+              "fade_to_black",
+              "flash",
+              "screen_shake",
+              "blur",
+              "vignette",
+              "letterbox",
+              "color_grade",
+              "focus",
+            ] as const,
+          },
+          duration: { type: "number" as const },
+          intensity: { type: "number" as const },
+          target: {
+            type: "string" as const,
+            enum: ["background", "content", "all"] as const,
+          },
+          params: {
+            type: "object" as const,
+            additionalProperties: { type: "string" as const },
+          },
+        },
+        required: ["effect"] as const,
+        additionalProperties: false as const,
+      },
+    },
   },
   additionalProperties: false as const,
-  required: [
-    "background",
-    "music",
-    "ambient",
-    "weather",
-    "timeOfDay",
-    "reputationChanges",
-    "widgetUpdates",
-    "segmentEffects",
-  ] as const,
+  required: ["background", "music", "ambient", "weather", "timeOfDay", "reputationChanges", "segmentEffects"] as const,
 };
 
 export async function analyzeScene(systemPrompt: string, userPrompt: string): Promise<SceneAnalysis> {

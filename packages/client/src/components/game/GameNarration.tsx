@@ -1,7 +1,17 @@
 // ──────────────────────────────────────────────
 // Game: Narration Area (VN-style segmented box)
 // ──────────────────────────────────────────────
-import { useEffect, useMemo, useState, useCallback, useRef, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  useCallback,
+  useRef,
+  type ReactNode,
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import DOMPurify from "dompurify";
 import {
   MessageCircle,
@@ -14,12 +24,16 @@ import {
   Check,
   Play,
   Pause,
+  Square,
   Trash2,
+  Volume2,
+  VolumeX,
+  Loader2,
 } from "lucide-react";
-import { cn } from "../../lib/utils";
+import { cn, getAvatarCropStyle, type AvatarCrop } from "../../lib/utils";
 import { findNamedMapValue } from "../../lib/game-character-name-match";
 import type { GameSegmentEdit } from "../../lib/game-segment-edits";
-import { stripGmTagsKeepReadables } from "../../lib/game-tag-parser";
+import { parseGmTags, stripGmTagsKeepReadables } from "../../lib/game-tag-parser";
 import { audioManager } from "../../lib/game-audio";
 import {
   DIALOGUE_QUOTE_CAPTURE_GROUP_PATTERN_SOURCE,
@@ -28,16 +42,20 @@ import {
 } from "../../lib/dialogue-quotes";
 import type { SpriteInfo } from "../../hooks/use-characters";
 import { useTranslate } from "../../hooks/use-translate";
+import { useTTSConfig } from "../../hooks/use-tts";
 import { useGameAssetStore } from "../../stores/game-asset.store";
 import { useGameModeStore } from "../../stores/game-mode.store";
 import { useUIStore } from "../../stores/ui.store";
 import { findCharacterByName, resolveMessageMacros } from "../../lib/chat-macros";
 import { animateTextHtml } from "./AnimatedText";
-import type { PartyDialogueLine, Message } from "@marinara-engine/shared";
+import { ttsService } from "../../lib/tts-service";
+import { getOrCreateCachedTTSAudioBlob } from "../../lib/tts-audio-cache";
+import { resolveTTSVoiceForSpeaker, splitTTSChunks, ttsConfigMatchesSpeaker } from "../../lib/tts-dialogue";
+import type { PartyDialogueLine, Message, TTSConfig, GameNpc } from "@marinara-engine/shared";
 import type { CharacterMap, PersonaInfo } from "../chat/chat-area.types";
 
 /** Build inline style for a color that may be a plain color or a CSS gradient. */
-function nameColorStyle(color?: string): React.CSSProperties | undefined {
+function nameColorStyle(color?: string): CSSProperties | undefined {
   if (!color) return undefined;
   if (color.includes("gradient(")) {
     return {
@@ -60,6 +78,9 @@ const PARTY_TYPE_ICONS: Record<string, string> = {
   thought: "💭",
   whisper: "🤫",
 };
+
+const GAME_DIALOGUE_AVATAR_CLASS =
+  "h-[calc(4rem*var(--game-avatar-scale))] w-[calc(4rem*var(--game-avatar-scale))] max-h-[min(8.5rem,32vw)] max-w-[min(8.5rem,32vw)] rounded-xl border-2 border-white/15 shadow-xl sm:h-[calc(5rem*var(--game-avatar-scale))] sm:w-[calc(5rem*var(--game-avatar-scale))] sm:max-h-[min(9.5rem,26vw)] sm:max-w-[min(9.5rem,26vw)]";
 
 type NarrationMessage = Pick<Message, "id" | "chatId" | "role" | "content" | "characterId" | "extra"> & {
   characterName?: string;
@@ -85,13 +106,56 @@ interface NarrationSegment {
   readableContent?: string;
 }
 
+type SpeakerAvatarInfo = {
+  url: string;
+  crop?: AvatarCrop | null;
+};
+
+type GameSegmentVoiceEntry =
+  | { status: "loading"; speaker?: string; tone?: string; voice?: string; chunks: string[] }
+  | { status: "ready"; speaker?: string; tone?: string; voice?: string; chunks: string[]; urls: string[] }
+  | { status: "error"; speaker?: string; tone?: string; voice?: string; chunks: string[] };
+
+interface GameSegmentVoiceRequest {
+  speaker?: string;
+  tone?: string;
+  voice?: string;
+  chunks: string[];
+}
+
+type GameSideLine = PartyDialogueLine & {
+  voiceSourceMessageId?: string | null;
+  voiceSourceSegmentIndex?: number | null;
+  voiceSourceRole?: Message["role"] | null;
+};
+
+const EMPTY_GAME_SIDE_LINES: GameSideLine[] = [];
+
+interface GameVoiceAudioJob {
+  cacheKey: string;
+  textCacheKey: string;
+  chunk: string;
+  speaker?: string;
+  tone?: string;
+  voice?: string;
+}
+
+interface GameVoiceEntryPlan {
+  key: string;
+  audioJobs: GameVoiceAudioJob[];
+  controller: AbortController;
+}
+
 interface GameNarrationProps {
   messages: NarrationMessage[];
   isStreaming: boolean;
   characterMap: CharacterMap;
+  activeCharacterIds?: string[];
   personaInfo?: PersonaInfo;
   /** Map of lowercase character name → sprite images for expression resolution */
   spriteMap?: Map<string, SpriteInfo[]>;
+  /** Additional lowercase speaker name → avatar entries, e.g. matched library cards outside the party. */
+  speakerAvatarMap?: Map<string, SpeakerAvatarInfo>;
   onActiveSpeakerChange?: (speaker: { name: string; avatarUrl: string; expression?: string } | null) => void;
   /** Called when the user enters a new narration segment (for segment-tied effects). Index is 0-based. */
   onSegmentEnter?: (segmentIndex: number) => void;
@@ -121,9 +185,7 @@ interface GameNarrationProps {
   onRetryGeneration?: () => void;
   /** Whether direction effects (cinematic overlays) are currently playing */
   directionsActive?: boolean;
-  /** Whether this is a restored session (skip typewriter, jump to saved segment) */
-  isRestored?: boolean;
-  /** Whether a locally saved narration position exists for this chat. */
+  /** Whether a validated saved narration position exists for the current assistant message. */
   hasStoredNarrationPosition?: boolean;
   /** The saved narration segment index to restore to */
   restoredSegmentIndex?: number;
@@ -135,6 +197,8 @@ interface GameNarrationProps {
   widgetSlot?: ReactNode;
   /** Slot rendered above the narration box for GM choice cards */
   choicesSlot?: ReactNode;
+  /** Slot rendered above the narration box for skill check results */
+  skillCheckSlot?: ReactNode;
   /** Open the inventory panel */
   onOpenInventory?: () => void;
   /** Number of items in inventory (for badge) */
@@ -166,6 +230,30 @@ interface GameNarrationProps {
   autoPlayBlocked?: boolean;
   /** Called synchronously before rewinding to the first segment so the parent can reset segment-tied scene state (e.g. applied segment effects). */
   onPrepareNarrationRestart?: () => void;
+  /** Effective game-mode TTS playback volume, 0–1. */
+  gameVoiceVolume?: number;
+  /**
+   * Player hit the "Interrupt!" button. Soft-pauses narration: the parent
+   * stops generation, records the interrupt anchor, and only truncates the
+   * GM message when the player actually sends their next turn. `messageId`
+   * + `truncatedContent` describe what truncation *would* be applied; the
+   * parent stashes them until commit (send) or cancel (Resume).
+   */
+  onInterruptRequest?: (info: { messageId: string | null; truncatedContent: string | null }) => void;
+  /** Player hit "Resume" — discard the pending interrupt and continue narration. */
+  onInterruptCancel?: () => void;
+  /**
+   * True while the narration is paused for an interrupt — covers both the pre-confirm
+   * modal phase and the post-confirm waiting-to-send phase. Drives auto-play snapshot
+   * and hides Play/Next.
+   */
+  interruptPending?: boolean;
+  /**
+   * True only after the player has confirmed (Yes or Force Interrupt). Drives the
+   * Resume button and the early reveal of the chat input. While the confirmation
+   * modal is open this stays false so the input bar doesn't appear behind the modal.
+   */
+  interruptCommitted?: boolean;
 }
 
 /** Regex matching explicit {effect:text} tags used by AnimatedText. */
@@ -233,6 +321,153 @@ function getGameTranslationHtml(message: NarrationMessage, translatedText: strin
   return animateTextHtml(formatNarration(content.trim(), false));
 }
 
+function hashVoiceKey(value: string): string {
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) {
+    hash = (hash << 5) - hash + value.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+function buildVoiceConfigSignature(config?: TTSConfig | null): string {
+  if (!config) return "tts:none";
+  return [
+    config.source,
+    config.baseUrl,
+    config.model,
+    config.voice,
+    config.voiceMode,
+    JSON.stringify(config.voiceAssignments ?? []),
+    config.npcDefaultVoicesEnabled ? "npc-defaults" : "npc-global",
+    JSON.stringify(config.npcDefaultMaleVoices ?? []),
+    JSON.stringify(config.npcDefaultFemaleVoices ?? []),
+    config.speed,
+    config.elevenLabsStability,
+    config.dialogueOnly ? "dialogue" : "all-text",
+    config.dialogueScope,
+    config.dialogueCharacterName,
+  ].join("|");
+}
+
+function buildVoiceLineTextCacheKey(
+  config: TTSConfig,
+  job: Omit<GameVoiceAudioJob, "cacheKey" | "textCacheKey">,
+): string {
+  const rawKey = [
+    config.source,
+    config.baseUrl,
+    config.model,
+    config.speed,
+    config.elevenLabsStability,
+    job.voice ?? "",
+    job.speaker ?? "",
+    job.tone ?? "",
+    job.chunk,
+  ].join("\n");
+  return `game-voice-line-v1:${rawKey.length}:${hashVoiceKey(rawKey)}`;
+}
+
+function buildVoiceLineSegmentCacheKey(segmentVoiceKey: string, jobIndex: number): string {
+  return `game-voice-line-v2:${segmentVoiceKey}:${jobIndex}`;
+}
+
+function buildGameVoiceAudioJobs(
+  key: string,
+  requests: GameSegmentVoiceRequest[],
+  config: TTSConfig,
+): GameVoiceAudioJob[] {
+  let voiceJobIndex = 0;
+  return requests.flatMap((request) =>
+    request.chunks.map((chunk) => {
+      const jobIndex = voiceJobIndex;
+      voiceJobIndex += 1;
+      const job = {
+        chunk,
+        speaker: request.speaker,
+        tone: request.tone,
+        voice: request.voice,
+      };
+      return {
+        ...job,
+        cacheKey: buildVoiceLineSegmentCacheKey(key, jobIndex),
+        textCacheKey: buildVoiceLineTextCacheKey(config, job),
+      };
+    }),
+  );
+}
+
+function findNpcVoiceHint(speaker: string | null | undefined, gameNpcs: GameNpc[]) {
+  const normalizedSpeaker = speaker?.trim().toLowerCase();
+  if (!normalizedSpeaker) return null;
+  const npc = gameNpcs.find((candidate) => candidate.name.trim().toLowerCase() === normalizedSpeaker);
+  if (!npc) return null;
+  return { name: npc.name, description: npc.description, gender: npc.gender, pronouns: npc.pronouns, notes: npc.notes };
+}
+
+function getGameSegmentVoiceRequest(
+  segment: NarrationSegment,
+  config: TTSConfig,
+  gameNpcs: GameNpc[] = [],
+): GameSegmentVoiceRequest | null {
+  if (segment.sourceRole === "user" || segment.sourceRole === "system") return null;
+  if (segment.type !== "dialogue" && segment.type !== "narration") return null;
+
+  if (segment.type === "dialogue") {
+    if (!ttsConfigMatchesSpeaker(config, segment.speaker)) return null;
+    const chunks = splitTTSChunks(segment.content);
+    if (chunks.length === 0) return null;
+    const tone = [segment.sprite, segment.partyType && segment.partyType !== "main" ? segment.partyType : null]
+      .filter(Boolean)
+      .join(", ");
+    const voice = resolveTTSVoiceForSpeaker(
+      config,
+      segment.speaker,
+      undefined,
+      findNpcVoiceHint(segment.speaker, gameNpcs),
+    );
+    if (config.source === "elevenlabs" && !voice) return null;
+    return {
+      chunks,
+      speaker: segment.speaker,
+      tone: tone || undefined,
+      voice,
+    };
+  }
+
+  if (config.dialogueOnly) return null;
+  const chunks = splitTTSChunks(segment.content);
+  if (chunks.length === 0) return null;
+  const voice = config.voice;
+  if (config.source === "elevenlabs" && !voice) return null;
+  return { chunks, voice };
+}
+
+function getGameSegmentVoiceKeyForRequests(
+  segment: NarrationSegment,
+  configSignature: string,
+  requests: GameSegmentVoiceRequest[],
+): string | null {
+  if (!segment.sourceMessageId || segment.sourceSegmentIndex == null || requests.length === 0) return null;
+  return `${segment.sourceMessageId}:${segment.sourceSegmentIndex}:${hashVoiceKey(configSignature)}`;
+}
+
+function getGameSideLineVoiceKeyForRequests(
+  segment: NarrationSegment,
+  line: GameSideLine,
+  sideIndex: number,
+  configSignature: string,
+  requests: GameSegmentVoiceRequest[],
+): string | null {
+  if (requests.length === 0) return null;
+  const sourceMessageId = line.voiceSourceMessageId ?? segment.sourceMessageId;
+  const sourceSegmentIndex = line.voiceSourceSegmentIndex ?? segment.sourceSegmentIndex;
+  if (!sourceMessageId || sourceSegmentIndex == null) return null;
+
+  const suffix = line.voiceSourceSegmentIndex == null ? `:side:${sideIndex}` : "";
+  return `${sourceMessageId}:${sourceSegmentIndex}${suffix}:${hashVoiceKey(configSignature)}`;
+}
+
 function withSegmentSource(
   segment: NarrationSegment,
   sourceMessageId: string | null,
@@ -278,12 +513,46 @@ function applySegmentEditOverlay(
   return next;
 }
 
+function formatSkillCheckLogContent(message: NarrationMessage): NarrationSegment[] {
+  const skillChecks = parseGmTags(message.content || "").skillChecks;
+  if (skillChecks.length === 0) return [];
+
+  return skillChecks.map((skillCheck, index) => {
+    const result = skillCheck.resolvedResult;
+    if (!result) {
+      return {
+        id: `${message.id}-skill-check-log-${index}`,
+        type: "system",
+        content: `${skillCheck.skill} check (DC ${skillCheck.dc})`,
+      };
+    }
+
+    const label = result.criticalSuccess
+      ? "Critical success"
+      : result.criticalFailure
+        ? "Critical failure"
+        : result.success
+          ? "Success"
+          : "Failure";
+    const modifier = result.modifier === 0 ? "" : ` ${result.modifier > 0 ? "+" : ""}${result.modifier}`;
+    const rollMode = result.rollMode !== "normal" ? ` (${result.rollMode})` : "";
+
+    return {
+      id: `${message.id}-skill-check-log-${index}`,
+      type: "system",
+      content: `${result.skill} check (DC ${result.dc}): [${result.rolls.join(", ")}]${modifier}${rollMode} = ${result.total}. ${label}.`,
+    };
+  });
+}
+
 export function GameNarration({
   messages,
   isStreaming,
   characterMap,
+  activeCharacterIds,
   personaInfo,
   spriteMap,
+  speakerAvatarMap,
   onActiveSpeakerChange,
   onSegmentEnter,
   inputSlot,
@@ -299,13 +568,13 @@ export function GameNarration({
   generationFailed,
   onRetryGeneration,
   directionsActive,
-  isRestored,
   hasStoredNarrationPosition,
   restoredSegmentIndex,
   onSegmentChange,
   onNarrationComplete,
   widgetSlot,
   choicesSlot,
+  skillCheckSlot,
   onOpenInventory,
   inventoryCount,
   onDeleteMessage,
@@ -319,6 +588,11 @@ export function GameNarration({
   onNpcPortraitClick,
   autoPlayBlocked,
   onPrepareNarrationRestart,
+  gameVoiceVolume = 1,
+  onInterruptRequest,
+  onInterruptCancel,
+  interruptPending,
+  interruptCommitted,
 }: GameNarrationProps) {
   const { translations, translating } = useTranslate();
   const [activeIndex, setActiveIndex] = useState(0);
@@ -335,8 +609,19 @@ export function GameNarration({
     readableType?: "note" | "book";
   } | null>(null);
   const logEditTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const logEditDraftRef = useRef<{ content: string; speaker?: string }>({ content: "", speaker: undefined });
   const logScrolledRef = useRef(false);
   const segmentSourceMessageIdsRef = useRef<Array<string | null>>([]);
+  const { data: ttsConfig } = useTTSConfig();
+  const [gameVoiceVersion, setGameVoiceVersion] = useState(0);
+  const [gameVoicePlayingKey, setGameVoicePlayingKey] = useState<string | null>(null);
+  const gameVoiceCacheRef = useRef<Map<string, GameSegmentVoiceEntry>>(new Map());
+  const gameVoicePendingRef = useRef<Map<string, AbortController>>(new Map());
+  const gameVoiceAudioRef = useRef<HTMLAudioElement | null>(null);
+  const gameVoiceSequenceRef = useRef(0);
+  const gameVoiceGenerationTailRef = useRef<Promise<void>>(Promise.resolve());
+  const lastAutoPlayedVoiceKeyRef = useRef<string | null>(null);
+  const lastAutoPlayedSideVoiceGroupRef = useRef<string | null>(null);
 
   // Clear edit state when the active segment changes
   useEffect(() => {
@@ -350,9 +635,15 @@ export function GameNarration({
   // Track previous active segment so we can detect in-place edits
   const prevActiveRef = useRef<{ index: number; content?: string }>({ index: 0 });
 
+  const activeCharacterEntries = useMemo(() => {
+    if (!activeCharacterIds) return Array.from(characterMap);
+    const allowedIds = new Set(activeCharacterIds);
+    return Array.from(characterMap).filter(([id]) => allowedIds.has(id));
+  }, [activeCharacterIds, characterMap]);
+
   const speakerColors = useMemo(() => {
     const byName = new Map<string, string>();
-    for (const [, c] of characterMap) {
+    for (const [, c] of activeCharacterEntries) {
       const color = c.dialogueColor || c.nameColor;
       if (color) byName.set(c.name.toLowerCase(), color);
     }
@@ -360,12 +651,12 @@ export function GameNarration({
       byName.set(personaInfo.name.toLowerCase(), personaInfo.dialogueColor || personaInfo.nameColor || "");
     }
     return byName;
-  }, [characterMap, personaInfo]);
+  }, [activeCharacterEntries, personaInfo]);
 
   /** Name-display colors (prefers nameColor which may be a gradient). */
   const speakerNameColors = useMemo(() => {
     const byName = new Map<string, string>();
-    for (const [, c] of characterMap) {
+    for (const [, c] of activeCharacterEntries) {
       const color = c.nameColor || c.dialogueColor;
       if (color) byName.set(c.name.toLowerCase(), color);
     }
@@ -373,27 +664,40 @@ export function GameNarration({
       byName.set(personaInfo.name.toLowerCase(), personaInfo.nameColor || personaInfo.dialogueColor || "");
     }
     return byName;
-  }, [characterMap, personaInfo]);
+  }, [activeCharacterEntries, personaInfo]);
 
   const gameNpcs = useGameModeStore((s) => s.npcs);
   const sourceMessagesById = useMemo(() => new Map(messages.map((message) => [message.id, message])), [messages]);
 
-  const speakerAvatars = useMemo(() => {
-    const byName = new Map<string, string>();
-    for (const [, c] of characterMap) {
-      if (c.avatarUrl) byName.set(c.name.toLowerCase(), c.avatarUrl);
+  const speakerAvatarInfos = useMemo(() => {
+    const byName = new Map<string, SpeakerAvatarInfo>();
+    const setAvatarInfo = (name: string, avatarInfo: SpeakerAvatarInfo) => {
+      const key = name.toLowerCase();
+      const existing = byName.get(key) ?? findNamedMapValue(byName, name);
+      byName.set(key, {
+        url: avatarInfo.url || existing?.url || "",
+        crop: avatarInfo.crop ?? existing?.crop ?? null,
+      });
+    };
+    for (const [, c] of activeCharacterEntries) {
+      if (c.avatarUrl) setAvatarInfo(c.name, { url: c.avatarUrl, crop: c.avatarCrop });
     }
     if (personaInfo?.name && personaInfo.avatarUrl) {
-      byName.set(personaInfo.name.toLowerCase(), personaInfo.avatarUrl);
+      setAvatarInfo(personaInfo.name, { url: personaInfo.avatarUrl });
+    }
+    if (speakerAvatarMap) {
+      for (const [name, avatarInfo] of speakerAvatarMap) {
+        if (avatarInfo.url) setAvatarInfo(name, avatarInfo);
+      }
     }
     // Include tracked game NPC avatars so dialogue boxes show their portrait
     for (const npc of gameNpcs) {
-      if (npc.avatarUrl && !byName.has(npc.name.toLowerCase())) {
-        byName.set(npc.name.toLowerCase(), npc.avatarUrl);
+      if (npc.avatarUrl) {
+        setAvatarInfo(npc.name, { url: npc.avatarUrl });
       }
     }
     return byName;
-  }, [characterMap, personaInfo, gameNpcs]);
+  }, [activeCharacterEntries, personaInfo, speakerAvatarMap, gameNpcs]);
 
   const uploadableNpcNames = useMemo(
     () => new Set(gameNpcs.map((npc) => npc.name.trim().toLowerCase()).filter(Boolean)),
@@ -692,7 +996,7 @@ export function GameNarration({
   // Map segment index → side/extra lines that should appear with it as overlay boxes.
   // Sources: inline GM party lines (from parseNarrationSegments) + party-chat side lines.
   const sideLineMap = useMemo(() => {
-    const map = new Map<number, PartyDialogueLine[]>();
+    const map = new Map<number, GameSideLine[]>();
 
     const userName = personaInfo?.name || "You";
     const subMacros = (text: string, speaker: string | null): string =>
@@ -722,6 +1026,9 @@ export function GameNarration({
             content: subMacros(seg.content, seg.speaker ?? null),
             expression: seg.sprite,
             target: seg.whisperTarget,
+            voiceSourceMessageId: latestAssistant.id,
+            voiceSourceSegmentIndex: rawIndex,
+            voiceSourceRole: latestAssistant.role,
           });
           map.set(lastMainIdx, arr);
         } else {
@@ -757,6 +1064,11 @@ export function GameNarration({
             ...line,
             character: editedCharacter,
             content: subMacros(editedContent, editedCharacter),
+            voiceSourceMessageId: partyChatMessageId,
+            voiceSourceSegmentIndex: partySegmentIndex,
+            voiceSourceRole: partyChatMessageId
+              ? (sourceMessagesById.get(partyChatMessageId)?.role ?? "assistant")
+              : null,
           });
           map.set(lastPartySegIdx, arr);
           partySegmentIndex += 1;
@@ -785,6 +1097,7 @@ export function GameNarration({
     segmentEdits,
     segments,
     speakerColors,
+    sourceMessagesById,
   ]);
 
   const active = segments[activeIndex] ?? null;
@@ -792,6 +1105,155 @@ export function GameNarration({
   const activeSourceMessage = activeSourceMessageId ? (sourceMessagesById.get(activeSourceMessageId) ?? null) : null;
   const activeTranslatedText = activeSourceMessageId ? translations[activeSourceMessageId] : undefined;
   const activeIsTranslating = activeSourceMessageId ? !!translating[activeSourceMessageId] : false;
+  const gameVoiceEnabled = Boolean(ttsConfig?.enabled && ttsConfig.autoplayGame);
+  const gameVoiceConfigSignature = useMemo(() => buildVoiceConfigSignature(ttsConfig), [ttsConfig]);
+  const normalizedGameVoiceVolume = Math.max(0, Math.min(1, gameVoiceVolume));
+
+  const stopGameVoicePlayback = useCallback(() => {
+    gameVoiceSequenceRef.current += 1;
+    if (gameVoiceAudioRef.current) {
+      gameVoiceAudioRef.current.pause();
+      gameVoiceAudioRef.current.onended = null;
+      gameVoiceAudioRef.current.onerror = null;
+      gameVoiceAudioRef.current = null;
+    }
+    setGameVoicePlayingKey(null);
+  }, []);
+
+  const playGameVoiceKeys = useCallback(
+    (keys: string[]) => {
+      const playableKeys = keys.filter((key) => {
+        const entry = gameVoiceCacheRef.current.get(key);
+        return entry?.status === "ready" && entry.urls.length > 0;
+      });
+      if (playableKeys.length === 0) return;
+
+      stopGameVoicePlayback();
+      const sequence = ++gameVoiceSequenceRef.current;
+      let keyIndex = 0;
+      let urlIndex = 0;
+
+      const playNext = () => {
+        if (gameVoiceSequenceRef.current !== sequence) return;
+        const key = playableKeys[keyIndex];
+        if (!key) {
+          setGameVoicePlayingKey(null);
+          gameVoiceAudioRef.current = null;
+          return;
+        }
+
+        const entry = gameVoiceCacheRef.current.get(key);
+        if (!entry || entry.status !== "ready" || entry.urls.length === 0) {
+          keyIndex += 1;
+          urlIndex = 0;
+          playNext();
+          return;
+        }
+
+        const url = entry.urls[urlIndex];
+        if (!url) {
+          keyIndex += 1;
+          urlIndex = 0;
+          playNext();
+          return;
+        }
+
+        setGameVoicePlayingKey(key);
+        const audio = new Audio(url);
+        audio.volume = normalizedGameVoiceVolume;
+        audio.muted = normalizedGameVoiceVolume <= 0;
+        gameVoiceAudioRef.current = audio;
+        audio.onended = () => {
+          if (gameVoiceSequenceRef.current !== sequence || gameVoiceAudioRef.current !== audio) return;
+          urlIndex += 1;
+          playNext();
+        };
+        audio.onerror = () => {
+          if (gameVoiceSequenceRef.current !== sequence || gameVoiceAudioRef.current !== audio) return;
+          setGameVoicePlayingKey(null);
+          gameVoiceAudioRef.current = null;
+        };
+        audio.play().catch(() => {
+          if (gameVoiceSequenceRef.current !== sequence || gameVoiceAudioRef.current !== audio) return;
+          setGameVoicePlayingKey(null);
+          gameVoiceAudioRef.current = null;
+        });
+      };
+
+      playNext();
+    },
+    [normalizedGameVoiceVolume, stopGameVoicePlayback],
+  );
+
+  const playGameVoiceKey = useCallback((key: string) => playGameVoiceKeys([key]), [playGameVoiceKeys]);
+
+  useEffect(() => {
+    if (!gameVoiceAudioRef.current) return;
+    gameVoiceAudioRef.current.volume = normalizedGameVoiceVolume;
+    gameVoiceAudioRef.current.muted = normalizedGameVoiceVolume <= 0;
+  }, [normalizedGameVoiceVolume]);
+
+  const toggleGameVoiceKey = useCallback(
+    (key: string) => {
+      if (gameVoicePlayingKey === key) {
+        stopGameVoicePlayback();
+        return;
+      }
+      playGameVoiceKey(key);
+    },
+    [gameVoicePlayingKey, playGameVoiceKey, stopGameVoicePlayback],
+  );
+
+  const getVoiceRequestsForSegment = useCallback(
+    (segment: NarrationSegment): GameSegmentVoiceRequest[] => {
+      if (!ttsConfig) return [];
+
+      const requests: GameSegmentVoiceRequest[] = [];
+      const baseRequest = getGameSegmentVoiceRequest(segment, ttsConfig, gameNpcs);
+      if (baseRequest) requests.push(baseRequest);
+
+      return requests;
+    },
+    [gameNpcs, ttsConfig],
+  );
+
+  const getVoiceRequestForSideLine = useCallback(
+    (segment: NarrationSegment, line: GameSideLine, index: number): GameSegmentVoiceRequest[] => {
+      if (!ttsConfig) return [];
+      const sideSegment: NarrationSegment = {
+        id: `${segment.id}-side-voice-${index}`,
+        type: "dialogue",
+        speaker: line.character,
+        sprite: line.expression,
+        content: line.content,
+        partyType: line.type,
+        whisperTarget: line.target,
+        sourceMessageId: line.voiceSourceMessageId ?? segment.sourceMessageId,
+        sourceSegmentIndex: line.voiceSourceSegmentIndex ?? segment.sourceSegmentIndex,
+        sourceRole: line.voiceSourceRole ?? "assistant",
+      };
+      const request = getGameSegmentVoiceRequest(sideSegment, ttsConfig, gameNpcs);
+      return request ? [request] : [];
+    },
+    [gameNpcs, ttsConfig],
+  );
+
+  const getVoiceKeyForSegment = useCallback(
+    (segment: NarrationSegment) => {
+      if (!ttsConfig) return null;
+      return getGameSegmentVoiceKeyForRequests(segment, gameVoiceConfigSignature, getVoiceRequestsForSegment(segment));
+    },
+    [gameVoiceConfigSignature, getVoiceRequestsForSegment, ttsConfig],
+  );
+
+  const getVoiceKeyForSideLine = useCallback(
+    (segment: NarrationSegment, line: GameSideLine, index: number) => {
+      if (!ttsConfig) return null;
+      const requests = getVoiceRequestForSideLine(segment, line, index);
+      return getGameSideLineVoiceKeyForRequests(segment, line, index, gameVoiceConfigSignature, requests);
+    },
+    [gameVoiceConfigSignature, getVoiceRequestForSideLine, ttsConfig],
+  );
 
   // When a segment's content changes in-place (user edited it), snap visibleChars
   // to the full display length so the typewriter doesn't re-type the edited text.
@@ -880,6 +1342,7 @@ export function GameNarration({
       if (latestAssistant && msg.id === latestAssistant.id) {
         // Current scene: include already-read segments + current active segment
         const allSegs = parseNarrationSegments(msg, speakerColors);
+        const skillCheckSegs = formatSkillCheckLogContent(msg);
         // Apply segment edit overlays
         if (segmentEdits) {
           for (let si = 0; si < allSegs.length; si++) {
@@ -902,6 +1365,9 @@ export function GameNarration({
           }
         }
         const currentSegs: NarrationSegment[] = [];
+        for (const seg of skillCheckSegs) {
+          currentSegs.push({ ...seg, sourceMessageId: msg.id, sourceRole: msg.role });
+        }
         for (let si = 0; si < Math.min(readUpTo, allSegs.length); si++) {
           if (isDeletedSegment(segmentDeletes, msg.id, si)) continue;
           currentSegs.push(withSegmentSource(allSegs[si]!, msg.id, si, msg.role));
@@ -910,6 +1376,7 @@ export function GameNarration({
       } else {
         // Past scenes: include ALL segments (narration, dialogue, party chat)
         const segs = parseNarrationSegments(msg, speakerColors);
+        const skillCheckSegs = formatSkillCheckLogContent(msg);
         // Apply segment edit overlays
         if (segmentEdits) {
           for (let si = 0; si < segs.length; si++) {
@@ -918,6 +1385,9 @@ export function GameNarration({
           }
         }
         const visibleSegs: NarrationSegment[] = [];
+        for (const seg of skillCheckSegs) {
+          visibleSegs.push({ ...seg, sourceMessageId: msg.id, sourceRole: msg.role });
+        }
         for (let si = 0; si < segs.length; si++) {
           if (isDeletedSegment(segmentDeletes, msg.id, si)) continue;
           visibleSegs.push(withSegmentSource(segs[si]!, msg.id, si, msg.role));
@@ -1048,24 +1518,32 @@ export function GameNarration({
   ]);
 
   // Report active speaker to parent for sprite viewport
+  // Guard against infinite re-render: skip callback if the resolved speaker hasn't changed,
+  // even when dependency refs churn (e.g. unstable speakerAvatarInfos from store).
+  const lastReportedSpeakerRef = useRef<string | null>(null);
   useEffect(() => {
     if (!onActiveSpeakerChange) return;
-    if (!active || active.type !== "dialogue" || !active.speaker) {
-      onActiveSpeakerChange(null);
-      return;
-    }
-    const avatar = findNamedMapValue(speakerAvatars, active.speaker);
-    if (avatar) {
-      onActiveSpeakerChange({ name: active.speaker, avatarUrl: avatar, expression: active.sprite });
-    } else {
-      onActiveSpeakerChange(null);
-    }
-  }, [active, speakerAvatars, onActiveSpeakerChange]);
+
+    const next =
+      !active || active.type !== "dialogue" || !active.speaker
+        ? null
+        : (() => {
+            const avatar = findNamedMapValue(speakerAvatarInfos, active.speaker);
+            return avatar ? { name: active.speaker, avatarUrl: avatar.url, expression: active.sprite } : null;
+          })();
+
+    // Composite key catches legitimate expression/avatar changes, not just name
+    const nextKey = next ? `${next.name}|${next.expression ?? ""}|${next.avatarUrl ?? ""}` : null;
+    if (nextKey === lastReportedSpeakerRef.current) return;
+    lastReportedSpeakerRef.current = nextKey;
+    onActiveSpeakerChange(next);
+  }, [active, speakerAvatarInfos, onActiveSpeakerChange]);
 
   // How many segments are prepended before the actual GM narration segments
   const playerSegmentOffset = latestUserMessage?.content && latestAssistant ? 1 : 0;
 
   const restoredRef = useRef(false);
+  const restoredChatIdRef = useRef<string | null>(null);
   const lastNarrationMsgIdRef = useRef<string | undefined>(undefined);
   const segmentChangeReady = useRef(false);
   const segmentEnterReady = useRef(false);
@@ -1074,7 +1552,17 @@ export function GameNarration({
   const gameTextSpeed = useUIStore((s) => s.gameTextSpeed);
   const gameAutoPlayDelay = useUIStore((s) => s.gameAutoPlayDelay);
   const chatFontColor = useUIStore((s) => s.chatFontColor);
-  const narrationStyle = chatFontColor ? { color: chatFontColor } : undefined;
+  const chatFontSize = useUIStore((s) => s.chatFontSize);
+  const gameAvatarScale = useUIStore((s) => s.gameAvatarScale);
+  const narrationFontStyle = useMemo<CSSProperties>(() => ({ fontSize: `${chatFontSize}px` }), [chatFontSize]);
+  const narrationStyle = useMemo<CSSProperties>(
+    () => (chatFontColor ? { ...narrationFontStyle, color: chatFontColor } : narrationFontStyle),
+    [chatFontColor, narrationFontStyle],
+  );
+  const gameAvatarScaleStyle = useMemo<CSSProperties>(
+    () => ({ "--game-avatar-scale": gameAvatarScale }) as CSSProperties,
+    [gameAvatarScale],
+  );
   const [autoPlay, setAutoPlay] = useState(false);
 
   const getSegmentStartVisibleChars = useCallback(
@@ -1098,12 +1586,14 @@ export function GameNarration({
 
     lastNarrationMsgIdRef.current = latestAssistant.id;
 
-    const shouldRestorePosition =
-      (isRestored || hasStoredNarrationPosition) && !restoredRef.current && segments.length > 0;
+    const currentChatId = latestAssistant.chatId ?? null;
+    const firstNarrationForChat = restoredChatIdRef.current !== currentChatId;
+    const shouldRestorePosition = hasStoredNarrationPosition && firstNarrationForChat && segments.length > 0;
     if (shouldRestorePosition) {
       // Jump to saved segment index (or last segment if saved index exceeds current
       // segment count — party dialogue may not be restored yet).
       restoredRef.current = true;
+      restoredChatIdRef.current = currentChatId;
       const targetIdx =
         restoredSegmentIndex != null && restoredSegmentIndex >= 0 && restoredSegmentIndex < segments.length
           ? restoredSegmentIndex
@@ -1117,6 +1607,7 @@ export function GameNarration({
       });
       return;
     }
+    restoredChatIdRef.current = currentChatId;
     setActiveIndex(playerSegmentOffset);
     setVisibleChars(getSegmentStartVisibleChars(playerSegmentOffset));
     // Clear the restore flag once we've advanced to a new message so the
@@ -1128,8 +1619,8 @@ export function GameNarration({
     segmentEnterReady.current = true;
   }, [
     latestAssistant?.id,
+    latestAssistant?.chatId,
     isStreaming,
-    isRestored,
     hasStoredNarrationPosition,
     restoredSegmentIndex,
     segments,
@@ -1158,12 +1649,16 @@ export function GameNarration({
   useEffect(() => {
     if (!segmentEnterReady.current) return;
     if (!onSegmentEnter) return;
-    // Convert activeIndex to narration-only index (skip the prepended player segment)
-    const narrationIndex = activeIndex - playerSegmentOffset;
-    if (narrationIndex >= 0) {
-      onSegmentEnter(narrationIndex);
-    }
-  }, [activeIndex, onSegmentEnter, playerSegmentOffset]);
+    const activeSegment = segments[activeIndex];
+    if (!activeSegment) return;
+    // Scene analysis keys segmentEffects to the assistant message's original
+    // segment indices. Use the source segment index rather than the flattened
+    // viewer position so later effects still line up after filtering or
+    // injecting display-only segments.
+    if (activeSegment.sourceMessageId !== latestAssistant?.id) return;
+    if (activeSegment.sourceSegmentIndex == null || activeSegment.sourceSegmentIndex < 0) return;
+    onSegmentEnter(activeSegment.sourceSegmentIndex);
+  }, [activeIndex, latestAssistant?.id, onSegmentEnter, segments]);
 
   // Trigger readable overlay when the typewriter finishes a readable segment
   const readableFiredRef = useRef<Set<string>>(new Set());
@@ -1181,6 +1676,212 @@ export function GameNarration({
       sourceSegmentIndex: active.sourceSegmentIndex,
     });
   }, [active, narrationMessageChanged, visibleChars, onReadable]);
+
+  useEffect(() => {
+    if (!ttsConfig || !gameVoiceEnabled || isStreaming || generationFailed) return;
+
+    const plans: GameVoiceEntryPlan[] = [];
+    const queuePlan = (key: string | null, requests: GameSegmentVoiceRequest[]) => {
+      if (!key || gameVoiceCacheRef.current.has(key) || gameVoicePendingRef.current.has(key)) return;
+      const audioJobs = buildGameVoiceAudioJobs(key, requests, ttsConfig);
+      if (audioJobs.length === 0) return;
+
+      const controller = new AbortController();
+      gameVoicePendingRef.current.set(key, controller);
+      gameVoiceCacheRef.current.set(key, {
+        status: "loading",
+        chunks: audioJobs.map((job) => job.chunk),
+        speaker: audioJobs[0]?.speaker,
+        tone: audioJobs[0]?.tone,
+        voice: audioJobs[0]?.voice,
+      });
+      plans.push({ key, audioJobs, controller });
+    };
+
+    for (const [segmentIndex, segment] of segments.entries()) {
+      const requests = getVoiceRequestsForSegment(segment);
+      queuePlan(getGameSegmentVoiceKeyForRequests(segment, gameVoiceConfigSignature, requests), requests);
+
+      const sideLines = sideLineMap.get(segmentIndex) ?? [];
+      for (const [sideIndex, line] of sideLines.entries()) {
+        const sideRequests = getVoiceRequestForSideLine(segment, line, sideIndex);
+        queuePlan(
+          getGameSideLineVoiceKeyForRequests(segment, line, sideIndex, gameVoiceConfigSignature, sideRequests),
+          sideRequests,
+        );
+      }
+    }
+
+    if (plans.length === 0) return;
+    setGameVoiceVersion((version) => version + 1);
+
+    const runPlans = async () => {
+      for (const plan of plans) {
+        const { key, audioJobs, controller } = plan;
+        if (controller.signal.aborted) continue;
+
+        const blobs: Blob[] = [];
+        for (const job of audioJobs) {
+          if (controller.signal.aborted) break;
+          try {
+            const blob = await getOrCreateCachedTTSAudioBlob(
+              job.cacheKey,
+              () =>
+                ttsService.generateAudio(job.chunk, {
+                  speaker: job.speaker,
+                  tone: job.tone,
+                  voice: job.voice,
+                  signal: controller.signal,
+                }),
+              [job.textCacheKey],
+            );
+            blobs.push(blob);
+          } catch (err) {
+            if (controller.signal.aborted || (err instanceof Error && err.name === "AbortError")) break;
+            console.warn("[game-tts] Failed to generate voice line", err);
+          }
+        }
+
+        try {
+          if (controller.signal.aborted) return;
+          const urls = blobs.map((blob) => URL.createObjectURL(blob));
+          if (urls.length > 0) {
+            gameVoiceCacheRef.current.set(key, {
+              status: "ready",
+              chunks: audioJobs.map((job) => job.chunk),
+              speaker: audioJobs[0]?.speaker,
+              tone: audioJobs[0]?.tone,
+              voice: audioJobs[0]?.voice,
+              urls,
+            });
+          } else {
+            gameVoiceCacheRef.current.set(key, {
+              status: "error",
+              chunks: audioJobs.map((job) => job.chunk),
+              speaker: audioJobs[0]?.speaker,
+              tone: audioJobs[0]?.tone,
+              voice: audioJobs[0]?.voice,
+            });
+          }
+        } finally {
+          gameVoicePendingRef.current.delete(key);
+          if (!controller.signal.aborted) {
+            setGameVoiceVersion((version) => version + 1);
+          }
+        }
+      }
+    };
+
+    gameVoiceGenerationTailRef.current = gameVoiceGenerationTailRef.current.catch(() => undefined).then(runPlans);
+    void gameVoiceGenerationTailRef.current;
+  }, [
+    gameNpcs,
+    gameVoiceConfigSignature,
+    gameVoiceEnabled,
+    generationFailed,
+    getVoiceRequestForSideLine,
+    getVoiceRequestsForSegment,
+    isStreaming,
+    sideLineMap,
+    segments,
+    ttsConfig,
+  ]);
+
+  const activeVoiceKey = active ? getVoiceKeyForSegment(active) : null;
+  const activeSideLines = useMemo(
+    () => (active ? (sideLineMap.get(activeIndex) ?? EMPTY_GAME_SIDE_LINES) : EMPTY_GAME_SIDE_LINES),
+    [active, activeIndex, sideLineMap],
+  );
+  const activeSideVoiceKeys = useMemo(() => {
+    if (!active) return [];
+    return activeSideLines
+      .map((line, index) => getVoiceKeyForSideLine(active, line, index))
+      .filter((key): key is string => Boolean(key));
+  }, [active, activeSideLines, getVoiceKeyForSideLine]);
+
+  useEffect(() => {
+    lastAutoPlayedVoiceKeyRef.current = null;
+    lastAutoPlayedSideVoiceGroupRef.current = null;
+    stopGameVoicePlayback();
+  }, [activeIndex, activeVoiceKey, stopGameVoicePlayback]);
+
+  useEffect(() => {
+    if (gameVoiceEnabled && !isStreaming && !scenePreparing && !directionsActive && !autoPlayBlocked) return;
+    stopGameVoicePlayback();
+  }, [autoPlayBlocked, directionsActive, gameVoiceEnabled, isStreaming, scenePreparing, stopGameVoicePlayback]);
+
+  useEffect(() => {
+    if (!gameVoiceEnabled || !activeVoiceKey) return;
+    if (isStreaming || scenePreparing || directionsActive || autoPlayBlocked) return;
+    if (lastAutoPlayedVoiceKeyRef.current === activeVoiceKey) return;
+    const entry = gameVoiceCacheRef.current.get(activeVoiceKey);
+    if (!entry || entry.status !== "ready") return;
+    lastAutoPlayedVoiceKeyRef.current = activeVoiceKey;
+    playGameVoiceKey(activeVoiceKey);
+  }, [
+    activeVoiceKey,
+    autoPlayBlocked,
+    directionsActive,
+    gameVoiceEnabled,
+    gameVoiceVersion,
+    isStreaming,
+    playGameVoiceKey,
+    scenePreparing,
+  ]);
+
+  useEffect(() => {
+    if (!gameVoiceEnabled || activeSideVoiceKeys.length === 0) return;
+    if (!doneTyping || isStreaming || scenePreparing || directionsActive || autoPlayBlocked) return;
+
+    const sideVoiceGroupKey = activeSideVoiceKeys.join("|");
+    if (lastAutoPlayedSideVoiceGroupRef.current === sideVoiceGroupKey) return;
+
+    if (activeVoiceKey) {
+      const parentEntry = gameVoiceCacheRef.current.get(activeVoiceKey);
+      if (!parentEntry || parentEntry.status === "loading") return;
+      if (parentEntry.status === "ready") {
+        if (lastAutoPlayedVoiceKeyRef.current !== activeVoiceKey) return;
+        if (gameVoicePlayingKey === activeVoiceKey) return;
+      }
+    }
+
+    const entries = activeSideVoiceKeys.map((key) => gameVoiceCacheRef.current.get(key));
+    if (entries.some((entry) => !entry || entry.status === "loading")) return;
+
+    const playableKeys = activeSideVoiceKeys.filter((key, index) => entries[index]?.status === "ready");
+    lastAutoPlayedSideVoiceGroupRef.current = sideVoiceGroupKey;
+    if (playableKeys.length > 0) playGameVoiceKeys(playableKeys);
+  }, [
+    activeVoiceKey,
+    activeSideVoiceKeys,
+    autoPlayBlocked,
+    directionsActive,
+    doneTyping,
+    gameVoiceEnabled,
+    gameVoicePlayingKey,
+    gameVoiceVersion,
+    isStreaming,
+    playGameVoiceKeys,
+    scenePreparing,
+  ]);
+
+  useEffect(() => {
+    const pendingRequests = gameVoicePendingRef.current;
+    const cachedVoices = gameVoiceCacheRef.current;
+    return () => {
+      stopGameVoicePlayback();
+      for (const controller of pendingRequests.values()) {
+        controller.abort();
+      }
+      pendingRequests.clear();
+      for (const entry of cachedVoices.values()) {
+        if (entry.status === "ready") {
+          for (const url of entry.urls) URL.revokeObjectURL(url);
+        }
+      }
+      cachedVoices.clear();
+    };
+  }, [stopGameVoicePlayback]);
 
   useEffect(() => {
     if (!active) return;
@@ -1253,7 +1954,7 @@ export function GameNarration({
     }) => {
       if (!editingLogSeg || !options.sourceMessageId) return;
 
-      const content = editingLogSeg.content.trim();
+      const content = logEditDraftRef.current.content.trim();
       if (!content) {
         setEditingLogSeg(null);
         return;
@@ -1271,7 +1972,7 @@ export function GameNarration({
           return;
         }
 
-        const speaker = editingLogSeg.speaker?.trim() || options.fallbackSpeaker?.trim() || undefined;
+        const speaker = logEditDraftRef.current.speaker?.trim() || options.fallbackSpeaker?.trim() || undefined;
         onEditSegment?.(
           options.sourceMessageId,
           options.sourceSegmentIndex,
@@ -1337,6 +2038,7 @@ export function GameNarration({
   useEffect(() => {
     if (!autoPlay) return;
     if (!active || !doneTyping) return;
+    if (interruptPending) return;
     if (isStreaming || partyTurnPending || scenePreparing || directionsActive) return;
     if (autoPlayBlocked) return;
     if (editingContent !== null) return;
@@ -1361,11 +2063,12 @@ export function GameNarration({
     directionsActive,
     autoPlayBlocked,
     editingContent,
+    interruptPending,
     getSegmentStartVisibleChars,
     playClickSfx,
   ]);
 
-  const activeAvatar = useMemo(() => {
+  const activeAvatar = useMemo<SpeakerAvatarInfo | null>(() => {
     if (!active || active.type !== "dialogue" || !active.speaker) return null;
     // Try to resolve a sprite image matching the expression (exclude full-body sprites for avatar)
     if (active.sprite && spriteMap) {
@@ -1376,22 +2079,25 @@ export function GameNarration({
         const expressionSprites = sprites.filter((s) => !s.expression.toLowerCase().startsWith("full_"));
         if (expressionSprites.length) {
           const exact = expressionSprites.find((s) => s.expression.toLowerCase() === exprLower);
-          if (exact) return exact.url;
+          if (exact) return { url: exact.url };
           const partial = expressionSprites.find(
             (s) => s.expression.toLowerCase().includes(exprLower) || exprLower.includes(s.expression.toLowerCase()),
           );
-          if (partial) return partial.url;
+          if (partial) return { url: partial.url };
           // If no matching expression found, use the first available expression sprite
-          return expressionSprites[0]!.url;
+          return { url: expressionSprites[0]!.url };
         }
       }
     }
     // Fall back to base avatar
-    return findNamedMapValue(speakerAvatars, active.speaker) ?? null;
-  }, [active, speakerAvatars, spriteMap]);
+    return findNamedMapValue(speakerAvatarInfos, active.speaker) ?? null;
+  }, [active, speakerAvatarInfos, spriteMap]);
 
-  // Side lines paired with the active segment
-  const activeSideLines = sideLineMap.get(activeIndex) ?? [];
+  const NARRATION_ACTION_BTN =
+    "flex items-center gap-1.5 rounded-lg bg-[var(--muted)]/30 px-3 py-1.5 text-xs text-[var(--foreground)]/70 transition-colors hover:bg-[var(--muted)]/50 hover:text-[var(--foreground)] dark:bg-white/10 dark:text-white/70 dark:hover:bg-white/20 dark:hover:text-white";
+  const NARRATION_META_BTN =
+    "flex min-h-7 items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--muted)]/20 px-2.5 py-1 text-xs text-[var(--foreground)]/75 transition-colors hover:bg-[var(--muted)]/40 dark:border-white/10 dark:bg-white/5 dark:text-white/75 dark:hover:bg-white/10";
+  const NARRATION_ICON_META_BTN = cn(NARRATION_META_BTN, "min-w-7 justify-center px-2");
 
   const sceneStartVisibleChars = getSegmentStartVisibleChars(playerSegmentOffset);
   const atSceneStart =
@@ -1407,41 +2113,131 @@ export function GameNarration({
     editingContent !== null ||
     atSceneStart;
 
-  // Shared Next + auto-play control group used by dialogue, narration, and readable boxes
-  const navControls = (
-    <div className="flex items-stretch gap-1">
-      <button
-        type="button"
-        onClick={restartFromSceneStart}
-        disabled={restartFromStartDisabled}
-        className={cn(
-          "flex items-center justify-center gap-1 self-stretch rounded-lg border border-white/10 bg-white/5 px-2 text-xs font-medium text-white/75 transition-colors hover:bg-white/10 disabled:pointer-events-none disabled:opacity-40",
+  const handleInterrupt = useCallback(() => {
+    // Request only — the parent opens the confirmation modal. We don't pause
+    // here; the parent flips `interruptPending` once the player has confirmed
+    // (Yes or Force Interrupt), and the effect below handles the pause then.
+    let truncatedContent: string | null = null;
+    let truncatedMessageId: string | null = null;
+    if (latestAssistant) {
+      const editInfo = segmentEditInfoRef.current[activeIndex];
+      if (editInfo && editInfo.messageId === latestAssistant.id) {
+        const allSegs = parseNarrationSegments(latestAssistant, speakerColors);
+        if (editInfo.segmentIndex < allSegs.length - 1) {
+          let cutIndex = editInfo.segmentIndex;
+          while (cutIndex + 1 < allSegs.length) {
+            const nextSegment = allSegs[cutIndex + 1];
+            if (nextSegment?.partyType !== "side" && nextSegment?.partyType !== "extra") break;
+            cutIndex += 1;
+          }
+          const next = truncateMessageContentAtSegment(latestAssistant.content || "", cutIndex);
+          if (next && next !== latestAssistant.content) {
+            truncatedContent = next;
+            truncatedMessageId = latestAssistant.id;
+          }
+        }
+      }
+    }
+    onInterruptRequest?.({ messageId: truncatedMessageId, truncatedContent });
+  }, [activeIndex, latestAssistant, onInterruptRequest, speakerColors]);
+
+  const handleResume = useCallback(() => {
+    onInterruptCancel?.();
+  }, [onInterruptCancel]);
+
+  // Auto-play snapshot/restore: when `interruptPending` flips on we save the
+  // current auto-play state and pause; when it flips off (Resume, send, modal
+  // dismissed, new GM turn arrived, chat switched) we restore exactly what it
+  // was. Also snaps the typewriter so the pause anchor lands at a clean
+  // segment boundary.
+  const autoPlayBeforeInterruptRef = useRef(false);
+  const prevInterruptPendingRef = useRef(false);
+  useEffect(() => {
+    const wasPending = prevInterruptPendingRef.current;
+    const isPending = !!interruptPending;
+    prevInterruptPendingRef.current = isPending;
+    if (!wasPending && isPending) {
+      autoPlayBeforeInterruptRef.current = autoPlay;
+      setAutoPlay(false);
+      if (active) {
+        const dispLen = effectDisplayLength(active.content);
+        setVisibleChars(dispLen);
+        twRef.current.pos = dispLen;
+      }
+    } else if (wasPending && !isPending) {
+      if (autoPlayBeforeInterruptRef.current) {
+        setAutoPlay(true);
+      }
+      autoPlayBeforeInterruptRef.current = false;
+    }
+  }, [active, autoPlay, interruptPending]);
+
+  // Shared Next + auto-play control group used by dialogue, narration, and readable boxes.
+  // The red Interrupt button swaps to a yellow Resume button only AFTER the player
+  // confirms in the modal (interruptCommitted). While the modal is still open we keep
+  // the red button visible so it doesn't look like the interrupt already happened.
+  const showInterruptControls = !narrationComplete && !partyTurnPending && !!onInterruptRequest;
+  const showNav = !narrationComplete && !isStreaming && !interruptPending;
+  const navControls =
+    !showInterruptControls && !showNav ? null : (
+      <div className="flex items-stretch gap-1">
+        {showInterruptControls && !interruptCommitted && (
+          <button
+            onClick={handleInterrupt}
+            className={cn(NARRATION_ICON_META_BTN, "text-red-300 hover:text-red-200 dark:text-red-300")}
+            title="Pause the GM so you can write back. Nothing is committed until you send."
+            aria-label="Interrupt"
+          >
+            <Square size={11} className="text-white" fill="currentColor" />
+          </button>
         )}
-        title="Jump to the first line of this scene and replay segment effects as you advance"
-      >
-        <RotateCcw size={12} />
-        <span className="hidden sm:inline">From start</span>
-      </button>
-      <button
-        onClick={() => setAutoPlay((v) => !v)}
-        className={cn(
-          "flex items-center justify-center self-stretch rounded-lg border px-2 text-xs transition-colors",
-          autoPlay
-            ? "border-[var(--primary)]/40 bg-[var(--primary)]/20 text-white"
-            : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10",
+        {showInterruptControls && interruptCommitted && (
+          <button
+            onClick={handleResume}
+            className={cn(NARRATION_META_BTN, "font-semibold text-amber-200 hover:text-amber-100 dark:text-amber-200")}
+            title="Resume narration — your interrupt has not been committed."
+            aria-label="Resume"
+          >
+            <Play size={11} fill="currentColor" />
+            <span className="hidden sm:inline">Resume</span>
+          </button>
         )}
-        title={autoPlay ? "Pause auto-play" : "Auto-play segments"}
-      >
-        {autoPlay ? <Pause size={12} /> : <Play size={12} />}
-      </button>
-      <button
-        onClick={nextSegment}
-        className="flex items-center justify-center self-stretch rounded-lg border border-white/10 bg-white/5 px-3 text-xs font-semibold text-white/75 transition-colors hover:bg-white/10"
-      >
-        {!doneTyping ? "Reveal" : "Next"}
-      </button>
-    </div>
-  );
+        {showNav && (
+          <>
+            <button
+              type="button"
+              onClick={restartFromSceneStart}
+              disabled={restartFromStartDisabled}
+              className={cn(
+                "flex items-center justify-center gap-1 self-stretch rounded-lg border border-white/10 bg-white/5 px-2 text-xs font-medium text-white/75 transition-colors hover:bg-white/10 disabled:pointer-events-none disabled:opacity-40",
+              )}
+              title="Jump to the first line of this scene and replay segment effects as you advance"
+            >
+              <RotateCcw size={12} />
+              <span className="hidden sm:inline">From start</span>
+            </button>
+            <button
+              onClick={() => setAutoPlay((v) => !v)}
+              className={cn(
+                "flex items-center justify-center self-stretch rounded-lg border px-2 text-xs transition-colors",
+                autoPlay
+                  ? "border-[var(--primary)]/40 bg-[var(--primary)]/20 text-[var(--primary)]"
+                  : "border-[var(--border)] bg-[var(--muted)]/20 text-[var(--foreground)]/70 hover:bg-[var(--muted)]/40 dark:border-white/10 dark:bg-white/5 dark:text-white/70 dark:hover:bg-white/10",
+              )}
+              title={autoPlay ? "Pause auto-play" : "Auto-play segments"}
+            >
+              {autoPlay ? <Pause size={12} /> : <Play size={12} />}
+            </button>
+            <button
+              onClick={nextSegment}
+              className="flex items-center justify-center self-stretch rounded-lg border border-[var(--border)] bg-[var(--muted)]/20 px-3 text-xs font-semibold text-[var(--foreground)]/75 transition-colors hover:bg-[var(--muted)]/40 dark:border-white/10 dark:bg-white/5 dark:text-white/75 dark:hover:bg-white/10"
+            >
+              {!doneTyping ? "Reveal" : "Next"}
+            </button>
+          </>
+        )}
+      </div>
+    );
 
   return (
     <div className="relative flex min-h-0 flex-1 items-end px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-20 md:pt-24 sm:px-6 md:pb-4">
@@ -1452,7 +2248,7 @@ export function GameNarration({
         {activeSideLines.length > 0 && doneTyping && (
           <div className="mb-2 flex w-full flex-col space-y-1.5">
             {activeSideLines.map((line, i) => {
-              const charAvatar = findNamedMapValue(speakerAvatars, line.character) ?? null;
+              const charAvatar = findNamedMapValue(speakerAvatarInfos, line.character) ?? null;
               const charColor = findNamedMapValue(speakerColors, line.character);
               const charNameColor = findNamedMapValue(speakerNameColors, line.character);
               return (
@@ -1482,12 +2278,15 @@ export function GameNarration({
         {/* Widget slot — mobile widget icons sit above the narration box */}
         {widgetSlot}
 
-        <div className="rounded-2xl border border-white/15 bg-black/50 p-3 backdrop-blur-md shadow-[0_16px_38px_rgba(0,0,0,0.45)]">
+        {/* Skill check result — shown above the narration box until dismissed */}
+        {skillCheckSlot}
+
+        <div className="rounded-2xl border border-[var(--border)] bg-[var(--card)]/90 p-3 backdrop-blur-md shadow-[0_16px_38px_rgba(0,0,0,0.45)] dark:border-white/15 dark:bg-black/50">
           {/* Scene preparation gate: wait for effects before showing narration */}
           {scenePreparing && (
             <div className="flex items-center gap-2 py-3">
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-              <span className="text-sm text-white/70">
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--muted)]/40 border-t-[var(--foreground)]/70 dark:border-white/30 dark:border-t-white" />
+              <span className="text-sm text-[var(--muted-foreground)] dark:text-white/70">
                 {assetsGenerating ? "Generating sprites…" : "Preparing scene…"}
               </span>
             </div>
@@ -1499,19 +2298,13 @@ export function GameNarration({
               <span className="text-sm text-red-300/80">Scene analysis failed</span>
               <div className="flex gap-2">
                 {onRetryScene && (
-                  <button
-                    onClick={onRetryScene}
-                    className="flex items-center gap-1.5 rounded-lg bg-white/10 px-3 py-1.5 text-xs text-white/70 transition-colors hover:bg-white/20 hover:text-white"
-                  >
+                  <button onClick={onRetryScene} className={NARRATION_ACTION_BTN}>
                     <RefreshCw size={12} />
                     Retry
                   </button>
                 )}
                 {onSkipScene && (
-                  <button
-                    onClick={onSkipScene}
-                    className="flex items-center gap-1.5 rounded-lg bg-white/10 px-3 py-1.5 text-xs text-white/70 transition-colors hover:bg-white/20 hover:text-white"
-                  >
+                  <button onClick={onSkipScene} className={NARRATION_ACTION_BTN}>
                     Skip
                   </button>
                 )}
@@ -1525,7 +2318,7 @@ export function GameNarration({
               <span className="text-sm text-red-300/80">Generation failed</span>
               <button
                 onClick={onRetryGeneration}
-                className="flex items-center gap-1.5 rounded-lg bg-white/10 px-3 py-1.5 text-xs text-white/70 transition-colors hover:bg-white/20 hover:text-white"
+                className="flex items-center gap-1.5 rounded-lg bg-[var(--muted)]/30 px-3 py-1.5 text-xs text-[var(--foreground)]/70 transition-colors hover:bg-[var(--muted)]/50 hover:text-[var(--foreground)] dark:bg-white/10 dark:text-white/70 dark:hover:bg-white/20 dark:hover:text-white"
               >
                 <RefreshCw size={12} />
                 Retry
@@ -1533,7 +2326,7 @@ export function GameNarration({
             </div>
           )}
 
-          {!scenePreparing && !active && !isStreaming && (
+          {!scenePreparing && !active && !isStreaming && !sceneAnalysisFailed && (
             <p className="text-sm text-[var(--muted-foreground)]">Send an action to begin the scene.</p>
           )}
 
@@ -1543,7 +2336,7 @@ export function GameNarration({
               {(() => {
                 const activeCanUploadPortrait = canUploadNpcPortrait(active.speaker);
                 return (
-                  <div className="flex gap-3">
+                  <div className="flex min-w-0 gap-3 max-[420px]:gap-2" style={gameAvatarScaleStyle}>
                     {/* Left: Speaker avatar with reaction indicator */}
                     <div className="relative flex shrink-0 flex-col items-center gap-1">
                       {activeCanUploadPortrait ? (
@@ -1554,30 +2347,35 @@ export function GameNarration({
                           title="Upload or replace NPC portrait"
                         >
                           {activeAvatar ? (
-                            <img
-                              src={activeAvatar}
+                            <CroppedAvatar
+                              src={activeAvatar.url}
                               alt={active.speaker || ""}
-                              className="h-16 w-16 rounded-xl border-2 border-white/15 object-cover shadow-xl transition-colors hover:border-white/30 sm:h-20 sm:w-20"
+                              crop={activeAvatar.crop}
+                              className={cn(GAME_DIALOGUE_AVATAR_CLASS, "transition-colors hover:border-white/30")}
                             />
                           ) : (
                             <img
                               src="/npc-silhouette.svg"
                               alt={active.speaker || "?"}
-                              className="h-16 w-16 rounded-xl border-2 border-white/15 object-cover shadow-xl transition-colors hover:border-white/30 sm:h-20 sm:w-20"
+                              className={cn(
+                                GAME_DIALOGUE_AVATAR_CLASS,
+                                "object-cover transition-colors hover:border-white/30",
+                              )}
                             />
                           )}
                         </button>
                       ) : activeAvatar ? (
-                        <img
-                          src={activeAvatar}
+                        <CroppedAvatar
+                          src={activeAvatar.url}
                           alt={active.speaker || ""}
-                          className="h-16 w-16 rounded-xl border-2 border-white/15 object-cover shadow-xl sm:h-20 sm:w-20"
+                          crop={activeAvatar.crop}
+                          className={GAME_DIALOGUE_AVATAR_CLASS}
                         />
                       ) : (
                         <img
                           src="/npc-silhouette.svg"
                           alt={active.speaker || "?"}
-                          className="h-16 w-16 rounded-xl border-2 border-white/15 object-cover shadow-xl sm:h-20 sm:w-20"
+                          className={cn(GAME_DIALOGUE_AVATAR_CLASS, "object-cover")}
                         />
                       )}
                       <ExpressionReaction expression={active.sprite} />
@@ -1620,7 +2418,7 @@ export function GameNarration({
                               ? "border-purple-400/10 bg-purple-950/20"
                               : active.partyType === "whisper"
                                 ? "border-rose-400/10 bg-rose-950/20"
-                                : "border-white/10 bg-black/35",
+                                : "border-[var(--border)] bg-[var(--muted)]/20 dark:border-white/10 dark:bg-black/35",
                           )}
                         >
                           {editingContent !== null ? (
@@ -1628,7 +2426,8 @@ export function GameNarration({
                               ref={editTextareaRef}
                               value={editingContent}
                               onChange={(e) => setEditingContent(e.target.value)}
-                              className="w-full resize-none bg-transparent text-sm leading-relaxed text-white/90 outline-none"
+                              className="w-full resize-none bg-transparent text-sm leading-relaxed text-[var(--foreground)] outline-none"
+                              style={narrationFontStyle}
                               rows={3}
                               autoFocus
                             />
@@ -1639,12 +2438,16 @@ export function GameNarration({
                                 active.partyType === "thought" ? "italic opacity-80" : "font-semibold",
                                 doneTyping
                                   ? ""
-                                  : "after:ml-0.5 after:inline-block after:h-4 after:w-[1px] after:animate-pulse after:bg-white/60 after:align-middle",
+                                  : "after:ml-0.5 after:inline-block after:h-4 after:w-[1px] after:animate-pulse after:bg-[var(--foreground)]/60 after:align-middle dark:after:bg-white/60",
                               )}
                               style={
                                 active.color
-                                  ? ({ color: active.color, "--speaker-color": active.color } as React.CSSProperties)
-                                  : undefined
+                                  ? ({
+                                      ...narrationFontStyle,
+                                      color: active.color,
+                                      "--speaker-color": active.color,
+                                    } as CSSProperties)
+                                  : narrationStyle
                               }
                               dangerouslySetInnerHTML={{
                                 __html: animateTextHtml(
@@ -1661,7 +2464,7 @@ export function GameNarration({
                           segmentEditInfoRef.current[activeIndex] != null && (
                             <button
                               onClick={() => setEditingContent(active.content)}
-                              className="absolute right-1.5 top-1.5 rounded p-1 text-white/20 transition-colors hover:bg-white/10 hover:text-white/60"
+                              className="absolute right-1.5 top-1.5 rounded p-1 text-[var(--muted-foreground)]/40 transition-colors hover:bg-[var(--muted)]/30 hover:text-[var(--muted-foreground)] dark:text-white/20 dark:hover:bg-white/10 dark:hover:text-white/60"
                               title="Edit"
                             >
                               <Pencil size={11} />
@@ -1705,18 +2508,15 @@ export function GameNarration({
                   <button
                     onClick={() => setLogsOpen(true)}
                     disabled={logEntries.length === 0}
-                    className="flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-white/75 transition-colors hover:bg-white/10 disabled:opacity-40"
+                    className={cn(NARRATION_META_BTN, "disabled:opacity-40")}
                   >
                     <ScrollText size={12} />
-                    Logs
+                    <span className="hidden sm:inline">Logs</span>
                   </button>
                   {onOpenInventory && (
-                    <button
-                      onClick={onOpenInventory}
-                      className="relative flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-white/75 transition-colors hover:bg-white/10"
-                    >
+                    <button onClick={onOpenInventory} className={cn("relative", NARRATION_META_BTN)}>
                       <Package size={12} />
-                      Inventory
+                      <span className="hidden sm:inline">Inventory</span>
                       {(inventoryCount ?? 0) > 0 && (
                         <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-0.5 text-[0.55rem] font-bold text-black">
                           {inventoryCount}
@@ -1725,7 +2525,7 @@ export function GameNarration({
                     </button>
                   )}
                 </div>
-                {!narrationComplete && !isStreaming && !partyTurnPending && navControls}
+                {navControls}
               </div>
             </>
           )}
@@ -1734,18 +2534,19 @@ export function GameNarration({
             <>
               {/* Narration: centered, no avatar */}
               <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="rounded-full bg-white/10 px-2 py-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-white/90">
+                <span className="rounded-full bg-[var(--muted)]/30 px-2 py-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-[var(--foreground)]/90 dark:bg-white/10 dark:text-white/90">
                   Narration
                 </span>
               </div>
 
-              <div className="relative game-narration-prose max-h-40 overflow-y-auto rounded-xl border border-white/10 bg-black/35 px-3 py-2.5 sm:max-h-48">
+              <div className="relative game-narration-prose max-h-40 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--muted)]/20 px-3 py-2.5 sm:max-h-48 dark:border-white/10 dark:bg-black/35">
                 {editingContent !== null ? (
                   <textarea
                     ref={editTextareaRef}
                     value={editingContent}
                     onChange={(e) => setEditingContent(e.target.value)}
-                    className="w-full resize-none bg-transparent text-sm leading-relaxed text-white/90 outline-none"
+                    className="w-full resize-none bg-transparent text-sm leading-relaxed text-[var(--foreground)] outline-none"
+                    style={narrationFontStyle}
                     rows={3}
                     autoFocus
                   />
@@ -1755,7 +2556,7 @@ export function GameNarration({
                       "text-sm leading-relaxed",
                       doneTyping
                         ? ""
-                        : "after:ml-0.5 after:inline-block after:h-4 after:w-[1px] after:animate-pulse after:bg-white/60 after:align-middle",
+                        : "after:ml-0.5 after:inline-block after:h-4 after:w-[1px] after:animate-pulse after:bg-[var(--foreground)]/60 after:align-middle dark:after:bg-white/60",
                     )}
                     style={narrationStyle}
                     dangerouslySetInnerHTML={{
@@ -1772,7 +2573,7 @@ export function GameNarration({
                   segmentEditInfoRef.current[activeIndex] != null && (
                     <button
                       onClick={() => setEditingContent(active.content)}
-                      className="absolute right-1.5 top-1.5 rounded p-1 text-white/20 transition-colors hover:bg-white/10 hover:text-white/60"
+                      className="absolute right-1.5 top-1.5 rounded p-1 text-[var(--muted-foreground)]/40 transition-colors hover:bg-[var(--muted)]/30 hover:text-[var(--muted-foreground)] dark:text-white/20 dark:hover:bg-white/10 dark:hover:text-white/60"
                       title="Edit"
                     >
                       <Pencil size={11} />
@@ -1803,18 +2604,15 @@ export function GameNarration({
                   <button
                     onClick={() => setLogsOpen(true)}
                     disabled={logEntries.length === 0}
-                    className="flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-white/75 transition-colors hover:bg-white/10 disabled:opacity-40"
+                    className={cn(NARRATION_META_BTN, "disabled:opacity-40")}
                   >
                     <ScrollText size={12} />
-                    Logs
+                    <span className="hidden sm:inline">Logs</span>
                   </button>
                   {onOpenInventory && (
-                    <button
-                      onClick={onOpenInventory}
-                      className="relative flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-white/75 transition-colors hover:bg-white/10"
-                    >
+                    <button onClick={onOpenInventory} className={cn("relative", NARRATION_META_BTN)}>
                       <Package size={12} />
-                      Inventory
+                      <span className="hidden sm:inline">Inventory</span>
                       {(inventoryCount ?? 0) > 0 && (
                         <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-0.5 text-[0.55rem] font-bold text-black">
                           {inventoryCount}
@@ -1823,7 +2621,7 @@ export function GameNarration({
                     </button>
                   )}
                 </div>
-                {!narrationComplete && !isStreaming && navControls}
+                {navControls}
               </div>
             </>
           )}
@@ -1832,7 +2630,7 @@ export function GameNarration({
           {!scenePreparing && active && active.type === "readable" && (
             <>
               <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="rounded-full bg-white/10 px-2 py-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-white/70">
+                <span className="rounded-full bg-[var(--muted)]/30 px-2 py-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-[var(--foreground)]/70 dark:bg-white/10 dark:text-white/70">
                   {active.readableType === "book" ? "Book" : "Note"}
                 </span>
               </div>
@@ -1845,6 +2643,7 @@ export function GameNarration({
                       ? ""
                       : "after:ml-0.5 after:inline-block after:h-4 after:w-[1px] after:animate-pulse after:bg-amber-200/60 after:align-middle",
                   )}
+                  style={narrationFontStyle}
                   dangerouslySetInnerHTML={{
                     __html: animateTextHtml(
                       formatNarration(slicePreservingEffects(active.content, visibleChars), false),
@@ -1861,24 +2660,29 @@ export function GameNarration({
                   <button
                     onClick={() => setLogsOpen(true)}
                     disabled={logEntries.length === 0}
-                    className="flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-white/75 transition-colors hover:bg-white/10 disabled:opacity-40"
+                    className={cn(NARRATION_META_BTN, "disabled:opacity-40")}
                   >
                     <ScrollText size={12} />
-                    Logs
+                    <span className="hidden sm:inline">Logs</span>
                   </button>
                 </div>
-                {!narrationComplete && !isStreaming && navControls}
+                {navControls}
               </div>
             </>
           )}
 
-          {/* Inline input — appears inside the narration box once all segments are read */}
-          {!scenePreparing && narrationComplete && !isStreaming && !partyTurnPending && inputSlot && (
-            <div className="mt-2">{inputSlot}</div>
-          )}
+          {/* Inline input — appears inside the narration box once all segments are read,
+              or after the player has CONFIRMED an interrupt (not just opened the modal).
+              Gating on `interruptCommitted` (not `interruptPending`) keeps the input bar
+              from showing in the background while the confirmation modal is still open. */}
+          {!scenePreparing &&
+            (narrationComplete || interruptCommitted) &&
+            !isStreaming &&
+            !partyTurnPending &&
+            inputSlot && <div className="mt-2">{inputSlot}</div>}
 
           {/* Also show input when no narration at all (start of scene) */}
-          {!scenePreparing && !active && !isStreaming && inputSlot && (
+          {!scenePreparing && !active && !isStreaming && !sceneAnalysisFailed && inputSlot && (
             <div className="mt-2">
               {logEntries.length > 0 && (
                 <div className="mb-2">
@@ -1887,7 +2691,7 @@ export function GameNarration({
                     className="flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-white/75 transition-colors hover:bg-white/10"
                   >
                     <ScrollText size={12} />
-                    Logs
+                    <span className="hidden sm:inline">Logs</span>
                   </button>
                 </div>
               )}
@@ -1960,6 +2764,42 @@ export function GameNarration({
                         seg.sourceRole ??
                         (sourceMessageId ? (sourceMessagesById.get(sourceMessageId)?.role ?? null) : null);
                       const isActiveSeg = active?.id === seg.id;
+                      const liveSegmentIndex = segments.findIndex((s) => s.id === seg.id);
+                      const canJumpToSeg =
+                        !!latestAssistant &&
+                        sourceMessageId === latestAssistant.id &&
+                        liveSegmentIndex >= 0 &&
+                        liveSegmentIndex !== activeIndex;
+                      const performJump = () => {
+                        setActiveIndex(liveSegmentIndex);
+                        setVisibleChars(getSegmentStartVisibleChars(liveSegmentIndex));
+                        setLogsOpen(false);
+                        setEditingLogSeg(null);
+                        logScrolledRef.current = false;
+                        playClickSfx();
+                      };
+                      const isInteractiveTarget = (target: EventTarget | null) =>
+                        target instanceof Element && !!target.closest("button, input, textarea, a");
+                      const jumpRowProps = canJumpToSeg
+                        ? {
+                            role: "button" as const,
+                            tabIndex: 0,
+                            title: "Jump back to this segment",
+                            onClick: (e: ReactMouseEvent<HTMLDivElement>) => {
+                              if (isInteractiveTarget(e.target)) return;
+                              performJump();
+                            },
+                            onKeyDown: (e: ReactKeyboardEvent<HTMLDivElement>) => {
+                              if (e.key !== "Enter" && e.key !== " ") return;
+                              if (isInteractiveTarget(e.target)) return;
+                              e.preventDefault();
+                              performJump();
+                            },
+                          }
+                        : null;
+                      const jumpRowClasses = canJumpToSeg
+                        ? "cursor-pointer hover:ring-1 hover:ring-white/15 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/30"
+                        : "";
                       const canEditMessage = !!onEditMessage && !!sourceMessageId && sourceRole === "user";
                       const canEditSegment =
                         !!onEditSegment &&
@@ -1991,7 +2831,7 @@ export function GameNarration({
                             }
                           }}
                           className={cn(
-                            "absolute top-1.5 rounded p-1 text-white/20 opacity-0 transition-all group-hover/logseg:opacity-100 hover:bg-red-500/20 hover:text-red-400",
+                            "absolute top-1.5 z-10 rounded p-1 text-white/45 opacity-100 transition-all hover:bg-red-500/20 hover:text-red-400 md:text-white/20 md:opacity-0 md:group-hover/logseg:opacity-100",
                             canEdit ? "right-7" : "right-1.5",
                           )}
                           title={canDeleteThisSegment ? "Delete segment" : "Delete message"}
@@ -2016,22 +2856,62 @@ export function GameNarration({
                           </span>
                         ) : null;
 
+                      const voiceKey = getVoiceKeyForSegment(seg);
+                      const voiceEntry = voiceKey ? gameVoiceCacheRef.current.get(voiceKey) : undefined;
+                      const voiceButton =
+                        voiceKey && voiceEntry && voiceEntry.status !== "error" ? (
+                          <button
+                            type="button"
+                            onClick={() => toggleGameVoiceKey(voiceKey)}
+                            disabled={voiceEntry.status === "loading"}
+                            className={cn(
+                              "ml-1 inline-flex h-5 w-5 items-center justify-center rounded-full text-white/45 transition-colors hover:bg-white/10 hover:text-sky-200 disabled:cursor-wait disabled:opacity-60",
+                              gameVoicePlayingKey === voiceKey && "bg-sky-400/15 text-sky-200",
+                            )}
+                            title={
+                              voiceEntry.status === "loading"
+                                ? "Generating voice-over"
+                                : gameVoicePlayingKey === voiceKey
+                                  ? "Stop voice-over"
+                                  : "Play voice-over"
+                            }
+                          >
+                            {voiceEntry.status === "loading" ? (
+                              <Loader2 size={11} className="animate-spin" />
+                            ) : gameVoicePlayingKey === voiceKey ? (
+                              <VolumeX size={11} />
+                            ) : (
+                              <Volume2 size={11} />
+                            )}
+                          </button>
+                        ) : null;
+
                       const editButtons = canEdit && (
                         <>
                           {!isEditingThis && (
                             <button
                               onClick={() =>
                                 sourceMessageId &&
-                                setEditingLogSeg({
-                                  messageId: sourceMessageId,
-                                  segIndex: sourceSegmentIndex,
-                                  content: seg.type === "readable" ? (seg.readableContent ?? seg.content) : seg.content,
-                                  speaker: canEditSegment && seg.type === "dialogue" ? (seg.speaker ?? "") : undefined,
-                                  segmentType: seg.type,
-                                  readableType: seg.readableType,
-                                })
+                                (() => {
+                                  const initialContent =
+                                    seg.type === "readable" ? (seg.readableContent ?? seg.content) : seg.content;
+                                  const initialSpeaker =
+                                    canEditSegment && seg.type === "dialogue" ? (seg.speaker ?? "") : undefined;
+                                  logEditDraftRef.current = {
+                                    content: initialContent,
+                                    speaker: initialSpeaker,
+                                  };
+                                  setEditingLogSeg({
+                                    messageId: sourceMessageId,
+                                    segIndex: sourceSegmentIndex,
+                                    content: initialContent,
+                                    speaker: initialSpeaker,
+                                    segmentType: seg.type,
+                                    readableType: seg.readableType,
+                                  });
+                                })()
                               }
-                              className="absolute right-1.5 top-1.5 rounded p-1 text-white/20 opacity-0 transition-all group-hover/logseg:opacity-100 hover:bg-white/10 hover:text-white/60"
+                              className="absolute right-1.5 top-1.5 z-10 rounded p-1 text-white/45 opacity-100 transition-all hover:bg-white/10 hover:text-white/60 md:text-white/20 md:opacity-0 md:group-hover/logseg:opacity-100"
                               title="Edit"
                             >
                               <Pencil size={11} />
@@ -2060,25 +2940,34 @@ export function GameNarration({
                       const editSpeakerInput =
                         isEditingThis && seg.type === "dialogue" && canEditSegment ? (
                           <input
+                            key={`${sourceMessageId}:${sourceSegmentIndex}:speaker`}
                             className="mb-1 w-full rounded border border-white/10 bg-black/40 px-2 py-1 text-[0.7rem] font-semibold text-white/90 outline-none focus:border-white/30"
-                            value={editingLogSeg?.speaker ?? ""}
+                            defaultValue={editingLogSeg?.speaker ?? ""}
                             placeholder="Speaker name"
-                            onChange={(e) =>
-                              setEditingLogSeg((current) =>
-                                current ? { ...current, speaker: e.target.value } : current,
-                              )
-                            }
+                            onChange={(e) => {
+                              logEditDraftRef.current = {
+                                ...logEditDraftRef.current,
+                                speaker: e.target.value,
+                              };
+                            }}
                           />
                         ) : null;
 
                       const editTextarea = isEditingThis && (
                         <textarea
+                          key={`${sourceMessageId}:${sourceSegmentIndex}:content`}
                           ref={logEditTextareaRef}
                           className="mt-1 w-full rounded border border-white/10 bg-black/40 px-2 py-1 text-xs text-white/90 outline-none focus:border-white/30"
-                          value={editingLogSeg.content}
+                          style={narrationFontStyle}
+                          defaultValue={editingLogSeg.content}
                           rows={3}
                           autoFocus
-                          onChange={(e) => setEditingLogSeg({ ...editingLogSeg, content: e.target.value })}
+                          onChange={(e) => {
+                            logEditDraftRef.current = {
+                              ...logEditDraftRef.current,
+                              content: e.target.value,
+                            };
+                          }}
                           onKeyDown={(e) => {
                             if (e.key === "Escape") setEditingLogSeg(null);
                             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
@@ -2096,11 +2985,12 @@ export function GameNarration({
                       );
 
                       if (seg.type === "dialogue") {
-                        const logAvatar = seg.speaker ? findNamedMapValue(speakerAvatars, seg.speaker) : null;
+                        const logAvatar = seg.speaker ? findNamedMapValue(speakerAvatarInfos, seg.speaker) : null;
                         const canUploadLogPortrait = canUploadNpcPortrait(seg.speaker);
                         return (
                           <div
                             key={seg.id}
+                            {...(jumpRowProps ?? {})}
                             className={cn(
                               "group/logseg relative flex gap-2 rounded-lg border px-3 py-2",
                               seg.partyType === "thought"
@@ -2111,6 +3001,7 @@ export function GameNarration({
                                     ? "border-sky-400/10 bg-sky-950/15"
                                     : "border-white/5 bg-black/20",
                               isActiveSeg && "ring-1 ring-[var(--primary)]/40",
+                              jumpRowClasses,
                             )}
                           >
                             {deleteButton}
@@ -2123,10 +3014,11 @@ export function GameNarration({
                                 title="Upload or replace NPC portrait"
                               >
                                 {logAvatar ? (
-                                  <img
-                                    src={logAvatar}
+                                  <CroppedAvatar
+                                    src={logAvatar.url}
                                     alt={seg.speaker || ""}
-                                    className="h-8 w-8 rounded-lg border border-white/10 object-cover transition-colors hover:border-white/25"
+                                    crop={logAvatar.crop}
+                                    className="h-8 w-8 rounded-lg border border-white/10 transition-colors hover:border-white/25"
                                   />
                                 ) : (
                                   <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-[var(--accent)] text-[0.5rem] font-bold transition-colors hover:border-white/25">
@@ -2135,10 +3027,11 @@ export function GameNarration({
                                 )}
                               </button>
                             ) : logAvatar ? (
-                              <img
-                                src={logAvatar}
+                              <CroppedAvatar
+                                src={logAvatar.url}
                                 alt={seg.speaker || ""}
-                                className="h-8 w-8 shrink-0 rounded-lg border border-white/10 object-cover"
+                                crop={logAvatar.crop}
+                                className="h-8 w-8 shrink-0 rounded-lg border border-white/10"
                               />
                             ) : (
                               <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-[var(--accent)] text-[0.5rem] font-bold">
@@ -2158,6 +3051,7 @@ export function GameNarration({
                                   {seg.speaker || "Dialogue"}
                                 </span>
                                 {partyBadge}
+                                {voiceButton}
                               </div>
                               {isEditingThis ? (
                                 <>
@@ -2170,7 +3064,7 @@ export function GameNarration({
                                     "mt-0.5 text-xs leading-relaxed text-white/80",
                                     seg.partyType === "thought" ? "italic opacity-80" : "font-semibold",
                                   )}
-                                  style={seg.color ? { color: seg.color } : undefined}
+                                  style={seg.color ? { ...narrationFontStyle, color: seg.color } : narrationFontStyle}
                                   dangerouslySetInnerHTML={{
                                     __html: animateTextHtml(formatNarration(seg.content, false)),
                                   }}
@@ -2184,9 +3078,11 @@ export function GameNarration({
                         return (
                           <div
                             key={seg.id}
+                            {...(jumpRowProps ?? {})}
                             className={cn(
                               "group/logseg relative rounded-lg border border-cyan-400/15 bg-cyan-950/15 px-3 py-2",
                               isActiveSeg && "ring-1 ring-[var(--primary)]/40",
+                              jumpRowClasses,
                             )}
                           >
                             {deleteButton}
@@ -2197,6 +3093,7 @@ export function GameNarration({
                             </div>
                             <div
                               className="whitespace-pre-wrap break-words pr-6 text-xs leading-relaxed text-cyan-50/80"
+                              style={narrationFontStyle}
                               dangerouslySetInnerHTML={{ __html: animateTextHtml(formatNarration(seg.content, false)) }}
                             />
                           </div>
@@ -2206,9 +3103,11 @@ export function GameNarration({
                         return (
                           <div
                             key={seg.id}
+                            {...(jumpRowProps ?? {})}
                             className={cn(
                               "group/logseg relative rounded-lg border border-amber-400/15 bg-amber-950/15 px-3 py-2",
                               isActiveSeg && "ring-1 ring-[var(--primary)]/40",
+                              jumpRowClasses,
                             )}
                           >
                             {deleteButton}
@@ -2223,6 +3122,7 @@ export function GameNarration({
                             ) : (
                               <div
                                 className="text-xs italic leading-relaxed text-amber-200/70"
+                                style={narrationFontStyle}
                                 dangerouslySetInnerHTML={{
                                   __html: animateTextHtml(formatNarration(seg.readableContent ?? seg.content, false)),
                                 }}
@@ -2234,9 +3134,11 @@ export function GameNarration({
                       return (
                         <div
                           key={seg.id}
+                          {...(jumpRowProps ?? {})}
                           className={cn(
                             "group/logseg relative rounded-lg border border-white/5 bg-black/20 px-3 py-2",
                             isActiveSeg && "ring-1 ring-[var(--primary)]/40",
+                            jumpRowClasses,
                           )}
                         >
                           {deleteButton}
@@ -2245,6 +3147,7 @@ export function GameNarration({
                             <span className="text-[0.6rem] font-semibold uppercase tracking-wide text-white/80">
                               Narration
                             </span>
+                            {voiceButton}
                           </div>
                           {isEditingThis ? (
                             editTextarea
@@ -2271,6 +3174,24 @@ export function GameNarration({
   );
 }
 
+function CroppedAvatar({
+  src,
+  alt,
+  crop,
+  className,
+}: {
+  src: string;
+  alt: string;
+  crop?: AvatarCrop | null;
+  className?: string;
+}) {
+  return (
+    <div className={cn("overflow-hidden", className)}>
+      <img src={src} alt={alt} className="h-full w-full object-cover" style={getAvatarCropStyle(crop)} />
+    </div>
+  );
+}
+
 function PartyOverlayBox({
   line,
   avatar,
@@ -2278,13 +3199,13 @@ function PartyOverlayBox({
   nameColor,
 }: {
   line: PartyDialogueLine;
-  avatar: string | null;
+  avatar: SpeakerAvatarInfo | null;
   color?: string;
   nameColor?: string;
 }) {
   const styleByType: Record<string, { border: string; bg: string; icon: string; labelColor: string }> = {
-    side: { border: "border-sky-400/20", bg: "bg-sky-500/8", icon: "💬", labelColor: "text-sky-200/80" },
-    extra: { border: "border-sky-400/20", bg: "bg-sky-500/8", icon: "💬", labelColor: "text-sky-200/80" },
+    side: { border: "border-white/15", bg: "bg-black/50", icon: "💬", labelColor: "text-white/85" },
+    extra: { border: "border-white/15", bg: "bg-black/50", icon: "💬", labelColor: "text-white/85" },
     thought: { border: "border-purple-400/20", bg: "bg-purple-500/8", icon: "💭", labelColor: "text-purple-200/80" },
     whisper: { border: "border-rose-400/20", bg: "bg-rose-500/8", icon: "🤫", labelColor: "text-rose-200/80" },
   };
@@ -2294,15 +3215,17 @@ function PartyOverlayBox({
     <div
       className={cn(
         "flex w-fit min-w-0 max-w-full items-start gap-2 rounded-xl border px-3 py-2 backdrop-blur-md sm:max-w-[75%]",
+        (line.type === "side" || line.type === "extra") && "shadow-[0_16px_38px_rgba(0,0,0,0.45)]",
         style.border,
         style.bg,
       )}
     >
       {avatar ? (
-        <img
-          src={avatar}
+        <CroppedAvatar
+          src={avatar.url}
           alt={line.character}
-          className="mt-0.5 h-7 w-7 shrink-0 rounded-full border border-white/15 object-cover"
+          crop={avatar.crop}
+          className="mt-0.5 h-7 w-7 shrink-0 rounded-full border border-white/15"
         />
       ) : (
         <img
@@ -2349,53 +3272,64 @@ function PartyOverlayBox({
 
 // ── Anime-style expression reaction indicators ──
 
-const EXPRESSION_REACTIONS: Record<string, { symbol: string; color: string; animation: string }> = {
+type ExpressionReactionEffect =
+  | "pop"
+  | "anger"
+  | "sparkle"
+  | "heart"
+  | "tear"
+  | "stress"
+  | "thought"
+  | "focus"
+  | "sleep";
+
+const EXPRESSION_REACTIONS: Record<string, { symbol: string; color: string; effect: ExpressionReactionEffect }> = {
   // Anger / frustration
-  angry: { symbol: "❗", color: "text-red-400", animation: "animate-bounce" },
-  furious: { symbol: "‼️", color: "text-red-500", animation: "animate-bounce" },
-  annoyed: { symbol: "💢", color: "text-red-400", animation: "animate-pulse" },
-  irritated: { symbol: "💢", color: "text-orange-400", animation: "animate-pulse" },
+  angry: { symbol: "❗", color: "text-red-400", effect: "anger" },
+  furious: { symbol: "‼️", color: "text-red-500", effect: "anger" },
+  annoyed: { symbol: "💢", color: "text-red-400", effect: "anger" },
+  irritated: { symbol: "💢", color: "text-orange-400", effect: "anger" },
 
   // Confusion / surprise
-  confused: { symbol: "❓", color: "text-yellow-300", animation: "animate-bounce" },
-  surprised: { symbol: "❗", color: "text-yellow-300", animation: "animate-bounce" },
-  shocked: { symbol: "‼️", color: "text-yellow-400", animation: "animate-bounce" },
+  confused: { symbol: "❓", color: "text-yellow-300", effect: "pop" },
+  surprised: { symbol: "❗", color: "text-yellow-300", effect: "pop" },
+  shocked: { symbol: "‼️", color: "text-yellow-400", effect: "pop" },
 
   // Joy / amusement
-  happy: { symbol: "✨", color: "text-amber-300", animation: "animate-pulse" },
-  amused: { symbol: "✨", color: "text-amber-300", animation: "animate-pulse" },
-  delighted: { symbol: "✨", color: "text-yellow-300", animation: "animate-pulse" },
-  mischievous: { symbol: "😈", color: "text-purple-300", animation: "animate-bounce" },
+  happy: { symbol: "✨", color: "text-amber-300", effect: "sparkle" },
+  amused: { symbol: "✨", color: "text-amber-300", effect: "sparkle" },
+  delighted: { symbol: "✨", color: "text-yellow-300", effect: "sparkle" },
+  mischievous: { symbol: "😈", color: "text-purple-300", effect: "pop" },
 
   // Affection
-  flirty: { symbol: "💗", color: "text-pink-400", animation: "animate-pulse" },
-  tender: { symbol: "💕", color: "text-pink-300", animation: "animate-pulse" },
-  loving: { symbol: "💕", color: "text-pink-300", animation: "animate-pulse" },
+  flirty: { symbol: "💗", color: "text-pink-400", effect: "heart" },
+  tender: { symbol: "💕", color: "text-pink-300", effect: "heart" },
+  loving: { symbol: "💕", color: "text-pink-300", effect: "heart" },
 
   // Sadness
-  sad: { symbol: "💧", color: "text-blue-300", animation: "animate-pulse" },
-  crying: { symbol: "💧", color: "text-blue-400", animation: "animate-bounce" },
+  sad: { symbol: "💧", color: "text-blue-300", effect: "tear" },
+  crying: { symbol: "💧", color: "text-blue-400", effect: "tear" },
 
   // Fear / worry
-  scared: { symbol: "💦", color: "text-sky-300", animation: "animate-bounce" },
-  worried: { symbol: "💦", color: "text-sky-300", animation: "animate-pulse" },
-  nervous: { symbol: "💦", color: "text-sky-300", animation: "animate-pulse" },
+  scared: { symbol: "💦", color: "text-sky-300", effect: "stress" },
+  worried: { symbol: "💦", color: "text-sky-300", effect: "stress" },
+  nervous: { symbol: "💦", color: "text-sky-300", effect: "stress" },
 
   // Thinking
-  thinking: { symbol: "💭", color: "text-white/50", animation: "animate-pulse" },
+  thinking: { symbol: "💭", color: "text-white/70", effect: "thought" },
 
   // Smug / confident
-  smirk: { symbol: "✧", color: "text-amber-300", animation: "animate-pulse" },
-  smug: { symbol: "✧", color: "text-amber-400", animation: "animate-pulse" },
-  determined: { symbol: "🔥", color: "text-orange-400", animation: "animate-pulse" },
-  battle_stance: { symbol: "⚔️", color: "text-orange-300", animation: "animate-bounce" },
+  smirk: { symbol: "✧", color: "text-amber-300", effect: "sparkle" },
+  smug: { symbol: "✧", color: "text-amber-400", effect: "sparkle" },
+  determined: { symbol: "🔥", color: "text-orange-400", effect: "focus" },
+  battle_stance: { symbol: "⚔️", color: "text-orange-300", effect: "focus" },
 
   // Cold / dismissive
-  cold: { symbol: "❄️", color: "text-sky-300", animation: "animate-pulse" },
-  disgusted: { symbol: "💢", color: "text-green-400", animation: "animate-pulse" },
-  deadpan: { symbol: "…", color: "text-white/40", animation: "" },
-  eye_roll: { symbol: "…", color: "text-white/40", animation: "" },
-  bored: { symbol: "💤", color: "text-white/30", animation: "animate-pulse" },
+  cold: { symbol: "❄️", color: "text-sky-300", effect: "sparkle" },
+  disgusted: { symbol: "💢", color: "text-green-400", effect: "anger" },
+  deadpan: { symbol: "…", color: "text-white/40", effect: "pop" },
+  eye_roll: { symbol: "…", color: "text-white/40", effect: "pop" },
+  bored: { symbol: "💤", color: "text-white/40", effect: "sleep" },
 };
 
 function ExpressionReaction({ expression }: { expression?: string }) {
@@ -2407,12 +3341,20 @@ function ExpressionReaction({ expression }: { expression?: string }) {
   return (
     <div
       className={cn(
-        "absolute -right-1 -top-1 text-base drop-shadow-lg sm:-right-2 sm:-top-2 sm:text-lg",
+        "game-expression-reaction absolute -right-1 -top-1 sm:-right-2 sm:-top-2",
+        `game-expression-reaction--${reaction.effect}`,
         reaction.color,
-        reaction.animation,
       )}
     >
-      {reaction.symbol}
+      <span className="game-expression-reaction__halo" />
+      <span className="game-expression-reaction__symbol">{reaction.symbol}</span>
+      {reaction.effect === "thought" && (
+        <>
+          <span className="game-expression-reaction__bubble game-expression-reaction__bubble--one" />
+          <span className="game-expression-reaction__bubble game-expression-reaction__bubble--two" />
+        </>
+      )}
+      {reaction.effect === "tear" && <span className="game-expression-reaction__drop" />}
     </div>
   );
 }
@@ -2483,6 +3425,137 @@ const LOOSE_DIALOGUE_NON_SPEAKER_KEYWORDS = new Set<string>([
   "мастер",
 ]);
 
+function normalizeInlineVnDialogueLines(source: string): string {
+  return source
+    .replace(
+      /([^\n])\s+(\[[^\]]+\]\s*\[(?:main|side|extra|action|thought|whisper(?::[^\]]+)?)\]\s*(?:\[[^\]]+\])?\s*:)/gi,
+      "$1\n$2",
+    )
+    .replace(
+      /(\[[^\]]+\]\s*\[(?:main|side|extra|whisper(?::[^\]]+)?)\]\s*(?:\[[^\]]+\])?\s*:\s*(?:"[^"]*"|“[^”]*”|«[^»]*»))\s+(?=\S)/gi,
+      "$1\n",
+    );
+}
+
+type TruncationLine = {
+  text: string;
+  originalStart: number;
+  originalEnd: number;
+};
+
+function findReadableBlockEnd(source: string, start: number): number {
+  let depth = 0;
+  for (let i = start; i < source.length; i++) {
+    if (source[i] === "[") depth++;
+    else if (source[i] === "]") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function splitTextIntoBoundedLines(text: string, originalStart: number): TruncationLine[] {
+  const lines: TruncationLine[] = [];
+  let lineStart = 0;
+
+  for (let i = 0; i <= text.length; i++) {
+    if (i < text.length && text[i] !== "\n") continue;
+    const rawLine = text.slice(lineStart, i);
+    const lineText = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    lines.push({
+      text: lineText,
+      originalStart: originalStart + lineStart,
+      originalEnd: originalStart + lineStart + lineText.length,
+    });
+    lineStart = i + 1;
+  }
+
+  return lines;
+}
+
+function splitInlineVnDialogueLineMetadata(line: TruncationLine): TruncationLine[] {
+  const headerRe = /\[[^\]]+\]\s*\[(?:main|side|extra|action|thought|whisper(?::[^\]]+)?)\]\s*(?:\[[^\]]+\])?\s*:/gi;
+  const pieces: TruncationLine[] = [];
+  let chunkStart = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = headerRe.exec(line.text))) {
+    if (match.index > chunkStart && /\s/.test(line.text[match.index - 1] ?? "")) {
+      pieces.push({
+        text: line.text.slice(chunkStart, match.index),
+        originalStart: line.originalStart + chunkStart,
+        originalEnd: line.originalStart + match.index,
+      });
+      chunkStart = match.index;
+    }
+  }
+  pieces.push({
+    text: line.text.slice(chunkStart),
+    originalStart: line.originalStart + chunkStart,
+    originalEnd: line.originalEnd,
+  });
+
+  return pieces.flatMap((piece) => {
+    const splitRe =
+      /^(\s*\[[^\]]+\]\s*\[(?:main|side|extra|whisper(?::[^\]]+)?)\]\s*(?:\[[^\]]+\])?\s*:\s*(?:"[^"]*"|“[^”]*”|«[^»]*»))\s+(?=\S)/i;
+    const split = splitRe.exec(piece.text);
+    if (!split || split[1].length >= piece.text.length) return [piece];
+
+    const splitAt = split[1].length;
+    return [
+      {
+        text: piece.text.slice(0, splitAt),
+        originalStart: piece.originalStart,
+        originalEnd: piece.originalStart + splitAt,
+      },
+      {
+        text: piece.text.slice(splitAt).trimStart(),
+        originalStart: piece.originalStart + splitAt + (piece.text.slice(splitAt).match(/^\s*/)?.[0].length ?? 0),
+        originalEnd: piece.originalEnd,
+      },
+    ];
+  });
+}
+
+function buildTruncationLines(rawContent: string): TruncationLine[] {
+  const chunks: TruncationLine[] = [];
+  const readableTagRe = /\[(?:Note|Book):/gi;
+  let cursor = 0;
+  let placeholderIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = readableTagRe.exec(rawContent))) {
+    const start = match.index;
+    const end = findReadableBlockEnd(rawContent, start);
+    if (end < 0) continue;
+
+    if (start > cursor) {
+      chunks.push(...splitTextIntoBoundedLines(rawContent.slice(cursor, start), cursor));
+    }
+    chunks.push({
+      text: `__READABLE_${placeholderIndex}__`,
+      originalStart: start,
+      originalEnd: end + 1,
+    });
+    placeholderIndex += 1;
+    cursor = end + 1;
+    readableTagRe.lastIndex = cursor;
+  }
+
+  if (cursor < rawContent.length) {
+    chunks.push(...splitTextIntoBoundedLines(rawContent.slice(cursor), cursor));
+  }
+
+  return chunks.flatMap((chunk) => {
+    if (/^__READABLE_\d+__$/.test(chunk.text)) return [chunk];
+    return splitInlineVnDialogueLineMetadata(chunk).map((line) => ({
+      ...line,
+      text: stripGmTagsKeepReadables(line.text),
+    }));
+  });
+}
+
 function parseNarrationSegments(message: NarrationMessage, speakerColors: Map<string, string>): NarrationSegment[] {
   // Use stripGmTagsKeepReadables so [Note:] and [Book:] stay inline for position-aware display.
   // Extract them first as placeholders so multi-line readables don't break line-based parsing.
@@ -2521,7 +3594,7 @@ function parseNarrationSegments(message: NarrationMessage, speakerColors: Map<st
     }
   }
 
-  const lines = source.split(/\r?\n/);
+  const lines = normalizeInlineVnDialogueLines(source).split(/\r?\n/);
   const parsed: NarrationSegment[] = [];
   // Readable placeholder regex
   const readablePlaceholderRe = /^__READABLE_(\d+)__$/;
@@ -2750,6 +3823,68 @@ function parseNarrationSegments(message: NarrationMessage, speakerColors: Map<st
   }
 
   return parsed;
+}
+
+/**
+ * Truncate an assistant message's raw content so that it ends just after the
+ * Nth segment (inclusive) that `parseNarrationSegments` would emit. Used by
+ * the Interrupt feature so the model on the next turn can't see narration
+ * the player never read.
+ *
+ * The parser-facing text is normalized for segment detection, but the returned
+ * string is always a byte-for-byte prefix of the original raw content.
+ */
+function truncateMessageContentAtSegment(rawContent: string, segmentIndexInclusive: number): string {
+  if (segmentIndexInclusive < 0) return "";
+
+  const lines = buildTruncationLines(rawContent || "");
+  const readablePlaceholderRe = /^__READABLE_(\d+)__$/;
+  const narrationRegex = /^\s*Narration\s*:\s*(.+)$/i;
+  const legacyDialogueRegex = /^\s*Dialogue\s*\[([^\]]+)\]\s*(?:\[([^\]]+)\])?\s*:\s*(.+)$/i;
+  const compactDialogueRegex = /^\s*\[([^\]]+)\]\s*(?:\[([^\]]+)\])?\s*:\s*(.+)$/;
+  const partyLineRegex =
+    /^\s*\[([^\]]+)\]\s*\[(main|side|extra|action|thought|whisper(?::([^\]]+))?)\]\s*(?:\[([^\]]+)\])?\s*:\s*(.+)$/i;
+
+  const target = segmentIndexInclusive + 1;
+  let segmentCount = 0;
+  let pendingFallback = false;
+  let lastIncludedLineIdx = -1;
+
+  for (let i = 0; i < lines.length; i++) {
+    if (segmentCount >= target) break;
+    const line = lines[i]!.text.trim();
+
+    if (!line) {
+      if (pendingFallback) {
+        segmentCount++;
+        pendingFallback = false;
+      }
+      continue;
+    }
+
+    const isSpecial =
+      readablePlaceholderRe.test(line) ||
+      partyLineRegex.test(line) ||
+      narrationRegex.test(line) ||
+      legacyDialogueRegex.test(line) ||
+      compactDialogueRegex.test(line);
+
+    if (isSpecial) {
+      if (pendingFallback) {
+        segmentCount++;
+        pendingFallback = false;
+        if (segmentCount >= target) break;
+      }
+      segmentCount++;
+      lastIncludedLineIdx = i;
+    } else {
+      pendingFallback = true;
+      lastIncludedLineIdx = i;
+    }
+  }
+
+  if (lastIncludedLineIdx < 0) return rawContent;
+  return rawContent.slice(0, lines[lastIncludedLineIdx]!.originalEnd);
 }
 
 /**

@@ -249,7 +249,7 @@ class GameAudioManager {
 
   /** Play a one-shot sound effect. */
   playSfx(tag: string, manifest?: Record<string, { path: string }> | null): void {
-    if (this.isMuted || !this.userHasInteracted) return;
+    if (this.isMuted || this.sfxVolume <= 0 || !this.userHasInteracted) return;
     const url = this.resolveAssetUrl(tag, manifest);
     const audio = this.sfxPool[this.sfxIndex % SFX_POOL_SIZE]!;
     this.sfxIndex++;
@@ -349,6 +349,9 @@ class GameAudioManager {
     if (!this.isMuted) {
       if (this.musicElement) this.musicElement.volume = this.musicVolume;
       if (this.ambientElement) this.ambientElement.volume = this.ambientVolume;
+    }
+    for (const el of this.sfxPool) {
+      el.volume = this.sfxVolume;
     }
   }
 

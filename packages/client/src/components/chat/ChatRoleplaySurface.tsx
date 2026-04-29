@@ -10,7 +10,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { type SpritePlacement, type SpriteSide } from "@marinara-engine/shared";
+import { type SceneForkMode, type SpritePlacement, type SpriteSide } from "@marinara-engine/shared";
 import {
   FolderOpen,
   Globe,
@@ -86,6 +86,11 @@ const AuthorNotesPanel = lazy(async () => {
   const module = await import("./ChatRoleplayPanels");
   return { default: module.AuthorNotesPanel };
 });
+
+const PANEL_BACKDROP =
+  "fixed inset-0 z-[9999] flex items-center justify-center p-4 max-md:pt-[max(1rem,env(safe-area-inset-top))]";
+const PANEL_CONTAINER =
+  "relative max-h-[calc(100dvh-4rem)] w-full max-w-sm overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--card)] p-3 shadow-2xl shadow-black/40 animate-message-in";
 
 function WeatherEffectsConnected() {
   const gs = useGameStateStore((s) => s.current);
@@ -213,6 +218,12 @@ function RegeneratingMessageContent({
   return <ChatMessage message={{ ...msg, extra: cleanExtra, content: streamBuffer || "" }} isStreaming {...rest} />;
 }
 
+/** True for stored context messages that should feed generation but not render in the transcript. */
+function isHiddenFromUser(message: MessageWithSwipes) {
+  const extra = typeof message.extra === "string" ? JSON.parse(message.extra) : (message.extra ?? {});
+  return extra.hiddenFromUser === true;
+}
+
 function RpToolbarButton({
   icon,
   title,
@@ -273,9 +284,9 @@ function ToolbarMenu({ children }: { children: ReactNode }) {
         <button
           onClick={() => setOpen(!open)}
           className={cn(
-            "flex w-9 items-center justify-center rounded-xl border bg-black/40 p-1.5 text-foreground/60 backdrop-blur-md transition-all hover:bg-black/60 hover:text-foreground",
+            "flex w-9 items-center justify-center rounded-xl border bg-[var(--card)] p-1.5 text-foreground/60 backdrop-blur-md transition-all hover:bg-[var(--accent)] hover:text-foreground",
             "border-foreground/10",
-            open && "bg-black/60 border-foreground/20 text-foreground",
+            open && "bg-[var(--accent)] border-foreground/20 text-foreground",
           )}
           title="More options"
         >
@@ -285,7 +296,7 @@ function ToolbarMenu({ children }: { children: ReactNode }) {
           createPortal(
             <div
               ref={popRef}
-              className="fixed z-[9999] flex w-9 flex-col items-center gap-0.5 rounded-xl border border-foreground/10 bg-black/80 p-1 shadow-xl backdrop-blur-xl animate-message-in"
+              className="fixed z-[9999] flex w-9 flex-col items-center gap-0.5 rounded-xl border border-foreground/10 bg-[var(--card)] p-1 shadow-xl backdrop-blur-xl animate-message-in"
               style={{ top: pos.top, right: pos.right }}
               onClick={() => setOpen(false)}
             >
@@ -397,15 +408,12 @@ function WorldInfoButton({ chatId }: { chatId: string | null }) {
         (isMobile ? (
           createPortal(
             <div
-              className="fixed inset-0 z-[9999] flex items-center justify-center p-4 max-md:pt-[max(1rem,env(safe-area-inset-top))]"
+              className={PANEL_BACKDROP}
               onMouseDown={(e) => e.stopPropagation()}
               onTouchStart={(e) => e.stopPropagation()}
             >
               <div className="absolute inset-0 bg-black/30" onClick={() => setOpen(false)} />
-              <div
-                className="relative max-h-[calc(100dvh-4rem)] w-full max-w-sm overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--card)] p-3 shadow-2xl shadow-black/40 animate-message-in"
-                onClick={(e) => e.stopPropagation()}
-              >
+              <div className={PANEL_CONTAINER} onClick={(e) => e.stopPropagation()}>
                 <Suspense
                   fallback={
                     <div className="flex items-center gap-2 py-4 text-xs text-[var(--muted-foreground)]">
@@ -487,15 +495,12 @@ function AuthorNotesButton({ chatId, chatMeta }: { chatId: string | null; chatMe
         (isMobile ? (
           createPortal(
             <div
-              className="fixed inset-0 z-[9999] flex items-center justify-center p-4 max-md:pt-[max(1rem,env(safe-area-inset-top))]"
+              className={PANEL_BACKDROP}
               onMouseDown={(e) => e.stopPropagation()}
               onTouchStart={(e) => e.stopPropagation()}
             >
               <div className="absolute inset-0 bg-black/30" onClick={() => setOpen(false)} />
-              <div
-                className="relative max-h-[calc(100dvh-4rem)] w-full max-w-sm overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--card)] p-3 shadow-2xl shadow-black/40 animate-message-in"
-                onClick={(e) => e.stopPropagation()}
-              >
+              <div className={PANEL_CONTAINER} onClick={(e) => e.stopPropagation()}>
                 <Suspense
                   fallback={
                     <div className="flex items-center gap-2 py-4 text-xs text-[var(--muted-foreground)]">
@@ -538,6 +543,7 @@ function AuthorNotesButton({ chatId, chatMeta }: { chatId: string | null; chatMe
   );
 }
 
+/** Props for the full roleplay surface, including scene lifecycle and fork controls. */
 type RoleplaySurfaceProps = {
   activeChatId: string;
   chat: ChatData | null | undefined;
@@ -596,6 +602,8 @@ type RoleplaySurfaceProps = {
   onToggleConversationStart: (messageId: string, current: boolean) => void;
   onPeekPrompt: () => void;
   onBranch?: (messageId: string) => void;
+  onCloneSceneFromHere?: (messageId: string) => void;
+  isCloneSceneFromHereDisabled?: boolean;
   onToggleSelectMessage: (toggle: MessageSelectionToggle) => void;
   onSummaryContextSizeChange: (size: number) => void;
   onRerunTrackers: () => void;
@@ -603,6 +611,8 @@ type RoleplaySurfaceProps = {
   onStartEncounter: () => void;
   onConcludeScene: () => void;
   onAbandonScene: () => void;
+  onForkScene: (sceneChatId: string, mode: SceneForkMode) => void;
+  isForkingScene?: boolean;
   onOpenSettings: () => void;
   onOpenFiles: () => void;
   onOpenGallery: () => void;
@@ -691,6 +701,8 @@ export function ChatRoleplaySurface({
   onToggleConversationStart,
   onPeekPrompt,
   onBranch,
+  onCloneSceneFromHere,
+  isCloneSceneFromHereDisabled,
   onToggleSelectMessage,
   onSummaryContextSizeChange,
   onRerunTrackers,
@@ -698,6 +710,8 @@ export function ChatRoleplaySurface({
   onStartEncounter,
   onConcludeScene,
   onAbandonScene,
+  onForkScene,
+  isForkingScene,
   onOpenSettings,
   onOpenFiles,
   onOpenGallery,
@@ -992,7 +1006,7 @@ export function ChatRoleplaySurface({
                     <button
                       onClick={onLoadMore}
                       disabled={isFetchingNextPage}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-foreground/10 bg-black/40 px-3 py-1.5 text-xs font-medium text-foreground/70 backdrop-blur-sm transition-all hover:bg-foreground/10 hover:text-foreground/90 disabled:opacity-50"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-foreground/10 bg-[var(--card)] px-3 py-1.5 text-xs font-medium text-foreground/70 backdrop-blur-sm transition-all hover:bg-[var(--accent)] hover:text-foreground/90 disabled:opacity-50"
                     >
                       {isFetchingNextPage ? (
                         <Loader2 size="0.75rem" className="animate-spin" />
@@ -1006,11 +1020,12 @@ export function ChatRoleplaySurface({
 
                 {isLoading && (
                   <div className="flex flex-col items-center gap-3 py-12">
-                    <div className="h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-white/60" />
+                    <div className="h-8 w-8 animate-spin rounded-full border-2 border-foreground/20 border-t-white/60" />
                   </div>
                 )}
 
                 {messages?.map((msg, i) => {
+                  if (isHiddenFromUser(msg)) return null;
                   const isRegenerating = isStreaming && regenerateMessageId === msg.id;
                   return (
                     <div
@@ -1032,6 +1047,8 @@ export function ChatRoleplaySurface({
                           onToggleConversationStart={onToggleConversationStart}
                           onPeekPrompt={onPeekPrompt}
                           onBranch={onBranch}
+                          onCloneSceneFromHere={onCloneSceneFromHere}
+                          isCloneSceneFromHereDisabled={isCloneSceneFromHereDisabled}
                           isLastAssistantMessage={msg.id === lastAssistantMessageId}
                           characterMap={characterMap}
                           personaInfo={personaInfo}
@@ -1057,6 +1074,8 @@ export function ChatRoleplaySurface({
                           onToggleConversationStart={onToggleConversationStart}
                           onPeekPrompt={onPeekPrompt}
                           onBranch={onBranch}
+                          onCloneSceneFromHere={onCloneSceneFromHere}
+                          isCloneSceneFromHereDisabled={isCloneSceneFromHereDisabled}
                           isLastAssistantMessage={msg.id === lastAssistantMessageId}
                           characterMap={characterMap}
                           personaInfo={personaInfo}
@@ -1101,6 +1120,8 @@ export function ChatRoleplaySurface({
                     originChatId={chatMeta.sceneOriginChatId}
                     onConclude={onConcludeScene}
                     onAbandon={onAbandonScene}
+                    onFork={onForkScene}
+                    isForking={isForkingScene}
                   />
                 )}
                 {combatAgentEnabled && (
@@ -1116,6 +1137,7 @@ export function ChatRoleplaySurface({
                   </div>
                 )}
                 <ChatInput
+                  key={activeChatId}
                   mode={isRoleplay ? "roleplay" : "conversation"}
                   characterNames={characterNames}
                   groupResponseOrder={
@@ -1127,7 +1149,12 @@ export function ChatRoleplaySurface({
                     chatCharIds.length > 1
                       ? chatCharIds.map((id) => {
                           const info = characterMap.get(id);
-                          return { id, name: info?.name ?? "Unknown", avatarUrl: info?.avatarUrl ?? null };
+                          return {
+                            id,
+                            name: info?.name ?? "Unknown",
+                            avatarUrl: info?.avatarUrl ?? null,
+                            avatarCrop: info?.avatarCrop ?? null,
+                          };
                         })
                       : undefined
                   }

@@ -4,6 +4,7 @@ import type { Lorebook, LorebookEntry } from "@marinara-engine/shared";
 import {
   applyLorebookDefaults,
   applyPerLorebookTokenBudgets,
+  filterRelevantLorebooks,
 } from "../src/services/lorebook/index.js";
 import { scanForActivatedEntries, type ActivatedEntry } from "../src/services/lorebook/keyword-scanner.js";
 
@@ -18,6 +19,7 @@ function makeLorebook(overrides: Partial<Lorebook> = {}): Lorebook {
     recursiveScanning: false,
     maxRecursionDepth: 3,
     characterId: null,
+    personaId: null,
     chatId: null,
     enabled: true,
     tags: [],
@@ -35,6 +37,7 @@ function makeEntry(overrides: Partial<LorebookEntry> = {}): LorebookEntry {
     lorebookId: "book-1",
     name: "Entry",
     content: "Lore entry",
+    description: "",
     keys: ["keyword"],
     secondaryKeys: [],
     enabled: true,
@@ -89,6 +92,23 @@ test("entries inherit their lorebook scan depth when no per-entry override is se
 
   assert.equal(activated.length, 0);
   assert.equal(entries[0]?.scanDepth, 2);
+});
+
+test("persona-linked lorebooks activate only for the active persona", () => {
+  const personaBook = makeLorebook({ id: "persona-book", personaId: "persona-1" });
+  const otherPersonaBook = makeLorebook({ id: "other-persona-book", personaId: "persona-2" });
+  const characterBook = makeLorebook({ id: "character-book", characterId: "character-1" });
+
+  const relevant = filterRelevantLorebooks([personaBook, otherPersonaBook, characterBook], {
+    characterIds: [],
+    personaId: "persona-1",
+    activeLorebookIds: [],
+  });
+
+  assert.deepEqual(
+    relevant.map((book) => book.id),
+    ["persona-book"],
+  );
 });
 
 test("per-entry scan depth overrides the lorebook default", () => {

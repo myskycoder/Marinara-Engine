@@ -23,9 +23,10 @@ function buildLatestSessionContinuity(summaries: SessionSummary[]): string[] {
     ...(latest.resumePoint ? [`Resume point: ${latest.resumePoint}`] : []),
     ...(latest.partyDynamics ? [`Party dynamics: ${latest.partyDynamics}`] : []),
     ...(latest.keyDiscoveries.length ? [`Key discoveries: ${latest.keyDiscoveries.join("; ")}`] : []),
-    ...(latest.revelations?.length ? [`Revelations: ${latest.revelations.join("; ")}`] : []),
     ...(latest.characterMoments?.length ? [`Character moments: ${latest.characterMoments.join("; ")}`] : []),
+    ...(latest.littleDetails?.length ? [`Little details to recall: ${latest.littleDetails.join("; ")}`] : []),
     ...(latest.npcUpdates?.length ? [`NPC updates: ${latest.npcUpdates.join("; ")}`] : []),
+    ...(latest.nextSessionRequest ? [`Player request for this session: ${latest.nextSessionRequest}`] : []),
     ...(latest.statsSnapshot && Object.keys(latest.statsSnapshot).length > 0
       ? [`Stats snapshot: ${JSON.stringify(latest.statsSnapshot)}`]
       : []),
@@ -82,9 +83,10 @@ export function buildRecapPrompt(summaries: SessionSummary[], latestEndingBeat?:
     `Party dynamics: ${latest.partyDynamics}`,
     `Party state: ${latest.partyState}`,
     `Key discoveries: ${latest.keyDiscoveries.join(", ")}`,
-    ...(latest.revelations?.length ? [`Revelations: ${latest.revelations.join("; ")}`] : []),
     ...(latest.characterMoments?.length ? [`Character moments: ${latest.characterMoments.join("; ")}`] : []),
+    ...(latest.littleDetails?.length ? [`Little details to recall: ${latest.littleDetails.join("; ")}`] : []),
     ...(latest.npcUpdates?.length ? [`NPC updates: ${latest.npcUpdates.join("; ")}`] : []),
+    ...(latest.nextSessionRequest ? [`Player request for the next session: ${latest.nextSessionRequest}`] : []),
     ...(latest.statsSnapshot && Object.keys(latest.statsSnapshot).length > 0
       ? [`Stats snapshot: ${JSON.stringify(latest.statsSnapshot)}`]
       : []),

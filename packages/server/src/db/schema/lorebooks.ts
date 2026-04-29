@@ -13,6 +13,7 @@ export const lorebooks = sqliteTable("lorebooks", {
   recursiveScanning: text("recursive_scanning").notNull().default("false"),
   maxRecursionDepth: integer("max_recursion_depth").notNull().default(3),
   characterId: text("character_id"),
+  personaId: text("persona_id"),
   chatId: text("chat_id"),
   enabled: text("enabled").notNull().default("true"),
   /** Tags for organizing/filtering lorebooks (JSON array of strings) */
@@ -30,6 +31,8 @@ export const lorebookEntries = sqliteTable("lorebook_entries", {
     .references(() => lorebooks.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
   content: text("content").notNull().default(""),
+  /** Short summary used by the knowledge-router agent to decide if this entry is relevant */
+  description: text("description").notNull().default(""),
   /** JSON array of primary keywords */
   keys: text("keys").notNull().default("[]"),
   /** JSON array of secondary keywords */

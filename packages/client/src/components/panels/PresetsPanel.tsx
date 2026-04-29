@@ -39,7 +39,8 @@ export function PresetsPanel() {
   const [selectedPresetIds, setSelectedPresetIds] = useState<Set<string>>(new Set());
   const [exportingSelected, setExportingSelected] = useState(false);
 
-  const activePresetId = activeChat?.promptPresetId ?? null;
+  const canAssignToActiveChat = !!activeChat && activeChat.mode !== "conversation";
+  const activePresetId = canAssignToActiveChat ? (activeChat?.promptPresetId ?? null) : null;
 
   const filteredPresets = useMemo(() => {
     if (!presets) return [];
@@ -55,6 +56,10 @@ export function PresetsPanel() {
 
   const selectPreset = (presetId: string) => {
     if (!activeChat) return;
+    if (activeChat.mode === "conversation") {
+      toast.error("Prompt presets are not available in conversation mode.");
+      return;
+    }
     const newId = activePresetId === presetId ? null : presetId;
     // Clear stale preset choices from the previous preset before switching
     updateMetadata.mutate({ id: activeChat.id, presetChoices: {} });
@@ -333,7 +338,7 @@ export function PresetsPanel() {
               {/* Action buttons */}
               {!selectionMode && (
                 <div className="absolute right-2 top-1/2 -translate-y-1/2 flex shrink-0 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] px-1 py-0.5 opacity-0 shadow-sm ring-1 ring-[var(--border)] transition-opacity group-hover:opacity-100 max-md:opacity-100">
-                  {activeChat && (
+                  {canAssignToActiveChat && (
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -403,7 +408,9 @@ export function PresetsPanel() {
 
       {activeChat && !selectionMode && (
         <p className="px-1 text-[0.625rem] text-[var(--muted-foreground)]/60">
-          Click a preset to edit · hover → "Use" to assign to chat
+          {canAssignToActiveChat
+            ? 'Click a preset to edit · hover → "Use" to assign to chat'
+            : "Click a preset to edit"}
         </p>
       )}
 

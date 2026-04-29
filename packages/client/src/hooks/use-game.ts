@@ -59,11 +59,31 @@ interface ConcludeSessionResponse {
   summary: SessionSummary;
 }
 
+interface RegenerateSessionConclusionResponse {
+  summary: SessionSummary;
+}
+
+interface UpdateCampaignProgressionResponse {
+  sessionChat: Chat;
+  gameId: string;
+  campaignProgression: {
+    storyArc: string | null;
+    plotTwists: string[];
+    partyArcs: unknown[];
+  };
+}
+
 interface RecruitPartyMemberResponse {
   sessionChat: Chat;
   added: boolean;
   characterName: string;
   cardCreated: boolean;
+}
+
+interface RemovePartyMemberResponse {
+  sessionChat: Chat;
+  removed: boolean;
+  characterName: string;
 }
 
 interface DiceRollResponse {
@@ -77,10 +97,14 @@ interface StateTransitionResponse {
 
 interface MapGenerateResponse {
   map: GameMap;
+  maps?: GameMap[];
+  activeGameMapId?: string | null;
 }
 
 interface MapMoveResponse {
   map: GameMap;
+  maps?: GameMap[];
+  activeGameMapId?: string | null;
 }
 
 interface UpdateGameWidgetsResponse {
@@ -192,7 +216,7 @@ export function useConcludeSession() {
   const qc = useQueryClient();
 
   return useMutation({
-    mutationFn: (data: { chatId: string; connectionId?: string }) =>
+    mutationFn: (data: { chatId: string; connectionId?: string; nextSessionRequest?: string }) =>
       api.post<ConcludeSessionResponse>("/game/session/conclude", data),
     onMutate: (variables) => {
       console.info("[game/session/conclude] Starting conclude request", variables);
@@ -217,6 +241,62 @@ export function useConcludeSession() {
   });
 }
 
+export function useRegenerateSessionConclusion() {
+  const qc = useQueryClient();
+
+  return useMutation({
+    mutationFn: (data: { chatId: string; sessionNumber: number; connectionId?: string }) =>
+      api.post<RegenerateSessionConclusionResponse>("/game/session/regenerate-conclusion", data),
+    onMutate: (variables) => {
+      toast.loading(`Regenerating session ${variables.sessionNumber} conclusion...`, {
+        id: `game-session-regenerate:${variables.chatId}:${variables.sessionNumber}`,
+      });
+    },
+    onSuccess: (_, variables) => {
+      toast.success(`Session ${variables.sessionNumber} conclusion regenerated.`, {
+        id: `game-session-regenerate:${variables.chatId}:${variables.sessionNumber}`,
+      });
+      qc.invalidateQueries({ queryKey: chatKeys.detail(variables.chatId) });
+      qc.invalidateQueries({ queryKey: chatKeys.messages(variables.chatId) });
+    },
+    onError: (err, variables) => {
+      console.error("[game/session/regenerate-conclusion] Error:", err);
+      toast.error(err.message || "Failed to regenerate session conclusion.", {
+        id: `game-session-regenerate:${variables.chatId}:${variables.sessionNumber}`,
+      });
+    },
+  });
+}
+
+export function useUpdateCampaignProgression() {
+  const qc = useQueryClient();
+
+  return useMutation({
+    mutationFn: (data: { chatId: string; sessionNumber: number; connectionId?: string }) =>
+      api.post<UpdateCampaignProgressionResponse>("/game/session/update-campaign-progression", data),
+    onMutate: (variables) => {
+      toast.loading(`Updating plot arcs from session ${variables.sessionNumber}...`, {
+        id: `game-campaign-progression:${variables.chatId}:${variables.sessionNumber}`,
+      });
+    },
+    onSuccess: (res, variables) => {
+      qc.setQueryData(chatKeys.detail(res.sessionChat.id), res.sessionChat);
+      toast.success(`Plot arcs updated from session ${variables.sessionNumber}.`, {
+        id: `game-campaign-progression:${variables.chatId}:${variables.sessionNumber}`,
+      });
+      qc.invalidateQueries({ queryKey: chatKeys.detail(res.sessionChat.id) });
+      qc.invalidateQueries({ queryKey: chatKeys.list() });
+      qc.invalidateQueries({ queryKey: gameKeys.sessions(res.gameId) });
+    },
+    onError: (err, variables) => {
+      console.error("[game/session/update-campaign-progression] Error:", err);
+      toast.error(err.message || "Failed to update plot arcs.", {
+        id: `game-campaign-progression:${variables.chatId}:${variables.sessionNumber}`,
+      });
+    },
+  });
+}
+
 export function useRecruitPartyMember() {
   const qc = useQueryClient();
 
@@ -236,6 +316,27 @@ export function useRecruitPartyMember() {
     onError: (err) => {
       console.error("[recruitPartyMember] Error:", err);
       toast.error(err.message || "Failed to recruit party member.");
+    },
+  });
+}
+
+export function useRemovePartyMember() {
+  const qc = useQueryClient();
+
+  return useMutation({
+    mutationFn: (data: { chatId: string; characterName: string }) =>
+      api.post<RemovePartyMemberResponse>("/game/party/remove", data),
+    onSuccess: (res, variables) => {
+      qc.setQueryData(chatKeys.detail(variables.chatId), res.sessionChat);
+      qc.invalidateQueries({ queryKey: chatKeys.detail(variables.chatId) });
+      qc.invalidateQueries({ queryKey: chatKeys.list() });
+      if (res.removed) {
+        toast.success(`${res.characterName} left the party.`);
+      }
+    },
+    onError: (err) => {
+      console.error("[removePartyMember] Error:", err);
+      toast.error(err.message || "Failed to remove party member.");
     },
   });
 }
@@ -281,7 +382,11 @@ export function useGenerateMap() {
     mutationFn: (data: { chatId: string; locationType: string; context: string; connectionId?: string }) =>
       api.post<MapGenerateResponse>("/game/map/generate", data),
     onSuccess: (res, variables) => {
-      store.getState().setCurrentMap(res.map);
+      if (res.maps?.length) {
+        store.getState().setMaps(res.maps, res.activeGameMapId);
+      } else {
+        store.getState().setCurrentMap(res.map);
+      }
       qc.invalidateQueries({ queryKey: chatKeys.detail(variables.chatId) });
     },
   });
@@ -292,10 +397,14 @@ export function useMoveOnMap() {
   const store = useGameModeStore;
 
   return useMutation({
-    mutationFn: (data: { chatId: string; position: { x: number; y: number } | string }) =>
+    mutationFn: (data: { chatId: string; position: { x: number; y: number } | string; mapId?: string | null }) =>
       api.post<MapMoveResponse>("/game/map/move", data),
     onSuccess: (res, variables) => {
-      store.getState().setCurrentMap(res.map);
+      if (res.maps?.length) {
+        store.getState().setMaps(res.maps, res.activeGameMapId);
+      } else {
+        store.getState().setCurrentMap(res.map);
+      }
       qc.invalidateQueries({ queryKey: chatKeys.detail(variables.chatId) });
       qc.invalidateQueries({ queryKey: [...gameKeys.all, "journal", variables.chatId] });
     },
@@ -360,7 +469,11 @@ export function useSyncGameState(activeChatId: string, chatMeta: Record<string, 
     if (chatMeta.gameActiveState && chatMeta.gameActiveState !== state.gameState) {
       useGameModeStore.getState().setGameState(chatMeta.gameActiveState as GameActiveState);
     }
-    if (chatMeta.gameMap && chatMeta.gameMap !== state.currentMap) {
+    const metadataMaps = Array.isArray(chatMeta.gameMaps) ? (chatMeta.gameMaps as GameMap[]) : [];
+    const activeMapId = typeof chatMeta.activeGameMapId === "string" ? chatMeta.activeGameMapId : null;
+    if (metadataMaps.length > 0) {
+      useGameModeStore.getState().setMaps(metadataMaps, activeMapId);
+    } else if (chatMeta.gameMap && chatMeta.gameMap !== state.currentMap) {
       useGameModeStore.getState().setCurrentMap(chatMeta.gameMap as GameMap);
     }
     if (chatMeta.gameNpcs) {

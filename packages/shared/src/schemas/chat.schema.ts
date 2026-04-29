@@ -35,6 +35,8 @@ export const generateRequestSchema = z.object({
   userStatus: z.enum(["active", "idle", "dnd"]).optional().default("active"),
   mentionedCharacterNames: z.array(z.string()).optional().default([]),
   forCharacterId: z.string().nullable().optional().default(null),
+  generationGuide: z.string().nullable().optional().default(null),
+  debugMode: z.boolean().optional().default(false),
   attachments: z
     .array(
       z.object({

@@ -9,6 +9,7 @@ import { useCreatePersona } from "../../hooks/use-characters";
 import { useUIStore } from "../../stores/ui.store";
 import { Sparkles, Loader2, Wand2, CheckCircle, AlertCircle, ChevronDown, User, Save } from "lucide-react";
 import { api } from "../../lib/api-client";
+import { ProfessorMariWorkingWindow } from "../ui/ProfessorMariWorkingWindow";
 
 interface Props {
   open: boolean;
@@ -122,6 +123,7 @@ export function PersonaMakerModal({ open, onClose }: Props) {
 
   return (
     <Modal open={open} onClose={handleClose} title="✦ AI Persona Maker" width="max-w-lg">
+      <ProfessorMariWorkingWindow visible={streaming || saving} />
       <div className="space-y-4">
         {/* Connection selector */}
         <div className="space-y-1.5">

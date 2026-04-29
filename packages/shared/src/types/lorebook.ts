@@ -27,6 +27,8 @@ export interface Lorebook {
   maxRecursionDepth: number;
   /** ID of the character this lorebook is linked to (character books) */
   characterId: string | null;
+  /** ID of the persona this lorebook is linked to (persona books) */
+  personaId: string | null;
   /** ID of the chat this lorebook is scoped to (if any) */
   chatId: string | null;
   /** Whether this lorebook is globally active */
@@ -48,6 +50,8 @@ export interface LorebookEntry {
   name: string;
   /** The actual content injected into the prompt */
   content: string;
+  /** Short summary used by the knowledge-router agent to decide if this entry is relevant */
+  description: string;
   /** Primary trigger keywords (supports regex) */
   keys: string[];
   /** Secondary / optional keywords */

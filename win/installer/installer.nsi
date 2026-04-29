@@ -11,7 +11,7 @@
 
 ; ── App metadata ──
 !define APP_NAME "Marinara Engine"
-!define APP_VERSION "1.5.5"
+!define APP_VERSION "1.5.6"
 !define APP_PUBLISHER "Pasta-Devs"
 !define APP_URL "https://github.com/Pasta-Devs/Marinara-Engine"
 !define REPO_URL "https://github.com/Pasta-Devs/Marinara-Engine.git"
@@ -254,14 +254,76 @@ Please restart your computer and run this installer again."
   DetailPrint "═══ Step 2/6: Downloading ${APP_NAME} ═══"
   DetailPrint ""
   ${If} ${FileExists} "$INSTDIR\.git\*.*"
-    DetailPrint "Existing installation found — pulling latest version..."
-    nsExec::ExecToLog 'git pull'
+    DetailPrint "Existing installation found — fetching latest version..."
+    nsExec::ExecToLog 'git fetch origin main --quiet'
     Pop $0
     ${If} $0 != 0
-      DetailPrint "Warning: git pull failed. Continuing with existing files."
-    ${Else}
-      DetailPrint "Repository updated."
+      MessageBox MB_OK|MB_ICONSTOP "Failed to fetch latest repository changes.$\r$\n$\r$\nPlease check your internet connection and run the installer again."
+      Abort
     ${EndIf}
+
+    StrCpy $5 "0"
+    nsExec::ExecToLog 'cmd /c git diff --quiet && git diff --cached --quiet'
+    Pop $1
+    ${If} $1 != 0
+      DetailPrint "Local changes detected — stashing before update..."
+      nsExec::ExecToLog 'git stash push -q -m "installer auto-stash before update"'
+      Pop $1
+      ${If} $1 == 0
+        StrCpy $5 "1"
+      ${Else}
+        MessageBox MB_OK|MB_ICONSTOP "Failed to stash local repository changes before update.$\r$\n$\r$\nPlease resolve local changes or reinstall into a clean folder."
+        Abort
+      ${EndIf}
+    ${EndIf}
+
+    nsExec::ExecToLog 'git merge --ff-only origin/main'
+    Pop $0
+    ${If} $0 != 0
+      ${If} $5 == "1"
+        nsExec::ExecToLog 'git stash apply -q'
+        Pop $1
+        ${If} $1 == 0
+          nsExec::ExecToLog 'git stash drop -q'
+          Pop $1
+        ${EndIf}
+      ${EndIf}
+      MessageBox MB_OK|MB_ICONSTOP "Failed to fast-forward the existing installation to origin/main.$\r$\n$\r$\nYour files were left in place. Please resolve local changes or reinstall into a clean folder."
+      Abort
+    ${EndIf}
+
+    nsExec::ExecToStack 'git rev-parse HEAD'
+    Pop $0
+    Pop $2
+    nsExec::ExecToStack 'git rev-parse origin/main'
+    Pop $0
+    Pop $3
+    ${If} $2 != $3
+      ${If} $5 == "1"
+        nsExec::ExecToLog 'git stash apply -q'
+        Pop $1
+        ${If} $1 == 0
+          nsExec::ExecToLog 'git stash drop -q'
+          Pop $1
+        ${EndIf}
+      ${EndIf}
+      MessageBox MB_OK|MB_ICONSTOP "Repository update did not land on origin/main.$\r$\n$\r$\nPlease run the installer again after resolving local repository state."
+      Abort
+    ${EndIf}
+
+    ${If} $5 == "1"
+      nsExec::ExecToLog 'git stash apply -q'
+      Pop $0
+      ${If} $0 == 0
+        nsExec::ExecToLog 'git stash drop -q'
+        Pop $0
+      ${Else}
+        nsExec::ExecToLog 'git reset --hard HEAD'
+        Pop $0
+        DetailPrint "Warning: local changes are preserved in git stash and could not be reapplied automatically."
+      ${EndIf}
+    ${EndIf}
+    DetailPrint "Repository updated."
   ${Else}
     DetailPrint "Cloning ${APP_NAME} repository..."
     DetailPrint "This may take 2-5 minutes depending on your internet speed."

@@ -90,7 +90,10 @@ export function DirectionEngine({ directions, backgroundUrl, onPlayingChange, ch
 
   // Queue incoming directions (dedupe by stringifying to avoid re-firing)
   useEffect(() => {
-    if (directions.length === 0) return;
+    if (directions.length === 0) {
+      processedRef.current = "";
+      return;
+    }
     const key = JSON.stringify(directions);
     if (processedRef.current === key) return;
     processedRef.current = key;
@@ -156,18 +159,19 @@ export function DirectionEngine({ directions, backgroundUrl, onPlayingChange, ch
   );
 
   return (
-    <div className="relative h-full w-full">
-      {/* Background-layer overlays */}
+    <div className="relative h-full w-full overflow-hidden">
+      {/* Scene visual layer. Transform/filter effects live here so HUD widgets remain stable. */}
+      <div className="absolute inset-0 z-0 h-full w-full" style={buildVisualStyle(bgEffects)}>
+        <CrossfadeBackground url={backgroundUrl} />
+      </div>
+
+      {/* Background/all overlay effects */}
       {bgEffects.map((eff) => (
         <EffectOverlay key={eff.id} effect={eff} />
       ))}
 
-      {/* Content with optional content-layer filters */}
-      <div className="relative z-[2] h-full w-full" style={buildContentStyle(activeEffects)}>
-        {/* Background rendered inside effect scope so shake/blur/cinematic effects apply to it */}
-        <CrossfadeBackground url={backgroundUrl} />
-        {children}
-      </div>
+      {/* Interactive/game UI content remains outside transformed effect layers to avoid widget jitter. */}
+      <div className="relative z-[2] h-full w-full">{children}</div>
 
       {/* Click to dismiss persistent effects — only visible while effects are actively playing */}
       {activeEffects.some((e) => !e.expiring) && (
@@ -309,6 +313,85 @@ function EffectOverlay({ effect }: { effect: ActiveEffect }) {
         />
       );
 
+    case "pulse":
+      return (
+        <div
+          className="pointer-events-none absolute inset-0 z-[35]"
+          style={{
+            background: `radial-gradient(circle at center, rgba(255,255,255,${0.18 + intensity * 0.32}) 0%, transparent 55%)`,
+            animation: effect.expiring ? undefined : `dirPulse ${Math.max(0.45, dur)}s ease-out forwards`,
+            opacity: effect.expiring ? 0 : undefined,
+            transition: effect.expiring ? expiringTransition : undefined,
+          }}
+        />
+      );
+
+    case "chromatic_aberration":
+      return (
+        <div
+          className="pointer-events-none absolute inset-0 z-30 mix-blend-screen"
+          style={{
+            background:
+              "linear-gradient(90deg, rgba(255,0,80,0.22), transparent 35%, rgba(0,220,255,0.18) 65%, transparent)",
+            animation: effect.expiring ? undefined : `dirChromatic ${Math.min(dur, 2)}s steps(5, end) forwards`,
+            opacity: effect.expiring ? 0 : intensity,
+            transition: effect.expiring ? expiringTransition : undefined,
+          }}
+        />
+      );
+
+    case "film_grain":
+      return (
+        <div
+          className="pointer-events-none absolute inset-0 z-30 mix-blend-overlay"
+          style={{
+            backgroundImage:
+              "radial-gradient(circle at 20% 30%, rgba(255,255,255,0.18) 0 1px, transparent 1px), radial-gradient(circle at 70% 60%, rgba(0,0,0,0.22) 0 1px, transparent 1px), radial-gradient(circle at 45% 80%, rgba(255,255,255,0.12) 0 1px, transparent 1px)",
+            backgroundSize: "17px 19px, 23px 29px, 31px 37px",
+            animation: effect.expiring ? undefined : `dirGrain ${Math.max(0.5, dur)}s steps(8, end) infinite`,
+            opacity: effect.expiring ? 0 : Math.min(0.45, 0.12 + intensity * 0.35),
+            transition: effect.expiring ? expiringTransition : undefined,
+          }}
+        />
+      );
+
+    case "rain_streaks":
+      return (
+        <div
+          className="pointer-events-none absolute inset-0 z-30"
+          style={{
+            backgroundImage:
+              "linear-gradient(105deg, transparent 0 46%, rgba(190,220,255,0.22) 48%, transparent 51% 100%)",
+            backgroundSize: "42px 120px",
+            animation: effect.expiring ? undefined : `dirRainStreaks ${Math.max(0.8, dur)}s linear infinite`,
+            opacity: effect.expiring ? 0 : Math.min(0.55, 0.18 + intensity * 0.42),
+            transition: effect.expiring ? expiringTransition : undefined,
+          }}
+        />
+      );
+
+    case "spotlight": {
+      const x = command.params?.x ?? "50%";
+      const y = command.params?.y ?? "42%";
+      return (
+        <div
+          className="pointer-events-none absolute inset-0 z-30"
+          style={{
+            background: `radial-gradient(circle at ${x} ${y}, transparent 0%, transparent ${22 + intensity * 18}%, rgba(0,0,0,${0.4 + intensity * 0.38}) 100%)`,
+            opacity: effect.expiring ? 0 : undefined,
+            animation: effect.expiring ? undefined : `dirFadeFromZero ${Math.min(dur, 0.6)}s ease-out forwards`,
+            transition: effect.expiring ? expiringTransition : undefined,
+          }}
+        />
+      );
+    }
+
+    case "desaturate":
+    case "slow_zoom":
+    case "impact_zoom":
+    case "tilt":
+      return null;
+
     default:
       return null;
   }
@@ -326,7 +409,7 @@ const COLOR_GRADE_PRESETS: Record<string, string> = {
   dreamy: "saturate(0.6) brightness(1.2) blur(0.5px)",
 };
 
-function buildContentStyle(effects: ActiveEffect[]): React.CSSProperties {
+function buildVisualStyle(effects: ActiveEffect[]): React.CSSProperties {
   const style: React.CSSProperties = {};
   const filters: string[] = [];
   const animations: string[] = [];
@@ -339,7 +422,7 @@ function buildContentStyle(effects: ActiveEffect[]): React.CSSProperties {
     const intensity = command.intensity ?? 0.5;
     const dur = command.duration ?? 1;
 
-    if (command.effect === "blur" && (command.target === "content" || command.target === "all" || !command.target)) {
+    if (command.effect === "blur") {
       if (!eff.expiring) {
         const amount = command.params?.amount ?? `${intensity * 12}px`;
         filters.push(`blur(${amount})`);
@@ -356,6 +439,24 @@ function buildContentStyle(effects: ActiveEffect[]): React.CSSProperties {
         const shakeDur = Math.min(dur, 4);
         animations.push(`dirShakeDecay ${shakeDur}s ease-out forwards`);
       }
+    }
+
+    if (command.effect === "desaturate") {
+      if (!eff.expiring) filters.push(`grayscale(${0.35 + intensity * 0.65}) contrast(${1 + intensity * 0.2})`);
+      maxDur = Math.max(maxDur, dur);
+    }
+
+    if (command.effect === "slow_zoom" && !eff.expiring) {
+      animations.push(`dirSlowZoom ${Math.max(dur, 1.5)}s ease-out forwards`);
+    }
+
+    if (command.effect === "impact_zoom" && !eff.expiring) {
+      animations.push(`dirImpactZoom ${Math.max(0.35, Math.min(dur, 1.2))}s cubic-bezier(.2,.8,.2,1) forwards`);
+    }
+
+    if (command.effect === "tilt" && !eff.expiring) {
+      const tiltDur = Math.max(0.5, Math.min(dur, 2));
+      animations.push(`dirTilt ${tiltDur}s ease-in-out forwards`);
     }
   }
 

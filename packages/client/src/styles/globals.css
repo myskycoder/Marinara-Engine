@@ -421,7 +421,7 @@ strong {
 
 /* Chat message narration text color */
 .mari-message-content {
-  color: #c3c2c2;
+  color: var(--foreground);
 }
 
 /* Hide <style> text inside inline SVGs (browser renders CSS text as visible SVG content) */
@@ -1085,7 +1085,7 @@ summary[class*="cursor-pointer"],
 
 .os-window {
   backdrop-filter: blur(10px);
-  background: #141414d9;
+  background: var(--card);
   border: 2px solid var(--y2k-purple);
   border-radius: 0.75rem;
   position: relative;
@@ -1166,6 +1166,36 @@ summary[class*="cursor-pointer"],
   -webkit-mask-image: linear-gradient(to right, transparent, black 10%, black 90%, transparent);
 }
 
+@keyframes roleplay-hud-field-scroll {
+  0%,
+  12% {
+    transform: translateX(0);
+  }
+  88%,
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.roleplay-hud-scroll-field {
+  mask-image: linear-gradient(to right, black 0%, black 88%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black 0%, black 88%, transparent 100%);
+}
+
+.roleplay-hud-scroll-track {
+  display: inline-flex;
+  min-width: max-content;
+  max-width: none;
+  vertical-align: bottom;
+  transform: translateX(0);
+}
+
+.group:hover .roleplay-hud-scroll-track,
+.group:focus-visible .roleplay-hud-scroll-track,
+.roleplay-hud-scroll-track--active {
+  animation: roleplay-hud-field-scroll 9s linear infinite;
+}
+
 @keyframes message-in {
   from {
     opacity: 0;
@@ -1226,6 +1256,152 @@ summary[class*="cursor-pointer"],
 
 .animate-party-slide-in {
   animation: party-slide-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes expression-pop {
+  0%,
+  100% {
+    transform: translateY(0) scale(1) rotate(-6deg);
+  }
+  45% {
+    transform: translateY(-0.28rem) scale(1.16) rotate(5deg);
+  }
+}
+
+@keyframes expression-shiver {
+  0%,
+  100% {
+    transform: translate(0, 0) rotate(-5deg);
+  }
+  25% {
+    transform: translate(-0.08rem, -0.14rem) rotate(-10deg);
+  }
+  50% {
+    transform: translate(0.08rem, -0.04rem) rotate(7deg);
+  }
+  75% {
+    transform: translate(-0.05rem, 0.04rem) rotate(-3deg);
+  }
+}
+
+@keyframes expression-float {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+    opacity: 0.86;
+  }
+  50% {
+    transform: translateY(-0.38rem) scale(1.08);
+    opacity: 1;
+  }
+}
+
+@keyframes expression-halo {
+  0%,
+  100% {
+    transform: scale(0.72);
+    opacity: 0.16;
+  }
+  50% {
+    transform: scale(1.18);
+    opacity: 0.42;
+  }
+}
+
+@keyframes expression-drop {
+  0% {
+    transform: translateY(-0.2rem) scale(0.7);
+    opacity: 0;
+  }
+  28% {
+    opacity: 0.9;
+  }
+  100% {
+    transform: translateY(0.7rem) scale(0.9);
+    opacity: 0;
+  }
+}
+
+.game-expression-reaction {
+  display: grid;
+  height: 1.55rem;
+  width: 1.55rem;
+  place-items: center;
+  filter: drop-shadow(0 0.18rem 0.28rem rgb(0 0 0 / 0.55));
+  pointer-events: none;
+}
+
+.game-expression-reaction__halo {
+  position: absolute;
+  inset: 0.06rem;
+  border-radius: 9999px;
+  background: currentColor;
+  opacity: 0.22;
+  filter: blur(0.38rem);
+  animation: expression-halo 1.45s ease-in-out infinite;
+}
+
+.game-expression-reaction__symbol {
+  position: relative;
+  z-index: 1;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.game-expression-reaction--pop .game-expression-reaction__symbol,
+.game-expression-reaction--sparkle .game-expression-reaction__symbol,
+.game-expression-reaction--heart .game-expression-reaction__symbol,
+.game-expression-reaction--focus .game-expression-reaction__symbol,
+.game-expression-reaction--sleep .game-expression-reaction__symbol {
+  animation: expression-pop 1.15s ease-in-out infinite;
+}
+
+.game-expression-reaction--anger .game-expression-reaction__symbol,
+.game-expression-reaction--stress .game-expression-reaction__symbol {
+  animation: expression-shiver 0.72s steps(2, end) infinite;
+}
+
+.game-expression-reaction--thought .game-expression-reaction__symbol,
+.game-expression-reaction--tear .game-expression-reaction__symbol {
+  animation: expression-float 1.55s ease-in-out infinite;
+}
+
+.game-expression-reaction__bubble,
+.game-expression-reaction__drop {
+  position: absolute;
+  z-index: 0;
+  border-radius: 9999px;
+  background: currentColor;
+}
+
+.game-expression-reaction__bubble {
+  opacity: 0.45;
+}
+
+.game-expression-reaction__bubble--one {
+  right: 1.1rem;
+  top: 1.05rem;
+  height: 0.28rem;
+  width: 0.28rem;
+  animation: expression-float 1.3s ease-in-out infinite 120ms;
+}
+
+.game-expression-reaction__bubble--two {
+  right: 1.42rem;
+  top: 1.38rem;
+  height: 0.18rem;
+  width: 0.18rem;
+  animation: expression-float 1.45s ease-in-out infinite 260ms;
+}
+
+.game-expression-reaction__drop {
+  right: 0.18rem;
+  top: 0.78rem;
+  height: 0.36rem;
+  width: 0.24rem;
+  border-radius: 60% 60% 70% 70%;
+  opacity: 0;
+  animation: expression-drop 1.4s ease-in-out infinite;
 }
 
 @keyframes fade-in-up {
@@ -1526,7 +1702,7 @@ summary[class*="cursor-pointer"],
    15. CHAT: ROLEPLAY MODE
    ───────────────────────────────────────────── */
 .rpg-chat-area {
-  background: #0a0a0f;
+  background: var(--background);
 }
 
 .rpg-overlay {
@@ -1539,8 +1715,22 @@ summary[class*="cursor-pointer"],
   );
 }
 
+[data-theme="light"] .rpg-overlay {
+  background: linear-gradient(
+    180deg,
+    rgba(250, 248, 255, 0.4) 0%,
+    rgba(250, 248, 255, 0.25) 30%,
+    rgba(250, 248, 255, 0.3) 70%,
+    rgba(250, 248, 255, 0.45) 100%
+  );
+}
+
 .rpg-vignette {
   background: radial-gradient(ellipse at center, transparent 50%, rgba(0, 0, 0, 0.3) 100%);
+}
+
+[data-theme="light"] .rpg-vignette {
+  background: radial-gradient(ellipse at center, transparent 60%, rgba(120, 100, 160, 0.12) 100%);
 }
 
 .rpg-avatar-glow {
@@ -2572,6 +2762,103 @@ summary[class*="cursor-pointer"],
   }
   to {
     opacity: 1;
+  }
+}
+
+@keyframes dirPulse {
+  0% {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  18% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.18);
+  }
+}
+
+@keyframes dirSlowZoom {
+  from {
+    transform: scale(1);
+  }
+  to {
+    transform: scale(1.08);
+  }
+}
+
+@keyframes dirImpactZoom {
+  0% {
+    transform: scale(1);
+  }
+  35% {
+    transform: scale(1.12);
+  }
+  100% {
+    transform: scale(1.03);
+  }
+}
+
+@keyframes dirTilt {
+  0% {
+    transform: rotate(0deg) scale(1.02);
+  }
+  35% {
+    transform: rotate(-1.6deg) scale(1.04);
+  }
+  70% {
+    transform: rotate(1.1deg) scale(1.03);
+  }
+  100% {
+    transform: rotate(0deg) scale(1.01);
+  }
+}
+
+@keyframes dirChromatic {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-4px);
+  }
+  40% {
+    transform: translateX(3px);
+  }
+  60% {
+    transform: translateX(-2px);
+  }
+  80% {
+    transform: translateX(2px);
+  }
+}
+
+@keyframes dirGrain {
+  0% {
+    transform: translate(0, 0);
+  }
+  25% {
+    transform: translate(-2%, 1%);
+  }
+  50% {
+    transform: translate(1%, -2%);
+  }
+  75% {
+    transform: translate(2%, 2%);
+  }
+  100% {
+    transform: translate(-1%, 0);
+  }
+}
+
+@keyframes dirRainStreaks {
+  from {
+    background-position: 0 -120px;
+  }
+  to {
+    background-position: -42px 120px;
   }
 }
 

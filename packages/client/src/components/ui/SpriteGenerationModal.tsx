@@ -35,9 +35,21 @@ interface SlicedCell {
   selected: boolean;
 }
 
+interface SliceAdjustments {
+  marginX: number;
+  marginY: number;
+  gapX: number;
+  gapY: number;
+}
+
 // ── Constants ──
 
 const EXPRESSION_PRESETS = {
+  "1 (1×1)": {
+    cols: 1,
+    rows: 1,
+    expressions: ["neutral"],
+  },
   "6 (2×3)": {
     cols: 2,
     rows: 3,
@@ -66,13 +78,38 @@ const EXPRESSION_PRESETS = {
       "confused",
     ],
   },
+  "16 (4×4)": {
+    cols: 4,
+    rows: 4,
+    expressions: [
+      "neutral",
+      "happy",
+      "sad",
+      "angry",
+      "surprised",
+      "scared",
+      "disgusted",
+      "thinking",
+      "laughing",
+      "crying",
+      "blushing",
+      "smirk",
+      "embarrassed",
+      "determined",
+      "confused",
+      "sleepy",
+    ],
+  },
 } as const;
 
 type PresetKey = keyof typeof EXPRESSION_PRESETS;
 
 type SpriteType = "expressions" | "full-body";
 
+const DEFAULT_SPRITE_PRESET: PresetKey = "6 (2×3)";
+
 const FULL_BODY_POSE_PRESETS: Record<PresetKey, string[]> = {
+  "1 (1×1)": ["idle"],
   "6 (2×3)": ["idle", "walk", "battle_stance", "casting", "defend", "victory"],
   "9 (3×3)": ["idle", "walk", "run", "battle_stance", "attack", "defend", "casting", "hurt", "victory"],
   "12 (3×4)": [
@@ -88,6 +125,24 @@ const FULL_BODY_POSE_PRESETS: Record<PresetKey, string[]> = {
     "thinking",
     "cheer",
     "victory",
+  ],
+  "16 (4×4)": [
+    "idle",
+    "walk",
+    "run",
+    "battle_stance",
+    "attack",
+    "defend",
+    "casting",
+    "hurt",
+    "jump",
+    "thinking",
+    "cheer",
+    "victory",
+    "wave",
+    "sit",
+    "kneel",
+    "point",
   ],
 };
 
@@ -129,6 +184,13 @@ const ALL_FULL_BODY_POSES = [
   "point",
 ];
 
+const DEFAULT_SLICE_ADJUSTMENTS: SliceAdjustments = {
+  marginX: 0,
+  marginY: 0,
+  gapX: 0,
+  gapY: 0,
+};
+
 // ── Component ──
 
 export function SpriteGenerationModal({
@@ -149,9 +211,10 @@ export function SpriteGenerationModal({
   // Config state
   const [appearance, setAppearance] = useState(defaultAppearance ?? "");
   const [referenceImages, setReferenceImages] = useState<string[]>([]);
-  const [preset, setPreset] = useState<PresetKey>("6 (2×3)");
+  const [useCurrentAvatarReference, setUseCurrentAvatarReference] = useState(false);
+  const [preset, setPreset] = useState<PresetKey>(DEFAULT_SPRITE_PRESET);
   const [selectedExpressions, setSelectedExpressions] = useState<string[]>([
-    ...EXPRESSION_PRESETS["6 (2×3)"].expressions,
+    ...EXPRESSION_PRESETS[DEFAULT_SPRITE_PRESET].expressions,
   ]);
   const [noBackground, setNoBackground] = useState(true);
   const [cleanupStrength, setCleanupStrength] = useState(50);
@@ -162,6 +225,8 @@ export function SpriteGenerationModal({
   const [cells, setCells] = useState<SlicedCell[]>([]);
   const [cleanupApplying, setCleanupApplying] = useState(false);
   const [cleanupApplied, setCleanupApplied] = useState(false);
+  const [sliceAdjustments, setSliceAdjustments] = useState<SliceAdjustments>(DEFAULT_SLICE_ADJUSTMENTS);
+  const [sliceApplying, setSliceApplying] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -178,6 +243,21 @@ export function SpriteGenerationModal({
   }, [connectionsList]);
   const spriteGenerationUnavailable = spriteCapabilities?.spriteGenerationAvailable === false;
   const spriteGenerationReason = spriteCapabilities?.reason ?? "Sprite generation is unavailable on this platform.";
+  const selectedTargetCount = EXPRESSION_PRESETS[preset].cols * EXPRESSION_PRESETS[preset].rows;
+  const singleImageMode = selectedTargetCount === 1;
+  const cappedSelectedExpressions = useMemo(
+    () => selectedExpressions.slice(0, selectedTargetCount),
+    [selectedExpressions, selectedTargetCount],
+  );
+  const hasCurrentAvatarReference = !!defaultAvatarUrl;
+  const maxUploadedReferenceImages = useCurrentAvatarReference && hasCurrentAvatarReference ? 3 : 4;
+  const effectiveReferenceImages = useMemo(
+    () =>
+      [useCurrentAvatarReference && defaultAvatarUrl ? defaultAvatarUrl : null, ...referenceImages]
+        .filter((img): img is string => !!img)
+        .slice(0, 4),
+    [defaultAvatarUrl, referenceImages, useCurrentAvatarReference],
+  );
 
   // Auto-select first image connection
   const effectiveConnectionId = connectionId ?? imageConnections[0]?.id ?? null;
@@ -185,33 +265,42 @@ export function SpriteGenerationModal({
   useEffect(() => {
     if (!open) return;
     setSpriteType(initialSpriteType);
+    setPreset(DEFAULT_SPRITE_PRESET);
     setSelectedExpressions(
       initialSpriteType === "full-body"
-        ? [...FULL_BODY_POSE_PRESETS[preset]]
-        : [...EXPRESSION_PRESETS[preset].expressions],
+        ? [...FULL_BODY_POSE_PRESETS[DEFAULT_SPRITE_PRESET]]
+        : [...EXPRESSION_PRESETS[DEFAULT_SPRITE_PRESET].expressions],
     );
-  }, [open, initialSpriteType, preset]);
+  }, [open, initialSpriteType]);
 
   // Reset reference image & appearance when the target character changes
   useEffect(() => {
     setAppearance(defaultAppearance ?? "");
     setReferenceImages([]);
+    setUseCurrentAvatarReference(!!defaultAvatarUrl);
     setStep(0);
     setGeneratedSheet(null);
     setCells([]);
+    setSliceAdjustments(DEFAULT_SLICE_ADJUSTMENTS);
     setError(null);
   }, [entityId, defaultAvatarUrl, defaultAppearance]);
 
   // ── Handlers ──
 
-  const handleReferenceUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => setReferenceImages((prev) => (prev.length < 4 ? [...prev, reader.result as string] : prev));
-    reader.readAsDataURL(file);
-    e.target.value = "";
-  }, []);
+  const handleReferenceUpload = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () =>
+        setReferenceImages((prev) =>
+          prev.length < maxUploadedReferenceImages ? [...prev, reader.result as string] : prev,
+        );
+      reader.readAsDataURL(file);
+      e.target.value = "";
+    },
+    [maxUploadedReferenceImages],
+  );
 
   const removeReferenceImage = useCallback((idx: number) => {
     setReferenceImages((prev) => prev.filter((_, i) => i !== idx));
@@ -227,12 +316,26 @@ export function SpriteGenerationModal({
     [spriteType],
   );
 
-  const toggleExpression = useCallback((expr: string) => {
-    setSelectedExpressions((prev) => (prev.includes(expr) ? prev.filter((e) => e !== expr) : [...prev, expr]));
-  }, []);
+  const toggleExpression = useCallback(
+    (expr: string) => {
+      setSelectedExpressions((prev) => {
+        if (prev.includes(expr)) {
+          return prev.filter((entry) => entry !== expr);
+        }
+        if (singleImageMode) {
+          return [expr];
+        }
+        if (prev.length >= selectedTargetCount) {
+          return [...prev.slice(1), expr];
+        }
+        return [...prev, expr];
+      });
+    },
+    [selectedTargetCount, singleImageMode],
+  );
 
   const handleGenerate = useCallback(async () => {
-    if (spriteGenerationUnavailable || !effectiveConnectionId || selectedExpressions.length === 0) return;
+    if (spriteGenerationUnavailable || !effectiveConnectionId || cappedSelectedExpressions.length === 0) return;
 
     setStep(1);
     setError(null);
@@ -247,8 +350,8 @@ export function SpriteGenerationModal({
       }>("/sprites/generate-sheet", {
         connectionId: effectiveConnectionId,
         appearance,
-        referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
-        expressions: selectedExpressions,
+        referenceImages: effectiveReferenceImages.length > 0 ? effectiveReferenceImages : undefined,
+        expressions: cappedSelectedExpressions,
         cols,
         rows,
         spriteType,
@@ -258,6 +361,7 @@ export function SpriteGenerationModal({
       });
 
       setGeneratedSheet(result.sheetBase64 ? `data:image/png;base64,${result.sheetBase64}` : null);
+      setSliceAdjustments(DEFAULT_SLICE_ADJUSTMENTS);
       setCells(
         result.cells.map((c) => ({
           expression: c.expression,
@@ -281,8 +385,8 @@ export function SpriteGenerationModal({
     spriteGenerationUnavailable,
     effectiveConnectionId,
     appearance,
-    referenceImages,
-    selectedExpressions,
+    effectiveReferenceImages,
+    cappedSelectedExpressions,
     preset,
     spriteType,
   ]);
@@ -320,6 +424,69 @@ export function SpriteGenerationModal({
     setCells((prev) => prev.map((cell) => ({ ...cell, dataUrl: cell.rawDataUrl })));
     setCleanupApplied(false);
   }, []);
+
+  const handleSliceAdjustmentChange = useCallback((key: keyof SliceAdjustments, value: number) => {
+    setSliceAdjustments((prev) => ({ ...prev, [key]: value }));
+  }, []);
+
+  const handleResetSliceAdjustments = useCallback(() => {
+    setSliceAdjustments(DEFAULT_SLICE_ADJUSTMENTS);
+  }, []);
+
+  const handleApplySliceAdjustments = useCallback(async () => {
+    if (!generatedSheet || singleImageMode || cells.length === 0) return;
+
+    setSliceApplying(true);
+    setError(null);
+
+    try {
+      const image = new Image();
+      image.src = generatedSheet;
+      await image.decode();
+
+      const { cols, rows } = EXPRESSION_PRESETS[preset];
+      const marginXPx = Math.round((image.naturalWidth * sliceAdjustments.marginX) / 100);
+      const marginYPx = Math.round((image.naturalHeight * sliceAdjustments.marginY) / 100);
+      const gapXPx = Math.round((image.naturalWidth * sliceAdjustments.gapX) / 100);
+      const gapYPx = Math.round((image.naturalHeight * sliceAdjustments.gapY) / 100);
+      const cellWidth = Math.floor((image.naturalWidth - marginXPx * 2 - gapXPx * (cols - 1)) / cols);
+      const cellHeight = Math.floor((image.naturalHeight - marginYPx * 2 - gapYPx * (rows - 1)) / rows);
+
+      if (cellWidth <= 0 || cellHeight <= 0) {
+        throw new Error("Slice settings leave no usable cell area");
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = cellWidth;
+      canvas.height = cellHeight;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Canvas is unavailable");
+
+      const nextCells = cells.map((cell, index) => {
+        const row = Math.floor(index / cols);
+        const col = index % cols;
+        const sx = marginXPx + col * (cellWidth + gapXPx);
+        const sy = marginYPx + row * (cellHeight + gapYPx);
+
+        ctx.clearRect(0, 0, cellWidth, cellHeight);
+        ctx.drawImage(image, sx, sy, cellWidth, cellHeight, 0, 0, cellWidth, cellHeight);
+        const dataUrl = canvas.toDataURL("image/png");
+
+        return {
+          ...cell,
+          rawDataUrl: dataUrl,
+          dataUrl,
+        };
+      });
+
+      setCells(nextCells);
+      setCleanupApplied(false);
+    } catch (err: any) {
+      setError(err?.message || "Failed to adjust sprite slices");
+    } finally {
+      setSliceApplying(false);
+    }
+  }, [cells, generatedSheet, preset, singleImageMode, sliceAdjustments]);
 
   const handleCellToggle = useCallback((idx: number) => {
     setCells((prev) => prev.map((c, i) => (i === idx ? { ...c, selected: !c.selected } : c)));
@@ -384,6 +551,8 @@ export function SpriteGenerationModal({
     setCells([]);
     setCleanupApplied(false);
     setCleanupApplying(false);
+    setSliceAdjustments(DEFAULT_SLICE_ADJUSTMENTS);
+    setSliceApplying(false);
     setError(null);
   }, []);
 
@@ -392,7 +561,7 @@ export function SpriteGenerationModal({
   // ── Render ──
 
   return (
-    <Modal open={open} onClose={onClose} title="Generate Expression Sprites" width="max-w-2xl">
+    <Modal open={open} onClose={onClose} title="Generate Sprites" width="max-w-2xl">
       <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleReferenceUpload} />
 
       {/* Step 0: Configuration */}
@@ -471,8 +640,42 @@ export function SpriteGenerationModal({
             <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">
               Reference Images <span className="text-[var(--muted-foreground)]">(optional, up to 4)</span>
             </label>
+            {hasCurrentAvatarReference && (
+              <label className="mb-2 flex items-center gap-3 rounded-lg bg-[var(--secondary)]/60 p-2.5 text-xs text-[var(--foreground)] ring-1 ring-[var(--border)]/60">
+                <input
+                  type="checkbox"
+                  checked={useCurrentAvatarReference}
+                  onChange={(e) => {
+                    const enabled = e.target.checked;
+                    setUseCurrentAvatarReference(enabled);
+                    if (enabled) {
+                      setReferenceImages((prev) => prev.slice(0, 3));
+                    }
+                  }}
+                  className="accent-[var(--primary)]"
+                />
+                <img
+                  src={defaultAvatarUrl ?? ""}
+                  alt="Current avatar reference"
+                  className="h-12 w-12 rounded-lg object-cover ring-1 ring-[var(--border)]"
+                />
+                <span className="flex-1">Use current avatar as a reference image</span>
+              </label>
+            )}
             <div className="flex items-start gap-3">
               <div className="flex flex-wrap gap-2">
+                {useCurrentAvatarReference && defaultAvatarUrl && (
+                  <div className="relative">
+                    <img
+                      src={defaultAvatarUrl}
+                      alt="Current avatar reference"
+                      className="h-20 w-20 rounded-lg object-cover ring-2 ring-[var(--primary)]/40"
+                    />
+                    <span className="absolute bottom-1 left-1 rounded bg-black/60 px-1.5 py-0.5 text-[0.5625rem] text-white">
+                      Avatar
+                    </span>
+                  </div>
+                )}
                 {referenceImages.map((img, idx) => (
                   <div key={idx} className="group relative">
                     <img
@@ -488,7 +691,7 @@ export function SpriteGenerationModal({
                     </button>
                   </div>
                 ))}
-                {referenceImages.length < 4 && (
+                {referenceImages.length < maxUploadedReferenceImages && (
                   <button
                     onClick={() => fileInputRef.current?.click()}
                     className="flex h-20 w-20 flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-[var(--border)] text-[var(--muted-foreground)] transition-colors hover:border-[var(--primary)]/40 hover:text-[var(--primary)]"
@@ -523,7 +726,7 @@ export function SpriteGenerationModal({
               {/* Expression Preset */}
               <div>
                 <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">Expression Count</label>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   {(Object.keys(EXPRESSION_PRESETS) as PresetKey[]).map((key) => (
                     <button
                       key={key}
@@ -563,9 +766,9 @@ export function SpriteGenerationModal({
                   ))}
                 </div>
                 <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
-                  Select exactly {EXPRESSION_PRESETS[preset].cols * EXPRESSION_PRESETS[preset].rows} expressions for a{" "}
-                  {EXPRESSION_PRESETS[preset].cols}×{EXPRESSION_PRESETS[preset].rows} grid. Extra or fewer expressions
-                  will be adjusted.
+                  {singleImageMode
+                    ? "Generate one portrait sprite. Pick the expression you want to render."
+                    : `Select exactly ${selectedTargetCount} expressions for a ${EXPRESSION_PRESETS[preset].cols}×${EXPRESSION_PRESETS[preset].rows} grid. Extra or fewer expressions will be adjusted.`}
                 </p>
               </div>
             </>
@@ -576,7 +779,7 @@ export function SpriteGenerationModal({
             <>
               <div>
                 <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">Pose Count</label>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   {(Object.keys(EXPRESSION_PRESETS) as PresetKey[]).map((key) => (
                     <button
                       key={key}
@@ -615,8 +818,9 @@ export function SpriteGenerationModal({
                   ))}
                 </div>
                 <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
-                  Select roughly {EXPRESSION_PRESETS[preset].cols * EXPRESSION_PRESETS[preset].rows} general poses.
-                  These are generated one-by-one for clean full-body sprites.
+                  {singleImageMode
+                    ? "Generate one full-body pose image. Pick the pose you want to render."
+                    : `Select exactly ${selectedTargetCount} general poses for a ${EXPRESSION_PRESETS[preset].cols}×${EXPRESSION_PRESETS[preset].rows} full-body sheet.`}
                 </p>
               </div>
             </>
@@ -642,7 +846,13 @@ export function SpriteGenerationModal({
               className="flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-4 py-1.5 text-xs font-medium text-white transition-colors hover:opacity-90 disabled:opacity-50"
             >
               <Sparkles size={14} />
-              {spriteType === "full-body" ? "Generate Poses" : "Generate Sheet"}
+              {spriteType === "full-body"
+                ? singleImageMode
+                  ? "Generate Pose"
+                  : "Generate Pose Sheet"
+                : singleImageMode
+                  ? "Generate Sprite"
+                  : "Generate Sheet"}
             </button>
           </div>
         </div>
@@ -654,11 +864,19 @@ export function SpriteGenerationModal({
           <Loader2 size={32} className="animate-spin text-[var(--primary)]" />
           <div className="text-center">
             <p className="text-sm font-medium">
-              {spriteType === "full-body" ? "Generating full-body poses…" : "Generating expression sheet…"}
+              {spriteType === "full-body"
+                ? singleImageMode
+                  ? "Generating full-body pose…"
+                  : "Generating full-body pose sheet…"
+                : singleImageMode
+                  ? "Generating portrait sprite…"
+                  : "Generating expression sheet…"}
             </p>
             <p className="mt-1 text-xs text-[var(--muted-foreground)]">
               {spriteType === "full-body"
-                ? "This may take longer because each pose is generated separately for better quality."
+                ? singleImageMode
+                  ? "This may take 30–60 seconds depending on the provider."
+                  : "This may take 30–60 seconds depending on the provider. The sheet will be sliced into poses after generation."
                 : "This may take 30–60 seconds depending on the provider."}
             </p>
           </div>
@@ -678,14 +896,74 @@ export function SpriteGenerationModal({
           {generatedSheet && (
             <details className="group">
               <summary className="cursor-pointer text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
-                View full generated sheet
+                {singleImageMode ? "View generated source image" : "View full generated sheet"}
               </summary>
               <img
                 src={generatedSheet}
-                alt="Generated expression sheet"
+                alt={
+                  singleImageMode
+                    ? "Generated sprite source image"
+                    : spriteType === "full-body"
+                      ? "Generated full-body pose sheet"
+                      : "Generated expression sheet"
+                }
                 className="mt-2 w-full rounded-lg ring-1 ring-[var(--border)]"
               />
             </details>
+          )}
+
+          {generatedSheet && !singleImageMode && (
+            <div className="rounded-lg bg-[var(--secondary)]/60 p-2.5 ring-1 ring-[var(--border)]/60">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <label className="text-xs font-medium text-[var(--foreground)]">Adjust Slice</label>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={handleResetSliceAdjustments}
+                    disabled={sliceApplying}
+                    className="rounded-lg px-2.5 py-1 text-[0.6875rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:text-[var(--foreground)] disabled:opacity-50"
+                  >
+                    Reset
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleApplySliceAdjustments}
+                    disabled={sliceApplying}
+                    className="rounded-lg bg-[var(--primary)] px-2.5 py-1 text-[0.6875rem] font-medium text-white transition-colors hover:opacity-90 disabled:opacity-50"
+                  >
+                    {sliceApplying ? "Applying..." : "Apply Slice"}
+                  </button>
+                </div>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {(
+                  [
+                    ["marginX", "Side margin"],
+                    ["marginY", "Top/bottom margin"],
+                    ["gapX", "Column gap"],
+                    ["gapY", "Row gap"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <label key={key} className="flex items-center gap-2 text-[0.6875rem] text-[var(--muted-foreground)]">
+                    <span className="w-24 shrink-0 text-[var(--foreground)]">{label}</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={8}
+                      step={0.1}
+                      value={sliceAdjustments[key]}
+                      onChange={(e) => handleSliceAdjustmentChange(key, Number(e.target.value))}
+                      className="min-w-0 flex-1 accent-[var(--primary)]"
+                    />
+                    <span className="w-10 text-right tabular-nums">{sliceAdjustments[key].toFixed(1)}%</span>
+                  </label>
+                ))}
+              </div>
+              <p className="mt-2 text-[0.625rem] text-[var(--muted-foreground)]">
+                Use this when the generated sheet has borders, gutters, or uneven spacing. Applying re-slices the
+                original sheet without regenerating.
+              </p>
+            </div>
           )}
 
           {/* Cell grid */}

@@ -1,9 +1,9 @@
 const DIALOGUE_QUOTE_PAIRS = [
   ['"', '"'],
-  ['\u201c', '\u201d'],
-  ['\u00ab', '\u00bb'],
-  ['\u300c', '\u300d'],
-  ['\u300e', '\u300f'],
+  ["\u201c", "\u201d"],
+  ["\u00ab", "\u00bb"],
+  ["\u300c", "\u300d"],
+  ["\u300e", "\u300f"],
 ] as const;
 
 export const DIALOGUE_QUOTE_PATTERN_SOURCE =

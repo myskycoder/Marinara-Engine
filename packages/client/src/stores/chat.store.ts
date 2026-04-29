@@ -10,6 +10,8 @@ import { useGameStateStore } from "./game-state.store";
 const STORAGE_KEY = "marinara-active-chat-id";
 const DRAFTS_KEY = "marinara-input-drafts";
 
+type NotificationAvatarCrop = { zoom: number; offsetX: number; offsetY: number } | null;
+
 /** Read drafts from sessionStorage (survives refreshes within the same tab). */
 function loadDrafts(): Map<string, string> {
   try {
@@ -51,6 +53,8 @@ interface ChatState {
    */
   mariPhaseByChatId: Map<string, "thinking" | "updating">;
   streamBuffer: string;
+  /** Per-chat stream text for active generations, so switching chats does not lose in-flight UI state. */
+  streamBuffers: Map<string, string>;
   /** Per-chat AbortControllers for active generations — keyed by chatId. */
   abortControllers: Map<string, AbortController>;
   /** When regenerating, the ID of the message being regenerated (so streaming shows in-place). */
@@ -78,10 +82,21 @@ interface ChatState {
   pendingNewChatMode: Exclude<ChatMode, "visual_novel"> | null;
   /** Per-chat draft input text so typing isn't lost when navigating away. */
   inputDrafts: Map<string, string>;
+  /** Current chat input */
+  currentInput: string;
   /** Per-chat unread message count (from autonomous messages). */
   unreadCounts: Map<string, number>;
   /** Floating notification bubbles — tracks character info for each unread chat. */
-  chatNotifications: Map<string, { chatId: string; characterName: string; avatarUrl: string | null; count: number }>;
+  chatNotifications: Map<
+    string,
+    {
+      chatId: string;
+      characterName: string;
+      avatarUrl: string | null;
+      avatarCrop?: NotificationAvatarCrop;
+      count: number;
+    }
+  >;
   /** Manually dismissed notification chatIds (won't re-appear until next message). */
   dismissedNotifications: Set<string>;
   /** Pending /goto request — ChatArea fulfils by paginating + scrolling to the target message. Token forces re-fire on identical N. */
@@ -97,9 +112,9 @@ interface ChatState {
   setMariPhase: (chatId: string, phase: "thinking" | "updating" | "idle") => void;
   setAbortController: (chatId: string, controller: AbortController | null) => void;
   stopGeneration: () => void;
-  appendStreamBuffer: (text: string) => void;
-  setStreamBuffer: (text: string) => void;
-  clearStreamBuffer: () => void;
+  appendStreamBuffer: (text: string, chatId?: string) => void;
+  setStreamBuffer: (text: string, chatId?: string) => void;
+  clearStreamBuffer: (chatId?: string) => void;
   setRegenerateMessageId: (id: string | null) => void;
   setStreamingCharacterId: (id: string | null) => void;
   setTypingCharacterName: (name: string | null) => void;
@@ -115,9 +130,15 @@ interface ChatState {
   setPendingNewChatMode: (mode: Exclude<ChatMode, "visual_novel"> | null) => void;
   setInputDraft: (chatId: string, text: string) => void;
   clearInputDraft: (chatId: string) => void;
+  setCurrentInput: (text: string) => void;
   incrementUnread: (chatId: string) => void;
   clearUnread: (chatId: string) => void;
-  addNotification: (chatId: string, characterName: string, avatarUrl: string | null) => void;
+  addNotification: (
+    chatId: string,
+    characterName: string,
+    avatarUrl: string | null,
+    avatarCrop?: NotificationAvatarCrop,
+  ) => void;
   dismissNotification: (chatId: string) => void;
   requestGotoMessage: (chatId: string, messageNumber: number) => void;
   clearGotoRequest: () => void;
@@ -139,6 +160,7 @@ export const useChatStore = create<ChatState>()(
     streamingChatId: null,
     mariPhaseByChatId: new Map(),
     streamBuffer: "",
+    streamBuffers: new Map(),
     abortControllers: new Map(),
     regenerateMessageId: null,
     streamingCharacterId: null,
@@ -153,6 +175,7 @@ export const useChatStore = create<ChatState>()(
     shouldOpenWizardInShortcutMode: false,
     pendingNewChatMode: null,
     inputDrafts: loadDrafts(),
+    currentInput: "",
     unreadCounts: new Map(),
     chatNotifications: new Map(),
     dismissedNotifications: new Set(),
@@ -187,7 +210,7 @@ export const useChatStore = create<ChatState>()(
         // Clearing it would cause a black flash and wipe the background for new chats.
         // Restore per-chat typing/delayed indicators for the newly active chat
         if (id) {
-          const { perChatTyping, perChatDelayed, abortControllers } = get();
+          const { perChatTyping, perChatDelayed, abortControllers, streamBuffers } = get();
           const typing = perChatTyping.get(id) ?? null;
           const delayed = perChatDelayed.get(id) ?? null;
           // If this chat has an active generation, restore streaming state so the
@@ -196,10 +219,18 @@ export const useChatStore = create<ChatState>()(
           set({
             typingCharacterName: typing,
             delayedCharacterInfo: delayed,
-            ...(hasActiveGeneration && { isStreaming: true, streamingChatId: id }),
+            isStreaming: hasActiveGeneration,
+            streamingChatId: hasActiveGeneration ? id : null,
+            streamBuffer: hasActiveGeneration ? (streamBuffers.get(id) ?? "") : "",
           });
         } else {
-          set({ typingCharacterName: null, delayedCharacterInfo: null });
+          set({
+            typingCharacterName: null,
+            delayedCharacterInfo: null,
+            isStreaming: false,
+            streamingChatId: null,
+            streamBuffer: "",
+          });
         }
       }
       try {
@@ -264,9 +295,41 @@ export const useChatStore = create<ChatState>()(
         }).catch(() => {});
       }
     },
-    appendStreamBuffer: (text) => set((state) => ({ streamBuffer: state.streamBuffer + text })),
-    setStreamBuffer: (text) => set({ streamBuffer: text }),
-    clearStreamBuffer: () => set({ streamBuffer: "" }),
+    appendStreamBuffer: (text, chatId) =>
+      set((state) => {
+        const targetChatId = chatId ?? state.streamingChatId ?? state.activeChatId ?? "";
+        if (!targetChatId) return { streamBuffer: state.streamBuffer + text };
+        const nextText = (state.streamBuffers.get(targetChatId) ?? "") + text;
+        const buffers = new Map(state.streamBuffers);
+        buffers.set(targetChatId, nextText);
+        return {
+          streamBuffers: buffers,
+          ...(state.activeChatId === targetChatId ? { streamBuffer: nextText } : {}),
+        };
+      }),
+    setStreamBuffer: (text, chatId) =>
+      set((state) => {
+        const targetChatId = chatId ?? state.streamingChatId ?? state.activeChatId ?? "";
+        if (!targetChatId) return { streamBuffer: text };
+        const buffers = new Map(state.streamBuffers);
+        if (text) buffers.set(targetChatId, text);
+        else buffers.delete(targetChatId);
+        return {
+          streamBuffers: buffers,
+          ...(state.activeChatId === targetChatId ? { streamBuffer: text } : {}),
+        };
+      }),
+    clearStreamBuffer: (chatId) =>
+      set((state) => {
+        const targetChatId = chatId ?? state.streamingChatId ?? state.activeChatId ?? "";
+        if (!targetChatId) return { streamBuffer: "", streamBuffers: new Map() };
+        const buffers = new Map(state.streamBuffers);
+        buffers.delete(targetChatId);
+        return {
+          streamBuffers: buffers,
+          ...(state.activeChatId === targetChatId ? { streamBuffer: "" } : {}),
+        };
+      }),
 
     setRegenerateMessageId: (id) => set({ regenerateMessageId: id }),
 
@@ -332,6 +395,8 @@ export const useChatStore = create<ChatState>()(
         return { inputDrafts: m };
       }),
 
+    setCurrentInput: (text) => set({ currentInput: text }),
+
     incrementUnread: (chatId: string) =>
       set((state) => {
         const m = new Map(state.unreadCounts);
@@ -345,7 +410,7 @@ export const useChatStore = create<ChatState>()(
         m.delete(chatId);
         return { unreadCounts: m };
       }),
-    addNotification: (chatId, characterName, avatarUrl) =>
+    addNotification: (chatId, characterName, avatarUrl, avatarCrop) =>
       set((state) => {
         // Don't add if this chat is currently active or was dismissed
         if (state.activeChatId === chatId) return state;
@@ -356,6 +421,7 @@ export const useChatStore = create<ChatState>()(
           chatId,
           characterName,
           avatarUrl,
+          avatarCrop: avatarCrop ?? existing?.avatarCrop ?? null,
           count: (existing?.count ?? 0) + 1,
         });
         return { chatNotifications: m };
@@ -395,6 +461,7 @@ export const useChatStore = create<ChatState>()(
         streamingChatId: null,
         mariPhaseByChatId: new Map(),
         streamBuffer: "",
+        streamBuffers: new Map(),
         abortControllers: new Map(),
         regenerateMessageId: null,
         streamingCharacterId: null,
@@ -406,6 +473,7 @@ export const useChatStore = create<ChatState>()(
         swipeIndex: new Map(),
         pendingNewChatMode: null,
         inputDrafts: new Map(),
+        currentInput: "",
         unreadCounts: new Map(),
         chatNotifications: new Map(),
         dismissedNotifications: new Set(),

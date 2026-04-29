@@ -36,7 +36,13 @@ export function createLLMProvider(
     case "custom":
       return new OpenAIProvider(baseUrl, apiKey, normalizedMaxContext, openrouterProvider, normalizedMaxTokensOverride);
     case "anthropic":
-      return new AnthropicProvider(baseUrl, apiKey, normalizedMaxContext, openrouterProvider, normalizedMaxTokensOverride);
+      return new AnthropicProvider(
+        baseUrl,
+        apiKey,
+        normalizedMaxContext,
+        openrouterProvider,
+        normalizedMaxTokensOverride,
+      );
     case "claude_subscription":
       return new ClaudeSubscriptionProvider(
         baseUrl,

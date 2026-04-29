@@ -11,6 +11,7 @@ import {
 import type { ExportEnvelope } from "@marinara-engine/shared";
 import { createLorebooksStorage } from "../services/storage/lorebooks.storage.js";
 import { createChatsStorage } from "../services/storage/chats.storage.js";
+import { createCharactersStorage } from "../services/storage/characters.storage.js";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { processLorebooks } from "../services/lorebook/index.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
@@ -35,6 +36,7 @@ export async function lorebooksRoutes(app: FastifyInstance) {
     const query = req.query as Record<string, string>;
     if (query.category) return storage.listByCategory(query.category);
     if (query.characterId) return storage.listByCharacter(query.characterId);
+    if (query.personaId) return storage.listByPersona(query.personaId);
     if (query.chatId) return storage.listByChat(query.chatId);
     return storage.list();
   });
@@ -173,6 +175,17 @@ export async function lorebooksRoutes(app: FastifyInstance) {
     return storage.bulkCreateEntries(req.params.id, entries);
   });
 
+  app.put<{ Params: { id: string } }>("/:id/entries/reorder", async (req, reply) => {
+    const body = req.body as { entryIds?: unknown };
+    const entryIds = Array.isArray(body.entryIds)
+      ? body.entryIds.filter((id): id is string => typeof id === "string")
+      : [];
+    if (entryIds.length === 0) {
+      return reply.status(400).send({ error: "entryIds array is required" });
+    }
+    return storage.reorderEntries(req.params.id, entryIds);
+  });
+
   // ── Search ──
 
   app.get("/search/entries", async (req) => {
@@ -193,13 +206,25 @@ export async function lorebooksRoutes(app: FastifyInstance) {
     const { chatId } = req.params;
     const chatsStorage = createChatsStorage(app.db);
     const chatMessages = await chatsStorage.listMessages(chatId);
-    if (!chatMessages.length) return reply.send({ entries: [], totalTokens: 0, totalEntries: 0 });
+    // CONST entries activate regardless of message content, so the scan
+    // must run even when the chat has no messages.
 
     // Load chat to get characterIds and activeLorebookIds from metadata
     const chat = await chatsStorage.getById(chatId);
     let characterIds: string[] = [];
+    let personaId: string | null = null;
     let activeLorebookIds: string[] = [];
     if (chat) {
+      personaId = typeof chat.personaId === "string" ? chat.personaId : null;
+      if (!personaId && chat.mode !== "game") {
+        try {
+          const charactersStorage = createCharactersStorage(app.db);
+          const activePersona = (await charactersStorage.listPersonas()).find((p: any) => p.isActive === "true");
+          personaId = (activePersona?.id as string | undefined) ?? null;
+        } catch {
+          /* ignore */
+        }
+      }
       try {
         characterIds =
           typeof chat.characterIds === "string"
@@ -227,6 +252,7 @@ export async function lorebooksRoutes(app: FastifyInstance) {
     const result = await processLorebooks(app.db, scanMessages, null, {
       chatId,
       characterIds,
+      personaId,
       activeLorebookIds,
     });
 

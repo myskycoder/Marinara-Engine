@@ -168,7 +168,7 @@ function computeTooltipStyle(rect: Rect, side: "top" | "bottom" | "left" | "righ
     };
   }
 
-  const minScrollableHeight = 220;
+  const minScrollableHeight = isMobile ? 220 : 340;
   const preferredVerticalSide = available.bottom >= available.top ? "bottom" : "top";
   let placement = side;
 

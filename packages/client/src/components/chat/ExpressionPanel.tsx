@@ -138,7 +138,14 @@ export function ExpressionPanel({ characterIds, messages, characterMap, isRolepl
                 )}
               >
                 {info?.avatarUrl ? (
-                  <img src={info.avatarUrl} alt="" className="h-4 w-4 rounded-full object-cover" />
+                  <span className="block h-4 w-4 shrink-0 overflow-hidden rounded-full">
+                    <img
+                      src={info.avatarUrl}
+                      alt=""
+                      className="h-full w-full object-cover"
+                      style={getAvatarCropStyle(info.avatarCrop)}
+                    />
+                  </span>
                 ) : (
                   <div className="flex h-4 w-4 items-center justify-center rounded-full bg-[var(--accent)] text-[0.5rem] font-bold">
                     {(info?.name ?? "?")[0]}

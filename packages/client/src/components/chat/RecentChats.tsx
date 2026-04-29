@@ -7,7 +7,7 @@ import { MessageSquare, BookOpen } from "lucide-react";
 import { useChats } from "../../hooks/use-chats";
 import { useCharacters } from "../../hooks/use-characters";
 import { useChatStore } from "../../stores/chat.store";
-import { cn } from "../../lib/utils";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
 import type { Chat } from "@marinara-engine/shared";
 
 const MODE_BADGE: Record<string, { icon: React.ReactNode; bg: string; label: string }> = {
@@ -34,7 +34,10 @@ export function RecentChats() {
   const setActiveChatId = useChatStore((s) => s.setActiveChatId);
 
   const charLookup = useMemo(() => {
-    const map = new Map<string, { name: string; avatarUrl: string | null }>();
+    const map = new Map<
+      string,
+      { name: string; avatarUrl: string | null; avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null }
+    >();
     if (!allCharacters) return map;
     for (const char of allCharacters as Array<{ id: string; data: string; avatarPath: string | null }>) {
       try {
@@ -42,6 +45,7 @@ export function RecentChats() {
         map.set(char.id, {
           name: parsed.name ?? "Unknown",
           avatarUrl: char.avatarPath ?? null,
+          avatarCrop: parsed.extensions?.avatarCrop ?? null,
         });
       } catch {
         map.set(char.id, { name: "Unknown", avatarUrl: null });
@@ -77,7 +81,10 @@ function RecentChatChip({
   onClick,
 }: {
   chat: Chat;
-  charLookup: Map<string, { name: string; avatarUrl: string | null }>;
+  charLookup: Map<
+    string,
+    { name: string; avatarUrl: string | null; avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null }
+  >;
   onClick: () => void;
 }) {
   const mode = MODE_BADGE[chat.mode] ?? MODE_BADGE.conversation;
@@ -107,7 +114,14 @@ function RecentChatChip({
       {/* Small avatar with mode dot */}
       <div className="relative flex-shrink-0">
         {firstAvatar?.avatarUrl ? (
-          <img src={firstAvatar.avatarUrl} alt={firstAvatar.name} className="h-5 w-5 rounded-md object-cover" />
+          <span className="block h-5 w-5 overflow-hidden rounded-md">
+            <img
+              src={firstAvatar.avatarUrl}
+              alt={firstAvatar.name}
+              className="h-full w-full object-cover"
+              style={getAvatarCropStyle(firstAvatar.avatarCrop)}
+            />
+          </span>
         ) : firstAvatar ? (
           <div className="flex h-5 w-5 items-center justify-center rounded-md bg-[var(--secondary)] text-[0.5rem] font-bold text-[var(--muted-foreground)]">
             {firstAvatar.name[0]}

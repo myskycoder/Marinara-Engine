@@ -16,6 +16,9 @@ export interface KnownModel {
 // ── OpenAI (from #model_openai_select) ──
 
 export const OPENAI_MODELS: KnownModel[] = [
+  // GPT-5.5
+  { id: "gpt-5.5", name: "gpt-5.5", context: 1050000, maxOutput: 128000 },
+  { id: "gpt-5.5-2026-04-23", name: "gpt-5.5-2026-04-23", context: 1050000, maxOutput: 128000 },
   // GPT-5.4
   { id: "gpt-5.4", name: "gpt-5.4", context: 1050000, maxOutput: 128000 },
   { id: "gpt-5.4-2026-03-05", name: "gpt-5.4-2026-03-05", context: 1050000, maxOutput: 128000 },
@@ -458,6 +461,8 @@ export const IMAGE_GENERATION_SOURCES: ImageGenSource[] = [
 // Known image generation models (grouped by service)
 const IMAGE_GEN_MODELS: KnownModel[] = [
   // OpenAI
+  { id: "gpt-image-2", name: "GPT Image 2", context: 0, maxOutput: 0 },
+  { id: "gpt-image-1.5", name: "GPT Image 1.5", context: 0, maxOutput: 0 },
   { id: "dall-e-3", name: "DALL-E 3", context: 0, maxOutput: 0 },
   { id: "dall-e-2", name: "DALL-E 2", context: 0, maxOutput: 0 },
   { id: "gpt-image-1", name: "GPT Image 1", context: 0, maxOutput: 0 },
@@ -509,6 +514,7 @@ export function inferImageSource(model: string, baseUrl: string): string {
   }
   if (m === "drawthings") return "automatic1111";
   if (u.includes("openrouter.ai")) return "openrouter";
+  if (u.includes("nano-gpt.com")) return "nanogpt";
   if (m.startsWith("dall-e") || m.startsWith("gpt-image") || u.includes("openai.com")) return "openai";
   if (m.startsWith("sd3") || u.includes("stability.ai")) return "stability";
   if (m.includes("nai-diffusion") || u.includes("novelai.net")) return "novelai";
@@ -522,7 +528,6 @@ export function inferImageSource(model: string, baseUrl: string): string {
   if (m.includes("gemini") && m.includes("image")) return "gemini_image";
   if (m.includes("imagen")) return "gemini_image";
   // OpenAI-compatible fallback (works for most proxies)
-  if (u.includes("nano-gpt.com")) return "nanogpt";
   return "openai";
 }
 
@@ -538,7 +543,8 @@ export const MODEL_LISTS: Record<APIProvider, KnownModel[]> = {
   cohere: COHERE_MODELS,
   openrouter: OPENROUTER_MODELS,
   nanogpt: [], // NanoGPT aggregator — models fetched dynamically via API
-  custom: [], // User must type model ID manually for custom endpoints
+  // Seed OAI-compatible endpoints with the OpenAI catalog; remote /models still merge on top.
+  custom: OPENAI_MODELS,
   image_generation: IMAGE_GEN_MODELS,
 };
 

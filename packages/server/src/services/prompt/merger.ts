@@ -21,6 +21,11 @@ export function mergeAdjacentMessages(messages: ChatMLMessage[]): ChatMLMessage[
   const result: ChatMLMessage[] = [];
   let current: ChatMLMessage | null = null;
 
+  const mergeContextKind = (a?: ChatMLMessage["contextKind"], b?: ChatMLMessage["contextKind"]) => {
+    if (a === b) return a;
+    return undefined;
+  };
+
   for (const msg of messages) {
     // Skip empty messages
     if (!msg.content.trim()) continue;
@@ -31,9 +36,11 @@ export function mergeAdjacentMessages(messages: ChatMLMessage[]): ChatMLMessage[
         current.images || msg.images ? [...(current.images ?? []), ...(msg.images ?? [])] : undefined;
       // Prefer the later message's providerMetadata (most recent thought signature)
       const mergedMeta: Record<string, unknown> | undefined = msg.providerMetadata ?? current.providerMetadata;
+      const mergedContextKind = mergeContextKind(current.contextKind, msg.contextKind);
       current = {
         role: current.role,
         content: current.content + "\n\n" + msg.content,
+        ...(mergedContextKind ? { contextKind: mergedContextKind } : {}),
         name: current.name,
         ...(mergedImages ? { images: mergedImages } : {}),
         ...(mergedMeta ? { providerMetadata: mergedMeta } : {}),
@@ -69,6 +76,19 @@ export function squashLeadingSystemMessages(messages: ChatMLMessage[]): ChatMLMe
     .slice(0, systemEnd)
     .map((m) => m.content)
     .join("\n\n");
+  const contextKinds = new Set(
+    messages
+      .slice(0, systemEnd)
+      .map((m) => m.contextKind)
+      .filter(Boolean),
+  );
 
-  return [{ role: "system", content: combinedContent }, ...messages.slice(systemEnd)];
+  return [
+    {
+      role: "system",
+      content: combinedContent,
+      ...(contextKinds.size === 1 ? { contextKind: [...contextKinds][0] } : {}),
+    },
+    ...messages.slice(systemEnd),
+  ];
 }

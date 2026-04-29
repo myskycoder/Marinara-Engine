@@ -24,6 +24,7 @@ import {
   Square as SquareIcon,
   ArrowUpDown,
   Tag,
+  Pencil,
 } from "lucide-react";
 import { useChats, useCreateChat, useDeleteChat, useDeleteChatGroup } from "../../hooks/use-chats";
 import { useConnections } from "../../hooks/use-connections";
@@ -39,7 +40,7 @@ import { useCharacters } from "../../hooks/use-characters";
 import { useChatStore } from "../../stores/chat.store";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { useUIStore, type UserStatus } from "../../stores/ui.store";
-import { cn } from "../../lib/utils";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import type { Chat, ChatFolder, ChatMode } from "@marinara-engine/shared";
 import { Modal } from "../ui/Modal";
@@ -50,6 +51,25 @@ type ChatSortOption = "newest" | "oldest" | "name-asc" | "name-desc";
 function getChatTags(chat: Pick<Chat, "metadata">): string[] {
   return Array.isArray(chat.metadata?.tags)
     ? chat.metadata.tags.filter((tag): tag is string => typeof tag === "string" && tag.trim().length > 0)
+    : [];
+}
+
+function toSearchText(value: unknown): string {
+  return typeof value === "string" ? value : value == null ? "" : String(value);
+}
+
+function normalizeChatCharacterIds(value: unknown): string[] {
+  const parsed = (() => {
+    if (typeof value !== "string") return value;
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value.trim() ? [value] : [];
+    }
+  })();
+
+  return Array.isArray(parsed)
+    ? parsed.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim())
     : [];
 }
 
@@ -112,17 +132,34 @@ export function ChatSidebar() {
   const reorderFoldersMut = useReorderFolders();
   const moveChatMut = useMoveChat();
 
-  // Build character lookup: id → { name, avatarUrl, conversationStatus }
+  // Build character lookup: id → { name, avatarUrl, avatarCrop, conversationStatus }
   const charLookup = useMemo(() => {
-    const map = new Map<string, { name: string; avatarUrl: string | null; conversationStatus?: string }>();
+    const map = new Map<
+      string,
+      {
+        name: string;
+        avatarUrl: string | null;
+        avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null;
+        conversationStatus?: string;
+      }
+    >();
     if (!allCharacters) return map;
-    for (const char of allCharacters as Array<{ id: string; data: string; avatarPath: string | null }>) {
+    for (const char of allCharacters as Array<{ id: string; data: unknown; avatarPath: string | null }>) {
       try {
         const parsed = typeof char.data === "string" ? JSON.parse(char.data) : char.data;
+        const record = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+        const extensions =
+          record.extensions && typeof record.extensions === "object"
+            ? (record.extensions as Record<string, unknown>)
+            : {};
+        const name = typeof record.name === "string" && record.name.trim() ? record.name.trim() : "Unknown";
+        const conversationStatus =
+          typeof extensions.conversationStatus === "string" ? extensions.conversationStatus : undefined;
         map.set(char.id, {
-          name: parsed.name ?? "Unknown",
+          name,
           avatarUrl: char.avatarPath ?? null,
-          conversationStatus: parsed.extensions?.conversationStatus || undefined,
+          avatarCrop: (extensions.avatarCrop as { zoom: number; offsetX: number; offsetY: number } | undefined) ?? null,
+          conversationStatus,
         });
       } catch {
         map.set(char.id, { name: "Unknown", avatarUrl: null });
@@ -201,12 +238,12 @@ export function ChatSidebar() {
       if (activeTag && !tags.includes(activeTag)) return false;
       if (!query) return true;
 
-      const characterNames = chat.characterIds
+      const characterNames = normalizeChatCharacterIds((chat as { characterIds?: unknown }).characterIds)
         .map((characterId) => charLookup.get(characterId)?.name ?? "")
         .filter(Boolean);
 
       return (
-        chat.name.toLowerCase().includes(query) ||
+        toSearchText(chat.name).toLowerCase().includes(query) ||
         tags.some((tag) => tag.toLowerCase().includes(query)) ||
         characterNames.some((name) => name.toLowerCase().includes(query))
       );
@@ -232,9 +269,9 @@ export function ChatSidebar() {
         case "oldest":
           return new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime();
         case "name-asc":
-          return a.name.localeCompare(b.name);
+          return toSearchText(a.name).localeCompare(toSearchText(b.name));
         case "name-desc":
-          return b.name.localeCompare(a.name);
+          return toSearchText(b.name).localeCompare(toSearchText(a.name));
         case "newest":
         default:
           return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
@@ -555,12 +592,16 @@ export function ChatSidebar() {
         {/* Chat avatar(s) or mode icon fallback — with unread badge overlay */}
         <div className="relative flex-shrink-0">
           {(() => {
-            const charIds: string[] =
-              typeof chat.characterIds === "string" ? JSON.parse(chat.characterIds) : (chat.characterIds ?? []);
+            const charIds = normalizeChatCharacterIds((chat as { characterIds?: unknown }).characterIds);
             const avatars = charIds
               .slice(0, 3)
               .map((id) => charLookup.get(id))
-              .filter(Boolean) as { name: string; avatarUrl: string | null; conversationStatus?: string }[];
+              .filter(Boolean) as {
+              name: string;
+              avatarUrl: string | null;
+              avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null;
+              conversationStatus?: string;
+            }[];
 
             const isConvoMode = chat.mode === "conversation";
             const statusDot = (status?: string) => {
@@ -599,7 +640,14 @@ export function ChatSidebar() {
               const a = avatars[0]!;
               return a.avatarUrl ? (
                 <div className="relative h-7 w-7 flex-shrink-0 transition-transform group-active:scale-90">
-                  <img src={a.avatarUrl} alt={a.name} className="h-7 w-7 rounded-full object-cover" />
+                  <span className="block h-7 w-7 overflow-hidden rounded-full">
+                    <img
+                      src={a.avatarUrl}
+                      alt={a.name}
+                      className="h-full w-full object-cover"
+                      style={getAvatarCropStyle(a.avatarCrop)}
+                    />
+                  </span>
                   {statusDot(a.conversationStatus)}
                 </div>
               ) : (
@@ -617,15 +665,20 @@ export function ChatSidebar() {
               <div className="relative h-7 w-7 flex-shrink-0 transition-transform group-active:scale-90">
                 {avatars.slice(0, 2).map((a, i) =>
                   a.avatarUrl ? (
-                    <img
+                    <span
                       key={i}
-                      src={a.avatarUrl}
-                      alt={a.name}
                       className={cn(
-                        "absolute h-5 w-5 rounded-full object-cover ring-2 ring-[var(--sidebar-background)]",
+                        "absolute h-5 w-5 overflow-hidden rounded-full ring-2 ring-[var(--sidebar-background)]",
                         i === 0 ? "top-0 left-0 z-10" : "bottom-0 right-0",
                       )}
-                    />
+                    >
+                      <img
+                        src={a.avatarUrl}
+                        alt={a.name}
+                        className="h-full w-full object-cover"
+                        style={getAvatarCropStyle(a.avatarCrop)}
+                      />
+                    </span>
                   ) : (
                     <div
                       key={i}
@@ -1153,17 +1206,25 @@ function FolderRow({
   return (
     <Reorder.Item value={folder.id} dragListener={false} dragControls={dragControls} as="div" className="flex flex-col">
       {/* Folder header */}
-      <div className="group relative flex items-center gap-1.5 rounded-lg px-2 py-1.5 hover:bg-[var(--sidebar-accent)]/40">
+      <div
+        onClick={() => onToggleCollapse(folder)}
+        className="group relative flex items-center gap-1.5 rounded-lg px-2 py-1.5 hover:bg-[var(--sidebar-accent)]/40"
+      >
         <div
           onPointerDown={(e) => dragControls.start(e)}
           className="cursor-grab touch-none opacity-0 transition-opacity active:cursor-grabbing group-hover:opacity-100 max-md:opacity-100"
         >
           <GripVertical size="0.625rem" className="text-[var(--muted-foreground)]" />
         </div>
-        <button onClick={() => onToggleCollapse(folder)} className="p-0.5 text-[var(--muted-foreground)]">
-          <ChevronRight size="0.75rem" className={cn("transition-transform", !folder.collapsed && "rotate-90")} />
-        </button>
-        <div className="h-2 w-2 rounded-full flex-shrink-0" style={{ backgroundColor: folder.color || "#6b7280" }} />
+        <ChevronRight
+          size="0.75rem"
+          className={cn("text-[var(--muted-foreground)] transition-transform", !folder.collapsed && "rotate-90")}
+        />
+        <div
+          className="h-2 w-2 rounded-full flex-shrink-0 cursor-pointer"
+          style={{ backgroundColor: folder.color || "#6b7280" }}
+          title={folder.name}
+        />
         {renaming ? (
           <input
             autoFocus
@@ -1186,19 +1247,24 @@ function FolderRow({
             className="flex-1 bg-transparent text-xs font-medium text-[var(--foreground)] outline-none"
           />
         ) : (
-          <span
-            onClick={() => {
-              setRenameValue(folder.name);
-              setRenaming(true);
-            }}
-            className="flex-1 cursor-text truncate text-xs font-medium text-[var(--muted-foreground)]"
-          >
+          <span className="flex-1 cursor-pointer truncate text-xs font-medium text-[var(--muted-foreground)]">
             {folder.name}
           </span>
         )}
         {entries.length > 0 && (
           <span className="text-[0.5625rem] text-[var(--muted-foreground)]">{entries.length}</span>
         )}
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            setRenameValue(folder.name);
+            setRenaming(true);
+          }}
+          className="shrink-0 rounded-md p-1 opacity-0 transition-all hover:bg-[var(--accent)] group-hover:opacity-100 max-md:opacity-100"
+          title="Rename folder"
+        >
+          <Pencil size="0.75rem" className="text-[var(--muted-foreground)]" />
+        </button>
         <button
           onClick={(e) => {
             e.stopPropagation();

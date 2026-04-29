@@ -95,6 +95,7 @@ const CREATE_TABLES: string[] = [
     token_budget INTEGER NOT NULL DEFAULT 2048,
     recursive_scanning TEXT NOT NULL DEFAULT 'false',
     character_id TEXT,
+    persona_id TEXT,
     chat_id TEXT,
     enabled TEXT NOT NULL DEFAULT 'true',
     generated_by TEXT,
@@ -108,6 +109,7 @@ const CREATE_TABLES: string[] = [
     lorebook_id TEXT NOT NULL REFERENCES lorebooks(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     content TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
     keys TEXT NOT NULL DEFAULT '[]',
     secondary_keys TEXT NOT NULL DEFAULT '[]',
     enabled TEXT NOT NULL DEFAULT 'true',
@@ -319,6 +321,17 @@ const CREATE_TABLES: string[] = [
     height INTEGER,
     created_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS character_images (
+    id TEXT PRIMARY KEY NOT NULL,
+    character_id TEXT NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    file_path TEXT NOT NULL,
+    prompt TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    width INTEGER,
+    height INTEGER,
+    created_at TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS ooc_influences (
     id TEXT PRIMARY KEY NOT NULL,
     source_chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
@@ -411,6 +424,11 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
     table: "lorebooks",
     column: "max_recursion_depth",
     definition: "INTEGER NOT NULL DEFAULT 3",
+  },
+  {
+    table: "lorebooks",
+    column: "persona_id",
+    definition: "TEXT",
   },
   {
     table: "lorebook_entries",
@@ -521,6 +539,11 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
     table: "api_connections",
     column: "max_tokens_override",
     definition: "INTEGER",
+  },
+  {
+    table: "lorebook_entries",
+    column: "description",
+    definition: "TEXT NOT NULL DEFAULT ''",
   },
 ];
 

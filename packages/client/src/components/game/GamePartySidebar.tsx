@@ -3,7 +3,7 @@
 // ──────────────────────────────────────────────
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Users, Send, ChevronLeft, ChevronRight, Swords, Heart, Sparkles } from "lucide-react";
-import { cn } from "../../lib/utils";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
 import { AnimatedText } from "./AnimatedText";
 
 interface PartyChatMessage {
@@ -25,6 +25,7 @@ interface GamePartySidebarProps {
     id: string;
     name: string;
     avatarUrl?: string | null;
+    avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null;
     nameColor?: string;
     dialogueColor?: string;
   }>;
@@ -37,6 +38,7 @@ interface GamePartySidebarProps {
       status?: string;
       level?: number;
       avatarUrl?: string | null;
+      avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null;
       stats?: Array<{ name: string; value: number; max?: number; color?: string }>;
       inventory?: Array<{ name: string; quantity?: number; location?: string }>;
       customFields?: Record<string, string>;
@@ -135,7 +137,14 @@ export function GamePartySidebar({
                   title={m.name}
                 >
                   {m.avatarUrl ? (
-                    <img src={m.avatarUrl} alt={m.name} className="h-8 w-8 rounded-full object-cover" />
+                    <span className="block h-8 w-8 overflow-hidden rounded-full">
+                      <img
+                        src={m.avatarUrl}
+                        alt={m.name}
+                        className="h-full w-full object-cover"
+                        style={getAvatarCropStyle(m.avatarCrop)}
+                      />
+                    </span>
                   ) : (
                     <div
                       className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--accent)] text-[0.5625rem] font-bold"
@@ -157,11 +166,14 @@ export function GamePartySidebar({
                 <div className="relative border-b border-amber-500/15 bg-gradient-to-r from-amber-900/20 via-amber-800/10 to-amber-900/20 px-2.5 py-2">
                   <div className="flex items-center gap-2">
                     {selectedCard.avatarUrl ? (
-                      <img
-                        src={selectedCard.avatarUrl}
-                        alt={selectedCard.title}
-                        className="h-10 w-10 rounded-md border border-amber-500/25 object-cover shadow-md"
-                      />
+                      <span className="block h-10 w-10 shrink-0 overflow-hidden rounded-md border border-amber-500/25 shadow-md">
+                        <img
+                          src={selectedCard.avatarUrl}
+                          alt={selectedCard.title}
+                          className="h-full w-full object-cover"
+                          style={getAvatarCropStyle(selectedCard.avatarCrop)}
+                        />
+                      </span>
                     ) : (
                       <div className="flex h-10 w-10 items-center justify-center rounded-md border border-amber-500/25 bg-amber-900/20 text-sm font-bold text-amber-300/60">
                         {selectedCard.title[0]}
@@ -294,39 +306,40 @@ export function GamePartySidebar({
             {messages.length === 0 ? (
               <p className="py-4 text-center text-xs text-[var(--muted-foreground)]">Party members will chat here...</p>
             ) : (
-              messages.map((msg) => (
-                <div key={msg.id} className="flex items-start gap-1.5 text-xs">
-                  {msg.characterAvatar ? (
-                    <img
-                      src={msg.characterAvatar}
-                      alt=""
-                      className="mt-0.5 h-5 w-5 shrink-0 rounded-full object-cover"
-                    />
-                  ) : (
-                    <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-[0.4375rem] font-bold">
-                      {(msg.characterName || "P")[0]}
+              messages.map((msg) => {
+                const msgMember = msg.characterName ? partyMembersByName.get(msg.characterName.toLowerCase()) : null;
+                return (
+                  <div key={msg.id} className="flex items-start gap-1.5 text-xs">
+                    {msg.characterAvatar ? (
+                      <span className="mt-0.5 block h-5 w-5 shrink-0 overflow-hidden rounded-full">
+                        <img
+                          src={msg.characterAvatar}
+                          alt=""
+                          className="h-full w-full object-cover"
+                          style={getAvatarCropStyle(msgMember?.avatarCrop)}
+                        />
+                      </span>
+                    ) : (
+                      <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-[0.4375rem] font-bold">
+                        {(msg.characterName || "P")[0]}
+                      </div>
+                    )}
+                    <div>
+                      <span
+                        className="font-semibold"
+                        style={
+                          msg.characterName
+                            ? { color: msgMember?.dialogueColor || msgMember?.nameColor || "#7dd3fc" }
+                            : { color: "#7dd3fc" }
+                        }
+                      >
+                        {msg.characterName || "Party"}:
+                      </span>
+                      <AnimatedText html={msg.content} className="text-[var(--foreground)]" />
                     </div>
-                  )}
-                  <div>
-                    <span
-                      className="font-semibold"
-                      style={
-                        msg.characterName
-                          ? {
-                              color:
-                                partyMembersByName.get(msg.characterName.toLowerCase())?.dialogueColor ||
-                                partyMembersByName.get(msg.characterName.toLowerCase())?.nameColor ||
-                                "#7dd3fc",
-                            }
-                          : { color: "#7dd3fc" }
-                      }
-                    >
-                      {msg.characterName || "Party"}:
-                    </span>
-                    <AnimatedText html={msg.content} className="text-[var(--foreground)]" />
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
             {isStreaming && <div className="text-xs text-[var(--muted-foreground)] animate-pulse">Talking...</div>}
             <div ref={endRef} />

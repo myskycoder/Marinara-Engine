@@ -176,6 +176,7 @@ export const BUILT_IN_AGENT_IDS = {
   SPOTIFY: "spotify",
   EDITOR: "editor",
   KNOWLEDGE_RETRIEVAL: "knowledge-retrieval",
+  KNOWLEDGE_ROUTER: "knowledge-router",
   SCHEDULE_PLANNER: "schedule-planner",
   RESPONSE_ORCHESTRATOR: "response-orchestrator",
   AUTONOMOUS_MESSENGER: "autonomous-messenger",
@@ -401,6 +402,15 @@ export const BUILT_IN_AGENTS: BuiltInAgentMeta[] = [
     enabledByDefault: false,
     category: "writer",
   },
+  {
+    id: "knowledge-router",
+    name: "Knowledge Router",
+    description:
+      "Lower-cost alternative to Knowledge Retrieval. Reads a short catalog of lorebook entries (descriptions or content snippets), picks which ones are relevant to the current scene, and injects them verbatim — no per-entry summarization passes. Best for large lorebooks where you've written entry descriptions.",
+    phase: "pre_generation",
+    enabledByDefault: false,
+    category: "writer",
+  },
 
   // ── Conversation Agents ──
   {
@@ -535,6 +545,7 @@ export const DEFAULT_AGENT_TOOLS: Record<string, string[]> = {
   "persona-stats": ["update_game_state"],
   html: [],
   "chat-summary": [],
+  // Also used server-side to identify Spotify tools that require token refresh.
   spotify: [
     "spotify_get_playlists",
     "spotify_get_playlist_tracks",
@@ -544,6 +555,7 @@ export const DEFAULT_AGENT_TOOLS: Record<string, string[]> = {
   ],
   editor: [],
   "knowledge-retrieval": ["search_lorebook"],
+  "knowledge-router": [],
   "schedule-planner": [],
   "response-orchestrator": [],
   "autonomous-messenger": [],

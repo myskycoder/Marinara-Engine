@@ -1,9 +1,9 @@
 // ──────────────────────────────────────────────
 // Game: Session History Panel (view past sessions)
 // ──────────────────────────────────────────────
-import { useMemo, useState } from "react";
-import { History, ChevronDown, ChevronRight, ScrollText, Users, Sparkles, X } from "lucide-react";
-import type { SessionSummary } from "@marinara-engine/shared";
+import { useEffect, useMemo, useState } from "react";
+import { GitBranch, History, ChevronDown, ChevronRight, ScrollText, Users, Sparkles, X, RefreshCw } from "lucide-react";
+import type { GameNpc, PartyArc, SessionSummary } from "@marinara-engine/shared";
 import { toast } from "sonner";
 import { AnimatedText } from "./AnimatedText";
 
@@ -59,30 +59,138 @@ interface SessionSummaryDraft {
   partyDynamics: string;
   partyState: string;
   keyDiscoveries: string;
-  revelations: string;
   characterMoments: string;
+  littleDetails: string;
   npcUpdates: string;
   statsSnapshot: string;
+}
+
+export interface CurrentSessionSecrets {
+  worldOverview: string;
+  storyArc: string;
+  plotTwists: string[];
+  partyArcs: PartyArc[];
+  npcs: GameNpc[];
+  characterCards: Array<Record<string, unknown>>;
+}
+
+interface CurrentSessionSecretDraft {
+  worldOverview: string;
+  storyArc: string;
+  plotTwists: string;
+  partyArcs: string;
+  npcs: string;
+  characterCards: string;
+}
+
+function formatJsonDraft(value: unknown): string {
+  return JSON.stringify(value ?? [], null, 2);
+}
+
+function buildCurrentSecretsDraft(secrets: CurrentSessionSecrets): CurrentSessionSecretDraft {
+  return {
+    worldOverview: secrets.worldOverview,
+    storyArc: secrets.storyArc,
+    plotTwists: formatListDraft(secrets.plotTwists),
+    partyArcs: formatJsonDraft(secrets.partyArcs),
+    npcs: formatJsonDraft(secrets.npcs),
+    characterCards: formatJsonDraft(secrets.characterCards),
+  };
+}
+
+function parseJsonArrayDraft<T>(label: string, value: string): T[] {
+  const trimmed = value.trim();
+  if (!trimmed) return [];
+  const parsed = JSON.parse(trimmed) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${label} must be a JSON array.`);
+  }
+  return parsed as T[];
+}
+
+function SpoilerTextSection({ label, value }: { label: string; value: string }) {
+  if (!value.trim()) return null;
+  return (
+    <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2">
+      <div className="mb-1 text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+        {label}
+      </div>
+      <div className="whitespace-pre-wrap text-xs leading-relaxed text-[var(--foreground)]">{value}</div>
+    </div>
+  );
+}
+
+function SpoilerListSection({ label, values }: { label: string; values: string[] }) {
+  if (values.length === 0) return null;
+  return (
+    <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2">
+      <div className="mb-1 text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+        {label}
+      </div>
+      <ul className="flex flex-col gap-1 pl-4">
+        {values.map((value, index) => (
+          <li key={index} className="list-disc text-xs text-[var(--foreground)]">
+            {value}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function SpoilerJsonSection({ label, value }: { label: string; value: unknown[] }) {
+  if (!value.length) return null;
+  return (
+    <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2">
+      <div className="mb-1 text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+        {label}
+      </div>
+      <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[0.6875rem] leading-relaxed text-[var(--foreground)]">
+        {JSON.stringify(value, null, 2)}
+      </pre>
+    </div>
+  );
 }
 
 interface GameSessionHistoryProps {
   summaries: SessionSummary[];
   currentSessionNumber: number;
+  currentSessionDate?: string | null;
+  currentSecrets?: CurrentSessionSecrets | null;
   savingSessionNumber?: number | null;
+  savingCurrentSecrets?: boolean;
+  regeneratingSessionNumber?: number | null;
+  updatingPlotArcsSessionNumber?: number | null;
+  onSaveCurrentSecrets?: (secrets: CurrentSessionSecrets) => Promise<void> | void;
   onSaveSession?: (sessionNumber: number, session: SessionSummary) => Promise<void> | void;
+  onRegenerateSession?: (sessionNumber: number) => Promise<void> | void;
+  onUpdatePlotArcs?: (sessionNumber: number) => Promise<void> | void;
   onClose: () => void;
 }
 
 export function GameSessionHistory({
   summaries,
   currentSessionNumber,
+  currentSessionDate = null,
+  currentSecrets = null,
   savingSessionNumber = null,
+  savingCurrentSecrets = false,
+  regeneratingSessionNumber = null,
+  updatingPlotArcsSessionNumber = null,
+  onSaveCurrentSecrets,
   onSaveSession,
+  onRegenerateSession,
+  onUpdatePlotArcs,
   onClose,
 }: GameSessionHistoryProps) {
   const [expandedSession, setExpandedSession] = useState<number | null>(null);
   const [editingSession, setEditingSession] = useState<number | null>(null);
   const [draft, setDraft] = useState<SessionSummaryDraft | null>(null);
+  const [spoilersVisible, setSpoilersVisible] = useState(false);
+  const [editingSecrets, setEditingSecrets] = useState(false);
+  const [secretDraft, setSecretDraft] = useState<CurrentSessionSecretDraft | null>(() =>
+    currentSecrets ? buildCurrentSecretsDraft(currentSecrets) : null,
+  );
 
   const sorted = useMemo(() => {
     const normalized = (Array.isArray(summaries) ? summaries : []).map((session, index) => {
@@ -94,17 +202,24 @@ export function GameSessionHistory({
         resumePoint: normalizeText(raw.resumePoint, deriveResumePointFallback(summary)),
         partyDynamics: normalizeText(raw.partyDynamics),
         partyState: normalizeText(raw.partyState),
-        keyDiscoveries: normalizeTextList(raw.keyDiscoveries),
-        revelations: normalizeTextList(raw.revelations),
+        keyDiscoveries: [...normalizeTextList(raw.keyDiscoveries), ...normalizeTextList(raw.revelations)],
         characterMoments: normalizeTextList(raw.characterMoments),
+        littleDetails: normalizeTextList(raw.littleDetails),
         npcUpdates: normalizeTextList(raw.npcUpdates),
         statsSnapshot: normalizeStatsSnapshot(raw.statsSnapshot),
         timestamp: normalizeText(raw.timestamp, new Date().toISOString()),
+        nextSessionRequest: normalizeText(raw.nextSessionRequest) || null,
       } satisfies SessionSummary;
     });
 
     return normalized.sort((a, b) => b.sessionNumber - a.sessionNumber);
   }, [summaries]);
+
+  useEffect(() => {
+    if (!editingSecrets) {
+      setSecretDraft(currentSecrets ? buildCurrentSecretsDraft(currentSecrets) : null);
+    }
+  }, [currentSecrets, editingSecrets]);
 
   const handleStartEditing = (session: SessionSummary) => {
     setEditingSession(session.sessionNumber);
@@ -114,8 +229,8 @@ export function GameSessionHistory({
       partyDynamics: session.partyDynamics,
       partyState: session.partyState,
       keyDiscoveries: formatListDraft(session.keyDiscoveries),
-      revelations: formatListDraft(session.revelations),
       characterMoments: formatListDraft(session.characterMoments),
+      littleDetails: formatListDraft(session.littleDetails),
       npcUpdates: formatListDraft(session.npcUpdates),
       statsSnapshot: JSON.stringify(session.statsSnapshot, null, 2),
     });
@@ -152,9 +267,10 @@ export function GameSessionHistory({
         partyDynamics: draft.partyDynamics.trim(),
         partyState: draft.partyState.trim(),
         keyDiscoveries: parseListDraft(draft.keyDiscoveries),
-        revelations: parseListDraft(draft.revelations),
         characterMoments: parseListDraft(draft.characterMoments),
+        littleDetails: parseListDraft(draft.littleDetails),
         npcUpdates: parseListDraft(draft.npcUpdates),
+        nextSessionRequest: session.nextSessionRequest ?? null,
         statsSnapshot,
         timestamp: session.timestamp,
       });
@@ -164,6 +280,47 @@ export function GameSessionHistory({
       // The parent handles the error toast and keeps the draft intact.
     }
   };
+
+  const handleStartEditingSecrets = () => {
+    if (!currentSecrets) return;
+    setSecretDraft(buildCurrentSecretsDraft(currentSecrets));
+    setEditingSecrets(true);
+  };
+
+  const handleCancelEditingSecrets = () => {
+    setSecretDraft(currentSecrets ? buildCurrentSecretsDraft(currentSecrets) : null);
+    setEditingSecrets(false);
+  };
+
+  const handleSaveCurrentSecrets = async () => {
+    if (!onSaveCurrentSecrets || !secretDraft) return;
+
+    try {
+      await onSaveCurrentSecrets({
+        worldOverview: secretDraft.worldOverview.trim(),
+        storyArc: secretDraft.storyArc.trim(),
+        plotTwists: parseListDraft(secretDraft.plotTwists),
+        partyArcs: parseJsonArrayDraft<PartyArc>("Party arcs", secretDraft.partyArcs),
+        npcs: parseJsonArrayDraft<GameNpc>("NPCs", secretDraft.npcs),
+        characterCards: parseJsonArrayDraft<Record<string, unknown>>("Character cards", secretDraft.characterCards),
+      });
+      setEditingSecrets(false);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not save current session spoilers.");
+    }
+  };
+
+  const currentSessionDateStr = currentSessionDate
+    ? new Date(currentSessionDate).toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      })
+    : new Date().toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      });
 
   return (
     <div className="absolute inset-0 z-40 flex flex-col bg-[var(--card)]/95 backdrop-blur-sm">
@@ -184,18 +341,175 @@ export function GameSessionHistory({
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-3">
-        {sorted.length === 0 ? (
-          <div className="flex flex-col items-center justify-center gap-2 py-12 text-[var(--muted-foreground)]">
-            <ScrollText size={24} className="opacity-50" />
-            <span className="text-sm">No completed sessions yet</span>
-            <span className="text-xs">Conclude your current session to see a summary here.</span>
+        <div className="flex flex-col gap-2">
+          <div className="rounded-lg border border-[var(--primary)]/30 bg-[var(--primary)]/5">
+            <div className="flex flex-wrap items-center gap-3 px-4 py-3">
+              <span className="text-sm font-semibold text-[var(--foreground)]">
+                Session {currentSessionNumber} (Current)
+              </span>
+              <span className="text-xs text-[var(--muted-foreground)]">{currentSessionDateStr}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setSpoilersVisible((visible) => !visible);
+                  if (!spoilersVisible && currentSecrets) {
+                    setSecretDraft(buildCurrentSecretsDraft(currentSecrets));
+                  }
+                }}
+                className="ml-auto rounded-md bg-amber-500/15 px-2.5 py-1 text-[0.6875rem] font-semibold text-amber-500 ring-1 ring-amber-500/25 transition-colors hover:bg-amber-500/25"
+              >
+                {spoilersVisible ? "Hide Spoilers" : "Show Spoilers"}
+              </button>
+            </div>
+
+            {spoilersVisible && (
+              <div className="border-t border-[var(--border)] px-4 py-3">
+                {!currentSecrets ? (
+                  <p className="text-xs text-[var(--muted-foreground)]">No GM spoiler state has been generated yet.</p>
+                ) : editingSecrets ? (
+                  <div className="flex flex-col gap-3">
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                        World Overview
+                      </span>
+                      <textarea
+                        value={secretDraft?.worldOverview ?? ""}
+                        onChange={(event) =>
+                          setSecretDraft((prev) => (prev ? { ...prev, worldOverview: event.target.value } : prev))
+                        }
+                        rows={5}
+                        disabled={savingCurrentSecrets}
+                        className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                        Story Arc
+                      </span>
+                      <textarea
+                        value={secretDraft?.storyArc ?? ""}
+                        onChange={(event) =>
+                          setSecretDraft((prev) => (prev ? { ...prev, storyArc: event.target.value } : prev))
+                        }
+                        rows={5}
+                        disabled={savingCurrentSecrets}
+                        className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                        Plot Twists
+                      </span>
+                      <textarea
+                        value={secretDraft?.plotTwists ?? ""}
+                        onChange={(event) =>
+                          setSecretDraft((prev) => (prev ? { ...prev, plotTwists: event.target.value } : prev))
+                        }
+                        rows={5}
+                        disabled={savingCurrentSecrets}
+                        placeholder="One plot twist per line"
+                        className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                        Party Arcs JSON
+                      </span>
+                      <textarea
+                        value={secretDraft?.partyArcs ?? ""}
+                        onChange={(event) =>
+                          setSecretDraft((prev) => (prev ? { ...prev, partyArcs: event.target.value } : prev))
+                        }
+                        rows={8}
+                        disabled={savingCurrentSecrets}
+                        className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 font-mono text-xs leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                        NPCs JSON
+                      </span>
+                      <textarea
+                        value={secretDraft?.npcs ?? ""}
+                        onChange={(event) =>
+                          setSecretDraft((prev) => (prev ? { ...prev, npcs: event.target.value } : prev))
+                        }
+                        rows={8}
+                        disabled={savingCurrentSecrets}
+                        className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 font-mono text-xs leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                        Character Cards JSON
+                      </span>
+                      <textarea
+                        value={secretDraft?.characterCards ?? ""}
+                        onChange={(event) =>
+                          setSecretDraft((prev) => (prev ? { ...prev, characterCards: event.target.value } : prev))
+                        }
+                        rows={8}
+                        disabled={savingCurrentSecrets}
+                        className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 font-mono text-xs leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]"
+                      />
+                    </label>
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={handleCancelEditingSecrets}
+                        disabled={savingCurrentSecrets}
+                        className="rounded-md bg-[var(--secondary)] px-2.5 py-1.5 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleSaveCurrentSecrets()}
+                        disabled={savingCurrentSecrets}
+                        className="rounded-md bg-[var(--primary)] px-2.5 py-1.5 text-[0.6875rem] font-medium text-white transition-colors hover:bg-[var(--primary)]/90 disabled:opacity-50"
+                      >
+                        {savingCurrentSecrets ? "Saving..." : "Save Spoilers"}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-3">
+                    <div className="flex justify-end">
+                      {onSaveCurrentSecrets && (
+                        <button
+                          type="button"
+                          onClick={handleStartEditingSecrets}
+                          className="rounded-md bg-[var(--secondary)] px-2.5 py-1.5 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+                        >
+                          Edit Spoilers
+                        </button>
+                      )}
+                    </div>
+                    <SpoilerTextSection label="World Overview" value={currentSecrets.worldOverview} />
+                    <SpoilerTextSection label="Story Arc" value={currentSecrets.storyArc} />
+                    <SpoilerListSection label="Plot Twists" values={currentSecrets.plotTwists} />
+                    <SpoilerJsonSection label="Party Arcs" value={currentSecrets.partyArcs} />
+                    <SpoilerJsonSection label="NPCs" value={currentSecrets.npcs} />
+                    <SpoilerJsonSection label="Character Cards" value={currentSecrets.characterCards} />
+                  </div>
+                )}
+              </div>
+            )}
           </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {sorted.map((session) => {
+
+          {sorted.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-2 py-12 text-[var(--muted-foreground)]">
+              <ScrollText size={24} className="opacity-50" />
+              <span className="text-sm">No completed sessions yet</span>
+              <span className="text-xs">Conclude your current session to see a summary here.</span>
+            </div>
+          ) : (
+            sorted.map((session) => {
               const isExpanded = expandedSession === session.sessionNumber;
               const isEditing = editingSession === session.sessionNumber;
               const isSaving = savingSessionNumber === session.sessionNumber;
+              const isRegenerating = regeneratingSessionNumber === session.sessionNumber;
+              const isUpdatingPlotArcs = updatingPlotArcsSessionNumber === session.sessionNumber;
               const date = new Date(session.timestamp);
               const dateStr = date.toLocaleDateString(undefined, {
                 month: "short",
@@ -231,13 +545,40 @@ export function GameSessionHistory({
                             <ScrollText size={12} />
                             Summary
                           </div>
-                          {onSaveSession && !isEditing && (
-                            <button
-                              onClick={() => handleStartEditing(session)}
-                              className="rounded-md bg-[var(--secondary)] px-2 py-1 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-                            >
-                              Edit Details
-                            </button>
+                          {!isEditing && (
+                            <div className="flex items-center gap-2">
+                              {onUpdatePlotArcs && (
+                                <button
+                                  onClick={() => void onUpdatePlotArcs(session.sessionNumber)}
+                                  disabled={isUpdatingPlotArcs || isRegenerating}
+                                  title="Update game plot arcs from this session"
+                                  className="inline-flex items-center gap-1 rounded-md bg-[var(--secondary)] px-2 py-1 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  <GitBranch size={11} className={isUpdatingPlotArcs ? "animate-pulse" : undefined} />
+                                  {isUpdatingPlotArcs ? "Updating..." : "Update Plot Arcs"}
+                                </button>
+                              )}
+                              {onRegenerateSession && (
+                                <button
+                                  onClick={() => void onRegenerateSession(session.sessionNumber)}
+                                  disabled={isRegenerating}
+                                  title="Regenerate this session conclusion"
+                                  className="inline-flex items-center gap-1 rounded-md bg-[var(--secondary)] px-2 py-1 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  <RefreshCw size={11} className={isRegenerating ? "animate-spin" : undefined} />
+                                  {isRegenerating ? "Regenerating..." : "Regenerate"}
+                                </button>
+                              )}
+                              {onSaveSession && (
+                                <button
+                                  onClick={() => handleStartEditing(session)}
+                                  disabled={isRegenerating}
+                                  className="rounded-md bg-[var(--secondary)] px-2 py-1 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  Edit Details
+                                </button>
+                              )}
+                            </div>
                           )}
                         </div>
                         {isEditing ? (
@@ -310,22 +651,7 @@ export function GameSessionHistory({
                                 }
                                 disabled={isSaving}
                                 rows={4}
-                                placeholder="One discovery per line"
-                                className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]"
-                              />
-                            </label>
-                            <label className="flex flex-col gap-1">
-                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                                Revelations
-                              </span>
-                              <textarea
-                                value={draft?.revelations ?? ""}
-                                onChange={(event) =>
-                                  setDraft((prev) => (prev ? { ...prev, revelations: event.target.value } : prev))
-                                }
-                                disabled={isSaving}
-                                rows={4}
-                                placeholder="One revelation per line"
+                                placeholder="One continuity fact per line, including discoveries, twists, and reveals"
                                 className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]"
                               />
                             </label>
@@ -341,6 +667,21 @@ export function GameSessionHistory({
                                 disabled={isSaving}
                                 rows={4}
                                 placeholder="One moment per line"
+                                className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]"
+                              />
+                            </label>
+                            <label className="flex flex-col gap-1">
+                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                                Little Details To Recall
+                              </span>
+                              <textarea
+                                value={draft?.littleDetails ?? ""}
+                                onChange={(event) =>
+                                  setDraft((prev) => (prev ? { ...prev, littleDetails: event.target.value } : prev))
+                                }
+                                disabled={isSaving}
+                                rows={4}
+                                placeholder="One small preference, habit, promise, or past detail per line"
                                 className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]"
                               />
                             </label>
@@ -437,22 +778,6 @@ export function GameSessionHistory({
                         </div>
                       )}
 
-                      {session.revelations.length > 0 && (
-                        <div className="mb-3">
-                          <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-[var(--muted-foreground)]">
-                            <Sparkles size={12} />
-                            Revelations
-                          </div>
-                          <ul className="flex flex-col gap-1 pl-4">
-                            {session.revelations.map((revelation, i) => (
-                              <li key={i} className="list-disc text-xs text-[var(--foreground)]">
-                                <AnimatedText html={revelation} />
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-
                       {session.characterMoments.length > 0 && (
                         <div className="mb-3">
                           <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-[var(--muted-foreground)]">
@@ -469,6 +794,22 @@ export function GameSessionHistory({
                         </div>
                       )}
 
+                      {session.littleDetails.length > 0 && (
+                        <div className="mb-3">
+                          <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-[var(--muted-foreground)]">
+                            <Sparkles size={12} />
+                            Little Details To Recall
+                          </div>
+                          <ul className="flex flex-col gap-1 pl-4">
+                            {session.littleDetails.map((detail, i) => (
+                              <li key={i} className="list-disc text-xs text-[var(--foreground)]">
+                                <AnimatedText html={detail} />
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
                       {session.npcUpdates.length > 0 && (
                         <div className="mb-3">
                           <div className="mb-1 text-xs font-medium text-[var(--muted-foreground)]">NPC Updates</div>
@@ -479,6 +820,15 @@ export function GameSessionHistory({
                               </li>
                             ))}
                           </ul>
+                        </div>
+                      )}
+
+                      {session.nextSessionRequest && (
+                        <div className="mb-3 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2">
+                          <div className="mb-1 text-xs font-medium text-amber-500">Next Session Request</div>
+                          <div className="text-xs leading-relaxed text-[var(--foreground)]">
+                            {session.nextSessionRequest}
+                          </div>
                         </div>
                       )}
 
@@ -500,9 +850,9 @@ export function GameSessionHistory({
                   )}
                 </div>
               );
-            })}
-          </div>
-        )}
+            })
+          )}
+        </div>
       </div>
 
       <div className="border-t border-[var(--border)] px-4 py-2 text-center text-xs text-[var(--muted-foreground)]">

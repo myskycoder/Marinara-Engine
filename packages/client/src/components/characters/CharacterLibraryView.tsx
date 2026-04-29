@@ -114,7 +114,9 @@ function CharacterLibraryDetailCard({
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <h2 className="truncate text-xl font-semibold text-[var(--foreground)] sm:text-2xl">{characterName}</h2>
-                {characterTitle && <p className="mt-1 truncate text-sm italic text-[var(--muted-foreground)]">{characterTitle}</p>}
+                {characterTitle && (
+                  <p className="mt-1 truncate text-sm italic text-[var(--muted-foreground)]">{characterTitle}</p>
+                )}
                 {characterMeta && (
                   <p className="mt-1 text-xs font-semibold uppercase tracking-[0.22em] text-[var(--muted-foreground)]">
                     {characterMeta}
@@ -150,7 +152,10 @@ function CharacterLibraryDetailCard({
       {sections.length > 0 && (
         <div className="space-y-3">
           {sections.map((section) => (
-            <section key={section.title} className="rounded-[1.5rem] border border-[var(--border)]/50 bg-[var(--background)]/65 p-4">
+            <section
+              key={section.title}
+              className="rounded-[1.5rem] border border-[var(--border)]/50 bg-[var(--background)]/65 p-4"
+            >
               <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
                 {section.title}
               </h3>
@@ -262,7 +267,8 @@ export function CharacterLibraryView() {
                 Browse your characters
               </h1>
               <p className="text-xs text-[var(--muted-foreground)] md:text-sm">
-                {filteredCharacters.length} out of {parsedCharacters.length} card{parsedCharacters.length === 1 ? "" : "s"}
+                {filteredCharacters.length} out of {parsedCharacters.length} card
+                {parsedCharacters.length === 1 ? "" : "s"}
               </p>
             </div>
           </div>
@@ -416,7 +422,9 @@ export function CharacterLibraryView() {
 
                       <div className="flex min-w-0 flex-1 flex-col gap-2 p-3 sm:gap-3 sm:p-4">
                         <div className="min-w-0">
-                          <div className="truncate text-sm font-semibold text-[var(--foreground)] sm:text-base">{charName}</div>
+                          <div className="truncate text-sm font-semibold text-[var(--foreground)] sm:text-base">
+                            {charName}
+                          </div>
                           {charTitle && (
                             <div className="mt-0.5 truncate text-[0.625rem] italic text-[var(--muted-foreground)] sm:mt-1 sm:text-[0.6875rem]">
                               {charTitle}

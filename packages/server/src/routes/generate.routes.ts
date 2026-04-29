@@ -68,8 +68,11 @@ import {
   type NavigateCommand,
   type FetchCommand,
 } from "../services/conversation/character-commands.js";
+import { buildImpersonateInstruction } from "../services/conversation/impersonate-prompt.js";
+import { stripConversationPromptTimestamps } from "../services/conversation/transcript-sanitize.js";
 import { MARI_ASSISTANT_PROMPT } from "../db/seed-mari.js";
 import { executeKnowledgeRetrieval } from "../services/agents/knowledge-retrieval.js";
+import { executeKnowledgeRouter } from "../services/agents/knowledge-router.js";
 import { extractFileText, getSourceFilePath } from "./knowledge-sources.routes.js";
 import { gameStateSnapshots as gameStateSnapshotsTable } from "../db/schema/index.js";
 import { chats as chatsTable } from "../db/schema/index.js";
@@ -96,6 +99,7 @@ import {
   persistLorebookKeeperUpdates,
   resolveLorebookKeeperTarget,
 } from "./generate/lorebook-keeper-utils.js";
+import { registerDryRunRoute } from "./generate/dry-run-route.js";
 import { registerRetryAgentsRoute } from "./generate/retry-agents-route.js";
 import { sendSseEvent, startSseReply, trySendSseEvent } from "./generate/sse.js";
 import {
@@ -112,7 +116,13 @@ import {
   type GmPromptContext,
   type GameReadablePromptEntry,
 } from "../services/game/gm-prompts.js";
-import { syncGameMapPartyPosition } from "../services/game/map-position.service.js";
+import {
+  applyMapUpdateCommand,
+  getGameMapsFromMeta,
+  parseMapUpdateCommands,
+  syncGameMapMetaPartyPosition,
+  withActiveGameMapMeta,
+} from "../services/game/map-position.service.js";
 import { applyAllSegmentEdits, stripGmCommandTags } from "../services/game/segment-edits.js";
 import { listPartySprites } from "../services/game/sprite.service.js";
 import { materializeGameNpcs } from "../services/game/npc-materializer.service.js";
@@ -123,13 +133,48 @@ import {
   type PerceptionContext,
 } from "../services/game/perception.service.js";
 import { getMoraleTier, formatMoraleContext } from "../services/game/morale.service.js";
-import type { GameMap, PresentCharacter } from "@marinara-engine/shared";
+import type { GameMap, GameNpc, LorebookEntry, PresentCharacter } from "@marinara-engine/shared";
 import { sidecarModelService } from "../services/sidecar/sidecar-model.service.js";
+
+function hasConversationSchedules(value: unknown): value is Record<string, any> {
+  return !!value && typeof value === "object" && Object.keys(value as Record<string, unknown>).length > 0;
+}
+
+function areConversationSchedulesEnabled(meta: Record<string, any>): boolean {
+  if (typeof meta.conversationSchedulesEnabled === "boolean") return meta.conversationSchedulesEnabled;
+  return hasConversationSchedules(meta.characterSchedules);
+}
+
+function getEnabledConversationSchedules(meta: Record<string, any>): Record<string, any> {
+  return areConversationSchedulesEnabled(meta) && hasConversationSchedules(meta.characterSchedules)
+    ? meta.characterSchedules
+    : {};
+}
 
 function sanitizeConnectedGameTranscript(content: string): string {
   return stripGmCommandTags(content)
     .replace(/^\[(?:To the party|To the GM)\]\s*/i, "")
     .trim();
+}
+
+function normalizePartyLookupName(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function buildPartyNpcId(name: string): string {
+  const slug = normalizePartyLookupName(name).replace(/\s+/g, "-");
+  const encodedSlug = encodeURIComponent(name.trim().toLowerCase())
+    .replace(/%/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "");
+  return `npc:${slug || encodedSlug || "unknown"}`;
+}
+
+function isPartyNpcId(id: string): boolean {
+  return id.startsWith("npc:");
 }
 import { isInferenceAvailable as isSidecarInferenceAvailable } from "../services/sidecar/sidecar-inference.service.js";
 import { readFileSync, existsSync } from "fs";
@@ -160,7 +205,7 @@ async function updateJournal(db: any, chatId: string, transform: (journal: Journ
 function readAvatarBase64(avatarPath: string | null | undefined): string | undefined {
   if (!avatarPath) return undefined;
   // avatarPath is like /api/avatars/file/<filename> — extract just the filename
-  const filename = avatarPath.split("/").pop();
+  const filename = avatarPath.split("?")[0]?.split("/").pop();
   if (!filename || filename.includes("..") || filename.includes("/") || filename.includes("\\")) return undefined;
   const diskPath = join(DATA_DIR, "avatars", filename);
   try {
@@ -284,6 +329,36 @@ function normalizeChatTopP(value: unknown): number | undefined {
   return Math.min(value, 1);
 }
 
+function readChatCompletionsReasoningMetadata(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const source = value as Record<string, unknown>;
+  const metadata: Record<string, unknown> = {};
+  if (typeof source.reasoning_content === "string" && source.reasoning_content) {
+    metadata.reasoning_content = source.reasoning_content;
+  }
+  if (typeof source.reasoning === "string" && source.reasoning) {
+    metadata.reasoning = source.reasoning;
+  }
+  if (Array.isArray(source.reasoning_details) && source.reasoning_details.length) {
+    metadata.reasoning_details = source.reasoning_details;
+  }
+  return Object.keys(metadata).length ? metadata : undefined;
+}
+
+function isStandaloneCharacterProfileBlock(content: string, characterName: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed) return false;
+  const xmlTag = nameToXmlTag(characterName);
+  if (
+    (trimmed.startsWith(`<${xmlTag}>`) && trimmed.endsWith(`</${xmlTag}>`)) ||
+    (trimmed.startsWith(`<${characterName}>`) && trimmed.endsWith(`</${characterName}>`))
+  ) {
+    return true;
+  }
+  const escaped = characterName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^#{1,6}\\s+${escaped}\\s*$`, "m").test(trimmed);
+}
+
 export async function generateRoutes(app: FastifyInstance) {
   const isDebug = logger.isLevelEnabled("debug");
 
@@ -310,6 +385,14 @@ export async function generateRoutes(app: FastifyInstance) {
    */
   app.post("/", async (req, reply) => {
     const input = generateRequestSchema.parse(req.body);
+    const requestDebug = input.debugMode === true;
+    const debugLog = (message: string, ...args: any[]) => {
+      if (requestDebug) {
+        console.log(message, ...args);
+      } else {
+        app.log.debug(message, ...args);
+      }
+    };
 
     // Resolve the chat
     const chat = await chats.getById(input.chatId);
@@ -477,11 +560,16 @@ export async function generateRoutes(app: FastifyInstance) {
         const extra = parseExtra(m.extra);
         const attachments = extra.attachments as Array<{ type: string; data: string; filename?: string }> | undefined;
         const images = attachments?.filter((a) => a.type.startsWith("image/")).map((a) => a.data);
+        const providerMetadata: Record<string, unknown> = {};
         // For Google connections, carry stored Gemini parts (thought signatures) on assistant messages
-        const geminiParts =
-          isGoogleProvider && m.role === "assistant" && extra.geminiParts
-            ? { providerMetadata: { geminiParts: extra.geminiParts } }
-            : {};
+        if (isGoogleProvider && m.role === "assistant" && extra.geminiParts) {
+          providerMetadata.geminiParts = extra.geminiParts;
+        }
+        const chatCompletionsReasoning =
+          m.role === "assistant" ? readChatCompletionsReasoningMetadata(extra.chatCompletionsReasoning) : undefined;
+        if (chatCompletionsReasoning) {
+          Object.assign(providerMetadata, chatCompletionsReasoning);
+        }
 
         // Annotate assistant messages that have user-uploaded image attachments
         // so the model is aware it sent a photo in prior turns.
@@ -498,7 +586,7 @@ export async function generateRoutes(app: FastifyInstance) {
           role: m.role === "narrator" ? ("system" as const) : (m.role as "user" | "assistant" | "system"),
           content,
           ...(images?.length ? { images } : {}),
-          ...geminiParts,
+          ...(Object.keys(providerMetadata).length ? { providerMetadata } : {}),
         };
       });
 
@@ -576,6 +664,7 @@ export async function generateRoutes(app: FastifyInstance) {
 
       // Resolve persona — prefer per-chat personaId, fall back to globally active persona
       // (Game mode skips the fallback — persona must be explicitly selected in the setup wizard)
+      let personaId: string | null = null;
       let personaName = "User";
       let personaDescription = "";
       let personaFields: { personality?: string; scenario?: string; backstory?: string; appearance?: string } = {};
@@ -594,6 +683,7 @@ export async function generateRoutes(app: FastifyInstance) {
         (chat.personaId ? allPersonas.find((p: any) => p.id === chat.personaId) : null) ??
         (chatMode !== "game" ? allPersonas.find((p: any) => p.isActive === "true") : null);
       if (persona) {
+        personaId = persona.id as string;
         personaName = persona.name;
         personaDescription = persona.description;
 
@@ -628,7 +718,7 @@ export async function generateRoutes(app: FastifyInstance) {
       }
 
       // ── Assembler path: use preset if the chat has one ──
-      const presetId = (chat.promptPresetId as string | null) ?? undefined;
+      const presetId = chatMode === "conversation" ? undefined : ((chat.promptPresetId as string | null) ?? undefined);
       const chatChoices = (chatMeta.presetChoices ?? {}) as Record<string, string | string[]>;
 
       let finalMessages: Array<{
@@ -662,6 +752,13 @@ export async function generateRoutes(app: FastifyInstance) {
       const chatActiveLorebookIds: string[] = Array.isArray(chatMeta.activeLorebookIds)
         ? (chatMeta.activeLorebookIds as string[])
         : [];
+      const manualPromptTargetCharId =
+        (chatMeta.groupResponseOrder as string) === "manual" &&
+        typeof input.forCharacterId === "string" &&
+        characterIds.includes(input.forCharacterId)
+          ? input.forCharacterId
+          : null;
+      const promptCharacterIds = manualPromptTargetCharId ? [manualPromptTargetCharId] : characterIds;
 
       // ── Compute chat embedding for semantic lorebook matching (if any entries are vectorized) ──
       sendProgress("embedding");
@@ -670,7 +767,8 @@ export async function generateRoutes(app: FastifyInstance) {
       try {
         const activeEntries = await lorebooksStore.listActiveEntries({
           chatId: input.chatId,
-          characterIds,
+          characterIds: promptCharacterIds,
+          personaId,
           activeLorebookIds: chatActiveLorebookIds,
         });
         const hasVectorizedEntries = (activeEntries as Array<Record<string, unknown>>).some((e) => e.embedding != null);
@@ -740,7 +838,8 @@ export async function generateRoutes(app: FastifyInstance) {
             choiceBlocks: choiceBlocks as any,
             chatChoices,
             chatId: input.chatId,
-            characterIds,
+            characterIds: promptCharacterIds,
+            personaId,
             personaName,
             personaDescription,
             personaFields,
@@ -799,7 +898,10 @@ export async function generateRoutes(app: FastifyInstance) {
         // Gather character names and status for the prompt.
         // If schedules exist in chat metadata, derive status dynamically.
         const schedules: Record<string, import("../services/conversation/schedule.service.js").WeekSchedule> =
-          (chatMeta.characterSchedules as any) ?? {};
+          getEnabledConversationSchedules(chatMeta) as Record<
+            string,
+            import("../services/conversation/schedule.service.js").WeekSchedule
+          >;
         const convoCharInfo: {
           charId: string;
           name: string;
@@ -835,13 +937,28 @@ export async function generateRoutes(app: FastifyInstance) {
         }
         const convoCharNames = convoCharInfo.map((c) => c.name);
         const charNameList = convoCharNames.length ? convoCharNames.join(", ") : "the character";
+        const manualTargetCharId =
+          typeof input.forCharacterId === "string" && characterIds.includes(input.forCharacterId)
+            ? input.forCharacterId
+            : null;
+        const requestedMentionNames = new Set(
+          (input.mentionedCharacterNames ?? []).map((n: string) => n.toLowerCase()),
+        );
+        const scopedConvoCharInfo = manualTargetCharId
+          ? convoCharInfo.filter((c) => c.charId === manualTargetCharId)
+          : requestedMentionNames.size > 0
+            ? convoCharInfo.filter((c) => requestedMentionNames.has(c.name.toLowerCase()))
+            : convoCharInfo;
+        const respondingConvoCharInfo = scopedConvoCharInfo.length > 0 ? scopedConvoCharInfo : convoCharInfo;
+        const respondingConvoCharNames = respondingConvoCharInfo.map((c) => c.name);
 
         // ── Offline skip: if ALL characters are offline, don't generate ──
         // The user message is already saved. When the character comes back online,
         // the autonomous messaging system will trigger a catch-up generation.
-        const allOffline = convoCharInfo.length > 0 && convoCharInfo.every((c) => c.status === "offline");
+        const allOffline =
+          respondingConvoCharInfo.length > 0 && respondingConvoCharInfo.every((c) => c.status === "offline");
         if (allOffline && !input.regenerateMessageId && !input.impersonate) {
-          reply.raw.write(`data: ${JSON.stringify({ type: "offline", characters: convoCharNames })}\n\n`);
+          reply.raw.write(`data: ${JSON.stringify({ type: "offline", characters: respondingConvoCharNames })}\n\n`);
           reply.raw.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
           reply.raw.end();
           return;
@@ -851,10 +968,9 @@ export async function generateRoutes(app: FastifyInstance) {
         if (!input.regenerateMessageId && !input.impersonate) {
           const schedSvc = await import("../services/conversation/schedule.service.js");
           // Check if any characters were @mentioned
-          const mentionedNames = new Set((input.mentionedCharacterNames ?? []).map((n: string) => n.toLowerCase()));
-          const hasMentions = mentionedNames.size > 0;
+          const hasMentions = requestedMentionNames.size > 0 || !!manualTargetCharId;
           // Use the "worst" (longest-delay) status among all characters
-          const worstStatus = convoCharInfo.reduce((worst, c) => {
+          const worstStatus = respondingConvoCharInfo.reduce((worst, c) => {
             const rank = { online: 0, idle: 1, dnd: 2, offline: 3 } as Record<string, number>;
             return (rank[c.status] ?? 0) > (rank[worst] ?? 0) ? c.status : worst;
           }, "online");
@@ -862,7 +978,7 @@ export async function generateRoutes(app: FastifyInstance) {
           // Otherwise use the slowest configured delay among the responding characters.
           const delayMs = hasMentions
             ? schedSvc.getMentionDelay(worstStatus as "online" | "idle" | "dnd" | "offline")
-            : convoCharInfo.reduce((maxDelay, character) => {
+            : respondingConvoCharInfo.reduce((maxDelay, character) => {
                 const schedule = schedules[character.charId];
                 return Math.max(
                   maxDelay,
@@ -872,7 +988,7 @@ export async function generateRoutes(app: FastifyInstance) {
           if (delayMs > 0) {
             // Send "delayed" event first — client shows "will respond in a moment" / "when they're back"
             reply.raw.write(
-              `data: ${JSON.stringify({ type: "delayed", characters: convoCharNames, status: worstStatus, delayMs })}\n\n`,
+              `data: ${JSON.stringify({ type: "delayed", characters: respondingConvoCharNames, status: worstStatus, delayMs })}\n\n`,
             );
             await new Promise((r) => setTimeout(r, delayMs));
 
@@ -903,7 +1019,7 @@ export async function generateRoutes(app: FastifyInstance) {
             });
           }
           // Send "typing" event — client switches to "X is typing..."
-          reply.raw.write(`data: ${JSON.stringify({ type: "typing", characters: convoCharNames })}\n\n`);
+          reply.raw.write(`data: ${JSON.stringify({ type: "typing", characters: respondingConvoCharNames })}\n\n`);
         }
 
         // For regenerations, skip the delay but still send the typing indicator
@@ -926,11 +1042,7 @@ export async function generateRoutes(app: FastifyInstance) {
           `${String(ts.getHours()).padStart(2, "0")}:${String(ts.getMinutes()).padStart(2, "0")}`;
 
         // Strip leaked [HH:MM] or [DD.MM.YYYY] timestamps that models sometimes echo
-        const stripLeakedTimestamps = (text: string) =>
-          text
-            .replace(/^(\s*\[\d{1,2}[:.]\d{2}\]\s*)+/gm, "")
-            .replace(/^(\s*\[\d{1,2}\.\d{1,2}\.\d{4}\]\s*)+/gm, "")
-            .trim();
+        const stripLeakedTimestamps = stripConversationPromptTimestamps;
 
         // Build character name lookup for past-day author attribution
         const charIdToName = new Map<string, string>();
@@ -1316,14 +1428,11 @@ export async function generateRoutes(app: FastifyInstance) {
               const wEntry = weekSummaries[weekKey]!;
               const monday = parseDateKey(weekKey);
               const sunday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6);
-              let block = wEntry.summary;
-              if (wEntry.keyDetails.length > 0) {
-                block += `\nKey details: ${wEntry.keyDetails.join("; ")}`;
-              }
+              // Key details are surfaced separately via <important_memories> in the system prompt.
               return [
                 {
                   role: "system" as const,
-                  content: `<summary week="${weekKey} – ${fmtDateKey(sunday)}">\n${block}\n</summary>`,
+                  content: `<summary week="${weekKey} – ${fmtDateKey(sunday)}">\n${wEntry.summary}\n</summary>`,
                 },
               ];
             }
@@ -1331,14 +1440,11 @@ export async function generateRoutes(app: FastifyInstance) {
             // Non-consolidated day with a summary
             const entry = daySummaries[bucket.date];
             if (entry) {
-              let block = entry.summary;
-              if (entry.keyDetails.length > 0) {
-                block += `\nKey details: ${entry.keyDetails.join("; ")}`;
-              }
+              // Key details are surfaced separately via <important_memories> in the system prompt.
               return [
                 {
                   role: "system" as const,
-                  content: `<summary date="${bucket.date}">\n${block}\n</summary>`,
+                  content: `<summary date="${bucket.date}">\n${entry.summary}\n</summary>`,
                 },
               ];
             }
@@ -1361,9 +1467,13 @@ export async function generateRoutes(app: FastifyInstance) {
             : null;
 
         let conversationSystemPrompt: string;
-        // Resolve group mode early — conversations always use merged
+        const earlyGroupResponseOrder = (chatMeta.groupResponseOrder as string) ?? "sequential";
         const earlyGroupMode =
-          chatMode === "conversation" ? "merged" : ((chatMeta.groupChatMode as string) ?? "merged");
+          chatMode === "conversation"
+            ? earlyGroupResponseOrder === "manual"
+              ? "individual"
+              : "merged"
+            : ((chatMeta.groupChatMode as string) ?? "merged");
         if (customPrompt) {
           // Replace template variables in the custom prompt
           conversationSystemPrompt = customPrompt
@@ -1923,6 +2033,7 @@ export async function generateRoutes(app: FastifyInstance) {
           const lorebookResult = await processLorebooks(app.db, scanMessages, null, {
             chatId: input.chatId,
             characterIds,
+            personaId,
             activeLorebookIds: chatActiveLorebookIds,
             chatEmbedding: chatContextEmbedding,
             entryStateOverrides:
@@ -1964,6 +2075,7 @@ export async function generateRoutes(app: FastifyInstance) {
         const lorebookResult = await processLorebooks(app.db, scanMessages, null, {
           chatId: input.chatId,
           characterIds,
+          personaId,
           activeLorebookIds: chatActiveLorebookIds,
           chatEmbedding: chatContextEmbedding,
           entryStateOverrides:
@@ -1975,9 +2087,7 @@ export async function generateRoutes(app: FastifyInstance) {
           chatMeta.entryStateOverrides = lorebookResult.updatedEntryStateOverrides;
           await chats.updateMetadata(input.chatId, chatMeta);
         }
-        const loreContent = [lorebookResult.worldInfoBefore, lorebookResult.worldInfoAfter]
-          .filter(Boolean)
-          .join("\n");
+        const loreContent = [lorebookResult.worldInfoBefore, lorebookResult.worldInfoAfter].filter(Boolean).join("\n");
         if (loreContent) {
           const loreBlock = `<lore>\n${loreContent}\n</lore>`;
           const firstUserIdx = finalMessages.findIndex((m) => m.role === "user" || m.role === "assistant");
@@ -2004,22 +2114,28 @@ export async function generateRoutes(app: FastifyInstance) {
       if ((chatMode === "roleplay" || chatMode === "game") && chat.connectedChatId && !isSceneChat) {
         const pendingInfluences = await chats.listPendingInfluences(input.chatId);
         if (pendingInfluences.length > 0) {
-          const influenceLines = pendingInfluences.map((inf: any) => `- ${inf.content}`);
-          const influenceBlock = [
-            `<ooc_influences>`,
-            chatMode === "game"
-              ? `The following out-of-character notes come from a connected conversation. They represent things the players discussed or decided outside the game. Use them to steer the next scene, NPC reactions, objectives, or world state when appropriate — don't mention them explicitly as "OOC" in the narrative.`
-              : `The following out-of-character notes come from a connected conversation. They represent things the players discussed or decided outside of the roleplay. Weave them naturally into the story — don't mention them explicitly as "OOC" in the narrative.`,
-            ...influenceLines,
-            `</ooc_influences>`,
-          ].join("\n");
+          const influenceLines = pendingInfluences
+            .map((inf: any) => stripConversationPromptTimestamps(String(inf.content ?? "")))
+            .filter((content: string) => content.length > 0)
+            .map((content: string) => `- ${content}`);
 
-          // Inject before the last user message
-          const lastUserIdx = finalMessages.map((m) => m.role).lastIndexOf("user");
-          if (lastUserIdx >= 0) {
-            finalMessages.splice(lastUserIdx, 0, { role: "system" as const, content: influenceBlock });
-          } else {
-            finalMessages.push({ role: "system" as const, content: influenceBlock });
+          if (influenceLines.length > 0) {
+            const influenceBlock = [
+              `<ooc_influences>`,
+              chatMode === "game"
+                ? `The following out-of-character notes come from a connected conversation. They represent things the players discussed or decided outside the game. Use them to steer the next scene, NPC reactions, objectives, or world state when appropriate — don't mention them explicitly as "OOC" in the narrative.`
+                : `The following out-of-character notes come from a connected conversation. They represent things the players discussed or decided outside of the roleplay. Weave them naturally into the story — don't mention them explicitly as "OOC" in the narrative.`,
+              ...influenceLines,
+              `</ooc_influences>`,
+            ].join("\n");
+
+            // Inject before the last user message
+            const lastUserIdx = finalMessages.map((m) => m.role).lastIndexOf("user");
+            if (lastUserIdx >= 0) {
+              finalMessages.splice(lastUserIdx, 0, { role: "system" as const, content: influenceBlock });
+            } else {
+              finalMessages.push({ role: "system" as const, content: influenceBlock });
+            }
           }
 
           // Mark influences as consumed
@@ -2096,12 +2212,15 @@ export async function generateRoutes(app: FastifyInstance) {
       }
 
       // Resolve "maximum" reasoning effort to the highest level for the current model.
-      // GPT-5.4 and Claude Opus 4.7+ support "xhigh" — all others get "high".
+      // GPT-5.4/5.5 and Claude Opus 4.7+ support "xhigh" — all others get "high".
       let resolvedEffort: "low" | "medium" | "high" | "xhigh" | null =
         reasoningEffort !== "maximum" ? reasoningEffort : null;
       if (reasoningEffort === "maximum") {
         const modelLower = (conn.model ?? "").toLowerCase();
-        const supportsXhigh = modelLower.startsWith("gpt-5.4") || /claude-opus-4-(?:[7-9]|\d{2,})/.test(modelLower);
+        const supportsXhigh =
+          modelLower.startsWith("gpt-5.5") ||
+          modelLower.startsWith("gpt-5.4") ||
+          /claude-opus-4-(?:[7-9]|\d{2,})/.test(modelLower);
         resolvedEffort = supportsXhigh ? "xhigh" : "high";
       }
 
@@ -2165,10 +2284,14 @@ export async function generateRoutes(app: FastifyInstance) {
       const resolvedAgents: ResolvedAgent[] = [];
       // Cache per-connection providers so agents sharing the same connection batch together
       const agentProviderCache = new Map<string, { provider: BaseLLMProvider; model: string }>();
-      agentProviderCache.set(LOCAL_SIDECAR_CONNECTION_ID, {
-        provider: getLocalSidecarProvider(),
-        model: LOCAL_SIDECAR_MODEL,
-      });
+      const localSidecarAvailableForTrackers =
+        sidecarModelService.getConfig().useForTrackers && sidecarModelService.getConfiguredModelRef() !== null;
+      if (localSidecarAvailableForTrackers) {
+        agentProviderCache.set(LOCAL_SIDECAR_CONNECTION_ID, {
+          provider: getLocalSidecarProvider(),
+          model: LOCAL_SIDECAR_MODEL,
+        });
+      }
 
       // Check if there's a connection marked as default for all agents
       const defaultAgentConn = await connections.getDefaultForAgents();
@@ -2197,7 +2320,11 @@ export async function generateRoutes(app: FastifyInstance) {
         let agentModel = conn.model;
 
         // Resolve connection: per-agent override > default-for-agents > chat connection
-        const effectiveConnectionId = cfg.connectionId ?? defaultAgentConn?.id ?? null;
+        let effectiveConnectionId = cfg.connectionId ?? defaultAgentConn?.id ?? null;
+        if (effectiveConnectionId === LOCAL_SIDECAR_CONNECTION_ID && !localSidecarAvailableForTrackers) {
+          effectiveConnectionId =
+            cfg.connectionId === LOCAL_SIDECAR_CONNECTION_ID ? (defaultAgentConn?.id ?? null) : null;
+        }
         if (effectiveConnectionId) {
           const cached = agentProviderCache.get(effectiveConnectionId);
           if (cached) {
@@ -2389,7 +2516,10 @@ export async function generateRoutes(app: FastifyInstance) {
       // in the <party> section, so skip fallback injection to avoid duplication.
       if (chatMode !== "game") {
         const allContent = finalMessages.map((m) => m.content).join("\n");
-        for (const ci of charInfo) {
+        const fallbackCharInfo = manualPromptTargetCharId
+          ? charInfo.filter((c) => c.id === manualPromptTargetCharId)
+          : charInfo;
+        for (const ci of fallbackCharInfo) {
           // Check if this character already appears by description snippet, XML tag, or markdown heading
           const xmlTag = nameToXmlTag(ci.name);
           const hasCharInfo =
@@ -2643,6 +2773,34 @@ export async function generateRoutes(app: FastifyInstance) {
           }
         }
 
+        for (const npcId of partyCharIds) {
+          if (!isPartyNpcId(npcId)) continue;
+          const npc = gameNpcs.find((candidate) => buildPartyNpcId(candidate.name) === npcId);
+          if (!npc) continue;
+          const name = npc.name || "Unknown";
+          partyNames.push(name);
+          partyIdNamePairs.push({ id: npcId, name });
+          const parts = [`Name: ${name}`, "Source: Tracked NPC companion, not a character-library card"];
+          if (npc.description) parts.push(`Description: ${npc.description}`);
+          if (npc.location) parts.push(`Last Known Location: ${npc.location}`);
+          if (npc.notes?.length) parts.push(`Notes: ${npc.notes.join("; ")}`);
+          const gc = gameCardByName.get(name.toLowerCase());
+          if (gc) {
+            if (gc.class) parts.push(`Class: ${gc.class}`);
+            if ((gc.abilities as string[])?.length) parts.push(`Abilities: ${(gc.abilities as string[]).join(", ")}`);
+            if ((gc.strengths as string[])?.length) parts.push(`Strengths: ${(gc.strengths as string[]).join(", ")}`);
+            if ((gc.weaknesses as string[])?.length)
+              parts.push(`Weaknesses: ${(gc.weaknesses as string[]).join(", ")}`);
+            const extra = gc.extra as Record<string, string> | undefined;
+            if (extra) {
+              for (const [key, value] of Object.entries(extra)) {
+                parts.push(`${key}: ${value}`);
+              }
+            }
+          }
+          partyCards.push({ name, card: parts.join("\n") });
+        }
+
         // Resolve player persona card
         let playerCard: string | null = null;
         if (chat.personaId || (setupConfig as Record<string, unknown> | null)?.personaId) {
@@ -2823,6 +2981,7 @@ export async function generateRoutes(app: FastifyInstance) {
           const lorebookResult = await processLorebooks(app.db, scanMessages, null, {
             chatId: input.chatId,
             characterIds,
+            personaId,
             activeLorebookIds: chatActiveLorebookIds,
             chatEmbedding: chatContextEmbedding,
             entryStateOverrides:
@@ -2852,14 +3011,14 @@ export async function generateRoutes(app: FastifyInstance) {
           }
         }
 
-        // LOG_LEVEL=debug: log game-mode prompt details
-        if (isDebug) {
-          app.log.debug(
+        // LOG_LEVEL=debug or Settings -> Advanced -> Debug mode: log game-mode prompt details.
+        if (isDebug || requestDebug) {
+          debugLog(
             "[debug/game] GM prompt length: %d chars, messages: %d",
             finalMessages[0]?.content.length ?? 0,
             finalMessages.length,
           );
-          app.log.debug(
+          debugLog(
             "[debug/game] GM context: storyArc=%s, map=%s, npcs=%d, widgets=%s, hasSceneModel=%s, state=%s",
             !!gmCtx.storyArc,
             !!gmCtx.map,
@@ -2869,7 +3028,7 @@ export async function generateRoutes(app: FastifyInstance) {
             gmCtx.gameActiveState,
           );
           for (const msg of finalMessages) {
-            app.log.debug("[debug/game] [%s] %s", msg.role.toUpperCase(), msg.content);
+            debugLog("[debug/game] [%s] %s", msg.role.toUpperCase(), msg.content);
           }
         }
 
@@ -2891,10 +3050,12 @@ export async function generateRoutes(app: FastifyInstance) {
           gameActiveState: gameActiveState as import("@marinara-engine/shared").GameActiveState,
           sessionNumber,
           gameTime,
+          map: gameMap,
           partyNames: gmCtx.partyNames,
           playerName: gmCtx.playerName,
           characterSprites: gmCtx.characterSprites,
           language: gmCtx.language,
+          rating: gmCtx.rating,
           addressMode,
           playerInventory: (() => {
             try {
@@ -2970,25 +3131,9 @@ export async function generateRoutes(app: FastifyInstance) {
           // Use the last user message as the query
           const lastUserMsg = [...mappedMessages].reverse().find((m) => m.role === "user");
           if (lastUserMsg?.content?.trim()) {
-            // Scope recall: current chat only, plus other conversation-mode chats
-            // sharing the same characters (for group conversation chats).
-            const recallChatIds = [input.chatId];
-            if (chatMode === "conversation" && characterIds.length > 1) {
-              const allChats = await app.db
-                .select({ id: chatsTable.id, characterIds: chatsTable.characterIds, mode: chatsTable.mode })
-                .from(chatsTable);
-              const charSet = new Set(characterIds);
-              for (const c of allChats) {
-                if (c.id === input.chatId || c.mode !== "conversation") continue;
-                try {
-                  const ids: string[] = JSON.parse(c.characterIds);
-                  if (ids.some((id) => charSet.has(id))) recallChatIds.push(c.id);
-                } catch {
-                  /* skip */
-                }
-              }
-            }
-            const recalled = await recallMemories(app.db, lastUserMsg.content, recallChatIds);
+            // Scope recall to this chat only. Users expect memories to stay with
+            // the exact conversation/roleplay/game where they were created.
+            const recalled = await recallMemories(app.db, lastUserMsg.content, [input.chatId]);
             if (recalled.length > 0) {
               const packedRecall = packRecalledMemories(recalled, effectiveMaxContext ?? connectionMaxContext);
               if (packedRecall.lines.length === 0) {
@@ -3036,11 +3181,17 @@ export async function generateRoutes(app: FastifyInstance) {
 
       // ── Group chat processing ──
       const isGroupChat = characterIds.length > 1;
-      // Conversation mode always uses merged — individual mode is not supported there
-      const groupChatMode = chatMode === "conversation" ? "merged" : ((chatMeta.groupChatMode as string) ?? "merged");
+      const groupResponseOrder = (chatMeta.groupResponseOrder as string) ?? "sequential";
+      // Conversation mode stays merged by default, but Manual uses the same individual
+      // one-character-at-a-time trigger path as roleplay.
+      const groupChatMode =
+        chatMode === "conversation"
+          ? groupResponseOrder === "manual"
+            ? "individual"
+            : "merged"
+          : ((chatMeta.groupChatMode as string) ?? "merged");
       // Auto-enable speaker colors for conversation mode groups (system prompt already requests tags)
       const groupSpeakerColors = chatMeta.groupSpeakerColors === true || (chatMode === "conversation" && isGroupChat);
-      const groupResponseOrder = (chatMeta.groupResponseOrder as string) ?? "sequential";
 
       if (isGroupChat && chatMode !== "conversation") {
         // Strip <speaker> tags from history to save tokens in roleplay mode.
@@ -3210,6 +3361,7 @@ export async function generateRoutes(app: FastifyInstance) {
           lorebooksStore,
           chatId: input.chatId,
           characterIds,
+          personaId,
           activeLorebookIds: chatActiveLorebookIds,
           preferredTargetLorebookId: lorebookKeeperSettings.targetLorebookId,
         });
@@ -3420,6 +3572,50 @@ export async function generateRoutes(app: FastifyInstance) {
 
         if (materialParts.length > 0) {
           agentContext.memory._knowledgeRetrievalMaterial = materialParts.join("\n\n");
+        }
+      }
+
+      // If the knowledge-router agent is enabled, load candidate lorebook entries
+      // for routing. The router picks IDs from this list and the selected entries
+      // are injected verbatim — no per-entry summarization pass.
+      const knowledgeRouterAgent = resolvedAgents.find((a) => a.type === "knowledge-router");
+      let knowledgeRouterEntries: LorebookEntry[] = [];
+      if (knowledgeRouterAgent) {
+        try {
+          const sourceIds = (knowledgeRouterAgent.settings.sourceLorebookIds as string[]) ?? [];
+          if (sourceIds.length > 0) {
+            const entries = (await lorebooksStore.listEntriesByLorebooks(sourceIds)) as LorebookEntry[];
+            // Honor per-chat entry state overrides — a user can disable an entry for
+            // this chat without touching the global lorebook, and ephemeral entries
+            // carry per-chat countdown state. Mirrors the projection the standard
+            // lorebook activation pipeline does in services/lorebook/index.ts.
+            const entryStateOverrides =
+              (chatMeta.entryStateOverrides as Record<string, { enabled?: boolean; ephemeral?: number | null }>) ?? {};
+            // Skip:
+            //   - Disabled entries (off-limits, by global flag or per-chat override).
+            //   - Constant entries (already injected unconditionally by the standard
+            //     activation pipeline — routing them would duplicate work).
+            //   - Exhausted ephemeral entries (countdown reached 0 in this chat).
+            knowledgeRouterEntries = entries
+              .filter((e: LorebookEntry) => {
+                const ov = entryStateOverrides[e.id];
+                const isEnabled = ov?.enabled ?? e.enabled !== false;
+                if (!isEnabled || e.constant === true) return false;
+                // Project the ephemeral override here so the exhaustion check uses
+                // the per-chat remaining count, not the stale global default.
+                const effectiveEphemeral = ov?.ephemeral !== undefined ? ov.ephemeral : e.ephemeral;
+                if (effectiveEphemeral === 0) return false;
+                return true;
+              })
+              .map((e: LorebookEntry) => {
+                const ov = entryStateOverrides[e.id];
+                return ov?.ephemeral !== undefined ? { ...e, ephemeral: ov.ephemeral } : e;
+              });
+          }
+        } catch (err) {
+          // Non-critical: the router simply skips this turn if loading fails. Log
+          // so the failure is diagnosable instead of looking like "no matches found".
+          logger.warn(err, "[knowledge-router] failed to load source lorebook entries");
         }
       }
 
@@ -3658,6 +3854,260 @@ export async function generateRoutes(app: FastifyInstance) {
         pipelineAgents = pipelineAgents.filter((a) => a.type !== "combat");
       }
 
+      // ────────────────────────────────────────
+      // Tool Resolution (Main Generation + Agent Pipeline)
+      // ────────────────────────────────────────
+      const inputBody = req.body as Record<string, unknown>;
+      const enableTools = inputBody.enableTools === true || chatMeta.enableTools === true;
+      let toolDefs: LLMToolDefinition[] | undefined;
+      const customToolDefs: Array<{
+        name: string;
+        executionType: string;
+        webhookUrl: string | null;
+        staticResult: string | null;
+        scriptBody: string | null;
+      }> = [];
+
+      if (enableTools) {
+        // Per-chat tool selection (empty = all tools)
+        const chatActiveToolIds: string[] = Array.isArray(chatMeta.activeToolIds)
+          ? (chatMeta.activeToolIds as string[])
+          : [];
+        const hasToolFilter = chatActiveToolIds.length > 0;
+        const registeredToolSources = new Map<string, "built-in" | "custom">();
+
+        // Built-in tools
+        const builtInFiltered = hasToolFilter
+          ? BUILT_IN_TOOLS.filter((t) => chatActiveToolIds.includes(t.name))
+          : BUILT_IN_TOOLS;
+        toolDefs = [];
+        for (const t of builtInFiltered) {
+          const existingSource = registeredToolSources.get(t.name);
+          if (existingSource) {
+            throw new Error(
+              `Duplicate tool name "${t.name}" from built-in tool collides with existing ${existingSource} tool`,
+            );
+          }
+          registeredToolSources.set(t.name, "built-in");
+          toolDefs.push({
+            type: "function" as const,
+            function: {
+              name: t.name,
+              description: t.description,
+              parameters: t.parameters as unknown as Record<string, unknown>,
+            },
+          });
+        }
+
+        // Custom tools from DB
+        const enabledCustomTools = await customToolsStore.listEnabled();
+        const customFiltered = hasToolFilter
+          ? enabledCustomTools.filter((ct: any) => chatActiveToolIds.includes(ct.name))
+          : enabledCustomTools;
+        for (const ct of customFiltered) {
+          const existingSource = registeredToolSources.get(ct.name);
+          if (existingSource) {
+            logger.warn(
+              '[tools] Skipping custom tool "%s" because it collides with existing %s tool',
+              ct.name,
+              existingSource,
+            );
+            continue;
+          }
+          registeredToolSources.set(ct.name, "custom");
+
+          try {
+            const schema =
+              typeof ct.parametersSchema === "string" ? JSON.parse(ct.parametersSchema) : ct.parametersSchema;
+            if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+              throw new Error("parametersSchema must be a JSON object");
+            }
+            const schemaObject = schema as Record<string, unknown>;
+            const schemaType = schemaObject.type;
+            const schemaProperties = schemaObject.properties;
+            const schemaRequired = schemaObject.required;
+
+            if (schemaType !== undefined && schemaType !== "object") {
+              throw new Error('parametersSchema root "type" must be "object"');
+            }
+            if (
+              schemaProperties !== undefined &&
+              (!schemaProperties || typeof schemaProperties !== "object" || Array.isArray(schemaProperties))
+            ) {
+              throw new Error('parametersSchema "properties" must be an object');
+            }
+            if (
+              schemaType === undefined &&
+              (schemaProperties === undefined || !schemaProperties || typeof schemaProperties !== "object")
+            ) {
+              throw new Error('parametersSchema must define root "type": "object" or include object "properties"');
+            }
+            if (
+              schemaRequired !== undefined &&
+              (!Array.isArray(schemaRequired) || schemaRequired.some((entry) => typeof entry !== "string"))
+            ) {
+              throw new Error('parametersSchema "required" must be an array of strings');
+            }
+
+            customToolDefs.push({
+              name: ct.name,
+              executionType: ct.executionType,
+              webhookUrl: ct.webhookUrl,
+              staticResult: ct.staticResult,
+              scriptBody: ct.scriptBody,
+            });
+
+            toolDefs.push({
+              type: "function" as const,
+              function: {
+                name: ct.name,
+                description: ct.description,
+                parameters: schemaObject,
+              },
+            });
+          } catch (error) {
+            registeredToolSources.delete(ct.name);
+            logger.warn(
+              '[tools] Skipping custom tool "%s" with invalid parameter schema: %s %s',
+              ct.name,
+              error instanceof Error ? error.message : "unknown error",
+              String(ct.parametersSchema),
+            );
+          }
+        }
+      }
+
+      // ── Spotify Token Refresh (Early) ──
+      const resolvedToolNames = new Set((toolDefs ?? []).map((td) => td.function.name));
+      const spotifyToolNames = new Set(DEFAULT_AGENT_TOOLS.spotify ?? []);
+      const chatAllowsSpotify = Array.from(resolvedToolNames).some((name) => spotifyToolNames.has(name));
+      const anyAgentAllowsSpotify = resolvedAgents.some((agent) => {
+        const agentSettings = typeof agent.settings === "string" ? JSON.parse(agent.settings) : agent.settings || {};
+        const agentEnabledNames = Array.isArray(agentSettings.enabledTools)
+          ? (agentSettings.enabledTools as string[])
+          : [];
+        const agentResolvedNames = agentEnabledNames.filter((name) => resolvedToolNames.has(name));
+        return agentResolvedNames.some((name) => spotifyToolNames.has(name));
+      });
+      const needsSpotify = enableTools && (chatAllowsSpotify || anyAgentAllowsSpotify);
+      // Look beyond resolved agents only to reuse stored Spotify credentials when Spotify tools are allowed.
+      const spotifyAgent = needsSpotify
+        ? (resolvedAgents.find((a) => a.type === "spotify") ??
+          enabledConfigs.find((cfg: any) => cfg.type === "spotify") ??
+          (!enabledConfigs.some((cfg: any) => cfg.type === "spotify")
+            ? (await agentsStore.list()).find((cfg: any) => cfg.type === "spotify")
+            : null))
+        : null;
+      let spotifyAccessToken: string | null = null;
+      let spotifyExpiresAt = 0;
+      if (spotifyAgent) {
+        const sSettings =
+          typeof spotifyAgent.settings === "string" ? JSON.parse(spotifyAgent.settings) : spotifyAgent.settings || {};
+        spotifyAccessToken = (sSettings.spotifyAccessToken as string) || null;
+        const spotifyRefreshToken = (sSettings.spotifyRefreshToken as string) || null;
+        const spotifyClientId = (sSettings.spotifyClientId as string) || null;
+        spotifyExpiresAt = (sSettings.spotifyExpiresAt as number) ?? 0;
+
+        if (
+          spotifyRefreshToken &&
+          spotifyClientId &&
+          (!spotifyAccessToken || (spotifyExpiresAt > 0 && Date.now() > spotifyExpiresAt - 60_000)) // Refresh if missing or 1 min before expiry
+        ) {
+          try {
+            const tokenRes = await fetch("https://accounts.spotify.com/api/token", {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                grant_type: "refresh_token",
+                refresh_token: spotifyRefreshToken,
+                client_id: spotifyClientId,
+              }),
+              signal: AbortSignal.timeout(10_000),
+            });
+            if (tokenRes.ok) {
+              const tokens = (await tokenRes.json()) as {
+                access_token: string;
+                refresh_token?: string;
+                expires_in: number;
+              };
+              const refreshedExpiresAt = Date.now() + tokens.expires_in * 1000;
+              spotifyAccessToken = tokens.access_token;
+              spotifyExpiresAt = refreshedExpiresAt;
+              // Persist refreshed tokens in background (don't await)
+              agentsStore
+                .update(spotifyAgent.id, {
+                  settings: {
+                    ...sSettings,
+                    spotifyAccessToken: tokens.access_token,
+                    spotifyRefreshToken: tokens.refresh_token ?? spotifyRefreshToken,
+                    spotifyExpiresAt: refreshedExpiresAt,
+                  },
+                })
+                .catch((err) => logger.warn(err, "[spotify] failed to persist refreshed tokens"));
+            }
+          } catch {
+            /* ignore refresh errors */
+          }
+        }
+      }
+      const spotifyCreds =
+        spotifyAccessToken && (spotifyExpiresAt <= 0 || Date.now() < spotifyExpiresAt)
+          ? { accessToken: spotifyAccessToken }
+          : undefined;
+      const searchLorebookForTools = async (query: string, category?: string | null) => {
+        const entries = await lorebooksStore.listActiveEntries({
+          chatId: input.chatId,
+          characterIds,
+          personaId,
+          activeLorebookIds: chatActiveLorebookIds,
+        });
+        const q = query.toLowerCase();
+        return entries
+          .filter((e: any) => {
+            const nameMatch = e.name?.toLowerCase().includes(q);
+            const contentMatch = e.content?.toLowerCase().includes(q);
+            const keyMatch = (e.keys as string[])?.some((k: string) => k.toLowerCase().includes(q));
+            const catMatch = !category || e.tag === category;
+            return catMatch && (nameMatch || contentMatch || keyMatch);
+          })
+          .slice(0, 20)
+          .map((e: any) => ({ name: e.name, content: e.content, tag: e.tag, keys: e.keys as string[] }));
+      };
+
+      // ── Resolve tool context for all agents ──
+      // This enables built-in and custom tools for any agent in the pipeline.
+      for (const agent of resolvedAgents) {
+        if (agent.toolContext) continue;
+
+        const agentSettings = typeof agent.settings === "string" ? JSON.parse(agent.settings) : agent.settings || {};
+        const agentEnabledNames = Array.isArray(agentSettings.enabledTools)
+          ? (agentSettings.enabledTools as string[])
+          : [];
+        if (agentEnabledNames.length === 0) continue;
+
+        const agentTools = (toolDefs ?? []).filter((td) => agentEnabledNames.includes(td.function.name));
+        if (agentTools.length === 0) continue;
+        const allowedToolNames = new Set(agentTools.map((td) => td.function.name));
+
+        agent.toolContext = {
+          tools: agentTools,
+          executeToolCall: async (call) => {
+            if (!allowedToolNames.has(call.function.name)) {
+              return JSON.stringify({
+                error: `Tool not allowed for agent ${agent.type}: ${call.function.name}`,
+                allowed: Array.from(allowedToolNames),
+              });
+            }
+            const results = await executeToolCalls([call], {
+              customTools: customToolDefs,
+              spotify: spotifyCreds,
+              searchLorebook: searchLorebookForTools,
+            });
+            return results[0]?.result ?? "Tool execution failed";
+          },
+        };
+      }
+
       const pipeline = createAgentPipeline(pipelineAgents, agentContext, sendAgentEvent);
 
       // ────────────────────────────────────────
@@ -3672,21 +4122,56 @@ export async function generateRoutes(app: FastifyInstance) {
       let contextInjections: AgentInjection[] = [];
       // Static-injection agents don't need LLM calls — they inject prompt text directly
       const STATIC_INJECTION_AGENTS = new Set(["html"]);
-      const SEPARATE_INJECTION_AGENTS = new Set(["knowledge-retrieval"]);
-      const EXCLUDED_FROM_PIPELINE = new Set(["html", "knowledge-retrieval"]);
+      const SEPARATE_INJECTION_AGENTS = new Set(["knowledge-retrieval", "knowledge-router"]);
+      const EXCLUDED_FROM_PIPELINE = new Set(["html", "knowledge-retrieval", "knowledge-router"]);
       const hasPreGenAgents = resolvedAgents.some(
         (a) => a.phase === "pre_generation" && !EXCLUDED_FROM_PIPELINE.has(a.type),
       );
 
-      // ── Run pre-gen agents and knowledge retrieval in parallel when possible ──
+      // ── Run pre-gen agents, knowledge retrieval, and knowledge router in parallel when possible ──
       const shouldRunKR = !!(
         knowledgeRetrievalAgent &&
         agentContext.memory._knowledgeRetrievalMaterial &&
         !input.regenerateMessageId
       );
+      const shouldRunRouter = !!(
+        knowledgeRouterAgent &&
+        knowledgeRouterEntries.length > 0 &&
+        !input.regenerateMessageId
+      );
       const shouldRunPreGen = hasPreGenAgents && !input.regenerateMessageId;
 
-      if (shouldRunPreGen || shouldRunKR) {
+      // Helper: wrap a separate-injection agent's text and append it to the last
+      // user message. Used by both knowledge-retrieval and knowledge-router on
+      // both fresh generations AND regen-cache replays — keeping the wrap+append
+      // in one place prevents the two paths from drifting again (PR #228 had to
+      // fix exactly that drift once already).
+      const appendSeparateAgentInjection = (
+        agentType: "knowledge-retrieval" | "knowledge-router",
+        text: string,
+      ): void => {
+        const isRouter = agentType === "knowledge-router";
+        const heading = isRouter ? "Knowledge Router" : "Knowledge Retrieval";
+        const tag = isRouter ? "knowledge_router" : "knowledge_retrieval";
+        // Honor all three wrapFormat values (the previous KR-only injection had
+        // a markdown-or-xml-fallback bug that "none" silently fell into).
+        const wrapped =
+          wrapFormat === "none"
+            ? `\n\n${text}`
+            : wrapFormat === "markdown"
+              ? `\n\n## ${heading}\n${text}`
+              : `\n\n<${tag}>\n${text}\n</${tag}>`;
+        const lastUserIdx = findLastIndex(finalMessages, "user");
+        if (lastUserIdx >= 0) {
+          const target = finalMessages[lastUserIdx]!;
+          finalMessages[lastUserIdx] = { ...target, content: target.content + wrapped };
+        } else {
+          const last = finalMessages[finalMessages.length - 1]!;
+          finalMessages[finalMessages.length - 1] = { ...last, content: last.content + wrapped };
+        }
+      };
+
+      if (shouldRunPreGen || shouldRunKR || shouldRunRouter) {
         sendProgress("agents");
 
         // Build the pre-gen promise
@@ -3713,43 +4198,114 @@ export async function generateRoutes(app: FastifyInstance) {
           : Promise.resolve([] as AgentInjection[]);
 
         // Build the knowledge retrieval promise
+        // Wrapped in try/catch so a KR failure (LLM error, parse error, etc.) never
+        // aborts the whole generation — knowledge retrieval is an optional enhancement,
+        // not a critical dependency. (Same pattern as the router promise below.)
         const krPromise = shouldRunKR
           ? (async () => {
-              reply.raw.write(
-                `data: ${JSON.stringify({ type: "agent_start", data: { phase: "pre_generation", agentType: "knowledge-retrieval" } })}\n\n`,
-              );
-              const krConfig = {
-                id: knowledgeRetrievalAgent!.id,
-                type: knowledgeRetrievalAgent!.type,
-                name: knowledgeRetrievalAgent!.name,
-                phase: knowledgeRetrievalAgent!.phase,
-                promptTemplate: knowledgeRetrievalAgent!.promptTemplate,
-                connectionId: knowledgeRetrievalAgent!.connectionId,
-                settings: knowledgeRetrievalAgent!.settings,
-              };
-              const sourceMaterial = agentContext.memory._knowledgeRetrievalMaterial as string;
               const _tKR = Date.now();
-              const krResult = await executeKnowledgeRetrieval(
-                krConfig,
-                agentContext,
-                knowledgeRetrievalAgent!.provider,
-                knowledgeRetrievalAgent!.model,
-                sourceMaterial,
-              );
-              sendAgentEvent(krResult);
-              logger.debug(`[timing] Knowledge retrieval: ${Date.now() - _tKR}ms`);
-              return krResult;
+              try {
+                reply.raw.write(
+                  `data: ${JSON.stringify({ type: "agent_start", data: { phase: "pre_generation", agentType: "knowledge-retrieval" } })}\n\n`,
+                );
+                const krConfig = {
+                  id: knowledgeRetrievalAgent!.id,
+                  type: knowledgeRetrievalAgent!.type,
+                  name: knowledgeRetrievalAgent!.name,
+                  phase: knowledgeRetrievalAgent!.phase,
+                  promptTemplate: knowledgeRetrievalAgent!.promptTemplate,
+                  connectionId: knowledgeRetrievalAgent!.connectionId,
+                  settings: knowledgeRetrievalAgent!.settings,
+                };
+                const sourceMaterial = agentContext.memory._knowledgeRetrievalMaterial as string;
+                const krResult = await executeKnowledgeRetrieval(
+                  krConfig,
+                  agentContext,
+                  knowledgeRetrievalAgent!.provider,
+                  knowledgeRetrievalAgent!.model,
+                  sourceMaterial,
+                );
+                sendAgentEvent(krResult);
+                logger.debug(`[timing] Knowledge retrieval: ${Date.now() - _tKR}ms`);
+                return krResult;
+              } catch (err) {
+                // Emit agent_error so the client closes the pending state opened by
+                // agent_start above — without this the UI shows the agent as forever-
+                // running. (Mirrors the Illustrator agent's failure protocol.)
+                // Use trySendSseEvent rather than reply.raw.write so a disconnected
+                // client doesn't turn this caught failure back into a rejected promise.
+                logger.warn(err, "[knowledge-retrieval] failed — continuing generation without retrieved context");
+                trySendSseEvent(reply, {
+                  type: "agent_error",
+                  data: {
+                    agentType: "knowledge-retrieval",
+                    error: err instanceof Error ? err.message : "Knowledge retrieval failed",
+                  },
+                });
+                return null;
+              }
             })()
           : Promise.resolve(null);
 
-        // Run both in parallel
-        const [preGenResult, krResult] = await Promise.all([preGenPromise, krPromise]);
+        // Build the knowledge router promise
+        // Wrapped in try/catch so a router failure (LLM error, parse error, etc.)
+        // never aborts the whole generation — routing is an optional enhancement,
+        // not a critical dependency.
+        const krRouterPromise = shouldRunRouter
+          ? (async () => {
+              const _tRouter = Date.now();
+              try {
+                reply.raw.write(
+                  `data: ${JSON.stringify({ type: "agent_start", data: { phase: "pre_generation", agentType: "knowledge-router" } })}\n\n`,
+                );
+                const routerConfig = {
+                  id: knowledgeRouterAgent!.id,
+                  type: knowledgeRouterAgent!.type,
+                  name: knowledgeRouterAgent!.name,
+                  phase: knowledgeRouterAgent!.phase,
+                  promptTemplate: knowledgeRouterAgent!.promptTemplate,
+                  connectionId: knowledgeRouterAgent!.connectionId,
+                  settings: knowledgeRouterAgent!.settings,
+                };
+                const routerResult = await executeKnowledgeRouter(
+                  routerConfig,
+                  agentContext,
+                  knowledgeRouterAgent!.provider,
+                  knowledgeRouterAgent!.model,
+                  knowledgeRouterEntries,
+                );
+                sendAgentEvent(routerResult);
+                logger.debug(`[timing] Knowledge router: ${Date.now() - _tRouter}ms`);
+                return routerResult;
+              } catch (err) {
+                // Emit agent_error so the client closes the pending state opened by
+                // agent_start above — without this the UI shows the agent as forever-
+                // running. (Mirrors the Illustrator agent's failure protocol.)
+                // Use trySendSseEvent rather than reply.raw.write so a disconnected
+                // client doesn't turn this caught failure back into a rejected promise.
+                logger.warn(err, "[knowledge-router] failed — continuing generation without routed context");
+                trySendSseEvent(reply, {
+                  type: "agent_error",
+                  data: {
+                    agentType: "knowledge-router",
+                    error: err instanceof Error ? err.message : "Knowledge router failed",
+                  },
+                });
+                return null;
+              }
+            })()
+          : Promise.resolve(null);
+
+        // Run all three in parallel
+        const [preGenResult, krResult, routerResult] = await Promise.all([preGenPromise, krPromise, krRouterPromise]);
         contextInjections = preGenResult;
 
         // ── Failure gate: only block generation if a critical pre-gen agent failed ──
         // The secret-plot-driver shapes narrative direction — generating without
         // it would produce incoherent output. Other agents are enhancement-only.
-        const preGenResults = pipeline.results.filter((r) => r.agentType !== "knowledge-retrieval");
+        const preGenResults = pipeline.results.filter(
+          (r) => r.agentType !== "knowledge-retrieval" && r.agentType !== "knowledge-router",
+        );
         const criticalFailed = preGenResults.filter((r) => !r.success && r.type === "secret_plot");
         const nonCriticalFailed = preGenResults.filter((r) => !r.success && r.type !== "secret_plot");
         if (criticalFailed.length > 0) {
@@ -3819,23 +4375,28 @@ export async function generateRoutes(app: FastifyInstance) {
           const krText =
             typeof krResult.data === "string" ? krResult.data : ((krResult.data as { text?: string })?.text ?? "");
           if (krText) {
-            const krWrapped =
-              wrapFormat === "markdown"
-                ? `\n\n## Knowledge Retrieval\n${krText}`
-                : `\n\n<knowledge_retrieval>\n${krText}\n</knowledge_retrieval>`;
-            const lastUserIdx = findLastIndex(finalMessages, "user");
-            if (lastUserIdx >= 0) {
-              const target = finalMessages[lastUserIdx]!;
-              finalMessages[lastUserIdx] = { ...target, content: target.content + krWrapped };
-            } else {
-              const last = finalMessages[finalMessages.length - 1]!;
-              finalMessages[finalMessages.length - 1] = { ...last, content: last.content + krWrapped };
-            }
+            appendSeparateAgentInjection("knowledge-retrieval", krText);
             contextInjections.push({ agentType: "knowledge-retrieval", text: krText });
           }
         }
-      } else if (hasPreGenAgents && input.regenerateMessageId) {
-        // Regeneration — try to reuse cached context injections from the original generation
+
+        // Inject Router output into the prompt
+        if (routerResult?.success && routerResult.data) {
+          const routerText =
+            typeof routerResult.data === "string"
+              ? routerResult.data
+              : ((routerResult.data as { text?: string })?.text ?? "");
+          if (routerText) {
+            appendSeparateAgentInjection("knowledge-router", routerText);
+            contextInjections.push({ agentType: "knowledge-router", text: routerText });
+          }
+        }
+      } else if (input.regenerateMessageId) {
+        // Regeneration — try to reuse cached context injections from the original generation.
+        // This must run regardless of whether `hasPreGenAgents` is true, because the cached
+        // injections may have come from agents in `EXCLUDED_FROM_PIPELINE` (knowledge-retrieval,
+        // knowledge-router) — which `hasPreGenAgents` excludes. Without this, a chat whose
+        // only pre-gen agent is KR or Router would silently drop the lore on every regen.
         const regenExtra = parseExtra(regenMsg?.extra);
         const rawCached = regenExtra.contextInjections as AgentInjection[] | string[] | undefined;
 
@@ -3865,7 +4426,7 @@ export async function generateRoutes(app: FastifyInstance) {
               })}\n\n`,
             );
           }
-        } else {
+        } else if (hasPreGenAgents) {
           const hasContextInjectionAgents = resolvedAgents.some(
             (a) => a.phase === "pre_generation" && !EXCLUDED_FROM_PIPELINE.has(a.type),
           );
@@ -3878,7 +4439,10 @@ export async function generateRoutes(app: FastifyInstance) {
 
             // Failure gate — same as the new-message path
             const regenPreGenResults = pipeline.results.filter(
-              (r) => r.agentType !== "knowledge-retrieval" && r.agentType !== "secret-plot-driver",
+              (r) =>
+                r.agentType !== "knowledge-retrieval" &&
+                r.agentType !== "knowledge-router" &&
+                r.agentType !== "secret-plot-driver",
             );
             const failedRegen = regenPreGenResults.filter((r) => !r.success);
             if (failedRegen.length > 0) {
@@ -3896,9 +4460,27 @@ export async function generateRoutes(app: FastifyInstance) {
           }
         }
 
-        if (contextInjections.length > 0) {
-          const wrapped = formatAgentInjections(contextInjections, wrapFormat);
+        // Split cached injections by injection placement, mirroring the fresh-generation path:
+        //   - Pipeline agents (prose-guardian, director, etc.) inject at depth 0 as system context.
+        //   - Separate-injection agents (knowledge-retrieval, knowledge-router) append to the
+        //     last user message wrapped in their own tags.
+        // Without this split, KR/Router cached output would be replayed in the wrong prompt
+        // position with different wrapping than the original generation, subtly changing the
+        // model's behavior on regenerate/swipe.
+        const cachedPipelineInjections = contextInjections.filter(
+          (inj) => !SEPARATE_INJECTION_AGENTS.has(inj.agentType),
+        );
+        const cachedSeparateInjections = contextInjections.filter((inj) =>
+          SEPARATE_INJECTION_AGENTS.has(inj.agentType),
+        );
+
+        if (cachedPipelineInjections.length > 0) {
+          const wrapped = formatAgentInjections(cachedPipelineInjections, wrapFormat);
           finalMessages = injectAtDepth(finalMessages, [{ content: wrapped, role: "system", depth: 0 }]);
+        }
+
+        for (const inj of cachedSeparateInjections) {
+          appendSeparateAgentInjection(inj.agentType as "knowledge-retrieval" | "knowledge-router", inj.text);
         }
       }
 
@@ -4122,87 +4704,18 @@ export async function generateRoutes(app: FastifyInstance) {
       // ── Early exit if client disconnected during knowledge retrieval / injection ──
       if (abortController.signal.aborted) return;
 
-      // Check if tool-use is requested for the main generation (from chat
-      // metadata or the request body). Agents handle their own tool calls
-      // independently via agent-executor — do NOT enable tools on the main
-      // generation just because agents are active.
-      const inputBody = req.body as Record<string, unknown>;
-      const enableTools = inputBody.enableTools === true || chatMeta.enableTools === true;
-
-      // Build OpenAI-compatible tool definitions from built-in + custom tools
-      let toolDefs: LLMToolDefinition[] | undefined;
-      let customToolDefs: Array<{
-        name: string;
-        executionType: string;
-        webhookUrl: string | null;
-        staticResult: string | null;
-        scriptBody: string | null;
-      }> = [];
-      if (enableTools) {
-        // Per-chat tool selection (empty = all tools)
-        const chatActiveToolIds: string[] = Array.isArray(chatMeta.activeToolIds)
-          ? (chatMeta.activeToolIds as string[])
-          : [];
-        const hasToolFilter = chatActiveToolIds.length > 0;
-
-        // Built-in tools
-        const builtInFiltered = hasToolFilter
-          ? BUILT_IN_TOOLS.filter((t) => chatActiveToolIds.includes(t.name))
-          : BUILT_IN_TOOLS;
-        toolDefs = builtInFiltered.map((t) => ({
-          type: "function" as const,
-          function: {
-            name: t.name,
-            description: t.description,
-            parameters: t.parameters as unknown as Record<string, unknown>,
-          },
-        }));
-        // Custom tools from DB
-        const enabledCustomTools = await customToolsStore.listEnabled();
-        const customFiltered = hasToolFilter
-          ? enabledCustomTools.filter((ct: any) => chatActiveToolIds.includes(ct.name))
-          : enabledCustomTools;
-        for (const ct of customFiltered) {
-          const schema =
-            typeof ct.parametersSchema === "string" ? JSON.parse(ct.parametersSchema) : ct.parametersSchema;
-          toolDefs.push({
-            type: "function" as const,
-            function: {
-              name: ct.name,
-              description: ct.description,
-              parameters: schema as Record<string, unknown>,
-            },
-          });
-          customToolDefs.push({
-            name: ct.name,
-            executionType: ct.executionType,
-            webhookUrl: ct.webhookUrl,
-            staticResult: ct.staticResult,
-            scriptBody: ct.scriptBody,
-          });
-        }
-      }
+      // ── Main Generation Tool Configuration ──
+      // Tool definitions (toolDefs) and custom tool metadata (customToolDefs)
+      // were already resolved earlier for the agent pipeline and are reused here.
 
       // ── Impersonate: inject instruction to respond as the user's character ──
       if (input.impersonate) {
-        const rawImpersonationDirection = input.userMessage?.trim() ?? "";
-        const legacyDirectionMatch = rawImpersonationDirection.match(
-          /^\[Impersonation instruction — write \{\{user\}\}'s next response, steering it toward the following:\s*([\s\S]+?)\]$/,
-        );
-        const impersonationDirection = legacyDirectionMatch
-          ? legacyDirectionMatch[1]!.trim()
-          : rawImpersonationDirection;
-        const impersonateInstruction = [
-          `<instruction>`,
-          `You are now writing as ${personaName}, the user's character.`,
-          `Study ${personaName}'s previous messages in the conversation and replicate their voice, mannerisms, speech patterns, and style as closely as possible.`,
-          personaDescription ? `Character description: ${personaDescription}` : "",
-          impersonationDirection ? `Additional direction for this reply: ${impersonationDirection}` : "",
-          `Write a single in-character response from ${personaName}'s perspective. Do NOT break character or add meta-commentary. Respond exactly as ${personaName} would.`,
-          `</instruction>`,
-        ]
-          .filter(Boolean)
-          .join("\n");
+        const impersonateInstruction = buildImpersonateInstruction({
+          customPrompt: chatMeta.impersonatePrompt,
+          direction: input.userMessage,
+          personaName,
+          personaDescription,
+        });
         finalMessages.push({ role: "user", content: impersonateInstruction });
       }
 
@@ -4260,6 +4773,7 @@ export async function generateRoutes(app: FastifyInstance) {
         messagesForGen: Array<{
           role: "system" | "user" | "assistant";
           content: string;
+          contextKind?: "prompt" | "history" | "injection";
           images?: string[];
           providerMetadata?: Record<string, unknown>;
         }>,
@@ -4270,24 +4784,6 @@ export async function generateRoutes(app: FastifyInstance) {
         oocMessages: string[];
         characterId: string | null;
       } | null> => {
-        // Convert mid-prompt system messages to user role.
-        // The assembler enforces SYSTEM → user/assistant alternation, but
-        // post-assembler injections (agents, lorebook depth, author notes,
-        // OOC influences) insert system messages that break this pattern.
-        // Preserve only the leading system block; everything else becomes user.
-        let pastLeadingSystem = false;
-        messagesForGen = messagesForGen.map((m) => {
-          if (!pastLeadingSystem) {
-            if (m.role !== "system") pastLeadingSystem = true;
-            return m;
-          }
-          if (m.role === "system") return { ...m, role: "user" as const };
-          return m;
-        });
-
-        // Merge adjacent same-role messages (especially system) before sending to provider
-        messagesForGen = mergeAdjacentMessages(messagesForGen as any) as typeof messagesForGen;
-
         // Collapse 3+ consecutive blank lines in all messages to save tokens
         for (const m of messagesForGen) {
           m.content = m.content.replace(/\n([ \t]*\n){2,}/g, "\n\n");
@@ -4297,6 +4793,7 @@ export async function generateRoutes(app: FastifyInstance) {
           promptMessages: Array<{
             role: "system" | "user" | "assistant";
             content: string;
+            contextKind?: "prompt" | "history" | "injection";
             images?: string[];
             providerMetadata?: Record<string, unknown>;
           }>,
@@ -4304,16 +4801,33 @@ export async function generateRoutes(app: FastifyInstance) {
           promptMessages.map((message) => ({
             role: message.role,
             content: message.content,
+            ...(message.contextKind ? { contextKind: message.contextKind } : {}),
             ...(message.images?.length ? { images: message.images } : {}),
             ...(message.providerMetadata ? { providerMetadata: message.providerMetadata } : {}),
           }));
+
+        const prepareProviderMessages = (messages: ChatMessage[]): ChatMessage[] => {
+          // Convert mid-prompt system messages to user role after context fitting.
+          // This keeps prompt/injection system blocks protected while trimming history,
+          // then preserves provider alternation rules for the actual request.
+          let pastLeadingSystem = false;
+          const converted = messages.map((m) => {
+            if (!pastLeadingSystem) {
+              if (m.role !== "system") pastLeadingSystem = true;
+              return m;
+            }
+            if (m.role === "system") return { ...m, role: "user" as const };
+            return m;
+          });
+          return mergeAdjacentMessages(converted as any) as ChatMessage[];
+        };
 
         let finalPromptSent: ChatMessage[] = [];
         let effectiveMaxTokensForSend = maxTokens;
         const fitPromptForSend = (candidateMessages: ChatMessage[]): ChatMessage[] => {
           const fit = fitMessagesToContext(
             candidateMessages,
-            { maxContext: effectiveMaxContext, maxTokens },
+            { maxContext: effectiveMaxContext, maxTokens, tools: toolDefs },
             connectionMaxContext,
           );
           finalPromptSent = fit.messages;
@@ -4321,12 +4835,17 @@ export async function generateRoutes(app: FastifyInstance) {
           return fit.messages;
         };
 
-        const initialProviderMessages = fitPromptForSend(toProviderMessages(messagesForGen));
+        const initialProviderMessages = prepareProviderMessages(fitPromptForSend(toProviderMessages(messagesForGen)));
+        finalPromptSent = initialProviderMessages;
 
         // Reset per-character accumulators
         fullResponse = "";
         fullThinking = "";
         let geminiResponseParts: unknown[] | null = null;
+        let chatCompletionsReasoning: Record<string, unknown> | null = null;
+        const rememberChatCompletionsReasoning = (metadata: Record<string, unknown>) => {
+          chatCompletionsReasoning = readChatCompletionsReasoningMetadata(metadata) ?? metadata;
+        };
 
         // Track timing and usage
         const genStartTime = Date.now();
@@ -4349,8 +4868,8 @@ export async function generateRoutes(app: FastifyInstance) {
         }, 15_000);
 
         try {
-          // ── LOG_LEVEL=debug: log full prompt to server console ──
-          if (isDebug) {
+          // ── LOG_LEVEL=debug or Settings -> Advanced -> Debug mode: log full prompt to server console ──
+          if (isDebug || requestDebug) {
             const effModel = conn.model.toLowerCase();
             const tempSuppressed =
               (conn.provider === "openai" || conn.provider === "openrouter") &&
@@ -4358,7 +4877,7 @@ export async function generateRoutes(app: FastifyInstance) {
             const effTemp = tempSuppressed ? "N/A" : temperature;
             const effTopP = tempSuppressed ? "N/A" : topP;
 
-            app.log.debug(
+            debugLog(
               "\n[debug] Prompt sent to model (%d messages):\n  Model: %s (%s)  Temp: %s  MaxTokens: %s  MaxContext: %s  TopP: %s  TopK: %s  EnableThinking: %s  ShowThoughts: %s  Effort: %s  Verbosity: %s  Stream: %s",
               initialProviderMessages.length,
               conn.model,
@@ -4375,94 +4894,13 @@ export async function generateRoutes(app: FastifyInstance) {
               input.streaming,
             );
             for (const m of initialProviderMessages) {
-              app.log.debug("  [%s] %s", m.role.toUpperCase(), m.content);
+              debugLog("  [%s] %s", m.role.toUpperCase(), m.content);
             }
           }
 
           if (enableTools && provider.chatComplete) {
             const MAX_TOOL_ROUNDS = 5;
             let loopMessages: ChatMessage[] = initialProviderMessages;
-
-            // Extract Spotify credentials from the Spotify agent settings (if configured)
-            const spotifyAgent = resolvedAgents.find((a) => a.type === "spotify");
-            const spotifySettings = spotifyAgent?.settings
-              ? typeof spotifyAgent.settings === "string"
-                ? JSON.parse(spotifyAgent.settings)
-                : spotifyAgent.settings
-              : {};
-            let spotifyAccessToken = (spotifySettings.spotifyAccessToken as string) || null;
-
-            // Auto-refresh if token is expired and we have a refresh token
-            const spotifyExpiresAt = (spotifySettings.spotifyExpiresAt as number) ?? 0;
-            const spotifyRefreshToken = (spotifySettings.spotifyRefreshToken as string) || null;
-            const spotifyClientId = (spotifySettings.spotifyClientId as string) || null;
-            if (
-              spotifyAccessToken &&
-              spotifyRefreshToken &&
-              spotifyClientId &&
-              spotifyExpiresAt > 0 &&
-              Date.now() > spotifyExpiresAt - 60_000 // Refresh 1 min before expiry
-            ) {
-              try {
-                const tokenRes = await fetch("https://accounts.spotify.com/api/token", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/x-www-form-urlencoded" },
-                  body: new URLSearchParams({
-                    grant_type: "refresh_token",
-                    refresh_token: spotifyRefreshToken,
-                    client_id: spotifyClientId,
-                  }),
-                  signal: AbortSignal.timeout(10_000),
-                });
-                if (tokenRes.ok) {
-                  const tokens = (await tokenRes.json()) as {
-                    access_token: string;
-                    refresh_token?: string;
-                    expires_in: number;
-                  };
-                  spotifyAccessToken = tokens.access_token;
-                  // Persist refreshed tokens in background (don't await)
-                  agentsStore
-                    .update(spotifyAgent!.id, {
-                      settings: {
-                        ...spotifySettings,
-                        spotifyAccessToken: tokens.access_token,
-                        spotifyRefreshToken: tokens.refresh_token ?? spotifyRefreshToken,
-                        spotifyExpiresAt: Date.now() + tokens.expires_in * 1000,
-                      },
-                    })
-                    .catch(() => {});
-                }
-              } catch {
-                // Use the existing token as fallback
-              }
-            }
-
-            const spotifyCreds = spotifyAccessToken ? { accessToken: spotifyAccessToken } : undefined;
-
-            // Attach tool context to the Spotify agent for function calling
-            if (spotifyCreds && spotifyAgent) {
-              const resolvedSpotify = resolvedAgents.find((a) => a.type === "spotify");
-              if (resolvedSpotify) {
-                const spotifyToolNames = DEFAULT_AGENT_TOOLS["spotify"] ?? [];
-                const spotifyToolDefs = BUILT_IN_TOOLS.filter((t) => spotifyToolNames.includes(t.name)).map((t) => ({
-                  type: "function" as const,
-                  function: {
-                    name: t.name,
-                    description: t.description,
-                    parameters: t.parameters as unknown as Record<string, unknown>,
-                  },
-                }));
-                resolvedSpotify.toolContext = {
-                  tools: spotifyToolDefs,
-                  executeToolCall: async (call) => {
-                    const results = await executeToolCalls([call], { spotify: spotifyCreds });
-                    return results[0]?.result ?? "Tool execution failed";
-                  },
-                };
-              }
-            }
-
             // ── Seed encrypted reasoning cache from DB ──
             // OpenAI Responses API uses encrypted reasoning items for multi-turn continuity.
             // These must be replayed on each request. If the in-memory cache was lost (e.g. server
@@ -4533,9 +4971,11 @@ export async function generateRoutes(app: FastifyInstance) {
                   verbosity: verbosity ?? undefined,
                   onThinking,
                   onToken: input.streaming ? onToken : undefined,
+                  openrouterProvider: conn.openrouterProvider ?? undefined,
                   signal: abortController.signal,
                   encryptedReasoningItems: encryptedReasoningCache.get(input.chatId),
                   onEncryptedReasoning: (items) => encryptedReasoningCache.set(input.chatId, items),
+                  onChatCompletionsReasoning: rememberChatCompletionsReasoning,
                 });
               } catch (err: any) {
                 // If the error was caused by an abort, cancel silently and skip post-processing.
@@ -4581,30 +5021,33 @@ export async function generateRoutes(app: FastifyInstance) {
                 role: "assistant",
                 content: result.content ?? "",
                 tool_calls: result.toolCalls,
+                ...(result.providerMetadata ? { providerMetadata: result.providerMetadata } : {}),
               });
 
-              const toolResults = await executeToolCalls(result.toolCalls, {
+              const permittedToolCalls = result.toolCalls.filter((call) => resolvedToolNames.has(call.function.name));
+              const deniedToolResults = result.toolCalls
+                .filter((call) => !resolvedToolNames.has(call.function.name))
+                .map((call) => ({
+                  toolCallId: call.id,
+                  name: call.function.name,
+                  result: JSON.stringify({
+                    error: `Tool not allowed in this context: ${call.function.name}`,
+                    allowed: Array.from(resolvedToolNames),
+                  }),
+                  success: false,
+                }));
+
+              const executedToolResults = await executeToolCalls(permittedToolCalls, {
                 customTools: customToolDefs,
                 spotify: spotifyCreds,
-                searchLorebook: async (query: string, category?: string | null) => {
-                  const entries = await lorebooksStore.listActiveEntries({
-                    chatId: input.chatId,
-                    characterIds,
-                    activeLorebookIds: chatActiveLorebookIds,
-                  });
-                  const q = query.toLowerCase();
-                  return entries
-                    .filter((e: any) => {
-                      const nameMatch = e.name?.toLowerCase().includes(q);
-                      const contentMatch = e.content?.toLowerCase().includes(q);
-                      const keyMatch = (e.keys as string[])?.some((k: string) => k.toLowerCase().includes(q));
-                      const catMatch = !category || e.tag === category;
-                      return catMatch && (nameMatch || contentMatch || keyMatch);
-                    })
-                    .slice(0, 20)
-                    .map((e: any) => ({ name: e.name, content: e.content, tag: e.tag, keys: e.keys as string[] }));
-                },
+                searchLorebook: searchLorebookForTools,
               });
+              const toolResultsById = new Map(
+                [...executedToolResults, ...deniedToolResults].map((result) => [result.toolCallId, result]),
+              );
+              const toolResults = result.toolCalls
+                .map((call) => toolResultsById.get(call.id))
+                .filter((toolResult): toolResult is NonNullable<typeof toolResult> => toolResult != null);
 
               for (const tr of toolResults) {
                 reply.raw.write(
@@ -4666,9 +5109,11 @@ export async function generateRoutes(app: FastifyInstance) {
                   verbosity: verbosity ?? undefined,
                   onThinking,
                   onToken: input.streaming ? onToken : undefined,
+                  openrouterProvider: conn.openrouterProvider ?? undefined,
                   signal: abortController.signal,
                   encryptedReasoningItems: encryptedReasoningCache.get(input.chatId),
                   onEncryptedReasoning: (items) => encryptedReasoningCache.set(input.chatId, items),
+                  onChatCompletionsReasoning: rememberChatCompletionsReasoning,
                 });
                 if (finalResult.content && fullResponse.length === prevLen) {
                   writeContentChunked(finalResult.content);
@@ -4715,6 +5160,7 @@ export async function generateRoutes(app: FastifyInstance) {
               signal: abortController.signal,
               encryptedReasoningItems: encryptedReasoningCache.get(input.chatId),
               onEncryptedReasoning: (items) => encryptedReasoningCache.set(input.chatId, items),
+              onChatCompletionsReasoning: rememberChatCompletionsReasoning,
             });
             let result = await gen.next();
             while (!result.done) {
@@ -4737,6 +5183,17 @@ export async function generateRoutes(app: FastifyInstance) {
 
           const durationMs = Date.now() - genStartTime;
 
+          if (input.debugMode && chatMode === "game") {
+            console.log(
+              "[generate/game/raw] chatId=%s characterId=%s chars=%d BEGIN",
+              input.chatId,
+              targetCharId ?? "gm",
+              fullResponse.length,
+            );
+            console.log(fullResponse);
+            console.log("[generate/game/raw] chatId=%s characterId=%s END", input.chatId, targetCharId ?? "gm");
+          }
+
           // Some models inline reasoning blocks instead of using provider-native
           // thinking channels. Lift those blocks into message.extra.thinking.
           const inlineThinking = extractLeadingThinkingBlocks(fullResponse);
@@ -4748,14 +5205,14 @@ export async function generateRoutes(app: FastifyInstance) {
             reply.raw.write(`data: ${JSON.stringify({ type: "content_replace", data: fullResponse })}\n\n`);
           }
 
-          // ── LOG_LEVEL=debug: log full response + usage to server console ──
-          if (isDebug) {
-            app.log.debug("[debug] LLM response (%d chars, %dms):\n%s", fullResponse.length, durationMs, fullResponse);
+          // ── LOG_LEVEL=debug or Settings -> Advanced -> Debug mode: log full response + usage to server console ──
+          if (isDebug || requestDebug) {
+            debugLog("[debug] LLM response (%d chars, %dms):\n%s", fullResponse.length, durationMs, fullResponse);
             if (fullThinking) {
-              app.log.debug("[debug] Thinking tokens (%d chars):\n%s", fullThinking.length, fullThinking);
+              debugLog("[debug] Thinking tokens (%d chars):\n%s", fullThinking.length, fullThinking);
             }
             if (usage) {
-              app.log.debug(
+              debugLog(
                 "[debug] Token usage — prompt: %s  completion: %s  total: %s  cached: %s  cacheWrite: %s  finish: %s",
                 usage.promptTokens ?? "N/A",
                 usage.completionTokens ?? "N/A",
@@ -4898,6 +5355,9 @@ export async function generateRoutes(app: FastifyInstance) {
             else extraUpdate.thinking = null;
             // Store Gemini response parts (thought signatures + summaries) for multi-turn continuity
             if (geminiResponseParts) extraUpdate.geminiParts = geminiResponseParts;
+            // Store Chat Completions reasoning fields for providers that require replay (DeepSeek/OpenRouter)
+            if (chatCompletionsReasoning) extraUpdate.chatCompletionsReasoning = chatCompletionsReasoning;
+            else extraUpdate.chatCompletionsReasoning = null;
             // Store OpenAI Responses API encrypted reasoning items for multi-turn continuity
             const cachedReasoning = encryptedReasoningCache.get(input.chatId);
             if (cachedReasoning?.length) extraUpdate.encryptedReasoning = cachedReasoning;
@@ -4919,6 +5379,53 @@ export async function generateRoutes(app: FastifyInstance) {
               type: "message_saved",
               data: refreshedMsg ?? savedMsg,
             });
+
+            if (chatMode === "game" && !input.impersonate) {
+              const mapUpdates = parseMapUpdateCommands(fullResponse);
+              if (mapUpdates.length > 0) {
+                try {
+                  const freshChat = await chats.getById(input.chatId);
+                  const freshMeta = freshChat ? (parseExtra(freshChat.metadata) as Record<string, unknown>) : chatMeta;
+                  const originalMap = (freshMeta.gameMap as GameMap | null) ?? null;
+                  let nextMap = originalMap;
+                  let latestLocation: string | null = null;
+
+                  for (const command of mapUpdates) {
+                    const updatedMap = applyMapUpdateCommand(nextMap, command);
+                    if (!updatedMap) continue;
+                    nextMap = updatedMap;
+                    latestLocation = command.newLocation;
+                  }
+
+                  if (nextMap && nextMap !== originalMap) {
+                    const nextMeta = withActiveGameMapMeta(freshMeta, nextMap);
+                    await chats.updateMetadata(input.chatId, nextMeta);
+                    chatMeta.gameMap = nextMeta.gameMap;
+                    chatMeta.gameMaps = nextMeta.gameMaps;
+                    chatMeta.activeGameMapId = nextMeta.activeGameMapId;
+                    sendSseEvent(reply, { type: "game_map_update", data: nextMeta.gameMap });
+
+                    const persistedMsg = refreshedMsg ?? savedMsg;
+                    if (latestLocation && persistedMsg?.id) {
+                      const persistedSwipeIndex = persistedMsg.activeSwipeIndex ?? 0;
+                      await gameStateStore.updateByMessage(persistedMsg.id, persistedSwipeIndex, input.chatId, {
+                        location: latestLocation,
+                      });
+                      sendSseEvent(reply, { type: "game_state_patch", data: { location: latestLocation } });
+                    }
+
+                    console.log(
+                      "[generate/game/map_update] chatId=%s applied=%d location=%s",
+                      input.chatId,
+                      mapUpdates.length,
+                      latestLocation ?? "",
+                    );
+                  }
+                } catch (err) {
+                  console.warn("[generate/game/map_update] Failed to apply map_update:", err);
+                }
+              }
+            }
 
             // Evict cachedPrompt from older messages to save storage (keep last 2 assistant msgs)
             const allMsgs = await chats.listMessages(input.chatId);
@@ -4971,10 +5478,55 @@ export async function generateRoutes(app: FastifyInstance) {
       const collectedCommands: Array<{ command: CharacterCommand; characterId: string | null; messageId: string }> = [];
       const collectedOocMessages: string[] = [];
 
+      const normalizedGenerationGuide = typeof input.generationGuide === "string" ? input.generationGuide.trim() : "";
+      const generationGuideInstruction = normalizedGenerationGuide
+        ? `Take the following into special consideration for your next message: ${normalizedGenerationGuide}`
+        : null;
+      const resolveMessageSpeakerName = (message: any): string => {
+        if (message.role === "user") return personaName;
+        if (message.characterId) return charInfo.find((c) => c.id === message.characterId)?.name ?? "Character";
+        return chatMode === "conversation" ? "another group member" : "the narrator";
+      };
+      const latestVisibleSenderOtherThan = (targetCharId: string): string | null => {
+        for (let i = chatMessages.length - 1; i >= 0; i--) {
+          const message = chatMessages[i]!;
+          if (message.role !== "user" && message.role !== "assistant") continue;
+          if (message.role === "assistant" && message.characterId === targetCharId) continue;
+          return resolveMessageSpeakerName(message);
+        }
+        return null;
+      };
+      const filterManualTargetProfileBlocks = (messages: typeof finalMessages, targetCharId: string) => {
+        if (groupResponseOrder !== "manual") return messages;
+        const otherNames = charInfo.filter((c) => c.id !== targetCharId).map((c) => c.name);
+        if (otherNames.length === 0) return messages;
+        return messages.filter((message) => {
+          if (message.role !== "system") return true;
+          return !otherNames.some((name) => isStandaloneCharacterProfileBlock(message.content, name));
+        });
+      };
+      const buildCharacterInstruction = (charId: string, charName: string) => {
+        if (groupResponseOrder !== "manual") return `Respond ONLY as ${charName}.`;
+        const latestOtherSender = latestVisibleSenderOtherThan(charId);
+        return [
+          `Respond ONLY as ${charName}.`,
+          `This is an invisible manual trigger, not a visible message from ${personaName}. Do not mention being pinged, summoned, selected, or called by the user.`,
+          latestOtherSender
+            ? `Reply naturally to the latest visible sender other than yourself: ${latestOtherSender}.`
+            : `Reply naturally to the ongoing group context.`,
+          `If your own previous message is the most relevant last beat, continue naturally instead of answering the hidden trigger as if it came from ${personaName}.`,
+          `You may address ${personaName} or another character if that is what the context calls for, but do not speak or act for them.`,
+        ].join("\n");
+      };
+
       if (useIndividualLoop) {
         // Individual group mode: generate one response per character
         sendProgress("generating");
         let runningMessages = [...finalMessages];
+
+        if (generationGuideInstruction) {
+          runningMessages.push({ role: "system", content: generationGuideInstruction });
+        }
 
         for (let ci = 0; ci < respondingCharIds.length; ci++) {
           if (abortController.signal.aborted) break;
@@ -4987,8 +5539,8 @@ export async function generateRoutes(app: FastifyInstance) {
           );
 
           // Append "Respond ONLY as [name]" instruction
-          const charInstruction = `Respond ONLY as ${charName}.`;
-          const messagesWithInstruction = [...runningMessages];
+          const charInstruction = buildCharacterInstruction(charId, charName);
+          const messagesWithInstruction = [...filterManualTargetProfileBlocks(runningMessages, charId)];
           // Add as a system message at the end (just before any trailing user message)
           messagesWithInstruction.push({ role: "system", content: charInstruction });
 
@@ -5009,6 +5561,10 @@ export async function generateRoutes(app: FastifyInstance) {
         sendProgress("generating");
         let targetCharId = characterIds[0] ?? null;
         const sentMessages = [...finalMessages];
+
+        if (generationGuideInstruction) {
+          sentMessages.push({ role: "system", content: generationGuideInstruction });
+        }
 
         if (mentionedConversationCharacters.length > 0 && !regenGroupChatIndividual) {
           const mentionedNames = mentionedConversationCharacters.map((character) => character.name);
@@ -5037,7 +5593,9 @@ export async function generateRoutes(app: FastifyInstance) {
           // Get character of regenerated message and append "Respond ONLY as [name]" instruction
           targetCharId = regenMsg?.characterId ?? null;
           const targetCharName = charInfo.find((c) => c.id === targetCharId)?.name ?? "Character";
-          const charInstruction = `Respond ONLY as ${targetCharName}.`;
+          const charInstruction = targetCharId
+            ? buildCharacterInstruction(targetCharId, targetCharName)
+            : `Respond ONLY as ${targetCharName}.`;
           sentMessages.push({ role: "system", content: charInstruction });
         }
 
@@ -5395,11 +5953,14 @@ export async function generateRoutes(app: FastifyInstance) {
               reply.raw.write(`data: ${JSON.stringify({ type: "game_state_patch", data: worldStatePatch })}\n\n`);
 
               const existingGameMap = (chatMeta.gameMap as GameMap | null) ?? null;
-              const syncedGameMap = syncGameMapPartyPosition(existingGameMap, newLocation);
+              const syncedMeta = syncGameMapMetaPartyPosition(chatMeta, newLocation);
+              const syncedGameMap = (syncedMeta.gameMap as GameMap | null) ?? null;
               if (syncedGameMap && syncedGameMap !== existingGameMap) {
-                chatMeta.gameMap = syncedGameMap;
+                Object.assign(chatMeta, syncedMeta);
                 await chats.updateMetadata(input.chatId, chatMeta);
                 sendSseEvent(reply, { type: "game_map_update", data: syncedGameMap });
+              } else if (getGameMapsFromMeta(syncedMeta).length > 0) {
+                Object.assign(chatMeta, syncedMeta);
               }
 
               // Auto-populate journal: location change
@@ -6100,829 +6661,859 @@ export async function generateRoutes(app: FastifyInstance) {
       // Character Command Execution (Conversation mode)
       // ────────────────────────────────────────
       if (collectedCommands.length > 0 && !abortController.signal.aborted) {
+        const professorMariCommandTypes = new Set([
+          "create_persona",
+          "create_character",
+          "update_character",
+          "update_persona",
+          "create_chat",
+          "navigate",
+          "fetch",
+        ]);
+        const professorMariCommandCount = collectedCommands.filter(({ command }) =>
+          professorMariCommandTypes.has(command.type),
+        ).length;
         trySendSseEvent(reply, {
           type: "assistant_commands_start",
-          data: { count: collectedCommands.length },
+          data: { count: collectedCommands.length, professorMariCommandCount },
         });
         try {
-        for (const { command, characterId, messageId } of collectedCommands) {
-          try {
-            if (command.type === "schedule_update") {
-              // ── Schedule Update: modify the character's current schedule block ──
-              const schedCmd = command as ScheduleUpdateCommand;
-              if (characterId && (schedCmd.status || schedCmd.activity)) {
-                const freshChat = await chats.getById(input.chatId);
-                const freshMeta =
-                  typeof freshChat?.metadata === "string"
-                    ? JSON.parse(freshChat.metadata)
-                    : (freshChat?.metadata ?? {});
-                const schedules: Record<string, any> = freshMeta.characterSchedules ?? {};
-                const schedule = schedules[characterId];
-                if (schedule) {
-                  const nowDate = new Date();
-                  const DAYS_LIST = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-                  const dayName = DAYS_LIST[(nowDate.getDay() + 6) % 7]!;
-                  const daySchedule: Array<{ time: string; activity: string; status: string }> =
-                    schedule.days?.[dayName] ?? [];
-                  const currentMinutes = nowDate.getHours() * 60 + nowDate.getMinutes();
+          for (const { command, characterId, messageId } of collectedCommands) {
+            try {
+              if (command.type === "schedule_update") {
+                // ── Schedule Update: modify the character's current schedule block ──
+                const schedCmd = command as ScheduleUpdateCommand;
+                if (characterId && (schedCmd.status || schedCmd.activity)) {
+                  const freshChat = await chats.getById(input.chatId);
+                  const freshMeta =
+                    typeof freshChat?.metadata === "string"
+                      ? JSON.parse(freshChat.metadata)
+                      : (freshChat?.metadata ?? {});
+                  const schedules: Record<string, any> = getEnabledConversationSchedules(freshMeta);
+                  const schedule = schedules[characterId];
+                  if (schedule) {
+                    const nowDate = new Date();
+                    const DAYS_LIST = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+                    const dayName = DAYS_LIST[(nowDate.getDay() + 6) % 7]!;
+                    const daySchedule: Array<{ time: string; activity: string; status: string }> =
+                      schedule.days?.[dayName] ?? [];
+                    const currentMinutes = nowDate.getHours() * 60 + nowDate.getMinutes();
 
-                  // Find the current time block and update it
-                  let updated = false;
-                  for (const block of daySchedule) {
-                    const [startStr, endStr] = block.time.split("-");
-                    if (!startStr || !endStr) continue;
-                    const [sh, sm] = startStr.split(":").map(Number);
-                    const [eh, em] = endStr.split(":").map(Number);
-                    const startMin = (sh ?? 0) * 60 + (sm ?? 0);
-                    const endMin = (eh ?? 0) * 60 + (em ?? 0);
-                    if (startMin <= currentMinutes && currentMinutes < endMin) {
-                      if (schedCmd.status) block.status = schedCmd.status;
-                      if (schedCmd.activity) block.activity = schedCmd.activity;
+                    // Find the current time block and update it
+                    let updated = false;
+                    for (const block of daySchedule) {
+                      const [startStr, endStr] = block.time.split("-");
+                      if (!startStr || !endStr) continue;
+                      const [sh, sm] = startStr.split(":").map(Number);
+                      const [eh, em] = endStr.split(":").map(Number);
+                      const startMin = (sh ?? 0) * 60 + (sm ?? 0);
+                      const endMin = (eh ?? 0) * 60 + (em ?? 0);
+                      if (startMin <= currentMinutes && currentMinutes < endMin) {
+                        if (schedCmd.status) block.status = schedCmd.status;
+                        if (schedCmd.activity) block.activity = schedCmd.activity;
 
-                      // If duration specified, split the block
-                      if (schedCmd.duration) {
-                        const durationMin = parseDuration(schedCmd.duration);
-                        if (durationMin && currentMinutes + durationMin < endMin) {
-                          const splitTime = currentMinutes + durationMin;
-                          const splitH = String(Math.floor(splitTime / 60)).padStart(2, "0");
-                          const splitM = String(splitTime % 60).padStart(2, "0");
-                          // Shorten current block to end at the split point
-                          block.time = `${startStr}-${splitH}:${splitM}`;
-                          // Insert a new block for the remainder with the original activity/status
-                          const idx = daySchedule.indexOf(block);
-                          daySchedule.splice(idx + 1, 0, {
-                            time: `${splitH}:${splitM}-${endStr}`,
-                            activity: "free time",
-                            status: "online",
-                          });
+                        // If duration specified, split the block
+                        if (schedCmd.duration) {
+                          const durationMin = parseDuration(schedCmd.duration);
+                          if (durationMin && currentMinutes + durationMin < endMin) {
+                            const splitTime = currentMinutes + durationMin;
+                            const splitH = String(Math.floor(splitTime / 60)).padStart(2, "0");
+                            const splitM = String(splitTime % 60).padStart(2, "0");
+                            // Shorten current block to end at the split point
+                            block.time = `${startStr}-${splitH}:${splitM}`;
+                            // Insert a new block for the remainder with the original activity/status
+                            const idx = daySchedule.indexOf(block);
+                            daySchedule.splice(idx + 1, 0, {
+                              time: `${splitH}:${splitM}-${endStr}`,
+                              activity: "free time",
+                              status: "online",
+                            });
+                          }
                         }
+                        updated = true;
+                        break;
                       }
-                      updated = true;
-                      break;
+                    }
+
+                    if (updated) {
+                      schedule.days[dayName] = daySchedule;
+                      schedules[characterId] = schedule;
+                      await chats.updateMetadata(input.chatId, { ...freshMeta, characterSchedules: schedules });
+
+                      // Update character's conversationStatus
+                      const charRow = await chars.getById(characterId);
+                      if (charRow) {
+                        const charData = JSON.parse(charRow.data as string);
+                        const newStatus = schedCmd.status ?? charData.extensions?.conversationStatus ?? "online";
+                        const extensions = { ...(charData.extensions ?? {}), conversationStatus: newStatus };
+                        await chars.update(characterId, { extensions } as any);
+                      }
+
+                      // Sync to other chats with this character
+                      const allChatsList = await chats.list();
+                      for (const c of allChatsList) {
+                        if (c.id === input.chatId || c.mode !== "conversation") continue;
+                        const cCharIds: string[] =
+                          typeof c.characterIds === "string"
+                            ? JSON.parse(c.characterIds as string)
+                            : (c.characterIds as string[]);
+                        if (!cCharIds.includes(characterId)) continue;
+                        const cMeta =
+                          typeof c.metadata === "string" ? JSON.parse(c.metadata as string) : (c.metadata ?? {});
+                        if (!areConversationSchedulesEnabled(cMeta)) continue;
+                        const cScheds = cMeta.characterSchedules ?? {};
+                        cScheds[characterId] = schedule;
+                        await chats.updateMetadata(c.id, { ...cMeta, characterSchedules: cScheds });
+                      }
+
+                      reply.raw.write(
+                        `data: ${JSON.stringify({
+                          type: "schedule_updated",
+                          data: { characterId, status: schedCmd.status, activity: schedCmd.activity },
+                        })}\n\n`,
+                      );
+                      logger.info(
+                        `[commands] Schedule updated for ${characterId}: status=${schedCmd.status}, activity=${schedCmd.activity}`,
+                      );
                     }
                   }
-
-                  if (updated) {
-                    schedule.days[dayName] = daySchedule;
-                    schedules[characterId] = schedule;
-                    await chats.updateMetadata(input.chatId, { ...freshMeta, characterSchedules: schedules });
-
-                    // Update character's conversationStatus
-                    const charRow = await chars.getById(characterId);
-                    if (charRow) {
-                      const charData = JSON.parse(charRow.data as string);
-                      const newStatus = schedCmd.status ?? charData.extensions?.conversationStatus ?? "online";
-                      const extensions = { ...(charData.extensions ?? {}), conversationStatus: newStatus };
-                      await chars.update(characterId, { extensions } as any);
-                    }
-
-                    // Sync to other chats with this character
-                    const allChatsList = await chats.list();
-                    for (const c of allChatsList) {
-                      if (c.id === input.chatId || c.mode !== "conversation") continue;
-                      const cCharIds: string[] =
-                        typeof c.characterIds === "string"
-                          ? JSON.parse(c.characterIds as string)
-                          : (c.characterIds as string[]);
-                      if (!cCharIds.includes(characterId)) continue;
-                      const cMeta =
-                        typeof c.metadata === "string" ? JSON.parse(c.metadata as string) : (c.metadata ?? {});
-                      const cScheds = cMeta.characterSchedules ?? {};
-                      cScheds[characterId] = schedule;
-                      await chats.updateMetadata(c.id, { ...cMeta, characterSchedules: cScheds });
-                    }
-
-                    reply.raw.write(
-                      `data: ${JSON.stringify({
-                        type: "schedule_updated",
-                        data: { characterId, status: schedCmd.status, activity: schedCmd.activity },
-                      })}\n\n`,
-                    );
-                    logger.info(
-                      `[commands] Schedule updated for ${characterId}: status=${schedCmd.status}, activity=${schedCmd.activity}`,
-                    );
-                  }
                 }
-              }
-            } else if (command.type === "cross_post") {
-              // ── Cross-Post: copy/redirect message to another chat ──
-              const crossCmd = command as CrossPostCommand;
-              const targetName = crossCmd.target.toLowerCase();
+              } else if (command.type === "cross_post") {
+                // ── Cross-Post: copy/redirect message to another chat ──
+                const crossCmd = command as CrossPostCommand;
+                const targetName = crossCmd.target.toLowerCase();
 
-              // Find the target chat by name
-              const allChatsList = await chats.list();
-              const targetChat = allChatsList.find(
-                (c: any) =>
-                  c.mode === "conversation" &&
-                  c.id !== input.chatId &&
-                  (c.name?.toLowerCase().includes(targetName) || c.id === crossCmd.target),
-              );
-
-              if (targetChat) {
-                // Get the clean response (commands already stripped)
-                const msgRow = messageId ? await chats.getMessage(messageId) : null;
-                const msgContent = msgRow?.content ?? fullResponse;
-
-                // Create the message in the target chat
-                await chats.createMessage({
-                  chatId: targetChat.id,
-                  role: "assistant",
-                  characterId,
-                  content: msgContent,
-                });
-
-                // Remove the original message from the source chat (redirect, not copy)
-                if (messageId) {
-                  await chats.removeMessage(messageId);
-                }
-
-                reply.raw.write(
-                  `data: ${JSON.stringify({
-                    type: "cross_post",
-                    data: {
-                      targetChatId: targetChat.id,
-                      targetChatName: targetChat.name,
-                      sourceChatId: input.chatId,
-                      characterId,
-                    },
-                  })}\n\n`,
+                // Find the target chat by name
+                const allChatsList = await chats.list();
+                const targetChat = allChatsList.find(
+                  (c: any) =>
+                    c.mode === "conversation" &&
+                    c.id !== input.chatId &&
+                    (c.name?.toLowerCase().includes(targetName) || c.id === crossCmd.target),
                 );
-                logger.info(`[commands] Cross-posted message to chat "${targetChat.name}" (${targetChat.id})`);
-              } else {
-                logger.warn(`[commands] Cross-post target "${crossCmd.target}" not found`);
-              }
-            } else if (command.type === "selfie") {
-              // ── Selfie: generate an image from the character's appearance ──
-              const selfieCmd = command as SelfieCommand;
 
-              // Use the chat-level image gen connection (set by user in chat settings)
-              const imgConnId = chatMeta.imageGenConnectionId as string | undefined;
-              if (imgConnId) {
-                // Show typing indicator while generating the selfie
-                const charRow = characterId ? await chars.getById(characterId) : null;
-                const charData = charRow ? JSON.parse(charRow.data as string) : null;
-                const charName = charData?.name ?? "character";
-                reply.raw.write(`data: ${JSON.stringify({ type: "typing", characters: [charName] })}\n\n`);
+                if (targetChat) {
+                  // Get the clean response (commands already stripped)
+                  const msgRow = messageId ? await chats.getMessage(messageId) : null;
+                  const msgContent = msgRow?.content ?? fullResponse;
 
-                try {
-                  const imgConnFull = await connections.getWithKey(imgConnId);
-                  if (!imgConnFull) throw new Error("Cannot decrypt image generation connection");
+                  // Create the message in the target chat
+                  await chats.createMessage({
+                    chatId: targetChat.id,
+                    role: "assistant",
+                    characterId,
+                    content: msgContent,
+                  });
 
-                  // Build selfie prompt from character appearance + context
-                  const appearance = charData?.extensions?.appearance ?? charData?.description ?? "";
+                  // Remove the original message from the source chat (redirect, not copy)
+                  if (messageId) {
+                    await chats.removeMessage(messageId);
+                  }
 
-                  // Use the LLM to build a proper image prompt
-                  const selfieTags: string[] = Array.isArray(chatMeta.selfieTags)
-                    ? (chatMeta.selfieTags as string[])
-                    : [];
-                  const promptBuilder = createLLMProvider(
-                    conn.provider,
-                    baseUrl,
-                    conn.apiKey,
-                    conn.maxContext,
-                    conn.openrouterProvider,
-                    conn.maxTokensOverride,
-                  );
-                  const promptResult = await promptBuilder.chatComplete(
-                    [
-                      {
-                        role: "system",
-                        content: [
-                          `You are an image prompt generator. Create a concise, detailed image generation prompt for a selfie photo.`,
-                          `The character's appearance: ${appearance}`,
-                          `Character name: ${charName}`,
-                          ``,
-                          `Generate a prompt that describes a selfie photo of this character. Include:`,
-                          `- Physical appearance details (face, hair, eyes, skin)`,
-                          `- What they're wearing`,
-                          `- Expression and pose (selfie angle)`,
-                          `- Setting/background from context`,
-                          `- Lighting and mood`,
-                          ``,
-                          `Infer the appropriate art style from the character. For example, anime/game characters should use anime/illustration style, realistic characters should use photorealistic style. Match the style to the character's origin.`,
-                          ...(selfieTags.length > 0
-                            ? [``, `Always include these tags/modifiers in the prompt: ${selfieTags.join(", ")}`]
-                            : []),
-                          `Output ONLY the prompt text, nothing else.`,
-                        ].join("\n"),
+                  reply.raw.write(
+                    `data: ${JSON.stringify({
+                      type: "cross_post",
+                      data: {
+                        targetChatId: targetChat.id,
+                        targetChatName: targetChat.name,
+                        sourceChatId: input.chatId,
+                        characterId,
                       },
-                      {
-                        role: "user",
-                        content: selfieCmd.context
-                          ? `Context for the selfie: ${selfieCmd.context}`
-                          : `Generate a casual selfie of ${charName} based on the current conversation context.`,
-                      },
-                    ],
-                    { model: conn.model, temperature: 0.7, maxTokens: 8196 },
+                    })}\n\n`,
                   );
+                  logger.info(`[commands] Cross-posted message to chat "${targetChat.name}" (${targetChat.id})`);
+                } else {
+                  logger.warn(`[commands] Cross-post target "${crossCmd.target}" not found`);
+                }
+              } else if (command.type === "selfie") {
+                // ── Selfie: generate an image from the character's appearance ──
+                const selfieCmd = command as SelfieCommand;
 
-                  const imagePrompt = (promptResult.content ?? "").trim();
-                  if (imagePrompt) {
-                    const { generateImage, saveImageToDisk } = await import("../services/image/image-generation.js");
-                    const { createGalleryStorage } = await import("../services/storage/gallery.storage.js");
-                    const galleryStore = createGalleryStorage(app.db);
+                // Use the chat-level image gen connection (set by user in chat settings)
+                const imgConnId = chatMeta.imageGenConnectionId as string | undefined;
+                if (imgConnId) {
+                  // Show typing indicator while generating the selfie
+                  const charRow = characterId ? await chars.getById(characterId) : null;
+                  const charData = charRow ? JSON.parse(charRow.data as string) : null;
+                  const charName = charData?.name ?? "character";
+                  reply.raw.write(`data: ${JSON.stringify({ type: "typing", characters: [charName] })}\n\n`);
 
-                    const imgModel = imgConnFull.model || "";
-                    const imgBaseUrl = imgConnFull.baseUrl || "https://image.pollinations.ai";
-                    const imgApiKey = imgConnFull.apiKey || "";
-                    const imgSource = (imgConnFull as any).imageGenerationSource || imgModel;
+                  try {
+                    const imgConnFull = await connections.getWithKey(imgConnId);
+                    if (!imgConnFull) throw new Error("Cannot decrypt image generation connection");
 
-                    // Parse selfie resolution from chat metadata (default 512×768 portrait)
-                    const selfieRes = (chatMeta.selfieResolution as string) ?? "512x768";
-                    const [selfieW, selfieH] = selfieRes.split("x").map(Number) as [number, number];
+                    // Build selfie prompt from character appearance + context
+                    const appearance = charData?.extensions?.appearance ?? charData?.description ?? "";
 
-                    const serviceHint = imgConnFull.imageService || "";
-                    const imageResult = await generateImage(imgModel, imgBaseUrl, imgApiKey, serviceHint || imgSource, {
-                      prompt: imagePrompt,
-                      model: imgModel,
-                      width: selfieW || 512,
-                      height: selfieH || 768,
-                      comfyWorkflow: imgConnFull.comfyuiWorkflow || undefined,
-                    });
+                    // Use the LLM to build a proper image prompt
+                    const selfieTags: string[] = Array.isArray(chatMeta.selfieTags)
+                      ? (chatMeta.selfieTags as string[])
+                      : [];
+                    const promptBuilder = createLLMProvider(
+                      conn.provider,
+                      baseUrl,
+                      conn.apiKey,
+                      conn.maxContext,
+                      conn.openrouterProvider,
+                      conn.maxTokensOverride,
+                    );
+                    const promptResult = await promptBuilder.chatComplete(
+                      [
+                        {
+                          role: "system",
+                          content: [
+                            `You are an image prompt generator. Create a concise, detailed image generation prompt for a selfie photo.`,
+                            `The character's appearance: ${appearance}`,
+                            `Character name: ${charName}`,
+                            ``,
+                            `Generate a prompt that describes a selfie photo of this character. Include:`,
+                            `- Physical appearance details (face, hair, eyes, skin)`,
+                            `- What they're wearing`,
+                            `- Expression and pose (selfie angle)`,
+                            `- Setting/background from context`,
+                            `- Lighting and mood`,
+                            ``,
+                            `Infer the appropriate art style from the character. For example, anime/game characters should use anime/illustration style, realistic characters should use photorealistic style. Match the style to the character's origin.`,
+                            ...(selfieTags.length > 0
+                              ? [``, `Always include these tags/modifiers in the prompt: ${selfieTags.join(", ")}`]
+                              : []),
+                            `Output ONLY the prompt text, nothing else.`,
+                          ].join("\n"),
+                        },
+                        {
+                          role: "user",
+                          content: selfieCmd.context
+                            ? `Context for the selfie: ${selfieCmd.context}`
+                            : `Generate a casual selfie of ${charName} based on the current conversation context.`,
+                        },
+                      ],
+                      { model: conn.model, temperature: 0.7, maxTokens: 8196 },
+                    );
 
-                    // Save to disk and DB
-                    const filePath = saveImageToDisk(input.chatId, imageResult.base64, imageResult.ext);
-                    const galleryEntry = await galleryStore.create({
-                      chatId: input.chatId,
-                      filePath,
-                      prompt: imagePrompt,
-                      provider: imgConnFull.provider ?? "image_generation",
-                      model: imgModel || "unknown",
-                      width: selfieW || 512,
-                      height: selfieH || 768,
-                    });
+                    const imagePrompt = (promptResult.content ?? "").trim();
+                    if (imagePrompt) {
+                      const { generateImage, saveImageToDisk } = await import("../services/image/image-generation.js");
+                      const { createGalleryStorage } = await import("../services/storage/gallery.storage.js");
+                      const galleryStore = createGalleryStorage(app.db);
 
-                    // Attach the image to the message
-                    const filename = filePath.split("/").pop()!;
-                    const imageUrl = `/api/gallery/file/${input.chatId}/${encodeURIComponent(filename)}`;
-                    if (messageId) {
-                      const msgRow = await chats.getMessage(messageId);
-                      const msgExtra = msgRow?.extra
-                        ? typeof msgRow.extra === "string"
-                          ? JSON.parse(msgRow.extra)
-                          : msgRow.extra
-                        : {};
-                      const existingAttachments = (msgExtra.attachments as any[]) ?? [];
-                      existingAttachments.push({
-                        type: "image",
-                        url: imageUrl,
-                        filename: `selfie_${charName.toLowerCase().replace(/\s+/g, "_")}.${imageResult.ext}`,
+                      const imgModel = imgConnFull.model || "";
+                      const imgBaseUrl = imgConnFull.baseUrl || "https://image.pollinations.ai";
+                      const imgApiKey = imgConnFull.apiKey || "";
+                      const imgSource = (imgConnFull as any).imageGenerationSource || imgModel;
+
+                      // Parse selfie resolution from chat metadata (default 512×768 portrait)
+                      const selfieRes = (chatMeta.selfieResolution as string) ?? "512x768";
+                      const [selfieW, selfieH] = selfieRes.split("x").map(Number) as [number, number];
+
+                      const serviceHint = imgConnFull.imageService || "";
+                      const imageResult = await generateImage(
+                        imgModel,
+                        imgBaseUrl,
+                        imgApiKey,
+                        serviceHint || imgSource,
+                        {
+                          prompt: imagePrompt,
+                          model: imgModel,
+                          width: selfieW || 512,
+                          height: selfieH || 768,
+                          comfyWorkflow: imgConnFull.comfyuiWorkflow || undefined,
+                        },
+                      );
+
+                      // Save to disk and DB
+                      const filePath = saveImageToDisk(input.chatId, imageResult.base64, imageResult.ext);
+                      const galleryEntry = await galleryStore.create({
+                        chatId: input.chatId,
+                        filePath,
+                        prompt: imagePrompt,
+                        provider: imgConnFull.provider ?? "image_generation",
+                        model: imgModel || "unknown",
+                        width: selfieW || 512,
+                        height: selfieH || 768,
                       });
-                      await chats.updateMessageExtra(messageId, { attachments: existingAttachments });
-                    }
 
-                    // Send selfie event to client
+                      // Attach the image to the message
+                      const filename = filePath.split("/").pop()!;
+                      const imageUrl = `/api/gallery/file/${input.chatId}/${encodeURIComponent(filename)}`;
+                      if (messageId) {
+                        const msgRow = await chats.getMessage(messageId);
+                        const msgExtra = msgRow?.extra
+                          ? typeof msgRow.extra === "string"
+                            ? JSON.parse(msgRow.extra)
+                            : msgRow.extra
+                          : {};
+                        const existingAttachments = (msgExtra.attachments as any[]) ?? [];
+                        existingAttachments.push({
+                          type: "image",
+                          url: imageUrl,
+                          filename: `selfie_${charName.toLowerCase().replace(/\s+/g, "_")}.${imageResult.ext}`,
+                        });
+                        await chats.updateMessageExtra(messageId, { attachments: existingAttachments });
+                      }
+
+                      // Send selfie event to client
+                      reply.raw.write(
+                        `data: ${JSON.stringify({
+                          type: "selfie",
+                          data: {
+                            characterId,
+                            characterName: charName,
+                            messageId,
+                            imageUrl,
+                            prompt: imagePrompt,
+                            galleryId: (galleryEntry as any)?.id,
+                          },
+                        })}\n\n`,
+                      );
+                      logger.info(`[commands] Selfie generated for ${charName}: ${imagePrompt.slice(0, 80)}...`);
+                    }
+                  } catch (imgErr) {
+                    logger.error(imgErr, "[commands] Selfie generation failed");
                     reply.raw.write(
                       `data: ${JSON.stringify({
-                        type: "selfie",
+                        type: "selfie_error",
                         data: {
                           characterId,
-                          characterName: charName,
-                          messageId,
-                          imageUrl,
-                          prompt: imagePrompt,
-                          galleryId: (galleryEntry as any)?.id,
+                          error: imgErr instanceof Error ? imgErr.message : "Image generation failed",
                         },
                       })}\n\n`,
                     );
-                    logger.info(`[commands] Selfie generated for ${charName}: ${imagePrompt.slice(0, 80)}...`);
                   }
-                } catch (imgErr) {
-                  logger.error(imgErr, "[commands] Selfie generation failed");
+                } else {
+                  logger.warn("[commands] Selfie requested but no imageGenConnectionId set on chat metadata");
                   reply.raw.write(
                     `data: ${JSON.stringify({
                       type: "selfie_error",
                       data: {
                         characterId,
-                        error: imgErr instanceof Error ? imgErr.message : "Image generation failed",
+                        error: "No image generation connection configured for this chat. Set one in Chat Settings.",
                       },
                     })}\n\n`,
                   );
                 }
-              } else {
-                logger.warn("[commands] Selfie requested but no imageGenConnectionId set on chat metadata");
-                reply.raw.write(
-                  `data: ${JSON.stringify({
-                    type: "selfie_error",
-                    data: {
-                      characterId,
-                      error: "No image generation connection configured for this chat. Set one in Chat Settings.",
-                    },
-                  })}\n\n`,
-                );
-              }
-            } else if (command.type === "memory") {
-              // ── Memory: store a fake memory on the target character ──
-              const memCmd = command as MemoryCommand;
-              const targetName = memCmd.target.toLowerCase();
+              } else if (command.type === "memory") {
+                // ── Memory: store a fake memory on the target character ──
+                const memCmd = command as MemoryCommand;
+                const targetName = memCmd.target.toLowerCase();
 
-              // Resolve source character name
-              const srcCharRow = characterId ? await chars.getById(characterId) : null;
-              const srcCharData = srcCharRow ? JSON.parse(srcCharRow.data as string) : null;
-              const srcCharName = srcCharData?.name ?? "Unknown";
+                // Resolve source character name
+                const srcCharRow = characterId ? await chars.getById(characterId) : null;
+                const srcCharData = srcCharRow ? JSON.parse(srcCharRow.data as string) : null;
+                const srcCharName = srcCharData?.name ?? "Unknown";
 
-              // Find target character by name across all characters
-              const allCharsList = await chars.list();
-              const targetChar = allCharsList.find((c: any) => {
-                const d = typeof c.data === "string" ? JSON.parse(c.data) : c.data;
-                return d.name?.toLowerCase() === targetName;
-              });
-
-              if (targetChar) {
-                const targetData =
-                  typeof targetChar.data === "string" ? JSON.parse(targetChar.data as string) : targetChar.data;
-                const extensions = { ...(targetData.extensions ?? {}) };
-                const memories: Array<{ from: string; fromCharId: string; summary: string; createdAt: string }> =
-                  extensions.characterMemories ?? [];
-
-                memories.push({
-                  from: srcCharName,
-                  fromCharId: characterId ?? "",
-                  summary: memCmd.summary,
-                  createdAt: new Date().toISOString(),
-                });
-
-                extensions.characterMemories = memories;
-                await chars.update(targetChar.id, { extensions } as any);
-
-                logger.info(`[commands] Memory created: "${srcCharName}" → "${targetData.name}": ${memCmd.summary}`);
-              } else {
-                logger.warn(`[commands] Memory target character "${memCmd.target}" not found`);
-              }
-            }
-
-            if (command.type === "influence") {
-              // ── Influence: queue OOC influence for the connected chat ──
-              const infCmd = command as InfluenceCommand;
-              const freshChat = await chats.getById(input.chatId);
-              const connectedId = freshChat?.connectedChatId as string | null;
-              if (connectedId) {
-                await chats.createInfluence(input.chatId, connectedId, infCmd.content, messageId);
-                logger.info(
-                  `[commands] OOC influence queued for connected chat ${connectedId}: "${infCmd.content.slice(0, 80)}..."`,
-                );
-              } else {
-                logger.warn("[commands] Influence command used but no connected chat");
-              }
-            }
-
-            if (command.type === "haptic") {
-              // ── Haptic: send command to connected intimate devices ──
-              const hapCmd = command as HapticCommand;
-              try {
-                const { hapticService } = await import("../services/haptic/buttplug-service.js");
-                if (hapticService.connected && hapticService.devices.length > 0) {
-                  await hapticService.executeCommand({
-                    deviceIndex: "all",
-                    action: hapCmd.action,
-                    intensity: hapCmd.intensity,
-                    duration: hapCmd.duration,
-                  });
-                  reply.raw.write(
-                    `data: ${JSON.stringify({
-                      type: "haptic_command",
-                      data: { action: hapCmd.action, intensity: hapCmd.intensity, duration: hapCmd.duration },
-                    })}\n\n`,
-                  );
-                  logger.info(
-                    `[commands] Haptic: ${hapCmd.action} intensity=${hapCmd.intensity ?? "default"} duration=${hapCmd.duration ?? "indefinite"}`,
-                  );
-                } else if (!hapticService.connected) {
-                  logger.warn(`[commands] Haptic command [${hapCmd.action}] skipped — Intiface Central not connected`);
-                } else {
-                  logger.warn(`[commands] Haptic command [${hapCmd.action}] skipped — no devices found`);
-                }
-              } catch (hapErr) {
-                logger.error(hapErr, "[commands] Haptic command failed");
-              }
-            }
-
-            if (command.type === "scene") {
-              // ── Scene: plan + create a mini-roleplay branching from this conversation ──
-              const scnCmd = command as SceneCommand;
-              try {
-                const originChat = await chats.getById(input.chatId);
-                if (!originChat) throw new Error("Origin chat not found");
-
-                const originCharIds: string[] =
-                  typeof originChat.characterIds === "string"
-                    ? JSON.parse(originChat.characterIds)
-                    : (originChat.characterIds as string[]);
-
-                // Resolve initiator name
-                const initiatorRow = characterId ? await chars.getById(characterId) : null;
-                const initiatorData = initiatorRow
-                  ? typeof initiatorRow.data === "string"
-                    ? JSON.parse(initiatorRow.data as string)
-                    : initiatorRow.data
-                  : null;
-                const initiatorName = initiatorData?.name ?? "Character";
-
-                // Call /scene/plan internally to get a comprehensive plan
-                const planRes = await app.inject({
-                  method: "POST",
-                  url: "/api/scene/plan",
-                  payload: {
-                    chatId: input.chatId,
-                    prompt: scnCmd.scenario,
-                    connectionId: null,
-                  },
-                });
-                const planBody = JSON.parse(planRes.body);
-                if (!planBody.plan) throw new Error("Scene plan failed");
-
-                // Override background if the character specified one
-                if (scnCmd.background) {
-                  planBody.plan.background = scnCmd.background;
-                }
-
-                // Call /scene/create with the full plan
-                const createRes = await app.inject({
-                  method: "POST",
-                  url: "/api/scene/create",
-                  payload: {
-                    originChatId: input.chatId,
-                    initiatorCharId: characterId,
-                    plan: planBody.plan,
-                    connectionId: null,
-                  },
-                });
-                const createBody = JSON.parse(createRes.body);
-
-                if (createBody.chatId) {
-                  // Notify client
-                  reply.raw.write(
-                    `data: ${JSON.stringify({
-                      type: "scene_created",
-                      data: {
-                        sceneChatId: createBody.chatId,
-                        sceneChatName: createBody.chatName,
-                        description: createBody.description,
-                        background: createBody.background ?? null,
-                        initiatorCharId: characterId,
-                        initiatorCharName: initiatorName,
-                      },
-                    })}\n\n`,
-                  );
-                  logger.info(
-                    `[commands] Scene created: "${createBody.chatName}" (${createBody.chatId}) from chat ${input.chatId}`,
-                  );
-                }
-              } catch (sceneErr) {
-                logger.error(sceneErr, "[commands] Scene creation failed");
-              }
-            }
-
-            // ── Assistant commands (Professor Mari) ──
-            if (command.type === "create_persona") {
-              const cpCmd = command as CreatePersonaCommand;
-              try {
-                const persona = await chars.createPersona(cpCmd.name, cpCmd.description ?? "", undefined, {
-                  personality: cpCmd.personality,
-                  appearance: cpCmd.appearance,
-                });
-                reply.raw.write(
-                  `data: ${JSON.stringify({
-                    type: "assistant_action",
-                    data: { action: "persona_created", id: persona?.id, name: cpCmd.name },
-                  })}\n\n`,
-                );
-                logger.info(`[commands] Assistant created persona: "${cpCmd.name}" (${persona?.id})`);
-              } catch (err) {
-                logger.error(err, "[commands] Create persona failed");
-              }
-            }
-
-            if (command.type === "create_character") {
-              const ccCmd = command as CreateCharacterCommand;
-              try {
-                const charData = {
-                  name: ccCmd.name,
-                  description: ccCmd.description ?? "",
-                  personality: ccCmd.personality ?? "",
-                  first_mes: ccCmd.firstMessage ?? "",
-                  scenario: ccCmd.scenario ?? "",
-                  mes_example: ccCmd.mesExample ?? "",
-                  creator_notes: ccCmd.creatorNotes ?? "",
-                  system_prompt: ccCmd.systemPrompt ?? "",
-                  post_history_instructions: ccCmd.postHistoryInstructions ?? "",
-                  tags: ccCmd.tags ?? ([] as string[]),
-                  creator: ccCmd.creator ?? "",
-                  character_version: ccCmd.characterVersion ?? "",
-                  alternate_greetings: ccCmd.alternateGreetings ?? ([] as string[]),
-                  extensions: {
-                    talkativeness: ccCmd.talkativeness ?? 0.5,
-                    fav: ccCmd.fav ?? false,
-                    world: ccCmd.world ?? "",
-                    depth_prompt: {
-                      prompt: ccCmd.depthPrompt ?? "",
-                      depth: ccCmd.depthPromptDepth ?? 4,
-                      role: ccCmd.depthPromptRole ?? "system",
-                    },
-                    backstory: ccCmd.backstory ?? "",
-                    appearance: ccCmd.appearance ?? "",
-                  },
-                  character_book: null,
-                };
-                const created = await chars.create(charData as any);
-                if (created) {
-                  reply.raw.write(
-                    `data: ${JSON.stringify({
-                      type: "assistant_action",
-                      data: { action: "character_created", id: created.id, name: ccCmd.name },
-                    })}\n\n`,
-                  );
-                  logger.info(`[commands] Assistant created character: "${ccCmd.name}" (${created.id})`);
-                }
-              } catch (err) {
-                logger.error(err, "[commands] Create character failed");
-              }
-            }
-
-            if (command.type === "update_character") {
-              const ucCmd = command as UpdateCharacterCommand;
-              try {
+                // Find target character by name across all characters
                 const allCharsList = await chars.list();
                 const targetChar = allCharsList.find((c: any) => {
                   const d = typeof c.data === "string" ? JSON.parse(c.data) : c.data;
-                  return d.name?.toLowerCase() === ucCmd.name.toLowerCase();
+                  return d.name?.toLowerCase() === targetName;
                 });
-                if (targetChar) {
-                  const latestTargetChar = await chars.getById(targetChar.id);
-                  if (!latestTargetChar) {
-                    logger.warn(`[commands] Update character: "${ucCmd.name}" disappeared before update`);
-                    continue;
-                  }
-                  const existingData =
-                    typeof latestTargetChar.data === "string"
-                      ? JSON.parse(latestTargetChar.data as string)
-                      : latestTargetChar.data;
-                  const updates: Record<string, unknown> = {};
-                  const extensionUpdates: Record<string, unknown> = {};
-                  if (ucCmd.description !== undefined) updates.description = ucCmd.description;
-                  if (ucCmd.personality !== undefined) updates.personality = ucCmd.personality;
-                  if (ucCmd.firstMessage !== undefined) updates.first_mes = ucCmd.firstMessage;
-                  if (ucCmd.scenario !== undefined) updates.scenario = ucCmd.scenario;
-                  if (ucCmd.mesExample !== undefined) updates.mes_example = ucCmd.mesExample;
-                  if (ucCmd.creatorNotes !== undefined) updates.creator_notes = ucCmd.creatorNotes;
-                  if (ucCmd.systemPrompt !== undefined) updates.system_prompt = ucCmd.systemPrompt;
-                  if (ucCmd.postHistoryInstructions !== undefined) {
-                    updates.post_history_instructions = ucCmd.postHistoryInstructions;
-                  }
-                  if (ucCmd.creator !== undefined) updates.creator = ucCmd.creator;
-                  if (ucCmd.characterVersion !== undefined) updates.character_version = ucCmd.characterVersion;
-                  if (ucCmd.tags !== undefined) updates.tags = ucCmd.tags;
-                  if (ucCmd.alternateGreetings !== undefined) {
-                    updates.alternate_greetings = ucCmd.alternateGreetings;
-                  }
-                  if (ucCmd.backstory !== undefined) extensionUpdates.backstory = ucCmd.backstory;
-                  if (ucCmd.appearance !== undefined) extensionUpdates.appearance = ucCmd.appearance;
-                  if (ucCmd.talkativeness !== undefined) extensionUpdates.talkativeness = ucCmd.talkativeness;
-                  if (ucCmd.fav !== undefined) extensionUpdates.fav = ucCmd.fav;
-                  if (ucCmd.world !== undefined) extensionUpdates.world = ucCmd.world;
-                  if (
-                    ucCmd.depthPrompt !== undefined ||
-                    ucCmd.depthPromptDepth !== undefined ||
-                    ucCmd.depthPromptRole !== undefined
-                  ) {
-                    const existingDepthPrompt = existingData.extensions?.depth_prompt ?? {};
-                    extensionUpdates.depth_prompt = {
-                      ...existingDepthPrompt,
-                      ...(ucCmd.depthPrompt !== undefined ? { prompt: ucCmd.depthPrompt } : {}),
-                      ...(ucCmd.depthPromptDepth !== undefined ? { depth: ucCmd.depthPromptDepth } : {}),
-                      ...(ucCmd.depthPromptRole !== undefined ? { role: ucCmd.depthPromptRole } : {}),
-                    };
-                  }
-                  if (Object.keys(extensionUpdates).length > 0) {
-                    updates.extensions = { ...(existingData.extensions ?? {}), ...extensionUpdates };
-                  }
-                  await chars.update(targetChar.id, updates);
-                  reply.raw.write(
-                    `data: ${JSON.stringify({
-                      type: "assistant_action",
-                      data: { action: "character_updated", id: targetChar.id, name: ucCmd.name },
-                    })}\n\n`,
-                  );
-                  logger.info(`[commands] Assistant updated character: "${ucCmd.name}" (${targetChar.id})`);
-                } else {
-                  logger.warn(`[commands] Update character: "${ucCmd.name}" not found`);
-                }
-              } catch (err) {
-                logger.error(err, "[commands] Update character failed");
-              }
-            }
 
-            if (command.type === "update_persona") {
-              const upCmd = command as UpdatePersonaCommand;
-              try {
-                const allPersonas = await chars.listPersonas();
-                const targetPersona = allPersonas.find((p: any) => {
-                  return p.name?.toLowerCase() === upCmd.name.toLowerCase();
-                });
-                if (targetPersona) {
-                  const sets: Record<string, unknown> = {};
-                  if (upCmd.description !== undefined) sets.description = upCmd.description;
-                  if (upCmd.personality !== undefined) sets.personality = upCmd.personality;
-                  if (upCmd.appearance !== undefined) sets.appearance = upCmd.appearance;
-                  if (upCmd.scenario !== undefined) sets.scenario = upCmd.scenario;
-                  if (upCmd.backstory !== undefined) sets.backstory = upCmd.backstory;
-                  await chars.updatePersona(targetPersona.id, sets as any);
-                  reply.raw.write(
-                    `data: ${JSON.stringify({
-                      type: "assistant_action",
-                      data: { action: "persona_updated", id: targetPersona.id, name: upCmd.name },
-                    })}\n\n`,
-                  );
-                  logger.info(`[commands] Assistant updated persona: "${upCmd.name}" (${targetPersona.id})`);
-                } else {
-                  logger.warn(`[commands] Update persona: "${upCmd.name}" not found`);
-                }
-              } catch (err) {
-                logger.error(err, "[commands] Update persona failed");
-              }
-            }
-
-            if (command.type === "create_chat") {
-              const ctCmd = command as CreateChatCommand;
-              try {
-                // Resolve character by name or ID
-                const allCharsList = await chars.list();
-                const targetChar = allCharsList.find((c: any) => {
-                  if (c.id === ctCmd.character) return true;
-                  const d = typeof c.data === "string" ? JSON.parse(c.data) : c.data;
-                  return d.name?.toLowerCase() === ctCmd.character.toLowerCase();
-                });
                 if (targetChar) {
                   const targetData =
                     typeof targetChar.data === "string" ? JSON.parse(targetChar.data as string) : targetChar.data;
-                  const mode = ctCmd.mode ?? "conversation";
-                  const newChat = await chats.create({
-                    name: `Chat with ${targetData.name}`,
-                    mode,
-                    characterIds: [targetChar.id],
-                    groupId: null,
-                    personaId: null,
-                    promptPresetId: null,
-                    connectionId: null,
+                  const extensions = { ...(targetData.extensions ?? {}) };
+                  const memories: Array<{ from: string; fromCharId: string; summary: string; createdAt: string }> =
+                    extensions.characterMemories ?? [];
+
+                  memories.push({
+                    from: srcCharName,
+                    fromCharId: characterId ?? "",
+                    summary: memCmd.summary,
+                    createdAt: new Date().toISOString(),
                   });
-                  if (newChat) {
+
+                  extensions.characterMemories = memories;
+                  await chars.update(targetChar.id, { extensions } as any);
+
+                  logger.info(`[commands] Memory created: "${srcCharName}" → "${targetData.name}": ${memCmd.summary}`);
+                } else {
+                  logger.warn(`[commands] Memory target character "${memCmd.target}" not found`);
+                }
+              }
+
+              if (command.type === "influence") {
+                // ── Influence: queue OOC influence for the connected chat ──
+                const infCmd = command as InfluenceCommand;
+                const freshChat = await chats.getById(input.chatId);
+                const connectedId = freshChat?.connectedChatId as string | null;
+                if (connectedId) {
+                  const influenceContent = stripConversationPromptTimestamps(infCmd.content);
+                  if (!influenceContent) continue;
+                  await chats.createInfluence(input.chatId, connectedId, influenceContent, messageId);
+                  logger.info(
+                    `[commands] OOC influence queued for connected chat ${connectedId}: "${influenceContent.slice(0, 80)}..."`,
+                  );
+                } else {
+                  logger.warn("[commands] Influence command used but no connected chat");
+                }
+              }
+
+              if (command.type === "haptic") {
+                // ── Haptic: send command to connected intimate devices ──
+                const hapCmd = command as HapticCommand;
+                try {
+                  const { hapticService } = await import("../services/haptic/buttplug-service.js");
+                  if (hapticService.connected && hapticService.devices.length > 0) {
+                    await hapticService.executeCommand({
+                      deviceIndex: "all",
+                      action: hapCmd.action,
+                      intensity: hapCmd.intensity,
+                      duration: hapCmd.duration,
+                    });
+                    reply.raw.write(
+                      `data: ${JSON.stringify({
+                        type: "haptic_command",
+                        data: { action: hapCmd.action, intensity: hapCmd.intensity, duration: hapCmd.duration },
+                      })}\n\n`,
+                    );
+                    logger.info(
+                      `[commands] Haptic: ${hapCmd.action} intensity=${hapCmd.intensity ?? "default"} duration=${hapCmd.duration ?? "indefinite"}`,
+                    );
+                  } else if (!hapticService.connected) {
+                    logger.warn(
+                      `[commands] Haptic command [${hapCmd.action}] skipped — Intiface Central not connected`,
+                    );
+                  } else {
+                    logger.warn(`[commands] Haptic command [${hapCmd.action}] skipped — no devices found`);
+                  }
+                } catch (hapErr) {
+                  logger.error(hapErr, "[commands] Haptic command failed");
+                }
+              }
+
+              if (command.type === "scene") {
+                // ── Scene: plan + create a mini-roleplay branching from this conversation ──
+                const scnCmd = command as SceneCommand;
+                try {
+                  const originChat = await chats.getById(input.chatId);
+                  if (!originChat) throw new Error("Origin chat not found");
+
+                  const originCharIds: string[] =
+                    typeof originChat.characterIds === "string"
+                      ? JSON.parse(originChat.characterIds)
+                      : (originChat.characterIds as string[]);
+
+                  // Resolve initiator name
+                  const initiatorRow = characterId ? await chars.getById(characterId) : null;
+                  const initiatorData = initiatorRow
+                    ? typeof initiatorRow.data === "string"
+                      ? JSON.parse(initiatorRow.data as string)
+                      : initiatorRow.data
+                    : null;
+                  const initiatorName = initiatorData?.name ?? "Character";
+
+                  // Call /scene/plan internally to get a comprehensive plan
+                  const planRes = await app.inject({
+                    method: "POST",
+                    url: "/api/scene/plan",
+                    payload: {
+                      chatId: input.chatId,
+                      prompt: scnCmd.scenario,
+                      connectionId: null,
+                    },
+                  });
+                  const planBody = JSON.parse(planRes.body);
+                  if (!planBody.plan) throw new Error("Scene plan failed");
+
+                  // Override background if the character specified one
+                  if (scnCmd.background) {
+                    planBody.plan.background = scnCmd.background;
+                  }
+
+                  // Call /scene/create with the full plan
+                  const createRes = await app.inject({
+                    method: "POST",
+                    url: "/api/scene/create",
+                    payload: {
+                      originChatId: input.chatId,
+                      initiatorCharId: characterId,
+                      plan: planBody.plan,
+                      connectionId: null,
+                    },
+                  });
+                  const createBody = JSON.parse(createRes.body);
+
+                  if (createBody.chatId) {
+                    // Notify client
+                    reply.raw.write(
+                      `data: ${JSON.stringify({
+                        type: "scene_created",
+                        data: {
+                          sceneChatId: createBody.chatId,
+                          sceneChatName: createBody.chatName,
+                          description: createBody.description,
+                          background: createBody.background ?? null,
+                          initiatorCharId: characterId,
+                          initiatorCharName: initiatorName,
+                        },
+                      })}\n\n`,
+                    );
+                    logger.info(
+                      `[commands] Scene created: "${createBody.chatName}" (${createBody.chatId}) from chat ${input.chatId}`,
+                    );
+                  }
+                } catch (sceneErr) {
+                  logger.error(sceneErr, "[commands] Scene creation failed");
+                }
+              }
+
+              // ── Assistant commands (Professor Mari) ──
+              if (command.type === "create_persona") {
+                const cpCmd = command as CreatePersonaCommand;
+                try {
+                  const persona = await chars.createPersona(cpCmd.name, cpCmd.description ?? "", undefined, {
+                    personality: cpCmd.personality,
+                    appearance: cpCmd.appearance,
+                  });
+                  reply.raw.write(
+                    `data: ${JSON.stringify({
+                      type: "assistant_action",
+                      data: { action: "persona_created", id: persona?.id, name: cpCmd.name },
+                    })}\n\n`,
+                  );
+                  logger.info(`[commands] Assistant created persona: "${cpCmd.name}" (${persona?.id})`);
+                } catch (err) {
+                  logger.error(err, "[commands] Create persona failed");
+                }
+              }
+
+              if (command.type === "create_character") {
+                const ccCmd = command as CreateCharacterCommand;
+                try {
+                  const charData = {
+                    name: ccCmd.name,
+                    description: ccCmd.description ?? "",
+                    personality: ccCmd.personality ?? "",
+                    first_mes: ccCmd.firstMessage ?? "",
+                    scenario: ccCmd.scenario ?? "",
+                    mes_example: ccCmd.mesExample ?? "",
+                    creator_notes: ccCmd.creatorNotes ?? "",
+                    system_prompt: ccCmd.systemPrompt ?? "",
+                    post_history_instructions: ccCmd.postHistoryInstructions ?? "",
+                    tags: ccCmd.tags ?? ([] as string[]),
+                    creator: ccCmd.creator ?? "",
+                    character_version: ccCmd.characterVersion ?? "",
+                    alternate_greetings: ccCmd.alternateGreetings ?? ([] as string[]),
+                    extensions: {
+                      talkativeness: ccCmd.talkativeness ?? 0.5,
+                      fav: ccCmd.fav ?? false,
+                      world: ccCmd.world ?? "",
+                      depth_prompt: {
+                        prompt: ccCmd.depthPrompt ?? "",
+                        depth: ccCmd.depthPromptDepth ?? 4,
+                        role: ccCmd.depthPromptRole ?? "system",
+                      },
+                      backstory: ccCmd.backstory ?? "",
+                      appearance: ccCmd.appearance ?? "",
+                    },
+                    character_book: null,
+                  };
+                  const created = await chars.create(charData as any);
+                  if (created) {
+                    reply.raw.write(
+                      `data: ${JSON.stringify({
+                        type: "assistant_action",
+                        data: { action: "character_created", id: created.id, name: ccCmd.name },
+                      })}\n\n`,
+                    );
+                    logger.info(`[commands] Assistant created character: "${ccCmd.name}" (${created.id})`);
+                  }
+                } catch (err) {
+                  logger.error(err, "[commands] Create character failed");
+                }
+              }
+
+              if (command.type === "update_character") {
+                const ucCmd = command as UpdateCharacterCommand;
+                try {
+                  const allCharsList = await chars.list();
+                  const targetChar = allCharsList.find((c: any) => {
+                    const d = typeof c.data === "string" ? JSON.parse(c.data) : c.data;
+                    return d.name?.toLowerCase() === ucCmd.name.toLowerCase();
+                  });
+                  if (targetChar) {
+                    const latestTargetChar = await chars.getById(targetChar.id);
+                    if (!latestTargetChar) {
+                      logger.warn(`[commands] Update character: "${ucCmd.name}" disappeared before update`);
+                      continue;
+                    }
+                    const existingData =
+                      typeof latestTargetChar.data === "string"
+                        ? JSON.parse(latestTargetChar.data as string)
+                        : latestTargetChar.data;
+                    const updates: Record<string, unknown> = {};
+                    const extensionUpdates: Record<string, unknown> = {};
+                    if (ucCmd.description !== undefined) updates.description = ucCmd.description;
+                    if (ucCmd.personality !== undefined) updates.personality = ucCmd.personality;
+                    if (ucCmd.firstMessage !== undefined) updates.first_mes = ucCmd.firstMessage;
+                    if (ucCmd.scenario !== undefined) updates.scenario = ucCmd.scenario;
+                    if (ucCmd.mesExample !== undefined) updates.mes_example = ucCmd.mesExample;
+                    if (ucCmd.creatorNotes !== undefined) updates.creator_notes = ucCmd.creatorNotes;
+                    if (ucCmd.systemPrompt !== undefined) updates.system_prompt = ucCmd.systemPrompt;
+                    if (ucCmd.postHistoryInstructions !== undefined) {
+                      updates.post_history_instructions = ucCmd.postHistoryInstructions;
+                    }
+                    if (ucCmd.creator !== undefined) updates.creator = ucCmd.creator;
+                    if (ucCmd.characterVersion !== undefined) updates.character_version = ucCmd.characterVersion;
+                    if (ucCmd.tags !== undefined) updates.tags = ucCmd.tags;
+                    if (ucCmd.alternateGreetings !== undefined) {
+                      updates.alternate_greetings = ucCmd.alternateGreetings;
+                    }
+                    if (ucCmd.backstory !== undefined) extensionUpdates.backstory = ucCmd.backstory;
+                    if (ucCmd.appearance !== undefined) extensionUpdates.appearance = ucCmd.appearance;
+                    if (ucCmd.talkativeness !== undefined) extensionUpdates.talkativeness = ucCmd.talkativeness;
+                    if (ucCmd.fav !== undefined) extensionUpdates.fav = ucCmd.fav;
+                    if (ucCmd.world !== undefined) extensionUpdates.world = ucCmd.world;
+                    if (
+                      ucCmd.depthPrompt !== undefined ||
+                      ucCmd.depthPromptDepth !== undefined ||
+                      ucCmd.depthPromptRole !== undefined
+                    ) {
+                      const existingDepthPrompt = existingData.extensions?.depth_prompt ?? {};
+                      extensionUpdates.depth_prompt = {
+                        ...existingDepthPrompt,
+                        ...(ucCmd.depthPrompt !== undefined ? { prompt: ucCmd.depthPrompt } : {}),
+                        ...(ucCmd.depthPromptDepth !== undefined ? { depth: ucCmd.depthPromptDepth } : {}),
+                        ...(ucCmd.depthPromptRole !== undefined ? { role: ucCmd.depthPromptRole } : {}),
+                      };
+                    }
+                    if (Object.keys(extensionUpdates).length > 0) {
+                      updates.extensions = { ...(existingData.extensions ?? {}), ...extensionUpdates };
+                    }
+                    await chars.update(targetChar.id, updates);
+                    reply.raw.write(
+                      `data: ${JSON.stringify({
+                        type: "assistant_action",
+                        data: { action: "character_updated", id: targetChar.id, name: ucCmd.name },
+                      })}\n\n`,
+                    );
+                    logger.info(`[commands] Assistant updated character: "${ucCmd.name}" (${targetChar.id})`);
+                  } else {
+                    logger.warn(`[commands] Update character: "${ucCmd.name}" not found`);
+                  }
+                } catch (err) {
+                  logger.error(err, "[commands] Update character failed");
+                }
+              }
+
+              if (command.type === "update_persona") {
+                const upCmd = command as UpdatePersonaCommand;
+                try {
+                  const allPersonas = await chars.listPersonas();
+                  const targetPersona = allPersonas.find((p: any) => {
+                    return p.name?.toLowerCase() === upCmd.name.toLowerCase();
+                  });
+                  if (targetPersona) {
+                    const sets: Record<string, unknown> = {};
+                    if (upCmd.description !== undefined) sets.description = upCmd.description;
+                    if (upCmd.personality !== undefined) sets.personality = upCmd.personality;
+                    if (upCmd.appearance !== undefined) sets.appearance = upCmd.appearance;
+                    if (upCmd.scenario !== undefined) sets.scenario = upCmd.scenario;
+                    if (upCmd.backstory !== undefined) sets.backstory = upCmd.backstory;
+                    await chars.updatePersona(targetPersona.id, sets as any);
+                    reply.raw.write(
+                      `data: ${JSON.stringify({
+                        type: "assistant_action",
+                        data: { action: "persona_updated", id: targetPersona.id, name: upCmd.name },
+                      })}\n\n`,
+                    );
+                    logger.info(`[commands] Assistant updated persona: "${upCmd.name}" (${targetPersona.id})`);
+                  } else {
+                    logger.warn(`[commands] Update persona: "${upCmd.name}" not found`);
+                  }
+                } catch (err) {
+                  logger.error(err, "[commands] Update persona failed");
+                }
+              }
+
+              if (command.type === "create_chat") {
+                const ctCmd = command as CreateChatCommand;
+                try {
+                  // Resolve character by name or ID
+                  const allCharsList = await chars.list();
+                  const targetChar = allCharsList.find((c: any) => {
+                    if (c.id === ctCmd.character) return true;
+                    const d = typeof c.data === "string" ? JSON.parse(c.data) : c.data;
+                    return d.name?.toLowerCase() === ctCmd.character.toLowerCase();
+                  });
+                  if (targetChar) {
+                    const targetData =
+                      typeof targetChar.data === "string" ? JSON.parse(targetChar.data as string) : targetChar.data;
+                    const mode = ctCmd.mode ?? "conversation";
+                    const newChat = await chats.create({
+                      name: `Chat with ${targetData.name}`,
+                      mode,
+                      characterIds: [targetChar.id],
+                      groupId: null,
+                      personaId: null,
+                      promptPresetId: null,
+                      connectionId: null,
+                    });
+                    if (newChat) {
+                      reply.raw.write(
+                        `data: ${JSON.stringify({
+                          type: "assistant_action",
+                          data: {
+                            action: "chat_created",
+                            chatId: newChat.id,
+                            chatName: newChat.name ?? `Chat with ${targetData.name}`,
+                            mode,
+                            characterName: targetData.name,
+                          },
+                        })}\n\n`,
+                      );
+                      logger.info(
+                        `[commands] Assistant created ${mode} chat with "${targetData.name}" (${newChat.id})`,
+                      );
+                    }
+                  } else {
+                    logger.warn(`[commands] Create chat: character "${ctCmd.character}" not found`);
+                  }
+                } catch (err) {
+                  logger.error(err, "[commands] Create chat failed");
+                }
+              }
+
+              if (command.type === "navigate") {
+                const navCmd = command as NavigateCommand;
+                reply.raw.write(
+                  `data: ${JSON.stringify({
+                    type: "assistant_action",
+                    data: { action: "navigate", panel: navCmd.panel, tab: navCmd.tab ?? null },
+                  })}\n\n`,
+                );
+                logger.info(`[commands] Assistant navigate: panel=${navCmd.panel}, tab=${navCmd.tab ?? "none"}`);
+              }
+
+              // ── Fetch command (Professor Mari) ──
+              if (command.type === "fetch") {
+                const fetchCmd = command as FetchCommand;
+                try {
+                  let fetchedContent = "";
+                  const contextKey = `${fetchCmd.fetchType}:${fetchCmd.name}`;
+
+                  if (fetchCmd.fetchType === "character") {
+                    const allCharsList = await chars.list();
+                    const found = allCharsList.find((c: any) => {
+                      const d = typeof c.data === "string" ? JSON.parse(c.data) : c.data;
+                      return d.name?.toLowerCase() === fetchCmd.name.toLowerCase();
+                    });
+                    if (found) {
+                      const d = typeof found.data === "string" ? JSON.parse(found.data as string) : found.data;
+                      const parts = [`Name: ${d.name}`];
+                      if (d.description) parts.push(`Description: ${d.description}`);
+                      if (d.personality) parts.push(`Personality: ${d.personality}`);
+                      if (d.scenario) parts.push(`Scenario: ${d.scenario}`);
+                      if (d.mes_example) parts.push(`Example Messages: ${d.mes_example}`);
+                      if (d.system_prompt) parts.push(`System Prompt: ${d.system_prompt}`);
+                      if (d.post_history_instructions) {
+                        parts.push(`Post-History Instructions: ${d.post_history_instructions}`);
+                      }
+                      if (d.first_mes) parts.push(`First Message: ${d.first_mes}`);
+                      if (d.creator_notes) parts.push(`Creator Notes: ${d.creator_notes}`);
+                      if (d.extensions?.appearance) parts.push(`Appearance: ${d.extensions.appearance}`);
+                      if (d.extensions?.backstory) parts.push(`Backstory: ${d.extensions.backstory}`);
+                      fetchedContent = parts.join("\n");
+                    }
+                  } else if (fetchCmd.fetchType === "persona") {
+                    const allPersonasList = await chars.listPersonas();
+                    const found = allPersonasList.find(
+                      (p: any) => p.name?.toLowerCase() === fetchCmd.name.toLowerCase(),
+                    );
+                    if (found) {
+                      const parts = [`Name: ${found.name}`];
+                      if (found.description) parts.push(`Description: ${found.description}`);
+                      if (found.personality) parts.push(`Personality: ${found.personality}`);
+                      if (found.scenario) parts.push(`Scenario: ${found.scenario}`);
+                      if (found.appearance) parts.push(`Appearance: ${found.appearance}`);
+                      if (found.backstory) parts.push(`Backstory: ${found.backstory}`);
+                      fetchedContent = parts.join("\n");
+                    }
+                  } else if (fetchCmd.fetchType === "lorebook") {
+                    const allLorebooks = await lorebooksStore.list();
+                    const found = (allLorebooks as any[]).find(
+                      (lb: any) => lb.name?.toLowerCase() === fetchCmd.name.toLowerCase(),
+                    );
+                    if (found) {
+                      const entries = await lorebooksStore.listEntries(found.id);
+                      const parts = [`Lorebook: ${found.name}`];
+                      if (found.description) parts.push(`Description: ${found.description}`);
+                      if (found.category) parts.push(`Category: ${found.category}`);
+                      parts.push(`Entries (${entries.length}):`);
+                      for (const entry of entries as any[]) {
+                        parts.push(
+                          `\n  Entry: ${entry.name}\n  Keys: ${(Array.isArray(entry.keys) ? entry.keys : []).join(", ")}\n  Content: ${entry.content}`,
+                        );
+                      }
+                      fetchedContent = parts.join("\n");
+                    }
+                  } else if (fetchCmd.fetchType === "chat") {
+                    const allChats = await chats.list();
+                    const found = (allChats as any[]).find(
+                      (c: any) => c.name?.toLowerCase() === fetchCmd.name.toLowerCase(),
+                    );
+                    if (found) {
+                      const parts = [`Chat: ${found.name}`, `Mode: ${found.mode}`];
+                      const recentMsgs = await chats.listMessagesPaginated(found.id, 20);
+                      if (recentMsgs.length > 0) {
+                        parts.push(`Recent Messages (${recentMsgs.length}):`);
+                        for (const msg of recentMsgs) {
+                          const role =
+                            msg.role === "assistant" ? (msg.characterId ? "Character" : "Assistant") : "User";
+                          parts.push(`  [${role}]: ${(msg.content as string).slice(0, 300)}`);
+                        }
+                      }
+                      fetchedContent = parts.join("\n");
+                    }
+                  } else if (fetchCmd.fetchType === "preset") {
+                    const allPresetsList = await presets.list();
+                    const found = (allPresetsList as any[]).find(
+                      (p: any) => p.name?.toLowerCase() === fetchCmd.name.toLowerCase(),
+                    );
+                    if (found) {
+                      const sections = await presets.listSections(found.id);
+                      const parts = [`Preset: ${found.name}`];
+                      if (found.description) parts.push(`Description: ${found.description}`);
+                      parts.push(`Sections (${sections.length}):`);
+                      for (const sec of sections) {
+                        parts.push(
+                          `  [${sec.role}] ${sec.name ?? "Untitled"}: ${(sec.content as string).slice(0, 200)}`,
+                        );
+                      }
+                      fetchedContent = parts.join("\n");
+                    }
+                  }
+
+                  if (fetchedContent) {
+                    // Persist to chatMeta.mariContext so it's available in subsequent messages
+                    const currentMeta = parseExtra(chat.metadata) as Record<string, unknown>;
+                    const mariContext = (currentMeta.mariContext as Record<string, string>) ?? {};
+                    mariContext[contextKey] = fetchedContent;
+                    currentMeta.mariContext = mariContext;
+                    await chats.updateMetadata(input.chatId, currentMeta);
+
                     reply.raw.write(
                       `data: ${JSON.stringify({
                         type: "assistant_action",
                         data: {
-                          action: "chat_created",
-                          chatId: newChat.id,
-                          chatName: newChat.name ?? `Chat with ${targetData.name}`,
-                          mode,
-                          characterName: targetData.name,
+                          action: "data_fetched",
+                          fetchType: fetchCmd.fetchType,
+                          name: fetchCmd.name,
                         },
                       })}\n\n`,
                     );
-                    logger.info(`[commands] Assistant created ${mode} chat with "${targetData.name}" (${newChat.id})`);
+                    logger.info(`[commands] Assistant fetched ${fetchCmd.fetchType}: "${fetchCmd.name}"`);
+                  } else {
+                    logger.warn(`[commands] Fetch: ${fetchCmd.fetchType} "${fetchCmd.name}" not found`);
                   }
-                } else {
-                  logger.warn(`[commands] Create chat: character "${ctCmd.character}" not found`);
+                } catch (err) {
+                  logger.error(err, "[commands] Fetch failed");
                 }
-              } catch (err) {
-                logger.error(err, "[commands] Create chat failed");
               }
+            } catch (cmdErr) {
+              logger.error(cmdErr, `[commands] Error processing ${command.type} command`);
             }
-
-            if (command.type === "navigate") {
-              const navCmd = command as NavigateCommand;
-              reply.raw.write(
-                `data: ${JSON.stringify({
-                  type: "assistant_action",
-                  data: { action: "navigate", panel: navCmd.panel, tab: navCmd.tab ?? null },
-                })}\n\n`,
-              );
-              logger.info(`[commands] Assistant navigate: panel=${navCmd.panel}, tab=${navCmd.tab ?? "none"}`);
-            }
-
-            // ── Fetch command (Professor Mari) ──
-            if (command.type === "fetch") {
-              const fetchCmd = command as FetchCommand;
-              try {
-                let fetchedContent = "";
-                const contextKey = `${fetchCmd.fetchType}:${fetchCmd.name}`;
-
-                if (fetchCmd.fetchType === "character") {
-                  const allCharsList = await chars.list();
-                  const found = allCharsList.find((c: any) => {
-                    const d = typeof c.data === "string" ? JSON.parse(c.data) : c.data;
-                    return d.name?.toLowerCase() === fetchCmd.name.toLowerCase();
-                  });
-                  if (found) {
-                    const d = typeof found.data === "string" ? JSON.parse(found.data as string) : found.data;
-                    const parts = [`Name: ${d.name}`];
-                    if (d.description) parts.push(`Description: ${d.description}`);
-                    if (d.personality) parts.push(`Personality: ${d.personality}`);
-                    if (d.scenario) parts.push(`Scenario: ${d.scenario}`);
-                    if (d.mes_example) parts.push(`Example Messages: ${d.mes_example}`);
-                    if (d.system_prompt) parts.push(`System Prompt: ${d.system_prompt}`);
-                    if (d.post_history_instructions) {
-                      parts.push(`Post-History Instructions: ${d.post_history_instructions}`);
-                    }
-                    if (d.first_mes) parts.push(`First Message: ${d.first_mes}`);
-                    if (d.creator_notes) parts.push(`Creator Notes: ${d.creator_notes}`);
-                    if (d.extensions?.appearance) parts.push(`Appearance: ${d.extensions.appearance}`);
-                    if (d.extensions?.backstory) parts.push(`Backstory: ${d.extensions.backstory}`);
-                    fetchedContent = parts.join("\n");
-                  }
-                } else if (fetchCmd.fetchType === "persona") {
-                  const allPersonasList = await chars.listPersonas();
-                  const found = allPersonasList.find((p: any) => p.name?.toLowerCase() === fetchCmd.name.toLowerCase());
-                  if (found) {
-                    const parts = [`Name: ${found.name}`];
-                    if (found.description) parts.push(`Description: ${found.description}`);
-                    if (found.personality) parts.push(`Personality: ${found.personality}`);
-                    if (found.scenario) parts.push(`Scenario: ${found.scenario}`);
-                    if (found.appearance) parts.push(`Appearance: ${found.appearance}`);
-                    if (found.backstory) parts.push(`Backstory: ${found.backstory}`);
-                    fetchedContent = parts.join("\n");
-                  }
-                } else if (fetchCmd.fetchType === "lorebook") {
-                  const allLorebooks = await lorebooksStore.list();
-                  const found = (allLorebooks as any[]).find(
-                    (lb: any) => lb.name?.toLowerCase() === fetchCmd.name.toLowerCase(),
-                  );
-                  if (found) {
-                    const entries = await lorebooksStore.listEntries(found.id);
-                    const parts = [`Lorebook: ${found.name}`];
-                    if (found.description) parts.push(`Description: ${found.description}`);
-                    if (found.category) parts.push(`Category: ${found.category}`);
-                    parts.push(`Entries (${entries.length}):`);
-                    for (const entry of entries as any[]) {
-                      parts.push(
-                        `\n  Entry: ${entry.name}\n  Keys: ${(Array.isArray(entry.keys) ? entry.keys : []).join(", ")}\n  Content: ${entry.content}`,
-                      );
-                    }
-                    fetchedContent = parts.join("\n");
-                  }
-                } else if (fetchCmd.fetchType === "chat") {
-                  const allChats = await chats.list();
-                  const found = (allChats as any[]).find(
-                    (c: any) => c.name?.toLowerCase() === fetchCmd.name.toLowerCase(),
-                  );
-                  if (found) {
-                    const parts = [`Chat: ${found.name}`, `Mode: ${found.mode}`];
-                    const recentMsgs = await chats.listMessagesPaginated(found.id, 20);
-                    if (recentMsgs.length > 0) {
-                      parts.push(`Recent Messages (${recentMsgs.length}):`);
-                      for (const msg of recentMsgs) {
-                        const role = msg.role === "assistant" ? (msg.characterId ? "Character" : "Assistant") : "User";
-                        parts.push(`  [${role}]: ${(msg.content as string).slice(0, 300)}`);
-                      }
-                    }
-                    fetchedContent = parts.join("\n");
-                  }
-                } else if (fetchCmd.fetchType === "preset") {
-                  const allPresetsList = await presets.list();
-                  const found = (allPresetsList as any[]).find(
-                    (p: any) => p.name?.toLowerCase() === fetchCmd.name.toLowerCase(),
-                  );
-                  if (found) {
-                    const sections = await presets.listSections(found.id);
-                    const parts = [`Preset: ${found.name}`];
-                    if (found.description) parts.push(`Description: ${found.description}`);
-                    parts.push(`Sections (${sections.length}):`);
-                    for (const sec of sections) {
-                      parts.push(`  [${sec.role}] ${sec.name ?? "Untitled"}: ${(sec.content as string).slice(0, 200)}`);
-                    }
-                    fetchedContent = parts.join("\n");
-                  }
-                }
-
-                if (fetchedContent) {
-                  // Persist to chatMeta.mariContext so it's available in subsequent messages
-                  const currentMeta = parseExtra(chat.metadata) as Record<string, unknown>;
-                  const mariContext = (currentMeta.mariContext as Record<string, string>) ?? {};
-                  mariContext[contextKey] = fetchedContent;
-                  currentMeta.mariContext = mariContext;
-                  await chats.updateMetadata(input.chatId, currentMeta);
-
-                  reply.raw.write(
-                    `data: ${JSON.stringify({
-                      type: "assistant_action",
-                      data: {
-                        action: "data_fetched",
-                        fetchType: fetchCmd.fetchType,
-                        name: fetchCmd.name,
-                      },
-                    })}\n\n`,
-                  );
-                  logger.info(`[commands] Assistant fetched ${fetchCmd.fetchType}: "${fetchCmd.name}"`);
-                } else {
-                  logger.warn(`[commands] Fetch: ${fetchCmd.fetchType} "${fetchCmd.name}" not found`);
-                }
-              } catch (err) {
-                logger.error(err, "[commands] Fetch failed");
-              }
-            }
-          } catch (cmdErr) {
-            logger.error(cmdErr, `[commands] Error processing ${command.type} command`);
           }
-        }
         } finally {
           trySendSseEvent(reply, {
             type: "assistant_commands_end",
@@ -7029,5 +7620,6 @@ export async function generateRoutes(app: FastifyInstance) {
     return reply.send({ aborted: true });
   });
 
+  await registerDryRunRoute(app);
   await registerRetryAgentsRoute(app);
 }

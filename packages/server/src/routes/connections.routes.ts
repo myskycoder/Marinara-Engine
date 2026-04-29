@@ -83,8 +83,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
         }
         return {
           success: true,
-          message:
-            "Claude Agent SDK loaded. The first chat will fail if `claude login` has not been run on this host.",
+          message: "Claude Agent SDK loaded. The first chat will fail if `claude login` has not been run on this host.",
           latencyMs: Date.now() - start,
           modelName: conn.model,
         };
@@ -281,6 +280,54 @@ export async function connectionsRoutes(app: FastifyInstance) {
     }
   });
 
+  // ── Test image generation — generates a small fixed test image ──
+  app.post<{ Params: { id: string } }>("/:id/test-image", async (req, reply) => {
+    const conn = await storage.getWithKey(req.params.id);
+    if (!conn) return reply.status(404).send({ error: "Connection not found" });
+    if (conn.provider !== "image_generation") {
+      return reply.status(400).send({ error: "Not an image generation connection" });
+    }
+
+    const { PROVIDERS } = await import("@marinara-engine/shared");
+    const providerDef = PROVIDERS[conn.provider as keyof typeof PROVIDERS];
+    const baseUrl = (conn.baseUrl || providerDef?.defaultBaseUrl || "").replace(/\/+$/, "");
+
+    const { generateImage } = await import("../services/image/image-generation.js");
+    const imgModel = conn.model || "";
+    const imgApiKey = conn.apiKey || "";
+    const imgSource = conn.imageGenerationSource || imgModel;
+    const imgServiceHint = conn.imageService || imgSource;
+
+    const BASE_PROMPT = "plate of spaghetti with marinara sauce";
+
+    const start = Date.now();
+    try {
+      const result = await generateImage(imgSource, baseUrl, imgApiKey, imgServiceHint, {
+        prompt: BASE_PROMPT,
+        model: imgModel || undefined,
+        width: 512,
+        height: 512,
+        comfyWorkflow: conn.comfyuiWorkflow || undefined,
+      });
+      return {
+        success: true,
+        base64: result.base64,
+        mimeType: result.mimeType,
+        latencyMs: Date.now() - start,
+        prompt: BASE_PROMPT,
+      };
+    } catch (err) {
+      return {
+        success: false,
+        base64: null,
+        mimeType: null,
+        latencyMs: Date.now() - start,
+        prompt: BASE_PROMPT,
+        error: err instanceof Error ? err.message : "Unknown error",
+      };
+    }
+  });
+
   // ── Test message — sends "hi" to the model and returns the response ──
   app.post<{ Params: { id: string } }>("/:id/test-message", async (req, reply) => {
     const conn = await storage.getWithKey(req.params.id);
@@ -302,7 +349,14 @@ export async function connectionsRoutes(app: FastifyInstance) {
 
     const start = Date.now();
     try {
-      const provider = createLLMProvider(conn.provider, baseUrl, conn.apiKey, conn.maxContext, conn.openrouterProvider, conn.maxTokensOverride);
+      const provider = createLLMProvider(
+        conn.provider,
+        baseUrl,
+        conn.apiKey,
+        conn.maxContext,
+        conn.openrouterProvider,
+        conn.maxTokensOverride,
+      );
 
       let fullResponse = "";
       for await (const chunk of provider.chat([{ role: "user", content: "hi" }], {

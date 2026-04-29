@@ -167,12 +167,14 @@ export function useBackgroundAutonomousPolling() {
                 // Resolve character name for the notification
                 let charName = "Someone";
                 let charAvatar: string | null = null;
+                let charAvatarCrop: { zoom: number; offsetX: number; offsetY: number } | null = null;
                 try {
                   // Find the triggering character's name
                   const charRow = await api.get<RawCharacter>(`/characters/${characterId}`);
                   if (charRow) {
                     const data = typeof charRow.data === "string" ? JSON.parse(charRow.data) : charRow.data;
                     if (data?.name) charName = data.name;
+                    charAvatarCrop = data?.extensions?.avatarCrop ?? null;
                     charAvatar = charRow.avatarPath ?? null;
                   }
                 } catch {
@@ -188,7 +190,7 @@ export function useBackgroundAutonomousPolling() {
                 useChatStore.getState().incrementUnread(chat.id);
 
                 // Add floating avatar notification bubble
-                useChatStore.getState().addNotification(chat.id, charName, charAvatar);
+                useChatStore.getState().addNotification(chat.id, charName, charAvatar, charAvatarCrop);
 
                 // Show a global toast so the user knows even from a different chat
                 toast(`${charName} sent you a message`, { icon: "💬" });

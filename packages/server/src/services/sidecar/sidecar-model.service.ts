@@ -27,6 +27,7 @@ import { getDataDir } from "../../utils/data-dir.js";
 import { downloadFileWithProgress, fetchJson, isAbortError } from "./sidecar-download.js";
 import { mlxRuntimeService } from "./mlx-runtime.service.js";
 import { sidecarRuntimeService } from "./sidecar-runtime.service.js";
+import { assertSupportedLlamaCppModelPath, isSupportedLlamaCppModelFilename } from "./sidecar-model-files.js";
 
 export const MODELS_DIR = join(getDataDir(), "models");
 export const CUSTOM_MODELS_DIR = join(MODELS_DIR, "custom");
@@ -134,12 +135,32 @@ class SidecarModelService {
       if (existsSync(CONFIG_PATH)) {
         const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as Partial<SidecarConfig>;
         nextConfig = { ...SIDECAR_DEFAULT_CONFIG, ...raw };
-        nextConfig.contextSize = normalizeIntegerSetting(nextConfig.contextSize, SIDECAR_DEFAULT_CONFIG.contextSize, 512, 32768);
-        nextConfig.maxTokens = normalizeIntegerSetting(nextConfig.maxTokens, SIDECAR_DEFAULT_CONFIG.maxTokens, 64, 32768);
-        nextConfig.temperature = normalizeFloatSetting(nextConfig.temperature, SIDECAR_DEFAULT_CONFIG.temperature, 0, 2);
+        nextConfig.contextSize = normalizeIntegerSetting(
+          nextConfig.contextSize,
+          SIDECAR_DEFAULT_CONFIG.contextSize,
+          512,
+          32768,
+        );
+        nextConfig.maxTokens = normalizeIntegerSetting(
+          nextConfig.maxTokens,
+          SIDECAR_DEFAULT_CONFIG.maxTokens,
+          64,
+          32768,
+        );
+        nextConfig.temperature = normalizeFloatSetting(
+          nextConfig.temperature,
+          SIDECAR_DEFAULT_CONFIG.temperature,
+          0,
+          2,
+        );
         nextConfig.topP = normalizeFloatSetting(nextConfig.topP, SIDECAR_DEFAULT_CONFIG.topP, Number.EPSILON, 1);
         nextConfig.topK = normalizeIntegerSetting(nextConfig.topK, SIDECAR_DEFAULT_CONFIG.topK, 0, 500);
-        nextConfig.gpuLayers = normalizeIntegerSetting(nextConfig.gpuLayers, SIDECAR_DEFAULT_CONFIG.gpuLayers, -1, 1024);
+        nextConfig.gpuLayers = normalizeIntegerSetting(
+          nextConfig.gpuLayers,
+          SIDECAR_DEFAULT_CONFIG.gpuLayers,
+          -1,
+          1024,
+        );
 
         if (!isRuntimePreference(nextConfig.runtimePreference)) {
           nextConfig.runtimePreference = SIDECAR_DEFAULT_CONFIG.runtimePreference;
@@ -441,7 +462,7 @@ class SidecarModelService {
   }
 
   isEnabled(): boolean {
-    return this.config.useForGameScene;
+    return this.config.useForGameScene || this.config.useForTrackers;
   }
 
   getResolvedBackend(): SidecarBackend {
@@ -583,7 +604,9 @@ class SidecarModelService {
     }
 
     const entries = await this.fetchRepoTree(repo);
-    const ggufEntries = entries.filter((entry) => entry.type === "file" && entry.path?.toLowerCase().endsWith(".gguf"));
+    const ggufEntries = entries.filter(
+      (entry) => entry.type === "file" && entry.path && isSupportedLlamaCppModelFilename(entry.path),
+    );
     if (ggufEntries.length === 0) {
       return [];
     }
@@ -647,6 +670,7 @@ class SidecarModelService {
     if (!selected) {
       throw new Error("Selected GGUF was not found in that repository");
     }
+    assertSupportedLlamaCppModelPath(selected.path);
 
     const relativePath = join("custom", `${slugifyRepo(repo)}__${selected.filename}`).replace(/\\/g, "/");
     const destination = this.resolveModelPath(relativePath);

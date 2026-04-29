@@ -276,28 +276,62 @@ function parseChatMetadata(metadata: Chat["metadata"] | string | null | undefine
   return metadata as Record<string, unknown>;
 }
 
+function slugifyGameMapId(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "");
+}
+
+function getGameMapId(map: GameMap | null | undefined, fallbackIndex = 0): string | null {
+  if (!map) return null;
+  const explicit = map.id?.trim();
+  if (explicit) return explicit;
+  return slugifyGameMapId(map.name || "") || `map-${fallbackIndex + 1}`;
+}
+
+function withGameMapCollection(metadata: Record<string, unknown>, map: GameMap): Record<string, unknown> {
+  const mapId = getGameMapId(map);
+  const existingMaps = Array.isArray(metadata.gameMaps) ? (metadata.gameMaps as GameMap[]) : [];
+  const nextMaps = [...existingMaps];
+  const existingIndex = nextMaps.findIndex((entry, index) => getGameMapId(entry, index) === mapId);
+
+  if (existingIndex >= 0) {
+    nextMaps[existingIndex] = map;
+  } else {
+    nextMaps.push(map);
+  }
+
+  return {
+    ...metadata,
+    gameMap: map,
+    gameMaps: nextMaps,
+    activeGameMapId: mapId,
+  };
+}
+
 function applyGameMapUpdate(qc: QueryClient, chatId: string, map: GameMap) {
   qc.setQueryData<Chat | undefined>(chatKeys.detail(chatId), (current) => {
     if (!current) return current;
+    const metadata = withGameMapCollection(parseChatMetadata(current.metadata as Chat["metadata"] | string), map);
     return {
       ...current,
-      metadata: {
-        ...parseChatMetadata(current.metadata as Chat["metadata"] | string),
-        gameMap: map,
-      } as Chat["metadata"],
+      metadata: metadata as Chat["metadata"],
     };
   });
 
   const chatStore = useChatStore.getState();
   if (chatStore.activeChat?.id === chatId) {
+    const metadata = withGameMapCollection(
+      parseChatMetadata(chatStore.activeChat.metadata as Chat["metadata"] | string),
+      map,
+    );
     chatStore.setActiveChat({
       ...chatStore.activeChat,
-      metadata: {
-        ...parseChatMetadata(chatStore.activeChat.metadata as Chat["metadata"] | string),
-        gameMap: map,
-      } as Chat["metadata"],
+      metadata: metadata as Chat["metadata"],
     });
-    useGameModeStore.getState().setCurrentMap(map);
+    useGameModeStore.getState().upsertMap(map, true);
   }
 }
 
@@ -342,6 +376,7 @@ export function useGenerate() {
       attachments?: Array<{ type: string; data: string }>;
       mentionedCharacterNames?: string[];
       forCharacterId?: string;
+      generationGuide?: string;
     }) => {
       // Prevent concurrent generations for the SAME chat — stops race conditions
       // where autonomous messaging + user input both fire generate at once.
@@ -372,7 +407,7 @@ export function useGenerate() {
       // tracked only by abortControllers.
       if (isActiveChat()) {
         setStreaming(true, params.chatId);
-        clearStreamBuffer();
+        clearStreamBuffer(params.chatId);
         clearThoughtBubbles();
         clearCyoaChoices();
         clearFailedAgentTypes();
@@ -511,7 +546,7 @@ export function useGenerate() {
         fullBuffer += pendingText;
         pendingText = "";
         typingActive = false;
-        if (streamingEnabled && fullBuffer && isActiveChat()) setStreamBuffer(fullBuffer);
+        if (streamingEnabled && fullBuffer) setStreamBuffer(fullBuffer, params.chatId);
       };
 
       const startTypewriter = () => {
@@ -535,7 +570,7 @@ export function useGenerate() {
           const batch = pendingText.slice(0, n);
           pendingText = pendingText.slice(n);
           fullBuffer += batch;
-          if (isActiveChat()) setStreamBuffer(fullBuffer);
+          setStreamBuffer(fullBuffer, params.chatId);
           rafId = requestAnimationFrame(tick);
         };
         rafId = requestAnimationFrame(tick);
@@ -555,7 +590,7 @@ export function useGenerate() {
       };
 
       try {
-        const userStatus = useUIStore.getState().userStatus;
+        const { userStatus, debugMode } = useUIStore.getState();
 
         // Flush any pending game-state widget edits so the server sees them before committing
         const flushPatch = useGameStateStore.getState().flushPatch;
@@ -563,7 +598,7 @@ export function useGenerate() {
 
         for await (const event of api.streamEvents(
           "/generate",
-          { ...params, userStatus, streaming: transportStreaming },
+          { ...params, userStatus, debugMode, streaming: transportStreaming },
           abortController.signal,
         )) {
           switch (event.type) {
@@ -882,7 +917,7 @@ export function useGenerate() {
                 thinkState = "done";
                 thinkBuf = "";
                 thinkCloseTag = "</think>";
-                if (isActiveChat()) setStreamBuffer("");
+                setStreamBuffer("", params.chatId);
               }
 
               if (isActiveChat()) setStreamingCharacterId(turn.characterId);
@@ -938,16 +973,16 @@ export function useGenerate() {
               // Consistency Editor replaced the message — update displayed text
               const rw = event.data as { editedText?: string; changes?: Array<{ description: string }> };
               if (rw.editedText) {
-                if (streamingEnabled && isActiveChat()) {
+                if (streamingEnabled) {
                   // Drain any pending typewriter first
                   if (pendingText.length > 0 || typingActive) {
                     cancelAnimationFrame(rafId);
                     pendingText = "";
                     typingActive = false;
                   }
-                  setStreamBuffer(rw.editedText);
                 }
                 fullBuffer = rw.editedText;
+                if (streamingEnabled) setStreamBuffer(rw.editedText, params.chatId);
               }
               break;
             }
@@ -955,13 +990,13 @@ export function useGenerate() {
             case "content_replace": {
               // Server stripped character commands — replace the displayed content
               const cleanContent = event.data as string;
-              if (streamingEnabled && isActiveChat()) {
+              if (streamingEnabled) {
                 cancelAnimationFrame(rafId);
                 pendingText = "";
                 typingActive = false;
-                setStreamBuffer(cleanContent);
               }
               fullBuffer = cleanContent;
+              if (streamingEnabled) setStreamBuffer(cleanContent, params.chatId);
               break;
             }
 
@@ -1092,6 +1127,8 @@ export function useGenerate() {
             }
 
             case "assistant_commands_start": {
+              const commandData = event.data as { professorMariCommandCount?: number } | undefined;
+              if ((commandData?.professorMariCommandCount ?? 0) <= 0) break;
               setMariPhase(params.chatId, "updating");
               window.dispatchEvent(
                 new CustomEvent("marinara:mari-phase", {
@@ -1220,7 +1257,7 @@ export function useGenerate() {
           });
         }
         // Final flush — ensure full content is set (only for the viewed chat)
-        if (streamingEnabled && isActiveChat()) setStreamBuffer(fullBuffer + pendingText);
+        if (streamingEnabled) setStreamBuffer(fullBuffer + pendingText, params.chatId);
       } catch (error) {
         // Flush everything instantly on error so user sees what arrived
         flushTypewriterBuffer();
@@ -1326,9 +1363,10 @@ export function useGenerate() {
             // await resolves — preventing both duplicate-flash and empty-flash.
             await refreshMessagesAuthoritatively(qc, params.chatId, persistedMessages.values());
             setStreaming(false);
-            clearStreamBuffer();
+            clearStreamBuffer(params.chatId);
           } else {
             await refreshMessagesAuthoritatively(qc, params.chatId, persistedMessages.values());
+            clearStreamBuffer(params.chatId);
           }
           if (isActiveChat()) {
             setProcessing(false);

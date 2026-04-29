@@ -13,6 +13,15 @@ import {
 } from "@marinara-engine/shared";
 
 const BUILTIN_AGENT_ID_PREFIX = "builtin:";
+const BUILT_IN_AGENT_TYPES = new Set(BUILT_IN_AGENTS.map((agent) => agent.id));
+
+function isBuiltInAgentType(type: string): boolean {
+  return BUILT_IN_AGENT_TYPES.has(type);
+}
+
+function suffixFromId(id: string): string {
+  return id.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 8) || Date.now().toString(36);
+}
 
 function getBuiltinAgentType(agentConfigId: string): string | null {
   if (!agentConfigId.startsWith(BUILTIN_AGENT_ID_PREFIX)) return null;
@@ -45,6 +54,20 @@ export function createAgentsStorage(db: DB) {
       .orderBy(desc(agentConfigs.updatedAt))
       .limit(1);
     return rows[0] ?? null;
+  }
+
+  async function getUniqueCustomType(requestedType: string, id: string) {
+    const baseType = requestedType.trim() || `custom-${suffixFromId(id)}`;
+    if (!(await getByType(baseType))) return baseType;
+
+    const suffix = suffixFromId(id);
+    let candidate = `${baseType}-${suffix}`;
+    let attempt = 2;
+    while (await getByType(candidate)) {
+      candidate = `${baseType}-${suffix}-${attempt}`;
+      attempt++;
+    }
+    return candidate;
   }
 
   async function listLatest() {
@@ -107,16 +130,20 @@ export function createAgentsStorage(db: DB) {
     getByType,
 
     async create(input: CreateAgentConfigInput) {
-      const existing = await getByType(input.type);
-      if (existing) {
-        return this.update(existing.id, input);
+      const builtInType = isBuiltInAgentType(input.type);
+      if (builtInType) {
+        const existing = await getByType(input.type);
+        if (existing) {
+          return this.update(existing.id, input);
+        }
       }
 
       const id = newId();
       const timestamp = now();
+      const type = builtInType ? input.type : await getUniqueCustomType(input.type, id);
       await db.insert(agentConfigs).values({
         id,
-        type: input.type,
+        type,
         name: input.name,
         description: input.description ?? "",
         phase: input.phase,

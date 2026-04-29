@@ -151,7 +151,7 @@ export async function chatPresetsRoutes(app: FastifyInstance) {
     if (typeof data.name !== "string" || !data.name.trim()) {
       return reply.status(400).send({ error: "Preset name is required" });
     }
-    const settings = sanitizePresetSettings(data.settings ?? {});
+    const settings = sanitizePresetSettings(data.settings ?? {}, modeParsed.data);
     const created = (await storage.importPreset({
       name: data.name.trim().slice(0, 120),
       mode: modeParsed.data,

@@ -540,7 +540,7 @@ function WidgetEditorModal({
             ) : (
               draft.stats.map((stat, index) => (
                 <div
-                  key={`${stat.name}:${index}`}
+                  key={`stat:${index}`}
                   className={cn(
                     "grid gap-1.5 sm:items-end",
                     allowStructureEdit ? "sm:grid-cols-[minmax(0,1fr)_7rem_auto]" : "sm:grid-cols-[minmax(0,1fr)_7rem]",

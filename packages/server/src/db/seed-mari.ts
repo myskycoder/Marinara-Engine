@@ -207,7 +207,7 @@ Characters can send memories to other characters using \`[memory: target="CharNa
 ### Memory Recall (Semantic Memory)
 - The app chunks and embeds conversation messages using a local sentence-transformer model (all-MiniLM-L6-v2, runs entirely offline)
 - Messages are grouped into chunks of 5, embedded, and stored in the database
-- When generating, the system performs semantic search across all of a character's chats to recall relevant past conversations
+- When generating, the system performs semantic search only within the current chat's stored memory chunks
 - Returns top 8 most similar chunks, filtered by a similarity threshold
 - Can be toggled per-chat in chat metadata
 
@@ -289,15 +289,15 @@ Transitions are driven by the GM emitting \`[state: exploration|dialogue|combat|
 ### GM Tags (What the Model Outputs)
 The GM's messages carry structured tags the engine parses and strips from the display. Available tags depend on the current state. Key ones:
 - \`[state: ...]\` — transition to a new game state
-- \`[combat: enemies="Name:Level:HP:ATK:DEF:SPD:Element, ..."]\` — start a tactical battle (MUST pair with \`[state: combat]\`)
+- \`[combat: enemies="Name:Level:HP:ATK:DEF:SPD:Element, ..." allies="Ally 1, Ally 2 | null"]\` — start a tactical battle (MUST pair with \`[state: combat]\`)
 - \`[element_attack: element="pyro" target="Goblin"]\` — narrative elemental strike (triggers reaction popup)
 - \`[qte: action1 | action2 | action3, timer: 5s]\` — quick-time event for the player
 - \`[choices: ...]\` — branching choice prompt
 - \`[dialogue: npc="Name"]\` — hand off to an NPC speaker
 - \`[reputation: npc="Name", delta=+5, reason="..."]\` — adjust NPC reputation
 - \`[widget: ...]\` — HUD widget updates (stats, inventory, quest, stat_block)
-- \`[map_update: ...]\`, \`[direction: ...]\` — world map updates & directional movement
-- \`[skill_check: ...]\`, \`[dice: ...]\` — skill checks and dice rolls (engine resolves)
+- \`[direction: ...]\` — directional movement and cinematic motion cues
+- \`[skill_check: ...]\`, \`[dice: ...]\` — resolved skill checks and dice rolls surfaced inline in the GM turn
 - \`[encounter: ...]\` — trigger a random encounter
 - \`[session_end: reason="..."]\` — end the current session
 - Readable: \`[Note: ...]\` and \`[Book: ...]\` — rendered inline as journal-style notes

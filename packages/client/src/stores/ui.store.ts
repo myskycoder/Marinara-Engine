@@ -93,6 +93,7 @@ interface UIState {
   /** Custom font family name (empty = default Inter) */
   fontFamily: string;
   enableStreaming: boolean;
+  debugMode: boolean;
   /** Typewriter speed: 1 (very slow) to 100 (instant). Controls how fast streaming tokens appear. */
   streamingSpeed: number;
   /** When true, Game mode narration segments are revealed in full as soon as they become active. */
@@ -107,6 +108,7 @@ interface UIState {
   showModelName: boolean;
   showTokenUsage: boolean;
   showMessageNumbers: boolean;
+  guideGenerations: boolean;
   confirmBeforeDelete: boolean;
   /** Number of messages to load per page (0 = load all) */
   messagesPerPage: number;
@@ -124,6 +126,8 @@ interface UIState {
   chatFontOpacity: number;
   /** Layout style for roleplay message avatars */
   roleplayAvatarStyle: RoleplayAvatarStyle;
+  /** Scale multiplier for Game mode VN portraits and full-body sprites. */
+  gameAvatarScale: number;
   /** Text outline/stroke width in px (0 = off) */
   textStrokeWidth: number;
   /** Text outline/stroke color */
@@ -143,6 +147,10 @@ interface UIState {
   // ── Custom Conversation Prompt ──
   /** User's custom default system prompt for new conversations (null = built-in default). */
   customConversationPrompt: string | null;
+
+  // ── Schedule Generation Preferences ──
+  /** Free-form user guidance injected into the conversation-mode schedule generation prompt (empty = unset). */
+  scheduleGenerationPreferences: string;
 
   // ── Input ──
   enterToSendRP: boolean;
@@ -232,6 +240,7 @@ interface UIState {
   setChatFontSize: (size: number) => void;
   setFontFamily: (family: string) => void;
   setEnableStreaming: (v: boolean) => void;
+  setDebugMode: (v: boolean) => void;
   setStreamingSpeed: (v: number) => void;
   setGameInstantTextReveal: (v: boolean) => void;
   setGameTextSpeed: (v: number) => void;
@@ -242,6 +251,7 @@ interface UIState {
   setShowModelName: (v: boolean) => void;
   setShowTokenUsage: (v: boolean) => void;
   setShowMessageNumbers: (v: boolean) => void;
+  setGuideGenerations: (v: boolean) => void;
   setConfirmBeforeDelete: (v: boolean) => void;
   setMessagesPerPage: (n: number) => void;
   setBoldDialogue: (v: boolean) => void;
@@ -250,6 +260,7 @@ interface UIState {
   setChatFontColor: (v: string) => void;
   setChatFontOpacity: (v: number) => void;
   setRoleplayAvatarStyle: (v: RoleplayAvatarStyle) => void;
+  setGameAvatarScale: (v: number) => void;
   setTextStrokeWidth: (v: number) => void;
   setTextStrokeColor: (v: string) => void;
   setCenterCompact: (v: boolean) => void;
@@ -259,6 +270,7 @@ interface UIState {
   setConvoNotificationSound: (v: boolean) => void;
   setRpNotificationSound: (v: boolean) => void;
   setCustomConversationPrompt: (v: string | null) => void;
+  setScheduleGenerationPreferences: (v: string) => void;
   setEnterToSendRP: (v: boolean) => void;
   setEnterToSendConvo: (v: boolean) => void;
   setEnterToSendGame: (v: boolean) => void;
@@ -310,6 +322,7 @@ export function pickSyncedSettings(state: UIState) {
     showModelName: state.showModelName,
     showTokenUsage: state.showTokenUsage,
     showMessageNumbers: state.showMessageNumbers,
+    guideGenerations: state.guideGenerations,
     confirmBeforeDelete: state.confirmBeforeDelete,
     messagesPerPage: state.messagesPerPage,
     boldDialogue: state.boldDialogue,
@@ -318,6 +331,7 @@ export function pickSyncedSettings(state: UIState) {
     chatFontColor: state.chatFontColor,
     chatFontOpacity: state.chatFontOpacity,
     roleplayAvatarStyle: state.roleplayAvatarStyle,
+    gameAvatarScale: state.gameAvatarScale,
     textStrokeWidth: state.textStrokeWidth,
     textStrokeColor: state.textStrokeColor,
     visualTheme: state.visualTheme,
@@ -335,6 +349,7 @@ export function pickSyncedSettings(state: UIState) {
     convoNotificationSound: state.convoNotificationSound,
     rpNotificationSound: state.rpNotificationSound,
     customConversationPrompt: state.customConversationPrompt,
+    scheduleGenerationPreferences: state.scheduleGenerationPreferences,
   };
 }
 
@@ -370,6 +385,7 @@ export const useUIStore = create<UIState>()(
       chatFontSize: 16,
       fontFamily: "",
       enableStreaming: true,
+      debugMode: false,
       streamingSpeed: 50,
       gameInstantTextReveal: false,
       gameTextSpeed: 50,
@@ -380,6 +396,7 @@ export const useUIStore = create<UIState>()(
       showModelName: false,
       showTokenUsage: false,
       showMessageNumbers: false,
+      guideGenerations: false,
       confirmBeforeDelete: true,
       messagesPerPage: 20,
       boldDialogue: true,
@@ -388,6 +405,7 @@ export const useUIStore = create<UIState>()(
       chatFontColor: "",
       chatFontOpacity: 90,
       roleplayAvatarStyle: "circles" as RoleplayAvatarStyle,
+      gameAvatarScale: 1,
       textStrokeWidth: 0.5,
       textStrokeColor: "#000000",
       visualTheme: "default" as VisualTheme,
@@ -396,6 +414,7 @@ export const useUIStore = create<UIState>()(
       convoNotificationSound: true,
       rpNotificationSound: true,
       customConversationPrompt: null,
+      scheduleGenerationPreferences: "",
       enterToSendRP: false,
       enterToSendConvo: true,
       enterToSendGame: true,
@@ -611,6 +630,7 @@ export const useUIStore = create<UIState>()(
       setChatFontSize: (size) => set({ chatFontSize: size }),
       setFontFamily: (family) => set({ fontFamily: family }),
       setEnableStreaming: (v) => set({ enableStreaming: v }),
+      setDebugMode: (v) => set({ debugMode: v }),
       setStreamingSpeed: (v) => set({ streamingSpeed: Math.max(1, Math.min(100, v)) }),
       setGameInstantTextReveal: (v) => set({ gameInstantTextReveal: v }),
       setGameTextSpeed: (v) => set({ gameTextSpeed: Math.max(1, Math.min(100, v)) }),
@@ -621,6 +641,7 @@ export const useUIStore = create<UIState>()(
       setShowModelName: (v) => set({ showModelName: v }),
       setShowTokenUsage: (v) => set({ showTokenUsage: v }),
       setShowMessageNumbers: (v) => set({ showMessageNumbers: v }),
+      setGuideGenerations: (v) => set({ guideGenerations: v }),
       setConfirmBeforeDelete: (v) => set({ confirmBeforeDelete: v }),
       setMessagesPerPage: (n) => set({ messagesPerPage: n }),
       setBoldDialogue: (v) => set({ boldDialogue: v }),
@@ -629,6 +650,7 @@ export const useUIStore = create<UIState>()(
       setChatFontColor: (v) => set({ chatFontColor: v }),
       setChatFontOpacity: (v) => set({ chatFontOpacity: Math.max(0, Math.min(100, v)) }),
       setRoleplayAvatarStyle: (v) => set({ roleplayAvatarStyle: v }),
+      setGameAvatarScale: (v) => set({ gameAvatarScale: Math.max(0.75, Math.min(1.75, v)) }),
       setTextStrokeWidth: (v) => set({ textStrokeWidth: Math.max(0, Math.min(5, v)) }),
       setTextStrokeColor: (v) => set({ textStrokeColor: v }),
       setCenterCompact: (v) => set({ centerCompact: v }),
@@ -638,6 +660,7 @@ export const useUIStore = create<UIState>()(
       setConvoNotificationSound: (v) => set({ convoNotificationSound: v }),
       setRpNotificationSound: (v) => set({ rpNotificationSound: v }),
       setCustomConversationPrompt: (v) => set({ customConversationPrompt: v }),
+      setScheduleGenerationPreferences: (v) => set({ scheduleGenerationPreferences: v }),
       setEnterToSendRP: (v) => set({ enterToSendRP: v }),
       setEnterToSendConvo: (v) => set({ enterToSendConvo: v }),
       setEnterToSendGame: (v) => set({ enterToSendGame: v }),
@@ -675,7 +698,7 @@ export const useUIStore = create<UIState>()(
     }),
     {
       name: "marinara-engine-ui",
-      version: 9,
+      version: 10,
       // Debounce localStorage writes to avoid sync I/O on every state change
       storage: createJSONStorage(() => {
         let timer: ReturnType<typeof setTimeout> | null = null;
@@ -775,6 +798,12 @@ export const useUIStore = create<UIState>()(
             persisted.roleplayAvatarStyle = "circles";
           }
         }
+        // v9 → v10: add Game mode avatar/sprite scale.
+        if (version <= 9) {
+          if (persisted.gameAvatarScale === undefined) {
+            persisted.gameAvatarScale = 1;
+          }
+        }
         return persisted;
       },
       partialize: (state) => ({
@@ -788,6 +817,7 @@ export const useUIStore = create<UIState>()(
         chatFontSize: state.chatFontSize,
         fontFamily: state.fontFamily,
         enableStreaming: state.enableStreaming,
+        debugMode: state.debugMode,
         streamingSpeed: state.streamingSpeed,
         gameInstantTextReveal: state.gameInstantTextReveal,
         gameTextSpeed: state.gameTextSpeed,
@@ -798,6 +828,7 @@ export const useUIStore = create<UIState>()(
         showModelName: state.showModelName,
         showTokenUsage: state.showTokenUsage,
         showMessageNumbers: state.showMessageNumbers,
+        guideGenerations: state.guideGenerations,
         confirmBeforeDelete: state.confirmBeforeDelete,
         messagesPerPage: state.messagesPerPage,
         boldDialogue: state.boldDialogue,
@@ -806,6 +837,7 @@ export const useUIStore = create<UIState>()(
         chatFontColor: state.chatFontColor,
         chatFontOpacity: state.chatFontOpacity,
         roleplayAvatarStyle: state.roleplayAvatarStyle,
+        gameAvatarScale: state.gameAvatarScale,
         textStrokeWidth: state.textStrokeWidth,
         textStrokeColor: state.textStrokeColor,
         visualTheme: state.visualTheme,
@@ -828,6 +860,7 @@ export const useUIStore = create<UIState>()(
         convoNotificationSound: state.convoNotificationSound,
         rpNotificationSound: state.rpNotificationSound,
         customConversationPrompt: state.customConversationPrompt,
+        scheduleGenerationPreferences: state.scheduleGenerationPreferences,
       }),
     },
   ),

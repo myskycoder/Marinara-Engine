@@ -56,14 +56,15 @@ export function buildPartySystemPrompt(ctx: PartyPromptContext): string {
     `  [Name] [whisper:TargetName] [expression]: "Whispered text." — A quiet aside directed at a specific character.`,
     ``,
     `Expression tags: Use [expression] to describe the character's facial expression/mood for the sprite display.`,
-    `Default: happy, sad, smirk, angry, neutral, surprised, worried, amused, disgusted, flirty, bored, scared, determined, mischievous, cold, tender, battle_stance, thinking, eye_roll, deadpan`,
+    `Default: happy, sad, smirk, angry, neutral, surprised, worried, amused, disgusted, flirty, bored, scared, determined, mischievous, cold, tender, thinking, eye_roll, deadpan`,
+    `The engine auto-selects built-in full-body poses like idle, thinking, cheer, battle stance, attack, defend, casting, hurt, and victory. Only use a pose-like tag when it is explicitly listed below for that character as a custom sprite alias.`,
     ...(ctx.characterSprites?.length
       ? [
           ``,
           `Available sprites per character (prefer these expression names for accurate avatar display):`,
           ...ctx.characterSprites.map(
             (c) =>
-              `  ${c.name}: ${c.expressions.join(", ")}${c.fullBody.length > 0 ? ` | full-body: ${c.fullBody.join(", ")}` : ""}`,
+              `  ${c.name}: ${c.expressions.join(", ")}${c.fullBody.length > 0 ? ` | custom full-body aliases: ${c.fullBody.join(", ")}` : ""}`,
           ),
         ]
       : []),
@@ -81,7 +82,7 @@ export function buildPartySystemPrompt(ctx: PartyPromptContext): string {
     `- Use [action] for physical actions, combat moves, exploration actions, and quick non-verbal reactions. Never use asterisks (*) — write plain text.`,
     `- Use [thought] sparingly for revealing inner conflict or foreshadowing`,
     `- Use [whisper:Name] for private asides (comedic or dramatic)`,
-    `- ALWAYS include the [expression] tag for every line — it drives the character sprite`,
+    `- ALWAYS include the [expression] tag for every line — it drives the portrait expression, while standard full-body poses are selected automatically by the engine`,
     `- Not every character needs to speak every turn — only those who would naturally react`,
     `- In [action] lines, ALWAYS address the player as "you" when describing something done to/around the player (e.g. "He gestures vaguely at your entire being")`,
     `- Dialogue text in [main], [side], and [whisper] should be in quotes`,

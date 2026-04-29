@@ -9,7 +9,14 @@ import { useGameStateStore } from "../stores/game-state.store";
 import { useEncounterStore } from "../stores/encounter.store";
 import { useUIStore } from "../stores/ui.store";
 import { clearBrowserRuntimeCaches } from "../lib/browser-runtime";
-import type { Chat, Message, MessageSwipe, DaySummaryEntry, WeekSummaryEntry } from "@marinara-engine/shared";
+import type {
+  Chat,
+  ChatMemoryChunk,
+  Message,
+  MessageSwipe,
+  DaySummaryEntry,
+  WeekSummaryEntry,
+} from "@marinara-engine/shared";
 
 export const chatKeys = {
   all: ["chats"] as const,
@@ -17,6 +24,7 @@ export const chatKeys = {
   detail: (id: string) => [...chatKeys.all, "detail", id] as const,
   messages: (chatId: string) => [...chatKeys.all, "messages", chatId] as const,
   messageCount: (chatId: string) => [...chatKeys.all, "messageCount", chatId] as const,
+  memories: (chatId: string) => [...chatKeys.all, "memories", chatId] as const,
   group: (groupId: string) => [...chatKeys.all, "group", groupId] as const,
 };
 
@@ -90,6 +98,35 @@ export function useChatMessageCount(chatId: string | null) {
   });
 }
 
+export function useChatMemories(chatId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: chatKeys.memories(chatId ?? ""),
+    queryFn: () => api.get<ChatMemoryChunk[]>(`/chats/${chatId}/memories`),
+    enabled: !!chatId && enabled,
+    staleTime: 10_000,
+  });
+}
+
+export function useDeleteChatMemory(chatId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (memoryId: string) => api.delete(`/chats/${chatId}/memories/${memoryId}`),
+    onSuccess: () => {
+      if (chatId) qc.invalidateQueries({ queryKey: chatKeys.memories(chatId) });
+    },
+  });
+}
+
+export function useClearChatMemories(chatId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.delete(`/chats/${chatId}/memories`),
+    onSuccess: () => {
+      if (chatId) qc.invalidateQueries({ queryKey: chatKeys.memories(chatId) });
+    },
+  });
+}
+
 export function useChatGroup(groupId: string | null) {
   return useQuery({
     queryKey: chatKeys.group(groupId ?? ""),
@@ -110,7 +147,9 @@ export function useCreateChat() {
       personaId?: string | null;
       promptPresetId?: string | null;
     }) => api.post<Chat>("/chats", data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: chatKeys.list() }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: chatKeys.list() });
+    },
   });
 }
 
@@ -121,13 +160,28 @@ export function useDeleteChat() {
     onMutate: async (id) => {
       await qc.cancelQueries({ queryKey: chatKeys.list() });
       const previous = qc.getQueryData<Chat[]>(chatKeys.list());
+      const deletedChat = previous?.find((c) => c.id === id) ?? null;
+
       qc.setQueryData<Chat[]>(chatKeys.list(), (old) => old?.filter((c) => c.id !== id));
-      return { previous };
+
+      if (deletedChat?.groupId) {
+        qc.setQueryData<Chat[]>(chatKeys.group(deletedChat.groupId), (old) => old?.filter((c) => c.id !== id));
+      }
+
+      return { previous, deletedChat };
     },
     onError: (_err, _id, context) => {
       if (context?.previous) qc.setQueryData(chatKeys.list(), context.previous);
+      if (context?.deletedChat?.groupId) {
+        qc.invalidateQueries({ queryKey: chatKeys.group(context.deletedChat.groupId) });
+      }
     },
-    onSettled: () => qc.invalidateQueries({ queryKey: chatKeys.list() }),
+    onSettled: (_data, _err, _id, context) => {
+      qc.invalidateQueries({ queryKey: chatKeys.list() });
+      if (context?.deletedChat?.groupId) {
+        qc.invalidateQueries({ queryKey: chatKeys.group(context.deletedChat.groupId) });
+      }
+    },
   });
 }
 
@@ -138,13 +192,24 @@ export function useDeleteChatGroup() {
     onMutate: async (groupId) => {
       await qc.cancelQueries({ queryKey: chatKeys.list() });
       const previous = qc.getQueryData<Chat[]>(chatKeys.list());
+
       qc.setQueryData<Chat[]>(chatKeys.list(), (old) => old?.filter((c) => c.groupId !== groupId));
-      return { previous };
+      qc.setQueryData<Chat[]>(chatKeys.group(groupId), []);
+
+      return { previous, groupId };
     },
     onError: (_err, _groupId, context) => {
       if (context?.previous) qc.setQueryData(chatKeys.list(), context.previous);
+      if (context?.groupId) {
+        qc.invalidateQueries({ queryKey: chatKeys.group(context.groupId) });
+      }
     },
-    onSettled: () => qc.invalidateQueries({ queryKey: chatKeys.list() }),
+    onSettled: (_data, _err, _groupId, context) => {
+      qc.invalidateQueries({ queryKey: chatKeys.list() });
+      if (context?.groupId) {
+        qc.invalidateQueries({ queryKey: chatKeys.group(context.groupId) });
+      }
+    },
   });
 }
 
@@ -184,18 +249,18 @@ export function useUpdateChatMetadata() {
   return useMutation({
     mutationFn: ({ id, ...metadata }: { id: string; [key: string]: unknown }) =>
       api.patch<Chat>(`/chats/${id}/metadata`, metadata),
-    onSuccess: (updatedChat, vars) => {
-      qc.setQueryData(chatKeys.detail(vars.id), updatedChat);
-      qc.setQueryData<Chat[]>(chatKeys.list(), (existing) =>
-        existing?.map((chat) => (chat.id === vars.id ? updatedChat : chat)),
-      );
-
-      const chatStore = useChatStore.getState();
-      if (chatStore.activeChatId === vars.id) {
-        chatStore.setActiveChat(updatedChat);
+    onSuccess: (data, vars) => {
+      // Write the server response straight into the detail cache. Plain
+      // invalidation alone leaves stale data in place when no observer is
+      // mounted to trigger a refetch (e.g. user navigated away after firing
+      // the mutation), causing later renders to re-read the pre-mutation
+      // value — which is what made cleared chat backgrounds reappear after
+      // a chat switch round-trip.
+      if (data) {
+        qc.setQueryData(chatKeys.detail(vars.id), data);
+      } else {
+        qc.invalidateQueries({ queryKey: chatKeys.detail(vars.id) });
       }
-
-      qc.invalidateQueries({ queryKey: chatKeys.detail(vars.id) });
       qc.invalidateQueries({ queryKey: chatKeys.list() });
     },
   });
@@ -370,7 +435,11 @@ export function useBranchChat() {
     onSuccess: (newChat, { chatId }) => {
       qc.invalidateQueries({ queryKey: chatKeys.list() });
       qc.invalidateQueries({ queryKey: chatKeys.detail(chatId) });
-      // Pre-populate the new branch's cache so settings are immediately available
+
+      if (newChat?.groupId) {
+        qc.invalidateQueries({ queryKey: chatKeys.group(newChat.groupId) });
+      }
+
       if (newChat) {
         qc.setQueryData(chatKeys.detail(newChat.id), newChat);
       }

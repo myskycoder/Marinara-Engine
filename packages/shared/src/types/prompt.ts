@@ -208,6 +208,8 @@ export const BUILTIN_MARKERS = {
 export interface ChatMLMessage {
   role: PromptRole;
   content: string;
+  /** Internal context-fitting hint: prompt data is preserved before chat history. */
+  contextKind?: "prompt" | "history" | "injection";
   /** Optional: name of the speaker for multi-character */
   name?: string;
   /** Base64 data URLs for multimodal image inputs */

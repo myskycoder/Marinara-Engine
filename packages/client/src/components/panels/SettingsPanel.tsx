@@ -50,8 +50,9 @@ import {
   RefreshCw,
   ExternalLink,
 } from "lucide-react";
-import { useClearAllData, useExpungeData, type ExpungeScope } from "../../hooks/use-chats";
+import { useClearAllData, useExpungeData, useUpdateChatMetadata, type ExpungeScope } from "../../hooks/use-chats";
 import { useChatStore } from "../../stores/chat.store";
+import { useGameAssetStore } from "../../stores/game-asset.store";
 import { chatKeys } from "../../hooks/use-chats";
 import { HelpTooltip } from "../ui/HelpTooltip";
 import { ConversationSoundSetting, ToggleSetting } from "./settings/SettingControls";
@@ -119,6 +120,42 @@ const ROLEPLAY_AVATAR_STYLE_OPTIONS: Array<{ id: RoleplayAvatarStyle; label: str
     desc: "A taller portrait strip fused into the message bubble.",
   },
 ];
+
+const GAME_ASSET_CATEGORIES = [
+  {
+    id: "music",
+    label: "Music",
+    defaultFolder: "exploration",
+    accept: "audio/*,.mp3,.ogg,.wav,.flac,.m4a,.aac,.webm",
+  },
+  {
+    id: "ambient",
+    label: "Ambient",
+    defaultFolder: "nature",
+    accept: "audio/*,.mp3,.ogg,.wav,.flac,.m4a,.aac,.webm",
+  },
+  {
+    id: "sfx",
+    label: "Sound Effects",
+    defaultFolder: "exploration",
+    accept: "audio/*,.mp3,.ogg,.wav,.flac,.m4a,.aac,.webm",
+  },
+  {
+    id: "sprites",
+    label: "Sprites",
+    defaultFolder: "generic-fantasy",
+    accept: "image/*,.svg",
+  },
+  {
+    id: "backgrounds",
+    label: "Backgrounds",
+    defaultFolder: "custom",
+    accept: "image/*",
+  },
+] as const;
+
+type GameAssetCategoryId = (typeof GAME_ASSET_CATEGORIES)[number]["id"];
+const GAME_ASSET_CATEGORY_BY_ID = new Map(GAME_ASSET_CATEGORIES.map((category) => [category.id, category]));
 
 // Module-level set survives component remounts (e.g. mobile AnimatePresence unmount/remount)
 const mountedSettingsTabs = new Set<string>();
@@ -195,6 +232,72 @@ function GeneralSettings() {
   const setMessagesPerPage = useUIStore((s) => s.setMessagesPerPage);
   const boldDialogue = useUIStore((s) => s.boldDialogue);
   const setBoldDialogue = useUIStore((s) => s.setBoldDialogue);
+  const rescanGameAssets = useGameAssetStore((s) => s.rescanAssets);
+  const assetFileRef = useRef<HTMLInputElement>(null);
+  const [assetCategory, setAssetCategory] = useState<GameAssetCategoryId>("backgrounds");
+  const [assetSubcategory, setAssetSubcategory] = useState<string>(
+    GAME_ASSET_CATEGORY_BY_ID.get("backgrounds")?.defaultFolder ?? "custom",
+  );
+  const [assetFiles, setAssetFiles] = useState<File[]>([]);
+  const [assetUploading, setAssetUploading] = useState(false);
+  const assetCategoryMeta = GAME_ASSET_CATEGORY_BY_ID.get(assetCategory) ?? GAME_ASSET_CATEGORIES[0];
+
+  const handleAssetCategoryChange = (nextCategory: GameAssetCategoryId) => {
+    setAssetCategory(nextCategory);
+    setAssetSubcategory(GAME_ASSET_CATEGORY_BY_ID.get(nextCategory)?.defaultFolder ?? "custom");
+    setAssetFiles([]);
+    if (assetFileRef.current) assetFileRef.current.value = "";
+  };
+
+  const handleGameAssetUpload = async () => {
+    if (assetUploading) return;
+    if (assetFiles.length === 0) {
+      toast.error("Choose at least one asset file first.");
+      return;
+    }
+    const folder = assetSubcategory.trim().replace(/^\/+|\/+$/g, "") || assetCategoryMeta.defaultFolder;
+    if (folder.includes("..") || folder.includes("\\") || folder.startsWith("/")) {
+      toast.error("Folder names cannot contain path traversal.");
+      return;
+    }
+
+    const tooLarge = assetFiles.find((file) => file.size > 50 * 1024 * 1024);
+    if (tooLarge) {
+      toast.error(`${tooLarge.name} is too large. Game assets are limited to 50 MB each.`);
+      return;
+    }
+
+    setAssetUploading(true);
+    try {
+      const uploads = await Promise.allSettled(
+        assetFiles.map((file) => {
+          const form = new FormData();
+          form.append("category", assetCategory);
+          form.append("subcategory", folder);
+          form.append("file", file, file.name);
+          return api.upload<{ tag: string; path: string; manifestCount: number }>("/game-assets/upload", form);
+        }),
+      );
+      const succeeded = uploads.filter((result) => result.status === "fulfilled").length;
+      const failed = uploads.length - succeeded;
+      await rescanGameAssets();
+      if (succeeded > 0) {
+        toast.success(`Uploaded ${succeeded} game asset${succeeded === 1 ? "" : "s"}.`);
+      }
+      if (failed > 0) {
+        const reason = uploads.find((result) => result.status === "rejected");
+        toast.error(
+          reason?.status === "rejected" && reason.reason instanceof Error
+            ? reason.reason.message
+            : `${failed} asset upload${failed === 1 ? "" : "s"} failed.`,
+        );
+      }
+      setAssetFiles([]);
+      if (assetFileRef.current) assetFileRef.current.value = "";
+    } finally {
+      setAssetUploading(false);
+    }
+  };
 
   return (
     <div className="flex flex-col gap-3">
@@ -315,7 +418,7 @@ function GeneralSettings() {
       <div className="flex flex-col gap-1.5 rounded-lg p-1 transition-colors hover:bg-[var(--secondary)]/50">
         <div className="flex items-center gap-2">
           <span className="text-xs">Send on Enter</span>
-          <HelpTooltip text="Choose which chat modes send on Enter. When off, Enter creates a new line and you press Ctrl/Cmd+Enter to send." />
+          <HelpTooltip text="Choose which chat modes send on Enter. When off, Enter creates a new line and you have to press the send button manually." />
         </div>
         <div className="flex items-center gap-1.5">
           <button
@@ -385,25 +488,99 @@ function GeneralSettings() {
 
       {/* Game Assets Folders */}
       <div className="rounded-xl bg-[var(--secondary)]/50 p-4 ring-1 ring-[var(--border)]">
-        <div className="mb-2 text-xs font-semibold text-[var(--foreground)]">Game Asset Folders</div>
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <div className="text-xs font-semibold text-[var(--foreground)]">Game Assets</div>
+          <button
+            onClick={() => {
+              rescanGameAssets()
+                .then(() => toast.success("Game assets rescanned."))
+                .catch(() => toast.error("Failed to rescan game assets."));
+            }}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--secondary)] px-2.5 py-1.5 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+          >
+            <RefreshCw size="0.75rem" />
+            Rescan
+          </button>
+        </div>
         <div className="flex flex-wrap gap-2">
-          {(["music", "ambient", "sfx", "sprites", "backgrounds"] as const).map((folder) => (
+          {GAME_ASSET_CATEGORIES.map((folder) => (
             <button
-              key={folder}
-              onClick={() => api.post("/game-assets/open-folder", { subfolder: folder }).catch(() => {})}
+              key={folder.id}
+              onClick={() => api.post("/game-assets/open-folder", { subfolder: folder.id }).catch(() => {})}
               className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-[0.6875rem] font-medium capitalize text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
             >
               <FolderOpen size="0.75rem" />
-              {folder}
+              {folder.id}
             </button>
           ))}
         </div>
+
+        <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          <label className="flex min-w-0 flex-col gap-1">
+            <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Type</span>
+            <select
+              value={assetCategory}
+              onChange={(e) => handleAssetCategoryChange(e.target.value as GameAssetCategoryId)}
+              className="w-full rounded-lg bg-[var(--background)] px-3 py-2 text-xs text-[var(--foreground)] outline-none ring-1 ring-[var(--border)] focus:ring-[var(--primary)]"
+            >
+              {GAME_ASSET_CATEGORIES.map((category) => (
+                <option key={category.id} value={category.id}>
+                  {category.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex min-w-0 flex-col gap-1">
+            <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Folder</span>
+            <input
+              value={assetSubcategory}
+              onChange={(e) => setAssetSubcategory(e.target.value)}
+              placeholder={assetCategoryMeta.defaultFolder}
+              className="w-full rounded-lg bg-[var(--background)] px-3 py-2 text-xs text-[var(--foreground)] outline-none ring-1 ring-[var(--border)] focus:ring-[var(--primary)]"
+            />
+          </label>
+        </div>
+
+        <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+          <input
+            ref={assetFileRef}
+            type="file"
+            multiple
+            accept={assetCategoryMeta.accept}
+            className="hidden"
+            onChange={(e) => setAssetFiles(Array.from(e.target.files ?? []))}
+          />
+          <button
+            onClick={() => assetFileRef.current?.click()}
+            className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs font-medium text-[var(--foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)]"
+          >
+            <Upload size="0.875rem" />
+            Choose Files
+          </button>
+          <button
+            onClick={handleGameAssetUpload}
+            disabled={assetUploading || assetFiles.length === 0}
+            className={cn(
+              "inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold ring-1 transition-all",
+              assetUploading || assetFiles.length === 0
+                ? "cursor-not-allowed bg-[var(--muted)] text-[var(--muted-foreground)] ring-[var(--border)]"
+                : "bg-[var(--primary)]/15 text-[var(--primary)] ring-[var(--primary)]/30 hover:bg-[var(--primary)]/20",
+            )}
+          >
+            {assetUploading ? <Loader2 size="0.875rem" className="animate-spin" /> : <Upload size="0.875rem" />}
+            Upload to Server
+          </button>
+          {assetFiles.length > 0 && (
+            <span className="truncate text-[0.625rem] text-[var(--muted-foreground)]">
+              {assetFiles.length === 1 ? assetFiles[0]?.name : `${assetFiles.length} files selected`}
+            </span>
+          )}
+        </div>
+
         <p className="mt-2.5 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
-          Drop <code className="rounded bg-[var(--secondary)] px-1 py-0.5 text-[var(--foreground)]/70">.mp3</code>,{" "}
-          <code className="rounded bg-[var(--secondary)] px-1 py-0.5 text-[var(--foreground)]/70">.ogg</code>, or{" "}
-          <code className="rounded bg-[var(--secondary)] px-1 py-0.5 text-[var(--foreground)]/70">.wav</code> files into
-          the subfolder that matches the vibe (e.g. combat music → <strong>music/combat</strong>, forest ambience →{" "}
-          <strong>ambient/nature</strong>). Restart or rescan assets for changes to take effect.
+          On desktop, folder buttons open the server's asset folders. On mobile or a dedicated server, use upload here
+          so files from your phone are copied onto the server. Audio supports MP3, OGG, WAV, FLAC, M4A, AAC, and WebM;
+          images support PNG, JPG, GIF, WebP, AVIF, and SVG for sprites.
         </p>
       </div>
     </div>
@@ -416,7 +593,23 @@ function AppearanceSettings() {
   const visualTheme = useUIStore((s) => s.visualTheme);
   const setVisualTheme = useUIStore((s) => s.setVisualTheme);
   const chatBackground = useUIStore((s) => s.chatBackground);
-  const setChatBackground = useUIStore((s) => s.setChatBackground);
+  const setChatBackgroundRaw = useUIStore((s) => s.setChatBackground);
+  const activeChatId = useChatStore((s) => s.activeChatId);
+  const updateMeta = useUpdateChatMetadata();
+  // Persist background changes to the active chat's metadata immediately so
+  // a clear (or pick) survives chat switches and page reloads. The effect-based
+  // persist in ChatArea covers other sources (agents/scene/slash commands), but
+  // for the Settings UI we wire the mutation directly to the click to remove
+  // any timing ambiguity around clearing.
+  const setChatBackground = useCallback(
+    (url: string | null) => {
+      setChatBackgroundRaw(url);
+      if (!activeChatId) return;
+      const filename = url ? decodeURIComponent(url.replace(/^\/api\/backgrounds\/file\//, "")) : null;
+      updateMeta.mutate({ id: activeChatId, background: filename });
+    },
+    [setChatBackgroundRaw, activeChatId, updateMeta],
+  );
   const fontFamily = useUIStore((s) => s.fontFamily);
   const setFontFamily = useUIStore((s) => s.setFontFamily);
   const convoGradientFrom = useUIStore((s) => s.convoGradientFrom);
@@ -439,6 +632,8 @@ function AppearanceSettings() {
   const setChatFontOpacity = useUIStore((s) => s.setChatFontOpacity);
   const roleplayAvatarStyle = useUIStore((s) => s.roleplayAvatarStyle);
   const setRoleplayAvatarStyle = useUIStore((s) => s.setRoleplayAvatarStyle);
+  const gameAvatarScale = useUIStore((s) => s.gameAvatarScale);
+  const setGameAvatarScale = useUIStore((s) => s.setGameAvatarScale);
   const textStrokeWidth = useUIStore((s) => s.textStrokeWidth);
   const setTextStrokeWidth = useUIStore((s) => s.setTextStrokeWidth);
   const textStrokeColor = useUIStore((s) => s.textStrokeColor);
@@ -780,10 +975,10 @@ function AppearanceSettings() {
                   </div>
                 ) : opt.id === "rectangles" ? (
                   <div className="flex h-14 items-center px-3">
-                    <div className="h-11 w-8 overflow-hidden rounded-xl bg-gradient-to-b from-rose-400/65 via-orange-300/45 to-zinc-600/70 ring-1 ring-white/12">
-                      <div className="h-full w-full bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.2),transparent_58%)]" />
-                    </div>
-                    <div className="ml-2.5 flex-1 rounded-2xl rounded-tl-sm bg-black/25 px-3 py-2">
+                    <div className="relative flex-1 rounded-2xl rounded-tl-sm bg-black/25 py-2 pl-8 pr-3">
+                      <div className="absolute left-2 top-2 h-4 w-4 overflow-hidden rounded bg-gradient-to-b from-rose-400/75 via-orange-300/55 to-zinc-600/80 ring-1 ring-white/20">
+                        <div className="h-full w-full bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.24),transparent_58%)]" />
+                      </div>
                       <div className="h-1.5 w-14 rounded-full bg-white/20" />
                       <div className="mt-1.5 h-1.5 w-20 rounded-full bg-white/12" />
                     </div>
@@ -810,6 +1005,44 @@ function AppearanceSettings() {
           Rectangles keep the compact side slot but give portraits a bit more vertical room. The larger panel crops
           portraits from the top on short messages and fades them back into the bubble background on taller ones.
         </p>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-1.5">
+          <Image size="0.75rem" className="text-[var(--muted-foreground)]" />
+          <span className="text-xs font-medium">Game Avatars</span>
+          <HelpTooltip text="Scales Game mode VN portraits and full-body sprites. The game view clamps oversized art so it still fits on small screens." />
+        </div>
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/45 p-3">
+          <div className="flex items-center gap-3">
+            <div className="flex h-16 w-20 shrink-0 items-end justify-center overflow-hidden rounded-md bg-black/30 ring-1 ring-[var(--border)]/70">
+              <div
+                className="mb-1 rounded-lg border border-white/20 bg-gradient-to-b from-sky-300/80 via-cyan-200/65 to-slate-800/90 shadow-lg transition-all"
+                style={{
+                  width: `${Math.min(3.5, 2.25 * gameAvatarScale)}rem`,
+                  height: `${Math.min(3.9, 2.6 * gameAvatarScale)}rem`,
+                }}
+              />
+            </div>
+            <label className="flex min-w-0 flex-1 flex-col gap-1">
+              <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">Avatar and sprite scale</span>
+              <div className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min={0.75}
+                  max={1.75}
+                  step={0.05}
+                  value={gameAvatarScale}
+                  onChange={(e) => setGameAvatarScale(Number(e.target.value))}
+                  className="min-w-0 flex-1 accent-[var(--primary)]"
+                />
+                <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
+                  {Math.round(gameAvatarScale * 100)}%
+                </span>
+              </div>
+            </label>
+          </div>
+        </div>
       </div>
 
       {/* ── Effects ── */}
@@ -1928,6 +2161,10 @@ function AdvancedSettings() {
   const setShowTokenUsage = useUIStore((s) => s.setShowTokenUsage);
   const showMessageNumbers = useUIStore((s) => s.showMessageNumbers);
   const setShowMessageNumbers = useUIStore((s) => s.setShowMessageNumbers);
+  const guideGenerations = useUIStore((s) => s.guideGenerations);
+  const setGuideGenerations = useUIStore((s) => s.setGuideGenerations);
+  const debugMode = useUIStore((s) => s.debugMode);
+  const setDebugMode = useUIStore((s) => s.setDebugMode);
   const clearAllData = useClearAllData();
   const expungeData = useExpungeData();
   const [selectedScopes, setSelectedScopes] = useState<ExpungeScope[]>(["chats"]);
@@ -2306,6 +2543,18 @@ function AdvancedSettings() {
         checked={showMessageNumbers}
         onChange={setShowMessageNumbers}
         help="Displays a message number below each avatar in roleplay chats."
+      />
+      <ToggleSetting
+        label="Guide generations with chat input"
+        checked={guideGenerations}
+        onChange={setGuideGenerations}
+        help="Uses chat input to guide regenerations and manually triggered responses."
+      />
+      <ToggleSetting
+        label="Debug mode"
+        checked={debugMode}
+        onChange={setDebugMode}
+        help="Logs the prompt and response payloads sent to the model in the server console for debugging."
       />
 
       {/* ── Backup ── */}

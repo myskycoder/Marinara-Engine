@@ -2,9 +2,11 @@
 // Sidecar Local Model Types
 //
 // Types for the built-in Gemma E2B sidecar that
-// handles tracker agents, scene analysis, widget
-// updates, and game mechanics locally.
+// handles tracker agents, scene analysis, and
+// game mechanics locally.
 // ──────────────────────────────────────────────
+
+import type { DirectionCommand } from "./game.js";
 
 /** Available quantization variants for the sidecar model. */
 export type SidecarQuantization = "q8_0" | "q4_k_m";
@@ -59,7 +61,7 @@ export interface SidecarConfig {
   customModelRepo: string | null;
   /** Whether to use the sidecar for tracker agents in roleplay mode. */
   useForTrackers: boolean;
-  /** Whether to use the sidecar for game scene analysis (backgrounds, music, widgets, etc.). */
+  /** Whether to use the sidecar for game scene analysis (backgrounds, music, weather, effects). */
   useForGameScene: boolean;
   /** Context size for the model. Default 8192. */
   contextSize: number;
@@ -158,8 +160,27 @@ export interface SceneSegmentEffect {
   music?: string | null;
   sfx?: string[];
   ambient?: string | null;
-  expressions?: Record<string, string>;
-  widgetUpdates?: SceneWidgetUpdate[];
+  /** Rare cinematic overlays/visual effects to fire when this narration segment appears. */
+  directions?: DirectionCommand[];
+}
+
+/** Rare request for a VN CG-style illustration background. */
+export interface SceneIllustrationRequest {
+  /** 0-based narration segment where the illustration should replace the background. */
+  segment?: number;
+  /** Image-generation prompt describing the important moment. */
+  prompt: string;
+  /** Names of visible referenced characters, if known. */
+  characters?: string[];
+  /** Why this scene is important enough to spend an image generation. */
+  reason?: string;
+  /** Optional stable filename hint. */
+  slug?: string;
+}
+
+export interface GeneratedSceneIllustration {
+  tag: string;
+  segment?: number;
 }
 
 /** Scene analysis result from the sidecar model for game mode.
@@ -193,10 +214,14 @@ export interface SceneAnalysis {
   season?: Season | null;
   /** NPC reputation changes — applied immediately. */
   reputationChanges: SceneReputationChange[];
-  /** Scene-wide widget updates — applied immediately after the turn. */
-  widgetUpdates?: SceneWidgetUpdate[];
   /** Segment-indexed effects. Each entry fires when the user reaches that segment. */
   segmentEffects?: SceneSegmentEffect[];
+  /** Cinematic overlay directions to play for this turn. */
+  directions?: DirectionCommand[];
+  /** Rare important-scene illustration request. Generated only when image generation is enabled. */
+  illustration?: SceneIllustrationRequest | null;
+  /** Generated illustration background tag, populated by the server when available. */
+  generatedIllustration?: GeneratedSceneIllustration | null;
   /** NPC avatars generated during this scene wrap (populated by server when image gen is enabled). */
   generatedNpcAvatars?: Array<{ name: string; avatarUrl: string }>;
   /**

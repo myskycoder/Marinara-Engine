@@ -1,7 +1,7 @@
 // ──────────────────────────────────────────────
 // Game: Node Map (dungeons/interiors)
 // ──────────────────────────────────────────────
-import { useState, useCallback } from "react";
+import { useState, useCallback, type ReactNode } from "react";
 import { cn } from "../../lib/utils";
 import type { GameMap } from "@marinara-engine/shared";
 
@@ -11,12 +11,21 @@ interface GameNodeMapProps {
   selectedNodeId?: string | null;
   /** When true, node clicks are disabled (e.g. narration still playing) */
   disabled?: boolean;
+  showPartyPosition?: boolean;
+  topLeftAction?: ReactNode;
 }
 
-export function GameNodeMap({ map, onNodeClick, selectedNodeId, disabled }: GameNodeMapProps) {
+export function GameNodeMap({
+  map,
+  onNodeClick,
+  selectedNodeId,
+  disabled,
+  showPartyPosition = true,
+  topLeftAction,
+}: GameNodeMapProps) {
   const nodes = map.nodes || [];
   const edges = map.edges || [];
-  const currentNodeId = typeof map.partyPosition === "string" ? map.partyPosition : null;
+  const currentNodeId = showPartyPosition && typeof map.partyPosition === "string" ? map.partyPosition : null;
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
 
   const handleTap = useCallback(
@@ -60,10 +69,11 @@ export function GameNodeMap({ map, onNodeClick, selectedNodeId, disabled }: Game
 
   return (
     <div
-      className="overflow-y-auto overflow-x-hidden"
+      className="relative overflow-y-auto overflow-x-hidden"
       style={{ maxHeight: 220 }}
       onMouseLeave={() => setHoveredNodeId(null)}
     >
+      {topLeftAction}
       <svg
         viewBox={`${minX} ${minY} ${viewWidth} ${viewHeight}`}
         className="w-full rounded border border-[var(--border)] bg-gray-900/30"

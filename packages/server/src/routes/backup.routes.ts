@@ -21,7 +21,7 @@ const BACKUP_DIRS = ["avatars", "sprites", "backgrounds", "gallery", "fonts", "k
 
 function resolveAvatarWritePath(dataDir: string, avatarPath: unknown) {
   if (typeof avatarPath !== "string" || !avatarPath.trim()) return null;
-  const filename = avatarPath.split("/").filter(Boolean).pop();
+  const filename = avatarPath.split("?")[0]?.split("/").filter(Boolean).pop();
   if (!filename) return null;
   return join(dataDir, "avatars", filename);
 }

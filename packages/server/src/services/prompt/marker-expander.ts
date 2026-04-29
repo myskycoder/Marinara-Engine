@@ -17,6 +17,7 @@ export interface MarkerContext {
   db: DB;
   chatId: string;
   characterIds: string[];
+  personaId?: string | null;
   personaName: string;
   personaDescription: string;
   personaFields?: {
@@ -224,6 +225,7 @@ async function expandLorebook(config: MarkerConfig, ctx: MarkerContext): Promise
   const result = await processLorebooks(ctx.db, ctx.chatMessages, null, {
     chatId: ctx.chatId,
     characterIds: ctx.characterIds,
+    personaId: ctx.personaId ?? null,
     activeLorebookIds: ctx.activeLorebookIds,
     chatEmbedding: ctx.chatEmbedding ?? null,
     entryStateOverrides: ctx.entryStateOverrides,
@@ -316,7 +318,7 @@ async function expandChatHistory(config: MarkerConfig, ctx: MarkerContext): Prom
 
   // Chat history is special — it returns multiple messages to be inserted directly,
   // not a single content block. The assembler handles this.
-  return { content: "", messages };
+  return { content: "", messages: messages.map((message) => ({ ...message, contextKind: "history" as const })) };
 }
 
 // ── Dialogue Examples ──────────────────────────

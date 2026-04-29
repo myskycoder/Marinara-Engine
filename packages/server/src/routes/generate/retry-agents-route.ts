@@ -11,13 +11,14 @@ import type { ResolvedAgent } from "../../services/agents/agent-pipeline.js";
 import { executeAgent, executeAgentBatch } from "../../services/agents/agent-executor.js";
 import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "../../services/llm/local-sidecar.js";
 import { createLLMProvider } from "../../services/llm/provider-registry.js";
+import { sidecarModelService } from "../../services/sidecar/sidecar-model.service.js";
 import { createAgentsStorage } from "../../services/storage/agents.storage.js";
 import { createCharactersStorage } from "../../services/storage/characters.storage.js";
 import { createChatsStorage } from "../../services/storage/chats.storage.js";
 import { createConnectionsStorage } from "../../services/storage/connections.storage.js";
 import { createGameStateStorage } from "../../services/storage/game-state.storage.js";
 import { createLorebooksStorage } from "../../services/storage/lorebooks.storage.js";
-import { syncGameMapPartyPosition } from "../../services/game/map-position.service.js";
+import { syncGameMapMetaPartyPosition } from "../../services/game/map-position.service.js";
 import { materializeGameNpcs } from "../../services/game/npc-materializer.service.js";
 import { gameStateSnapshots as gameStateSnapshotsTable } from "../../db/schema/index.js";
 import { parseExtra, parseGameStateRow, resolveBaseUrl } from "./generate-route-utils.js";
@@ -33,6 +34,7 @@ import { sendSseEvent, startSseReply } from "./sse.js";
 import type { GameMap, PresentCharacter } from "@marinara-engine/shared";
 
 type PersonaContext = {
+  personaId: string | null;
   personaName: string;
   personaDescription: string;
   personaFields: { personality?: string; scenario?: string; backstory?: string; appearance?: string };
@@ -56,6 +58,7 @@ async function resolvePersonaContext(
   chat: any,
 ): Promise<PersonaContext> {
   let personaName = "User";
+  let personaId: string | null = null;
   let personaDescription = "";
   let personaFields: PersonaContext["personaFields"] = {};
   let personaStats: any = null;
@@ -67,9 +70,10 @@ async function resolvePersonaContext(
     allPersonas.find((p: any) => p.isActive === "true");
 
   if (!persona) {
-    return { personaName, personaDescription, personaFields, personaStats, rpgStats };
+    return { personaId, personaName, personaDescription, personaFields, personaStats, rpgStats };
   }
 
+  personaId = persona.id as string;
   personaName = persona.name;
   personaDescription = persona.description;
   personaFields = {
@@ -102,7 +106,7 @@ async function resolvePersonaContext(
     }
   }
 
-  return { personaName, personaDescription, personaFields, personaStats, rpgStats };
+  return { personaId, personaName, personaDescription, personaFields, personaStats, rpgStats };
 }
 
 async function buildRetryAgentContext(args: {
@@ -216,6 +220,7 @@ async function buildRetryAgentContext(args: {
     lorebooksStore,
     chatId,
     characterIds,
+    personaId: personaContext.personaId,
     activeLorebookIds,
     preferredTargetLorebookId: lorebookKeeperSettings.targetLorebookId,
   });
@@ -283,16 +288,18 @@ async function resolveRetryAgents(args: {
     conn.maxTokensOverride,
   );
   const resolvedAgents: ResolvedRetryAgent[] = [];
+  const localSidecarAvailableForTrackers =
+    sidecarModelService.getConfig().useForTrackers && sidecarModelService.getConfiguredModelRef() !== null;
 
   for (const cfg of enabledConfigs) {
     let agentProvider = provider;
     let agentModel = conn.model;
 
     if (cfg.connectionId) {
-      if (cfg.connectionId === LOCAL_SIDECAR_CONNECTION_ID) {
+      if (cfg.connectionId === LOCAL_SIDECAR_CONNECTION_ID && localSidecarAvailableForTrackers) {
         agentProvider = getLocalSidecarProvider();
         agentModel = LOCAL_SIDECAR_MODEL;
-      } else {
+      } else if (cfg.connectionId !== LOCAL_SIDECAR_CONNECTION_ID) {
         const agentConn = await conns.getWithKey(cfg.connectionId as string);
         if (agentConn) {
           const agentBaseUrl = resolveBaseUrl(agentConn);
@@ -523,11 +530,12 @@ async function applyRetryResultEffects(args: {
           await gameStateStore.updateByMessage(retryMessageId, retrySwipeIndex, chatId, worldStatePatch as any);
         }
 
-        const existingGameMap = (chatMeta.gameMap as GameMap | null) ?? null;
         const nextLocation = typeof worldStatePatch.location === "string" ? worldStatePatch.location : null;
-        const syncedGameMap = syncGameMapPartyPosition(existingGameMap, nextLocation);
+        const existingGameMap = (chatMeta.gameMap as GameMap | null) ?? null;
+        const syncedMeta = syncGameMapMetaPartyPosition(chatMeta, nextLocation);
+        const syncedGameMap = (syncedMeta.gameMap as GameMap | null) ?? null;
         if (syncedGameMap && syncedGameMap !== existingGameMap) {
-          chatMeta.gameMap = syncedGameMap;
+          Object.assign(chatMeta, syncedMeta);
           await chats.updateMetadata(chatId, chatMeta);
           sendSseEvent(reply, { type: "game_map_update", data: syncedGameMap });
         }
@@ -815,7 +823,7 @@ async function applyRetryResultEffects(args: {
                   const charRow = await chars.getById(c.id);
                   const avatarPath = charRow?.avatarPath as string | null;
                   if (!avatarPath) continue;
-                  const filename = avatarPath.split("/").pop();
+                  const filename = avatarPath.split("?")[0]?.split("/").pop();
                   if (!filename) continue;
                   const diskPath = join(DATA_DIR, "avatars", filename);
                   try {
@@ -834,7 +842,7 @@ async function applyRetryResultEffects(args: {
                     const { readFileSync, existsSync } = await import("node:fs");
                     const { join } = await import("node:path");
                     const DATA_DIR = join(process.cwd(), "packages", "server", "data");
-                    const filename = avatarPath.split("/").pop();
+                    const filename = avatarPath.split("?")[0]?.split("/").pop();
                     if (filename) {
                       const diskPath = join(DATA_DIR, "avatars", filename);
                       try {

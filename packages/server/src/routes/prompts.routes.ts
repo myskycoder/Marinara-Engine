@@ -287,13 +287,17 @@ export async function promptsRoutes(app: FastifyInstance) {
 
     // Resolve persona
     const charStorage = createCharactersStorage(app.db);
+    let personaId: string | null = null;
     let personaName = "User";
     let personaDescription = "";
     let personaFields: { personality?: string; scenario?: string; backstory?: string; appearance?: string } = {};
     // Get active persona
     const allPersonas = await charStorage.listPersonas();
-    const activePersona = allPersonas.find((p: any) => p.isActive === "true");
+    const activePersona =
+      (chat.personaId ? allPersonas.find((p: any) => p.id === chat.personaId) : null) ??
+      allPersonas.find((p: any) => p.isActive === "true");
     if (activePersona) {
+      personaId = activePersona.id as string;
       personaName = activePersona.name;
       personaDescription = activePersona.description;
       personaFields = {
@@ -319,6 +323,7 @@ export async function promptsRoutes(app: FastifyInstance) {
       chatChoices: choices ?? {},
       chatId,
       characterIds,
+      personaId,
       personaName,
       personaDescription,
       personaFields,

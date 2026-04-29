@@ -48,6 +48,8 @@ export interface MapEdge {
 
 /** A map of the current area — either a grid (overworld/city) or a node graph (dungeon/interior). */
 export interface GameMap {
+  /** Stable ID used when a game stores more than one map. Older saves may omit it. */
+  id?: string;
   type: "grid" | "node";
   name: string;
   description: string;
@@ -104,6 +106,12 @@ export interface GameNpc {
   name: string;
   emoji: string;
   description: string;
+  /** Origin of the description. Only "model" descriptions should be treated as canonical profile text. */
+  descriptionSource?: "model" | "library" | "narration" | "user";
+  /** Optional presentation hint used for systems like NPC voice matching. */
+  gender?: string | null;
+  /** Optional pronoun hint used for systems like NPC voice matching. */
+  pronouns?: string | null;
   location: string;
   /** Party reputation with this NPC: -100 (hostile) to 100 (devoted) */
   reputation: number;
@@ -132,16 +140,18 @@ export interface SessionSummary {
   partyDynamics: string;
   /** Current state of the party after the session */
   partyState: string;
-  /** Important plot points, quests, and lore discovered */
+  /** Important plot points, twists, quests, and lore discovered */
   keyDiscoveries: string[];
-  /** Major story revelations or plot-critical moments */
-  revelations: string[];
   /** Important character moments (dates, bonding, betrayals, confessions, etc.) */
   characterMoments: string[];
+  /** Small personal details, preferences, habits, and past fragments to recall later */
+  littleDetails: string[];
   /** Serialized stats/inventory/quest snapshot */
   statsSnapshot: Record<string, unknown>;
   /** NPC reputation changes */
   npcUpdates: string[];
+  /** Optional player steering note for the next session. */
+  nextSessionRequest?: string | null;
   timestamp: string;
 }
 
@@ -159,7 +169,7 @@ export interface GameSetupConfig {
   rating: "sfw" | "nsfw";
   /** Character ID to use as GM (only when gmMode is "character") */
   gmCharacterId?: string;
-  /** Character IDs for party members */
+  /** Party member IDs; library character IDs or `npc:<slug>` tracked-NPC IDs. */
   partyCharacterIds: string[];
   /** User's persona ID */
   personaId?: string;
@@ -345,7 +355,16 @@ export type DirectionEffect =
   | "vignette"
   | "letterbox"
   | "color_grade"
-  | "focus";
+  | "focus"
+  | "pulse"
+  | "slow_zoom"
+  | "impact_zoom"
+  | "tilt"
+  | "desaturate"
+  | "chromatic_aberration"
+  | "film_grain"
+  | "rain_streaks"
+  | "spotlight";
 
 /** A single cinematic direction command parsed from GM output. */
 export interface DirectionCommand {

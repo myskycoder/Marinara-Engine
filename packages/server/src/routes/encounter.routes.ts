@@ -46,6 +46,9 @@ async function resolveConnection(
     const providerDef = PROVIDERS[conn.provider as keyof typeof PROVIDERS];
     baseUrl = providerDef?.defaultBaseUrl ?? "";
   }
+  // Claude (Subscription) uses the local Claude Agent SDK and has no HTTP
+  // endpoint — return a sentinel so the gate passes. The provider ignores it.
+  if (!baseUrl && conn.provider === "claude_subscription") baseUrl = "claude-agent-sdk://local";
   if (!baseUrl) throw new Error("No base URL configured for this connection");
 
   return { conn, baseUrl };
@@ -411,7 +414,14 @@ export async function encounterRoutes(app: FastifyInstance) {
       if (!chat) return reply.status(404).send({ error: "Chat not found" });
 
       const { conn, baseUrl } = await resolveConnection(connections, connectionId, chat.connectionId);
-      const provider = createLLMProvider(conn.provider, baseUrl, conn.apiKey, conn.maxContext, conn.openrouterProvider, conn.maxTokensOverride);
+      const provider = createLLMProvider(
+        conn.provider,
+        baseUrl,
+        conn.apiKey,
+        conn.maxContext,
+        conn.openrouterProvider,
+        conn.maxTokensOverride,
+      );
 
       const characterIds: string[] = JSON.parse(chat.characterIds as string);
       const characterCtx = await buildCharacterContext(chars, characterIds);
@@ -470,7 +480,14 @@ export async function encounterRoutes(app: FastifyInstance) {
       if (!chat) return reply.status(404).send({ error: "Chat not found" });
 
       const { conn, baseUrl } = await resolveConnection(connections, connectionId, chat.connectionId);
-      const provider = createLLMProvider(conn.provider, baseUrl, conn.apiKey, conn.maxContext, conn.openrouterProvider, conn.maxTokensOverride);
+      const provider = createLLMProvider(
+        conn.provider,
+        baseUrl,
+        conn.apiKey,
+        conn.maxContext,
+        conn.openrouterProvider,
+        conn.maxTokensOverride,
+      );
 
       const characterIds: string[] = JSON.parse(chat.characterIds as string);
       const characterCtx = await buildCharacterContext(chars, characterIds);
@@ -561,7 +578,14 @@ export async function encounterRoutes(app: FastifyInstance) {
       if (!chat) return reply.status(404).send({ error: "Chat not found" });
 
       const { conn, baseUrl } = await resolveConnection(connections, connectionId, chat.connectionId);
-      const provider = createLLMProvider(conn.provider, baseUrl, conn.apiKey, conn.maxContext, conn.openrouterProvider, conn.maxTokensOverride);
+      const provider = createLLMProvider(
+        conn.provider,
+        baseUrl,
+        conn.apiKey,
+        conn.maxContext,
+        conn.openrouterProvider,
+        conn.maxTokensOverride,
+      );
 
       const characterIds: string[] = JSON.parse(chat.characterIds as string);
       const characterCtx = await buildCharacterContext(chars, characterIds);

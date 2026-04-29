@@ -71,6 +71,8 @@ export async function promptReviewerRoutes(app: FastifyInstance) {
       const providerDef = PROVIDERS[conn.provider as keyof typeof PROVIDERS];
       baseUrl = providerDef?.defaultBaseUrl ?? "";
     }
+    // Claude (Subscription) uses the local Claude Agent SDK; no HTTP endpoint.
+    if (!baseUrl && conn.provider === "claude_subscription") baseUrl = "claude-agent-sdk://local";
     if (!baseUrl) {
       return reply.status(400).send({ error: "No base URL configured for this connection" });
     }
@@ -131,7 +133,14 @@ export async function promptReviewerRoutes(app: FastifyInstance) {
     });
 
     try {
-      const provider = createLLMProvider(conn.provider, baseUrl, conn.apiKey, conn.maxContext, conn.openrouterProvider, conn.maxTokensOverride);
+      const provider = createLLMProvider(
+        conn.provider,
+        baseUrl,
+        conn.apiKey,
+        conn.maxContext,
+        conn.openrouterProvider,
+        conn.maxTokensOverride,
+      );
       let fullResponse = "";
 
       const userPrompt = `Review this prompt preset. Focus areas: ${input.focusAreas.join(", ")}

@@ -78,10 +78,11 @@ Want to use Marinara Engine from your phone, tablet, or another computer? See th
 
 When you launch Marinara Engine via `./start.sh` from a git checkout, the launcher automatically:
 
-1. Pulls the latest code from GitHub with `git pull`
+1. Fetches the latest code from GitHub and fast-forwards to `origin/main`
 2. Detects whether the checkout changed
-3. Reinstalls dependencies and rebuilds when needed
-4. Starts the app on the current version
+3. Temporarily stashes tracked local changes if needed, then reapplies them
+4. Reinstalls dependencies and rebuilds when needed
+5. Starts the app on the current version
 
 ### In-App Update Check
 

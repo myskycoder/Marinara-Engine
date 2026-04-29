@@ -269,6 +269,7 @@ export function RoleplayHUD({
   const presentCharacters = gameState?.presentCharacters ?? [];
   const personaStatBars = gameState?.personaStats ?? [];
   const playerStats = gameState?.playerStats ?? null;
+  const personaStatus = playerStats?.status ?? "";
   const inventory = playerStats?.inventory ?? [];
   const activeQuests = playerStats?.activeQuests ?? [];
   const customTrackerFields = playerStats?.customTrackerFields ?? [];
@@ -330,6 +331,8 @@ export function RoleplayHUD({
             showCustomTracker={enabledAgentTypes.has("custom-tracker")}
             personaStats={personaStatBars}
             onUpdatePersonaStats={(bars) => patchField("personaStats", bars)}
+            personaStatus={personaStatus}
+            onUpdatePersonaStatus={(status) => patchPlayerStats("status", status)}
             characters={presentCharacters}
             onUpdateCharacters={(chars) => {
               if (gameState) {
@@ -356,8 +359,8 @@ export function RoleplayHUD({
             disabled={isAgentProcessing}
             className={cn(
               MOBILE_HUD_BTN,
-              "border-white/15 justify-center text-[0.5625rem] font-medium",
-              isAgentProcessing ? "text-purple-300" : "text-white/60",
+              "justify-center text-[0.5625rem] font-medium",
+              isAgentProcessing ? "text-purple-600 dark:text-purple-300" : "text-[var(--muted-foreground)]",
             )}
           >
             <RefreshCw size="0.875rem" className={cn("shrink-0 h-4 w-4", isAgentProcessing && "animate-spin")} />
@@ -387,6 +390,8 @@ export function RoleplayHUD({
           <PersonaStatsWidget
             bars={personaStatBars}
             onUpdate={(bars) => patchField("personaStats", bars)}
+            status={personaStatus}
+            onUpdateStatus={(status) => patchPlayerStats("status", status)}
             layout={layout}
           />
         )}
@@ -433,7 +438,7 @@ export function RoleplayHUD({
               onRetriggerTrackers();
             }}
             disabled={isAgentProcessing}
-            className={cn(WIDGET, isAgentProcessing ? "text-purple-300" : "text-white/60")}
+            className={cn(WIDGET, isAgentProcessing ? "text-purple-300" : "text-[var(--muted-foreground)]")}
             title={isAgentProcessing ? "Trackers running…" : "Run Trackers"}
           >
             <RefreshCw size="0.875rem" className={cn(isAgentProcessing && "animate-spin")} />
@@ -450,15 +455,15 @@ export function RoleplayHUD({
 
 /** Common mobile HUD button sizing – used by all four strip buttons */
 const MOBILE_HUD_BTN =
-  "flex items-center gap-1.5 rounded-lg border border-white/10 bg-black/40 backdrop-blur-md px-2 py-1.5 transition-all hover:bg-black/60 cursor-pointer select-none";
+  "flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)]/80 backdrop-blur-md px-2 py-1.5 transition-all hover:bg-[var(--card)] dark:border-foreground/10 dark:bg-black/40 dark:hover:bg-black/60 cursor-pointer select-none";
 
 function DeferredHUDPanelFallback({ label }: { label: string }) {
-  return <div className="px-3 py-4 text-center text-[0.625rem] text-white/30">{label}</div>;
+  return <div className="px-3 py-4 text-center text-[0.625rem] text-[var(--muted-foreground)]/60">{label}</div>;
 }
 
 function DeferredActionsFallback({ isAgentProcessing }: { isAgentProcessing: boolean }) {
   return (
-    <div className="px-3 py-4 text-center text-[0.625rem] text-white/30">
+    <div className="px-3 py-4 text-center text-[0.625rem] text-[var(--muted-foreground)]/60">
       {isAgentProcessing ? "Loading agent activity…" : "Loading actions…"}
     </div>
   );
@@ -540,7 +545,7 @@ function ActionsGroup({
     createPortal(
       <div
         ref={dropdownRef}
-        className="fixed w-72 max-w-[calc(100vw-1rem)] max-h-80 overflow-y-auto rounded-xl border border-white/10 bg-black/80 backdrop-blur-xl shadow-xl z-[9999] animate-message-in"
+        className="fixed w-72 max-w-[calc(100vw-1rem)] max-h-80 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--popover)] backdrop-blur-xl shadow-xl z-[9999] animate-message-in dark:border-foreground/10 dark:bg-black/80"
         style={{ top: pos.top, left: pos.left }}
       >
         <Suspense fallback={<DeferredActionsFallback isAgentProcessing={isAgentProcessing} />}>
@@ -570,8 +575,8 @@ function ActionsGroup({
         ref={btnRef}
         onClick={() => setAgentsOpen(!agentsOpen)}
         className={cn(
-          "flex items-center gap-1.5 md:gap-1 rounded-lg border border-white/10 bg-black/40 backdrop-blur-md px-2 py-1.5 md:px-2 md:py-2 md:h-10 transition-all hover:bg-black/60 cursor-pointer select-none",
-          agentsOpen && "bg-black/60 border-white/20",
+          "flex items-center gap-1.5 md:gap-1 rounded-lg border border-[var(--border)] bg-[var(--card)]/80 backdrop-blur-md px-2 py-1.5 md:px-2 md:py-2 md:h-10 transition-all hover:bg-[var(--card)] dark:border-foreground/10 dark:bg-black/40 dark:hover:bg-black/60 cursor-pointer select-none",
+          agentsOpen && "bg-[var(--card)] border-[var(--border)] dark:bg-black/60 dark:border-foreground/20",
         )}
         title="Agents & Actions"
       >
@@ -589,12 +594,12 @@ function ActionsGroup({
         )}
         <Trash2 size="0.8125rem" strokeWidth={2.5} className="text-purple-400/50 shrink-0" />
         {badgeCount > 0 && (
-          <span className="hidden md:flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-purple-500/80 px-1 text-[0.5rem] font-bold text-white">
+          <span className="hidden md:flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-purple-500/80 px-1 text-[0.5rem] font-bold text-foreground">
             {badgeCount}
           </span>
         )}
         {failedAgentTypes.length > 0 && (
-          <span className="flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-amber-500/80 px-1 text-[0.5rem] font-bold text-white">
+          <span className="flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-amber-500/80 px-1 text-[0.5rem] font-bold text-foreground">
             {failedAgentTypes.length}
           </span>
         )}
@@ -618,15 +623,15 @@ function EchoChamberToggle() {
     <button
       onClick={toggleEchoChamber}
       className={cn(
-        "flex items-center gap-1 rounded-full bg-white/5 border border-white/10 px-2 py-1 text-[0.625rem] text-white/60 backdrop-blur-md transition-all hover:bg-white/10 hover:text-white",
-        echoChamberOpen && "bg-purple-500/20 text-purple-300 border-purple-500/30",
+        "flex items-center gap-1 rounded-full bg-[var(--muted)]/20 border border-[var(--border)] px-2 py-1 text-[0.625rem] text-[var(--foreground)]/70 backdrop-blur-md transition-all hover:bg-[var(--muted)]/40 hover:text-[var(--foreground)] dark:bg-foreground/5 dark:border-foreground/10 dark:text-foreground/60 dark:hover:bg-foreground/10 dark:hover:text-foreground",
+        echoChamberOpen && "bg-purple-500/20 text-purple-600 border-purple-500/30 dark:text-purple-300",
       )}
       title="Toggle Echo Chamber panel"
     >
       <MessageCircle size="0.625rem" className="text-purple-400/70" />
       <span>Echo</span>
       {echoMessages.length > 0 && (
-        <span className="flex h-3.5 min-w-[0.875rem] items-center justify-center rounded-full bg-purple-500/80 px-1 text-[0.5rem] font-bold text-white">
+        <span className="flex h-3.5 min-w-[0.875rem] items-center justify-center rounded-full bg-purple-500/80 px-1 text-[0.5rem] font-bold text-foreground">
           {echoMessages.length}
         </span>
       )}
@@ -647,6 +652,8 @@ function CombinedPlayerWidget({
   showCustomTracker,
   personaStats,
   onUpdatePersonaStats,
+  personaStatus,
+  onUpdatePersonaStatus,
   characters,
   onUpdateCharacters,
   inventory,
@@ -663,6 +670,8 @@ function CombinedPlayerWidget({
   showCustomTracker: boolean;
   personaStats: CharacterStat[];
   onUpdatePersonaStats: (bars: CharacterStat[]) => void;
+  personaStatus: string;
+  onUpdatePersonaStatus: (status: string) => void;
   characters: PresentCharacter[];
   onUpdateCharacters: (chars: PresentCharacter[]) => void;
   inventory: InventoryItem[];
@@ -706,6 +715,8 @@ function CombinedPlayerWidget({
             showCustomTracker={showCustomTracker}
             personaStats={personaStats}
             onUpdatePersonaStats={onUpdatePersonaStats}
+            personaStatus={personaStatus}
+            onUpdatePersonaStatus={onUpdatePersonaStatus}
             characters={characters}
             onUpdateCharacters={onUpdateCharacters}
             inventory={inventory}
@@ -815,7 +826,7 @@ function WidgetPopover({
       ref={ref}
       style={pos ? { position: "fixed", top: pos.top, left: pos.left } : { position: "fixed", top: -9999, left: -9999 }}
       className={cn(
-        "z-[9999] max-w-[calc(100vw-1rem)] animate-message-in rounded-xl border border-white/10 bg-black/80 backdrop-blur-xl shadow-xl",
+        "z-[9999] max-w-[calc(100vw-1rem)] animate-message-in rounded-xl border border-[var(--border)] bg-[var(--popover)] backdrop-blur-xl shadow-xl dark:border-foreground/10 dark:bg-black/80",
         className,
       )}
     >
@@ -846,7 +857,7 @@ function CharactersWidget({
       <button
         ref={buttonRef}
         onClick={() => setOpen(!open)}
-        className={cn(WIDGET, "text-purple-300")}
+        className={cn(WIDGET, "text-purple-500 dark:text-purple-300")}
         title="Present Characters"
       >
         {characters.length > 0 ? (
@@ -857,7 +868,9 @@ function CharactersWidget({
               </span>
             ))}
             {characters.length > 3 && (
-              <span className="text-[0.4375rem] text-white/40 ml-0.5">+{characters.length - 3}</span>
+              <span className="text-[0.4375rem] text-[var(--muted-foreground)]/60 ml-0.5">
+                +{characters.length - 3}
+              </span>
             )}
           </div>
         ) : (
@@ -885,10 +898,14 @@ function CharactersWidget({
 function PersonaStatsWidget({
   bars,
   onUpdate,
+  status,
+  onUpdateStatus,
   layout = "top",
 }: {
   bars: CharacterStat[];
   onUpdate: (bars: CharacterStat[]) => void;
+  status: string;
+  onUpdateStatus: (status: string) => void;
   layout?: HudPosition;
 }) {
   const [open, setOpen] = useState(false);
@@ -907,7 +924,10 @@ function PersonaStatsWidget({
             {bars.map((bar) => {
               const pct = bar.max > 0 ? Math.min(100, (bar.value / bar.max) * 100) : 0;
               return (
-                <div key={bar.name} className="h-1 max-md:h-px w-full rounded-full bg-white/10 overflow-hidden">
+                <div
+                  key={bar.name}
+                  className="h-1 max-md:h-px w-full rounded-full bg-[var(--muted)]/30 dark:bg-foreground/10 overflow-hidden"
+                >
                   <div
                     className="h-full rounded-full transition-all duration-500"
                     style={{ width: `${pct}%`, backgroundColor: bar.color || "#8b5cf6" }}
@@ -932,7 +952,7 @@ function PersonaStatsWidget({
         className="w-60 max-h-80 overflow-y-auto"
       >
         <Suspense fallback={<DeferredHUDPanelFallback label="Loading persona stats…" />}>
-          <PersonaStatsPanel bars={bars} onUpdate={onUpdate} />
+          <PersonaStatsPanel bars={bars} onUpdate={onUpdate} status={status} onUpdateStatus={onUpdateStatus} />
         </Suspense>
       </WidgetPopover>
     </div>
@@ -1149,9 +1169,9 @@ function QuestsWidget({
 // ═══════════════════════════════════════════════
 
 const WIDGET =
-  "group flex w-10 h-10 max-md:w-auto max-md:h-auto max-md:px-2 max-md:py-1.5 flex-col items-center justify-center gap-0.5 max-md:gap-0 rounded-xl max-md:rounded-lg border border-white/15 bg-black/40 backdrop-blur-md transition-all hover:bg-black/60 cursor-pointer select-none overflow-hidden";
+  "group flex w-10 h-10 max-md:w-auto max-md:h-auto max-md:px-2 max-md:py-1.5 flex-col items-center justify-center gap-0.5 max-md:gap-0 rounded-xl max-md:rounded-lg border border-[var(--border)] bg-[var(--card)]/80 backdrop-blur-md transition-all hover:bg-[var(--card)] dark:border-foreground/15 dark:bg-black/40 dark:hover:bg-black/60 cursor-pointer select-none overflow-hidden";
 const WIDGET_EDIT =
-  "flex w-10 h-10 max-md:w-auto max-md:h-auto max-md:px-2 max-md:py-1.5 flex-col items-center justify-center gap-0.5 max-md:gap-0 rounded-xl max-md:rounded-lg border border-white/15 bg-black/60 backdrop-blur-md overflow-hidden";
+  "flex w-10 h-10 max-md:w-auto max-md:h-auto max-md:px-2 max-md:py-1.5 flex-col items-center justify-center gap-0.5 max-md:gap-0 rounded-xl max-md:rounded-lg border border-[var(--border)] bg-[var(--card)] backdrop-blur-md dark:border-foreground/15 dark:bg-black/60 overflow-hidden";
 
 /** Hook: mobile single-tap = tooltip, double-tap = edit; desktop click = edit */
 function useWidgetTap(onEdit: () => void) {
@@ -1209,7 +1229,7 @@ function WidgetLabel({
         {value || fallback}
       </span>
       {showTip && value && (
-        <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 whitespace-nowrap rounded bg-black/90 border border-white/10 px-1.5 py-0.5 text-[0.5625rem] text-white/80 z-[9999] pointer-events-none animate-message-in">
+        <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 whitespace-nowrap rounded bg-[var(--popover)] border border-[var(--border)] px-1.5 py-0.5 text-[0.5625rem] text-[var(--foreground)]/80 z-[9999] pointer-events-none animate-message-in dark:bg-black/90 dark:border-foreground/10 dark:text-foreground/80">
           {value}
         </span>
       )}
@@ -1249,7 +1269,7 @@ function WidgetInput({
       }}
       onBlur={commit}
       className={cn(
-        "w-[4.5rem] max-md:w-full max-md:px-0.5 bg-transparent text-center text-[0.5625rem] max-md:text-[0.625rem] font-medium outline-none placeholder:text-white/20",
+        "w-[4.5rem] max-md:w-full max-md:px-0.5 bg-transparent text-center text-[0.5625rem] max-md:text-[0.625rem] font-medium outline-none placeholder:text-[var(--muted-foreground)]/40 dark:placeholder:text-foreground/20",
         accent,
       )}
     />
@@ -1322,8 +1342,8 @@ function CombinedWorldWidget({
         ref={buttonRef}
         onClick={() => setOpen(!open)}
         className={cn(
-          "flex items-center gap-1.5 md:gap-1 rounded-lg border border-white/10 bg-black/40 backdrop-blur-md px-2 py-1.5 md:px-2 md:py-2 md:h-10 transition-all hover:bg-black/60 cursor-pointer select-none",
-          open && "bg-black/60 border-white/20",
+          "flex items-center gap-1.5 md:gap-1 rounded-lg border border-[var(--border)] bg-[var(--card)]/80 backdrop-blur-md px-2 py-1.5 md:px-2 md:py-2 md:h-10 transition-all hover:bg-[var(--card)] dark:border-foreground/10 dark:bg-black/40 dark:hover:bg-black/60 cursor-pointer select-none",
+          open && "bg-[var(--card)] border-[var(--border)] dark:bg-black/60 dark:border-foreground/20",
         )}
         title="World State"
       >

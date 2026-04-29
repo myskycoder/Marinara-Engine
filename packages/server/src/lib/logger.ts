@@ -13,8 +13,5 @@ import { getLogLevel, getNodeEnv } from "../config/runtime-config.js";
 
 export const logger = pino({
   level: getLogLevel(),
-  transport:
-    getNodeEnv() !== "production"
-      ? { target: "pino-pretty", options: { colorize: true } }
-      : undefined,
+  transport: getNodeEnv() !== "production" ? { target: "pino-pretty", options: { colorize: true } } : undefined,
 });

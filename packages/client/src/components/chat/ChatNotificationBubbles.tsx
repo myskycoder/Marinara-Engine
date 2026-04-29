@@ -11,7 +11,7 @@ import { X, MessageCircle } from "lucide-react";
 import { useChatStore } from "../../stores/chat.store";
 import { useGameModeStore } from "../../stores/game-mode.store";
 import { useUIStore } from "../../stores/ui.store";
-import { cn } from "../../lib/utils";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
 import { AnimatePresence, motion } from "framer-motion";
 
 export function ChatNotificationBubbles() {
@@ -105,7 +105,13 @@ export function ChatNotificationBubbles() {
                   }}
                 >
                   {notif.avatarUrl ? (
-                    <img src={notif.avatarUrl} alt="" className="h-full w-full object-cover" loading="lazy" />
+                    <img
+                      src={notif.avatarUrl}
+                      alt=""
+                      className="h-full w-full object-cover"
+                      loading="lazy"
+                      style={getAvatarCropStyle(notif.avatarCrop)}
+                    />
                   ) : (
                     <MessageCircle className="h-4 w-4 text-[var(--accent)]" />
                   )}
@@ -135,7 +141,13 @@ function NotificationBubble({
   onNavigate,
   onDismiss,
 }: {
-  notif: { chatId: string; characterName: string; avatarUrl: string | null; count: number };
+  notif: {
+    chatId: string;
+    characterName: string;
+    avatarUrl: string | null;
+    avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null;
+    count: number;
+  };
   onNavigate: () => void;
   onDismiss: () => void;
 }) {
@@ -175,7 +187,13 @@ function NotificationBubble({
         title={`${notif.characterName} sent a message`}
       >
         {notif.avatarUrl ? (
-          <img src={notif.avatarUrl} alt={notif.characterName} className="h-full w-full object-cover" loading="lazy" />
+          <img
+            src={notif.avatarUrl}
+            alt={notif.characterName}
+            className="h-full w-full object-cover"
+            loading="lazy"
+            style={getAvatarCropStyle(notif.avatarCrop)}
+          />
         ) : (
           <MessageCircle className="h-5 w-5 text-[var(--accent)]" />
         )}

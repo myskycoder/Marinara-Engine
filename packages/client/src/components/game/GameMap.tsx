@@ -170,8 +170,38 @@ function TimeOfDayIndicator({ timeOfDay, size = "desktop", className }: TimeOfDa
   );
 }
 
+function slugifyMapId(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "");
+}
+
+function getMapId(map: GameMap | null | undefined, fallbackIndex = 0): string | null {
+  if (!map) return null;
+  const explicit = map.id?.trim();
+  if (explicit) return explicit;
+  return slugifyMapId(map.name || "") || `map-${fallbackIndex + 1}`;
+}
+
+function buildMapOptions(map: GameMap | null, maps?: GameMap[]): GameMap[] {
+  const source = maps?.length ? maps : map ? [map] : [];
+  const seen = new Set<string>();
+  return source.filter((entry, index) => {
+    const id = getMapId(entry, index);
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
 interface GameMapProps {
   map: GameMap | null;
+  maps?: GameMap[];
+  activeMapId?: string | null;
+  viewedMapId?: string | null;
+  onViewedMapChange?: (mapId: string) => void;
   onMove: (position: { x: number; y: number } | string) => void;
   selectedPosition?: { x: number; y: number } | string | null;
   onGenerateMap?: () => void;
@@ -181,6 +211,32 @@ interface GameMapProps {
   gameState?: GameActiveState;
   /** Current time of day — shown as a compact sky indicator. */
   timeOfDay?: string | null;
+}
+
+interface MapGenerateButtonProps {
+  onGenerateMap: () => void;
+  disabled?: boolean;
+  onAfterGenerate?: () => void;
+}
+
+function MapGenerateButton({ onGenerateMap, disabled, onAfterGenerate }: MapGenerateButtonProps) {
+  return (
+    <button
+      type="button"
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        event.stopPropagation();
+        onGenerateMap();
+        onAfterGenerate?.();
+      }}
+      disabled={disabled}
+      className="absolute left-1.5 top-1.5 z-20 flex h-6 w-6 items-center justify-center rounded-md border border-white/15 bg-black/85 text-white/80 shadow-lg shadow-black/35 transition-colors hover:bg-black hover:text-white disabled:cursor-not-allowed disabled:opacity-45"
+      title="Generate another map"
+      aria-label="Generate another map"
+    >
+      <Wand2 size={11} />
+    </button>
+  );
 }
 
 interface GameMapPanelProps extends GameMapProps {
@@ -193,6 +249,10 @@ interface GameMapPanelProps extends GameMapProps {
 /** Desktop: inline collapsible panel. */
 export function GameMapPanel({
   map,
+  maps,
+  activeMapId,
+  viewedMapId,
+  onViewedMapChange,
   onMove,
   selectedPosition,
   onGenerateMap,
@@ -205,6 +265,10 @@ export function GameMapPanel({
   const [collapsed, setCollapsed] = useState(false);
   const [stateHovered, setStateHovered] = useState(false);
   const { locked, toggleLocked, x, y, handleDragEnd } = useDraggablePanel(chatId, "map");
+  const mapOptions = buildMapOptions(map, maps);
+  const selectedMapId = viewedMapId ?? getMapId(map);
+  const activeMap = activeMapId == null || selectedMapId === activeMapId;
+  const mapInteractionDisabled = disabled || !activeMap;
 
   if (!map) {
     return (
@@ -292,20 +356,48 @@ export function GameMapPanel({
         <PanelLockButton locked={locked} onToggle={toggleLocked} size={11} />
         <span className="shrink-0">{collapsed ? <ChevronDown size={12} /> : <ChevronUp size={12} />}</span>
       </div>
+      {!collapsed && mapOptions.length > 1 && (
+        <div className="flex items-center gap-1">
+          <select
+            value={selectedMapId ?? ""}
+            onChange={(event) => onViewedMapChange?.(event.target.value)}
+            className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/35 px-1.5 py-1 text-[0.625rem] text-[var(--foreground)] outline-none focus:border-[var(--primary)]"
+            title="View map"
+          >
+            {mapOptions.map((option, index) => {
+              const id = getMapId(option, index) ?? `map-${index + 1}`;
+              return (
+                <option key={id} value={id}>
+                  {option.name || `Map ${index + 1}`}
+                  {id === activeMapId ? " (Current)" : ""}
+                </option>
+              );
+            })}
+          </select>
+        </div>
+      )}
       {!collapsed &&
         (map.type === "grid" ? (
           <GameGridMap
             map={map}
             onCellClick={(x, y) => onMove({ x, y })}
             selectedPosition={selectedPosition}
-            disabled={disabled}
+            disabled={mapInteractionDisabled}
+            showPartyPosition={activeMap}
+            topLeftAction={
+              onGenerateMap ? <MapGenerateButton onGenerateMap={onGenerateMap} disabled={disabled} /> : null
+            }
           />
         ) : (
           <GameNodeMap
             map={map}
             onNodeClick={(nodeId) => onMove(nodeId)}
             selectedNodeId={typeof selectedPosition === "string" ? selectedPosition : null}
-            disabled={disabled}
+            disabled={mapInteractionDisabled}
+            showPartyPosition={activeMap}
+            topLeftAction={
+              onGenerateMap ? <MapGenerateButton onGenerateMap={onGenerateMap} disabled={disabled} /> : null
+            }
           />
         ))}
     </motion.div>
@@ -316,6 +408,10 @@ export function GameMapPanel({
 
 interface MobileMapButtonProps {
   map: GameMap | null;
+  maps?: GameMap[];
+  activeMapId?: string | null;
+  viewedMapId?: string | null;
+  onViewedMapChange?: (mapId: string) => void;
   onMove: (position: { x: number; y: number } | string) => void;
   selectedPosition?: { x: number; y: number } | string | null;
   onGenerateMap?: () => void;
@@ -327,6 +423,10 @@ interface MobileMapButtonProps {
 /** Mobile-only: map icon button in top-left that opens a centered modal. */
 export function MobileMapButton({
   map,
+  maps,
+  activeMapId,
+  viewedMapId,
+  onViewedMapChange,
   onMove,
   selectedPosition,
   onGenerateMap,
@@ -336,6 +436,10 @@ export function MobileMapButton({
 }: MobileMapButtonProps) {
   const [open, setOpen] = useState(false);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
+  const mapOptions = buildMapOptions(map, maps);
+  const selectedMapId = viewedMapId ?? getMapId(map);
+  const activeMap = activeMapId == null || selectedMapId === activeMapId;
+  const mapInteractionDisabled = disabled || !activeMap;
 
   useEffect(() => {
     if (!open) return;
@@ -357,9 +461,9 @@ export function MobileMapButton({
     }
   }, [selectedNode, onMove]);
 
-  const currentNode = map?.nodes?.find(
-    (n) => n.id === (typeof map.partyPosition === "string" ? map.partyPosition : null),
-  );
+  const currentNode = activeMap
+    ? map?.nodes?.find((n) => n.id === (typeof map.partyPosition === "string" ? map.partyPosition : null))
+    : null;
   const selectedNodeData = map?.nodes?.find((n) => n.id === selectedNode);
   const adjacentIds = new Set<string>();
   if (map?.edges && currentNode) {
@@ -369,7 +473,10 @@ export function MobileMapButton({
     }
   }
   const canTravel =
-    !disabled && selectedNode != null && (adjacentIds.has(selectedNode) || selectedNode === currentNode?.id);
+    activeMap &&
+    !disabled &&
+    selectedNode != null &&
+    (adjacentIds.has(selectedNode) || selectedNode === currentNode?.id);
 
   return (
     <>
@@ -421,6 +528,27 @@ export function MobileMapButton({
                     )}
                   </p>
                 )}
+                {mapOptions.length > 1 && (
+                  <select
+                    value={selectedMapId ?? ""}
+                    onChange={(event) => {
+                      onViewedMapChange?.(event.target.value);
+                      setSelectedNode(null);
+                    }}
+                    className="mt-1 w-full rounded-md border border-white/10 bg-black/35 px-1.5 py-1 text-[0.625rem] text-[var(--foreground)] outline-none focus:border-[var(--primary)]"
+                    title="View map"
+                  >
+                    {mapOptions.map((option, index) => {
+                      const id = getMapId(option, index) ?? `map-${index + 1}`;
+                      return (
+                        <option key={id} value={id}>
+                          {option.name || `Map ${index + 1}`}
+                          {id === activeMapId ? " (Current)" : ""}
+                        </option>
+                      );
+                    })}
+                  </select>
+                )}
               </div>
               <button
                 onClick={() => {
@@ -456,14 +584,45 @@ export function MobileMapButton({
                 <GameGridMap
                   map={map}
                   selectedPosition={selectedPosition}
-                  disabled={disabled}
+                  disabled={mapInteractionDisabled}
+                  showPartyPosition={activeMap}
+                  topLeftAction={
+                    onGenerateMap ? (
+                      <MapGenerateButton
+                        onGenerateMap={onGenerateMap}
+                        disabled={disabled}
+                        onAfterGenerate={() => {
+                          setOpen(false);
+                          setSelectedNode(null);
+                        }}
+                      />
+                    ) : null
+                  }
                   onCellClick={(x, y) => {
                     onMove({ x, y });
                     setOpen(false);
                   }}
                 />
               ) : (
-                <GameNodeMap map={map} onNodeClick={handleNodeTap} selectedNodeId={selectedNode} disabled={disabled} />
+                <GameNodeMap
+                  map={map}
+                  onNodeClick={handleNodeTap}
+                  selectedNodeId={selectedNode}
+                  disabled={mapInteractionDisabled}
+                  showPartyPosition={activeMap}
+                  topLeftAction={
+                    onGenerateMap ? (
+                      <MapGenerateButton
+                        onGenerateMap={onGenerateMap}
+                        disabled={disabled}
+                        onAfterGenerate={() => {
+                          setOpen(false);
+                          setSelectedNode(null);
+                        }}
+                      />
+                    ) : null
+                  }
+                />
               )}
             </div>
 

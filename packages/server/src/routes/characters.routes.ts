@@ -340,7 +340,7 @@ export async function charactersRoutes(app: FastifyInstance) {
     let pngBuffer: Buffer;
     if (char.avatarPath) {
       // avatarPath is like /api/avatars/file/abc123.png — extract filename
-      const filename = char.avatarPath.split("/").pop()!;
+      const filename = char.avatarPath.split("?")[0]!.split("/").pop()!;
       const avatarFile = join(DATA_DIR, "avatars", filename);
       if (existsSync(avatarFile)) {
         pngBuffer = await readFile(avatarFile);

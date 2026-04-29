@@ -23,6 +23,8 @@
 // - [navigate: panel="...", tab="..."]
 // - [fetch: type="character|persona|lorebook|chat|preset", name="..."]
 
+import { stripConversationPromptTimestamps } from "./transcript-sanitize.js";
+
 export interface ScheduleUpdateCommand {
   type: "schedule_update";
   status?: "online" | "idle" | "dnd" | "offline";
@@ -356,7 +358,7 @@ export function parseCharacterCommands(content: string): {
 
   // Parse influence commands (<influence>text</influence>)
   for (const match of content.matchAll(INFLUENCE_RE)) {
-    const text = match[1]!.trim();
+    const text = stripConversationPromptTimestamps(match[1]!.trim());
     if (text) commands.push({ type: "influence", content: text });
   }
 

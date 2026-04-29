@@ -78,11 +78,10 @@ test("streams text deltas and merges them into the yielded chunks", async () => 
   __setSdkForTesting(fake);
 
   const provider = makeProvider();
-  const { text, usage } = await drain(
-    provider,
-    [{ role: "user", content: "hi" }],
-    { model: "claude-opus-4-5", stream: true },
-  );
+  const { text, usage } = await drain(provider, [{ role: "user", content: "hi" }], {
+    model: "claude-opus-4-5",
+    stream: true,
+  });
 
   assert.equal(text, "Hello world");
   assert.deepEqual(usage, { promptTokens: 5, completionTokens: 2, totalTokens: 7 });
@@ -91,7 +90,7 @@ test("streams text deltas and merges them into the yielded chunks", async () => 
   assert.equal(calls[0]!.options.includePartialMessages, true);
   assert.deepEqual(calls[0]!.options.tools, []);
   assert.equal(calls[0]!.options.permissionMode, "bypassPermissions");
-  assert.equal(calls[0]!.options.maxTurns, 1);
+  assert.equal("maxTurns" in calls[0]!.options, false);
   assert.equal(calls[0]!.options.model, "claude-opus-4-5");
 });
 
@@ -113,10 +112,7 @@ test("extracts system messages into systemPrompt and renders the rest as a trans
   );
 
   assert.equal(calls[0]!.options.systemPrompt, "You are Aerith.\n\nStay in character.");
-  assert.equal(
-    calls[0]!.prompt,
-    "User: Hi Aerith.\n\nAssistant: Hello, traveler.\n\nUser: Where are we?",
-  );
+  assert.equal(calls[0]!.prompt, "User: Hi Aerith.\n\nAssistant: Hello, traveler.\n\nUser: Where are we?");
 });
 
 test("Opus 4.7 enables adaptive thinking by default even without enableThinking", async () => {

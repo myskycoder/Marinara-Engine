@@ -42,7 +42,7 @@ function rowToPreset(row: ChatPresetRow) {
     mode: row.mode as ChatMode,
     isDefault: row.isDefault === "true",
     isActive: row.isActive === "true",
-    settings,
+    settings: sanitizePresetSettings(settings, row.mode as ChatMode),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -60,11 +60,14 @@ export function sanitizePresetMetadata(metadata: Record<string, unknown> | undef
 }
 
 /** Strip chat-specific keys from a settings object before saving into a preset. */
-export function sanitizePresetSettings(input: ChatPresetSettings | undefined | null): ChatPresetSettings {
+export function sanitizePresetSettings(
+  input: ChatPresetSettings | undefined | null,
+  mode?: ChatMode,
+): ChatPresetSettings {
   if (!input) return {};
   const out: ChatPresetSettings = {};
   if ("connectionId" in input) out.connectionId = input.connectionId ?? null;
-  if ("promptPresetId" in input) out.promptPresetId = input.promptPresetId ?? null;
+  if (mode !== "conversation" && "promptPresetId" in input) out.promptPresetId = input.promptPresetId ?? null;
   if (input.metadata) out.metadata = sanitizePresetMetadata(input.metadata as Record<string, unknown>);
   return out;
 }
@@ -112,7 +115,7 @@ export function createChatPresetsStorage(db: DB) {
     async create(input: CreateChatPresetInput) {
       const id = newId();
       const ts = now();
-      const cleaned = sanitizePresetSettings(input.settings as ChatPresetSettings);
+      const cleaned = sanitizePresetSettings(input.settings as ChatPresetSettings, input.mode);
       await db.insert(chatPresets).values({
         id,
         name: input.name,
@@ -136,7 +139,7 @@ export function createChatPresetsStorage(db: DB) {
         if (existing.isDefault) {
           patch.settings = JSON.stringify({});
         } else {
-          patch.settings = JSON.stringify(sanitizePresetSettings(data.settings as ChatPresetSettings));
+          patch.settings = JSON.stringify(sanitizePresetSettings(data.settings as ChatPresetSettings, existing.mode));
         }
       }
       await db.update(chatPresets).set(patch).where(eq(chatPresets.id, id));
@@ -148,7 +151,7 @@ export function createChatPresetsStorage(db: DB) {
       const existing = await storage.getById(id);
       if (!existing) return null;
       if (existing.isDefault) return existing; // never mutate the default preset's settings
-      const cleaned = sanitizePresetSettings(settings);
+      const cleaned = sanitizePresetSettings(settings, existing.mode);
       await db
         .update(chatPresets)
         .set({ settings: JSON.stringify(cleaned), updatedAt: now() })
@@ -193,7 +196,7 @@ export function createChatPresetsStorage(db: DB) {
         mode: source.mode,
         isDefault: "false",
         isActive: "false",
-        settings: JSON.stringify(sanitizePresetSettings(source.settings)),
+        settings: JSON.stringify(sanitizePresetSettings(source.settings, source.mode)),
         createdAt: ts,
         updatedAt: ts,
       });
@@ -205,7 +208,7 @@ export function createChatPresetsStorage(db: DB) {
       return storage.create({
         name: payload.name,
         mode: payload.mode,
-        settings: sanitizePresetSettings(payload.settings),
+        settings: sanitizePresetSettings(payload.settings, payload.mode),
       });
     },
 
@@ -263,7 +266,7 @@ export function createChatPresetsStorage(db: DB) {
         .update(chats)
         .set({
           connectionId: preset.settings.connectionId ?? null,
-          promptPresetId: preset.settings.promptPresetId ?? null,
+          promptPresetId: chatRow.mode === "conversation" ? null : (preset.settings.promptPresetId ?? null),
           metadata: JSON.stringify(newMetadata),
           updatedAt: ts,
         })

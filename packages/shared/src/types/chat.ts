@@ -99,6 +99,19 @@ export interface LocationCatalogEntry {
   variants: LocationCatalogVariant[];
 }
 
+/** A vectorized recall fragment created from one chat's messages. */
+export interface ChatMemoryChunk {
+  id: string;
+  chatId: string;
+  content: string;
+  messageCount: number;
+  firstMessageAt: string;
+  lastMessageAt: string;
+  createdAt: string;
+  /** False when chunking succeeded but embedding generation was unavailable. */
+  hasEmbedding: boolean;
+}
+
 /** Extra metadata stored on a chat. */
 export interface ChatMetadata {
   /** Summary text for context injection */
@@ -137,7 +150,7 @@ export interface ChatMetadata {
   groupScenarioText?: string;
   /** When true, tracker agents only run when the user manually triggers them (not after every generation) */
   manualTrackers?: boolean;
-  /** Whether to recall memories from past conversations during generation. Default: true for conversation/scenes, false for roleplay. */
+  /** Whether to recall memories from this chat during generation. Default: true for conversation/scenes, false for roleplay. */
   enableMemoryRecall?: boolean;
   /** Discord webhook URL to mirror messages to a Discord channel. */
   discordWebhookUrl?: string;
@@ -146,6 +159,17 @@ export interface ChatMetadata {
   entryStateOverrides?: Record<string, { ephemeral?: number | null; enabled?: boolean }>;
   /** ID of the chat preset most recently applied to this chat (drives the preset bar dropdown). */
   appliedChatPresetId?: string | null;
+  /** Custom prompt prefix used by the /impersonate slash command. */
+  impersonatePrompt?: string | null;
+
+  // ── Conversation Mode Fields ──
+  /** Whether conversation character schedules are enabled for this chat. */
+  conversationSchedulesEnabled?: boolean;
+  /** Chat-scoped generated schedules for conversation characters. */
+  characterSchedules?: Record<string, unknown>;
+  /** Week start timestamp for the current generated conversation schedules. */
+  scheduleWeekStart?: string;
+
   // ── Game Mode Fields ──
   /** UUID linking all sessions of one game */
   gameId?: string;
@@ -160,18 +184,24 @@ export interface ChatMetadata {
   gameSessionNumber?: number;
   /** Current session lifecycle status */
   gameSessionStatus?: import("./game.js").GameSessionStatus;
+  /** Timestamp for when the current game session was created/started */
+  gameCurrentSessionStartedAt?: string;
   /** Current game state (exploration, dialogue, combat, travel_rest) */
   gameActiveState?: import("./game.js").GameActiveState;
   /** Whether GM is a standalone narrator or an existing character */
   gameGmMode?: import("./game.js").GameGmMode;
   /** Character ID used as GM (when gameGmMode is "character") */
   gameGmCharacterId?: string;
-  /** Character IDs for the player's party */
+  /** Party member IDs for the player's party; library character IDs or `npc:<slug>` tracked-NPC IDs. */
   gamePartyCharacterIds?: string[];
   /** ID of the linked party chat */
   gamePartyChatId?: string;
   /** Current area map */
   gameMap?: import("./game.js").GameMap | null;
+  /** All generated/known maps for this game session/campaign. */
+  gameMaps?: import("./game.js").GameMap[];
+  /** ID of the map the party is currently on. */
+  activeGameMapId?: string | null;
   /** Summaries of all previous sessions */
   gamePreviousSessionSummaries?: import("./game.js").SessionSummary[];
   /** GM-only: overarching story arc and plot (never sent to party agent) */
@@ -277,6 +307,8 @@ export interface MessageExtra {
     dialogueColor?: string | null;
     boxColor?: string | null;
   } | null;
+  /** Stored for generation context but hidden from the visible chat transcript */
+  hiddenFromUser?: boolean;
 }
 
 /** Metadata about how a message was generated. */

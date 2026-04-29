@@ -33,18 +33,23 @@ export function stripGmCommandTags(content: string): string {
     .replace(/\[skill_check:\s*[^\]]+\]/gi, "")
     .replace(/\[element_attack:\s*[^\]]+\]/gi, "")
     .replace(/\[inventory:\s*[^\]]+\]/gi, "")
+    .replace(/\[party_change:\s*[^\]]+\]/gi, "")
     .replace(/\[party_add:\s*[^\]]+\]/gi, "")
     .replace(/\[party-turn\]/gi, "")
     .replace(/\[party-chat\]/gi, "")
-    .replace(/\[dice:\s*[^\]]+\]/gi, "")
-    // Catch-all for unknown [tag: value] (but NOT [Name] or [Note:/Book:])
-    .replace(/\[(?!Note:|Book:)\w+:[^\]]*\]/g, "");
+    .replace(/\[dice:\s*[^\]]+\]/gi, "");
   // Balanced bracket tags
-  text = stripBalancedTag(text, "[map_update:");
+  text = stripMapUpdateTag(text);
   text = stripBalancedTag(text, "[choices:");
-  // Orphaned ] from multi-line tags
-  text = text.replace(/^\s*\]\s*$/gm, "");
+  // Catch-all for unknown [tag: value] (but NOT [Name] or [Note:/Book:])
+  text = text.replace(/\[(?!Note:|Book:)\w+:[^\]]*\]/g, "");
+  text = stripDanglingTagClosers(text);
   return text.trim();
+}
+
+/** Remove dangling closers left behind by malformed or partially stripped tags. */
+function stripDanglingTagClosers(text: string): string {
+  return text.replace(/^\s*[\]}]+\s*$/gm, "");
 }
 
 /** Strip a balanced-bracket tag (handles nested brackets like JSON). */
@@ -74,6 +79,10 @@ function stripBalancedTag(text: string, tagPrefix: string): string {
     result = result.slice(0, idx) + result.slice(end + 1);
   }
   return result;
+}
+
+function stripMapUpdateTag(text: string): string {
+  return stripBalancedTag(text, "[map_update:").replace(/\[map_update:[^\r\n]*(?:\r?\n|$)/gi, "");
 }
 
 // ── Segment parsing (mirrors client parseNarrationSegments indexing) ──
@@ -148,6 +157,18 @@ function replaceDialogueSpeaker(prefix: string, speaker: string): string {
   return prefix.replace(/^(\s*)\[[^\]]+\]/, `$1[${speaker}]`);
 }
 
+function normalizeInlineVnDialogueLines(source: string): string {
+  return source
+    .replace(
+      /([^\n])\s+(\[[^\]]+\]\s*\[(?:main|side|extra|action|thought|whisper(?::[^\]]+)?)\]\s*(?:\[[^\]]+\])?\s*:)/gi,
+      "$1\n$2",
+    )
+    .replace(
+      /(\[[^\]]+\]\s*\[(?:main|side|extra|whisper(?::[^\]]+)?)\]\s*(?:\[[^\]]+\])?\s*:\s*(?:"[^"]*"|“[^”]*”|«[^»]*»))\s+(?=\S)/gi,
+      "$1\n",
+    );
+}
+
 /**
  * Parse tag-stripped content into segments matching the client's indexing.
  * Only tracks enough info to locate and replace segment content.
@@ -186,7 +207,7 @@ function parseSegments(stripped: string): ParsedSegment[] {
     }
   }
 
-  const lines = source.split(/\r?\n/);
+  const lines = normalizeInlineVnDialogueLines(source).split(/\r?\n/);
   const segments: ParsedSegment[] = [];
   let fallbackText = "";
 

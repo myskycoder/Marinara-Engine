@@ -20,12 +20,13 @@ import {
   type SlashCommandContext,
 } from "../../lib/slash-commands";
 import { resolveInputMacrosForChat } from "../../lib/chat-macros";
-import { cn } from "../../lib/utils";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
 import { EmojiPicker } from "../ui/EmojiPicker";
 import { QuickConnectionSwitcher } from "./QuickConnectionSwitcher";
 import { QuickPersonaSwitcher } from "./QuickPersonaSwitcher";
 import { QuickSwitcherMobile } from "./QuickSwitcherMobile";
 import { MariThinkingIndicator } from "./MariThinkingIndicator";
+import { SlashCommandFeedback } from "./SlashCommandFeedback";
 
 interface Attachment {
   type: string; // MIME type
@@ -40,7 +41,12 @@ interface ChatInputProps {
   mode?: "conversation" | "roleplay";
   characterNames?: string[];
   groupResponseOrder?: string;
-  chatCharacters?: Array<{ id: string; name: string; avatarUrl: string | null }>;
+  chatCharacters?: Array<{
+    id: string;
+    name: string;
+    avatarUrl: string | null;
+    avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null;
+  }>;
 }
 
 export const ChatInput = memo(function ChatInput({
@@ -69,13 +75,24 @@ export const ChatInput = memo(function ChatInput({
   const isStreaming = isStreamingGlobal && streamingChatId === activeChatId;
   const setInputDraft = useChatStore((s) => s.setInputDraft);
   const clearInputDraft = useChatStore((s) => s.clearInputDraft);
+  const setCurrentInput = useChatStore((s) => s.setCurrentInput);
+  const currentInput = useChatStore((s) => s.currentInput);
   const { generate } = useGenerate();
   const { applyToUserInput } = useApplyRegex();
   const enterToSend = useUIStore((s) => s.enterToSendRP);
+  const guideGenerations = useUIStore((s) => s.guideGenerations);
   const createMessage = useCreateMessage(activeChatId);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const resizeRafRef = useRef<number>(0);
   const qc = useQueryClient();
+
+  const syncInputState = useCallback(
+    (value: string) => {
+      setHasInput(value.trim().length > 0);
+      setCurrentInput(value);
+    },
+    [setCurrentInput],
+  );
 
   // Restore draft when mounting or switching chats
   const prevChatIdRef = useRef<string | null>(null);
@@ -96,23 +113,23 @@ export const ChatInput = memo(function ChatInput({
     if (activeChatId && textareaRef.current) {
       const draft = useChatStore.getState().inputDrafts.get(activeChatId) ?? "";
       textareaRef.current.value = draft;
-      setHasInput(draft.trim().length > 0);
+      syncInputState(draft);
       // Resize textarea to fit content
       textareaRef.current.style.height = "auto";
       textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 200) + "px";
     }
-  }, [activeChatId, setInputDraft, clearInputDraft]);
+  }, [activeChatId, setInputDraft, clearInputDraft, syncInputState]);
 
   // Save draft when component unmounts (e.g. navigating to editor)
   useEffect(() => {
     const textarea = textareaRef.current;
+    const chatId = useChatStore.getState().activeChatId;
     return () => {
       // Cancel pending debounce timers
       if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
       // Cancel pending resize rAF
       if (resizeRafRef.current) cancelAnimationFrame(resizeRafRef.current);
       // Flush draft synchronously
-      const chatId = useChatStore.getState().activeChatId;
       if (chatId && textarea) {
         const text = textarea.value;
         if (text.trim()) {
@@ -128,6 +145,19 @@ export const ChatInput = memo(function ChatInput({
   // Read directly from the cache to avoid creating a useQuery observer that
   // conflicts with the useInfiniteQuery observer in useChatMessages (mixing
   // useQuery and useInfiniteQuery on the same query key corrupts query state).
+  // Subscribe to cache updates for the active chat so the send button enables
+  // as soon as messages land (e.g. right after branching) without needing the
+  // user to type to trigger a re-render.
+  const [, bumpMessagesTick] = useState(0);
+  useEffect(() => {
+    if (!activeChatId) return;
+    const targetKey = JSON.stringify(chatKeys.messages(activeChatId));
+    return qc.getQueryCache().subscribe((event) => {
+      if (JSON.stringify(event.query.queryKey) === targetKey) {
+        bumpMessagesTick((n) => n + 1);
+      }
+    });
+  }, [activeChatId, qc]);
   const messagesData = qc.getQueryData<InfiniteData<Message[]>>(chatKeys.messages(activeChatId ?? ""));
   const lastMessageRole = useMemo(() => {
     const firstPage = messagesData?.pages?.[0];
@@ -292,7 +322,7 @@ export const ChatInput = memo(function ChatInput({
         textareaRef.current.value = "";
         textareaRef.current.style.height = "auto";
       }
-      setHasInput(false);
+      syncInputState("");
       setCompletions([]);
       setAttachments([]);
       clearInputDraft(activeChatId);
@@ -339,7 +369,7 @@ export const ChatInput = memo(function ChatInput({
       textareaRef.current.value = "";
       textareaRef.current.style.height = "auto";
     }
-    setHasInput(false);
+    syncInputState("");
     setCompletions([]);
     const pendingAttachments = attachments.map((a) => ({ type: a.type, data: a.data }));
     setAttachments([]);
@@ -384,6 +414,7 @@ export const ChatInput = memo(function ChatInput({
     mode,
     groupResponseOrder,
     createMessage,
+    syncInputState,
   ]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -442,6 +473,7 @@ export const ChatInput = memo(function ChatInput({
       if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
       const chatId = activeChatId;
       const text = fixed;
+      setCurrentInput(text);
       draftTimerRef.current = setTimeout(() => {
         if (text.trim()) {
           setInputDraft(chatId, text);
@@ -478,17 +510,20 @@ export const ChatInput = memo(function ChatInput({
 
   const _isRP = mode === "roleplay";
 
-  const handleEmojiSelect = useCallback((emoji: string) => {
-    if (!textareaRef.current) return;
-    const el = textareaRef.current;
-    const start = el.selectionStart;
-    const end = el.selectionEnd;
-    const value = el.value;
-    el.value = value.slice(0, start) + emoji + value.slice(end);
-    el.selectionStart = el.selectionEnd = start + emoji.length;
-    setHasInput(el.value.length > 0);
-    el.focus();
-  }, []);
+  const handleEmojiSelect = useCallback(
+    (emoji: string) => {
+      if (!textareaRef.current) return;
+      const el = textareaRef.current;
+      const start = el.selectionStart;
+      const end = el.selectionEnd;
+      const value = el.value;
+      el.value = value.slice(0, start) + emoji + value.slice(end);
+      el.selectionStart = el.selectionEnd = start + emoji.length;
+      syncInputState(el.value);
+      el.focus();
+    },
+    [syncInputState],
+  );
 
   // Character picker: trigger a response from a specific character (manual mode)
   const handleCharacterResponse = useCallback(
@@ -497,17 +532,17 @@ export const ChatInput = memo(function ChatInput({
       setCharPickerOpen(false);
       setCharPickerPos(null);
       try {
-        await generate({
-          chatId: activeChatId,
-          connectionId: null,
-          forCharacterId: characterId,
-        });
+        await generate(
+          guideGenerations && hasInput
+            ? { chatId: activeChatId, connectionId: null, forCharacterId: characterId, generationGuide: currentInput }
+            : { chatId: activeChatId, connectionId: null, forCharacterId: characterId },
+        );
       } catch (error) {
         const msg = error instanceof Error ? error.message : "Generation failed";
         toast.error(msg);
       }
     },
-    [activeChatId, isStreaming, generate],
+    [activeChatId, isStreaming, generate, hasInput, currentInput, guideGenerations],
   );
 
   // Close character picker on outside click
@@ -552,7 +587,7 @@ export const ChatInput = memo(function ChatInput({
     <div className="mari-chat-input chat-input-container px-3 pb-3">
       {/* Slash command autocomplete popup */}
       {completions.length > 0 && (
-        <div className="mb-2 overflow-hidden rounded-xl border border-white/10 bg-black/80 shadow-xl backdrop-blur-xl">
+        <div className="mb-2 max-h-[min(18rem,45dvh)] overflow-y-auto rounded-xl border border-foreground/10 bg-[var(--card)] shadow-xl backdrop-blur-xl [-webkit-overflow-scrolling:touch]">
           {completions.map((cmd, i) => (
             <button
               key={cmd.name}
@@ -566,32 +601,23 @@ export const ChatInput = memo(function ChatInput({
                 setCompletions([]);
               }}
               className={cn(
-                "flex w-full items-center gap-3 px-3 py-2 text-left text-sm transition-colors",
+                "flex w-full min-w-0 items-start gap-2 px-3 py-2.5 text-left text-sm transition-colors",
                 i === selectedCompletion
                   ? "bg-foreground/10 text-foreground"
                   : "text-foreground/70 hover:bg-foreground/5",
               )}
             >
-              <span className="font-mono font-semibold text-blue-400">/{cmd.name}</span>
-              <span className="text-xs opacity-60">{cmd.description}</span>
+              <span className="shrink-0 whitespace-nowrap font-mono font-semibold text-blue-400">/{cmd.name}</span>
+              <span className="min-w-0 flex-1 text-xs leading-snug opacity-60 [overflow-wrap:anywhere]">
+                {cmd.description}
+              </span>
             </button>
           ))}
         </div>
       )}
 
       {/* Feedback toast */}
-      {feedback && (
-        <div className={cn("mb-2 flex items-start gap-2 rounded-lg px-3 py-2 text-xs bg-amber-500/15 text-amber-300")}>
-          <span className="flex-1 whitespace-pre-wrap">{feedback}</span>
-          <button
-            onClick={() => setFeedback(null)}
-            className="shrink-0 rounded p-0.5 opacity-60 transition-opacity hover:opacity-100"
-            aria-label="Dismiss"
-          >
-            <X size="0.75rem" />
-          </button>
-        </div>
-      )}
+      {feedback && <SlashCommandFeedback feedback={feedback} onDismiss={() => setFeedback(null)} className="mb-2" />}
 
       {/* Attachment previews */}
       {attachments.length > 0 && (
@@ -627,7 +653,7 @@ export const ChatInput = memo(function ChatInput({
         onDrop={handleDrop}
         className={cn(
           "mari-chat-input-box relative flex items-center gap-1.5 rounded-2xl border-2 px-2.5 py-2.5 transition-all duration-200 sm:gap-2 sm:px-4",
-          "bg-black/40",
+          "bg-[var(--card)]",
           isDragging
             ? "border-blue-400/50 bg-blue-500/10 shadow-lg shadow-blue-500/10"
             : hasInput || attachments.length
@@ -684,7 +710,7 @@ export const ChatInput = memo(function ChatInput({
           rows={1}
           spellCheck
           autoCorrect="on"
-          className="mari-chat-input-textarea max-h-[12.5rem] min-w-0 flex-1 resize-none bg-transparent py-0 text-sm leading-normal text-[#c3c2c2] placeholder:text-foreground/30 outline-none disabled:cursor-not-allowed disabled:opacity-40"
+          className="mari-chat-input-textarea max-h-[12.5rem] min-w-0 flex-1 resize-none bg-transparent py-0 text-sm leading-normal text-foreground/90 placeholder:text-foreground/30 outline-none disabled:cursor-not-allowed disabled:opacity-40"
         />
 
         {/* Emoji picker */}
@@ -718,11 +744,13 @@ export const ChatInput = memo(function ChatInput({
             onClick={() => setCharPickerOpen((v) => !v)}
             className={cn(
               "flex h-8 w-8 items-center justify-center rounded-full transition-colors",
-              charPickerOpen
-                ? "text-foreground bg-foreground/10"
-                : "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
+              guideGenerations && hasInput
+                ? "text-[var(--primary)] bg-[var(--primary)]/15 ring-1 ring-[var(--primary)]/30 hover:bg-[var(--primary)]/20"
+                : charPickerOpen
+                  ? "text-foreground bg-foreground/10"
+                  : "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
             )}
-            title="Trigger character response"
+            title={guideGenerations && hasInput ? "Trigger character response (guided)" : "Trigger character response"}
           >
             <Users size="1rem" />
           </button>
@@ -772,7 +800,14 @@ export const ChatInput = memo(function ChatInput({
                   className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--accent)]"
                 >
                   {char.avatarUrl ? (
-                    <img src={char.avatarUrl} alt={char.name} className="h-7 w-7 shrink-0 rounded-full object-cover" />
+                    <span className="h-7 w-7 shrink-0 overflow-hidden rounded-full">
+                      <img
+                        src={char.avatarUrl}
+                        alt={char.name}
+                        className="h-full w-full object-cover"
+                        style={getAvatarCropStyle(char.avatarCrop)}
+                      />
+                    </span>
                   ) : (
                     <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--secondary)] text-[0.6875rem] font-semibold text-[var(--muted-foreground)]">
                       {(char.name || "?")[0].toUpperCase()}

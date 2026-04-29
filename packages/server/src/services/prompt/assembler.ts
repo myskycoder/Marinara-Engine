@@ -83,6 +83,7 @@ export interface AssemblerInput {
   /** Chat context */
   chatId: string;
   characterIds: string[];
+  personaId?: string | null;
   personaName: string;
   personaDescription: string;
   personaFields?: {
@@ -208,6 +209,7 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
     db: input.db,
     chatId: input.chatId,
     characterIds: input.characterIds,
+    personaId: input.personaId ?? null,
     personaName: input.personaName,
     personaDescription: input.personaDescription,
     personaFields: input.personaFields,
@@ -655,6 +657,9 @@ function enforceStrictRoles(messages: ChatMLMessage[], chatHistoryEndIdx: number
       if (prev && prev.role === effectiveRole) {
         // Merge into previous (same role back-to-back)
         prev.content += "\n\n" + msg.content;
+        if (prev.contextKind !== msg.contextKind) {
+          delete prev.contextKind;
+        }
         if (msg.images?.length) {
           prev.images = [...(prev.images ?? []), ...msg.images];
         }

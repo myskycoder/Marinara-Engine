@@ -66,8 +66,8 @@ export function GameQteOverlay({ actions, timerSeconds, onSelect, onTimeout }: G
       {/* Dramatic overlay */}
       <div
         className={cn(
-          "absolute inset-0 transition-colors duration-300",
-          isUrgent ? "bg-red-900/40" : "bg-black/50",
+          "absolute inset-0 backdrop-blur-[2px] transition-colors duration-300",
+          isUrgent ? "bg-red-950/75" : "bg-black/75",
           flash && "bg-white/30",
         )}
       />
@@ -80,9 +80,9 @@ export function GameQteOverlay({ actions, timerSeconds, onSelect, onTimeout }: G
         )}
       />
 
-      <div className="relative z-10 w-full max-w-lg px-4">
+      <div className="relative z-10 w-full max-w-lg rounded-lg border border-white/20 bg-black/80 px-5 py-5 shadow-2xl shadow-black/60 ring-1 ring-amber-300/30 backdrop-blur-md">
         {/* Timer bar */}
-        <div className="mb-4 overflow-hidden rounded-full bg-white/10">
+        <div className="mb-4 overflow-hidden rounded-full bg-white/20 ring-1 ring-white/15">
           <div
             className={cn("h-2 rounded-full transition-all duration-100", isUrgent ? "bg-red-500" : "bg-amber-400")}
             style={{ width: `${progress}%` }}
@@ -115,7 +115,7 @@ export function GameQteOverlay({ actions, timerSeconds, onSelect, onTimeout }: G
                   ? "scale-110 border-[var(--primary)] bg-[var(--primary)]/30 text-white ring-4 ring-[var(--primary)]/40"
                   : selected !== null
                     ? "scale-90 border-white/5 bg-white/5 text-white/20 opacity-30"
-                    : "border-white/20 bg-white/10 text-white hover:scale-105 hover:border-amber-400/50 hover:bg-amber-400/15 active:scale-95",
+                    : "border-amber-300/50 bg-white/15 text-white shadow-lg shadow-black/30 hover:scale-105 hover:border-amber-300 hover:bg-amber-400/25 active:scale-95",
               )}
             >
               {action.label}

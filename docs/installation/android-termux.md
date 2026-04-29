@@ -49,10 +49,11 @@ The Termux launcher binds to `0.0.0.0` by default, so the app is already reachab
 
 The `start-termux.sh` launcher automatically updates Marinara Engine on each run:
 
-1. Pulls the latest code from GitHub with `git pull`
+1. Fetches the latest code from GitHub and fast-forwards to `origin/main`
 2. Detects whether the checkout changed
-3. Reinstalls dependencies and rebuilds when needed
-4. Starts the app on the current version
+3. Temporarily stashes tracked local changes if needed, then reapplies them
+4. Reinstalls dependencies and rebuilds when needed
+5. Starts the app on the current version
 
 Simply run `./start-termux.sh` to get the latest version each time.
 

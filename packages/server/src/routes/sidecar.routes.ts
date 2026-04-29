@@ -242,9 +242,12 @@ export const sidecarRoutes: FastifyPluginAsync = async (app) => {
       characterNames: z.array(z.string()).optional(),
       currentBackground: z.string().nullable().optional(),
       currentMusic: z.string().nullable().optional(),
+      recentMusic: z.array(z.string()).max(20).optional(),
       currentAmbient: z.string().nullable().optional(),
       currentWeather: z.string().nullable().optional(),
       currentTimeOfDay: z.string().nullable().optional(),
+      canGenerateIllustrations: z.boolean().optional(),
+      artStylePrompt: z.string().nullable().optional(),
     }),
   });
 
@@ -265,14 +268,22 @@ export const sidecarRoutes: FastifyPluginAsync = async (app) => {
     try {
       const raw = await analyzeScene(systemPrompt, userPrompt);
 
-      const widgets = (body.context.activeWidgets ?? []) as { id?: string }[];
       const ppCtx: PostProcessContext = {
         availableBackgrounds: bgTags,
         availableSfx: sfxTags,
-        validWidgetIds: new Set(widgets.map((widget) => widget.id).filter(Boolean) as string[]),
+        validWidgetIds: new Set(
+          (body.context.activeWidgets ?? [])
+            .map((widget) =>
+              widget && typeof widget === "object" && !Array.isArray(widget) ? (widget as { id?: unknown }).id : null,
+            )
+            .filter((id): id is string => typeof id === "string" && id.length > 0),
+        ),
         characterNames: body.context.characterNames ?? [],
       };
       const result = postProcessSceneResult(raw, ppCtx);
+      if (!body.context.canGenerateIllustrations) {
+        result.illustration = null;
+      }
 
       const { getAssetManifest } = await import("../services/game/asset-manifest.service.js");
       const manifest = getAssetManifest();
@@ -285,6 +296,7 @@ export const sidecarRoutes: FastifyPluginAsync = async (app) => {
         weather: result.weather ?? body.context.currentWeather ?? null,
         timeOfDay: result.timeOfDay ?? body.context.currentTimeOfDay ?? null,
         currentMusic: body.context.currentMusic ?? null,
+        recentMusic: body.context.recentMusic ?? null,
         availableMusic: musicTags,
       });
       result.music = scoredMusic ?? null;

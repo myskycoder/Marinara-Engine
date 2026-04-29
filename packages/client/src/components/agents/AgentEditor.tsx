@@ -54,6 +54,19 @@ import {
   type ToolDefinition,
 } from "@marinara-engine/shared";
 
+function createCustomAgentType(name: string): string {
+  const slug =
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "") || "agent";
+  const suffix =
+    globalThis.crypto && "randomUUID" in globalThis.crypto
+      ? globalThis.crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return `custom-${slug}-${suffix}`;
+}
+
 // ═══════════════════════════════════════════════
 //  Phase metadata
 // ═══════════════════════════════════════════════
@@ -239,6 +252,8 @@ export function AgentEditor() {
   // Knowledge Retrieval agent — lorebook source selector
   const isKnowledgeRetrievalAgent = agentDetailId === "knowledge-retrieval" || dbConfig?.type === "knowledge-retrieval";
   const isCharacterTrackerAgent = agentDetailId === "character-tracker" || dbConfig?.type === "character-tracker";
+  // Knowledge Router agent — also uses the lorebook source selector (file picker stays Retrieval-only)
+  const isKnowledgeRouterAgent = agentDetailId === "knowledge-router" || dbConfig?.type === "knowledge-router";
   const { data: allLorebooks } = useLorebooks();
   const { data: allKnowledgeSources } = useKnowledgeSources();
   const uploadSource = useUploadKnowledgeSource();
@@ -324,7 +339,11 @@ export function AgentEditor() {
         enabledTools: localEnabledTools,
         ...(localSpotifyClientId ? { spotifyClientId: localSpotifyClientId } : {}),
         ...(localSourceLorebookIds.length > 0 ? { sourceLorebookIds: localSourceLorebookIds } : {}),
-        ...(localSourceFileIds.length > 0 ? { sourceFileIds: localSourceFileIds } : {}),
+        // Only persist sourceFileIds for the Knowledge Retrieval agent — the Router
+        // doesn't read this setting. Without this guard, switching an agent from
+        // Retrieval to Router would leave behind stale file IDs the user can no
+        // longer see or remove via the UI.
+        ...(isKnowledgeRetrievalAgent && localSourceFileIds.length > 0 ? { sourceFileIds: localSourceFileIds } : {}),
         ...(localImageConnectionId ? { imageConnectionId: localImageConnectionId } : {}),
         ...(isCharacterTrackerAgent && localAutoMaterializeNpcs ? { autoMaterializeNpcs: true } : {}),
         ...(isCharacterTrackerAgent && localAutoGenerateAvatars ? { autoGenerateNpcAvatars: true } : {}),
@@ -341,13 +360,9 @@ export function AgentEditor() {
       if (dbConfig) {
         await updateAgent.mutateAsync({ id: dbConfig.id, ...payload });
       } else {
-        // For built-in agents, use their type; for custom, generate a slug
-        const typeId = builtIn
-          ? agentDetailId
-          : `custom-${localName
-              .toLowerCase()
-              .replace(/[^a-z0-9]+/g, "-")
-              .replace(/(^-|-$)/g, "")}`;
+        // Built-ins are keyed by type. Custom agents need unique types so creating
+        // another "New Agent" does not overwrite the existing custom agent.
+        const typeId = builtIn ? agentDetailId : createCustomAgentType(localName);
         const created = (await createAgent.mutateAsync({
           ...payload,
           type: typeId,
@@ -386,6 +401,7 @@ export function AgentEditor() {
     isCharacterTrackerAgent,
     dbConfig,
     builtIn,
+    isKnowledgeRetrievalAgent,
     updateAgent,
     createAgent,
     openAgentDetail,
@@ -1076,12 +1092,16 @@ export function AgentEditor() {
             </FieldGroup>
           )}
 
-          {/* ── Knowledge Source Lorebooks (only for Knowledge Retrieval agent) ── */}
-          {isKnowledgeRetrievalAgent && (
+          {/* ── Knowledge Source Lorebooks (Knowledge Retrieval + Knowledge Router) ── */}
+          {(isKnowledgeRetrievalAgent || isKnowledgeRouterAgent) && (
             <FieldGroup
               label="Knowledge Sources"
               icon={<BookOpen size="0.875rem" className="text-amber-400" />}
-              help="Select lorebooks and/or upload files for this agent to scan. Supported file types: .txt, .md, .csv, .json, .xml, .html, .pdf"
+              help={
+                isKnowledgeRouterAgent
+                  ? "Select lorebooks for this agent to route over. The router picks relevant entries by id and they're injected verbatim."
+                  : "Select lorebooks and/or upload files for this agent to scan. Supported file types: .txt, .md, .csv, .json, .xml, .html, .pdf"
+              }
             >
               <div className="space-y-4">
                 {/* ── Lorebooks ── */}
@@ -1131,111 +1151,113 @@ export function AgentEditor() {
                   )}
                 </div>
 
-                {/* ── Uploaded Files ── */}
-                <div className="space-y-1.5">
-                  <p className="text-[0.6875rem] font-medium text-white/60">Files</p>
-                  {/* File list */}
-                  {allKnowledgeSources && allKnowledgeSources.length > 0 && (
-                    <div className="max-h-48 overflow-y-auto space-y-1 rounded-lg border border-white/10 bg-white/[0.02] p-2">
-                      {allKnowledgeSources.map((src) => {
-                        const selected = localSourceFileIds.includes(src.id);
-                        return (
-                          <div
-                            key={src.id}
-                            className={cn(
-                              "flex items-center gap-2 rounded-lg px-3 py-2 text-xs transition-all",
-                              selected
-                                ? "bg-amber-500/10 border border-amber-500/20 text-amber-300"
-                                : "bg-white/[0.02] border border-transparent text-white/60",
-                            )}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setLocalSourceFileIds((prev) =>
-                                  selected ? prev.filter((id) => id !== src.id) : [...prev, src.id],
-                                );
-                                setDirty(true);
-                              }}
-                              className="flex items-center gap-2.5 flex-1 min-w-0 text-left"
+                {/* ── Uploaded Files (Knowledge Retrieval only) ── */}
+                {isKnowledgeRetrievalAgent && (
+                  <div className="space-y-1.5">
+                    <p className="text-[0.6875rem] font-medium text-white/60">Files</p>
+                    {/* File list */}
+                    {allKnowledgeSources && allKnowledgeSources.length > 0 && (
+                      <div className="max-h-48 overflow-y-auto space-y-1 rounded-lg border border-white/10 bg-white/[0.02] p-2">
+                        {allKnowledgeSources.map((src) => {
+                          const selected = localSourceFileIds.includes(src.id);
+                          return (
+                            <div
+                              key={src.id}
+                              className={cn(
+                                "flex items-center gap-2 rounded-lg px-3 py-2 text-xs transition-all",
+                                selected
+                                  ? "bg-amber-500/10 border border-amber-500/20 text-amber-300"
+                                  : "bg-white/[0.02] border border-transparent text-white/60",
+                              )}
                             >
-                              <div
-                                className={cn(
-                                  "flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-all",
-                                  selected ? "border-amber-500/50 bg-amber-500/20" : "border-white/20 bg-white/5",
-                                )}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setLocalSourceFileIds((prev) =>
+                                    selected ? prev.filter((id) => id !== src.id) : [...prev, src.id],
+                                  );
+                                  setDirty(true);
+                                }}
+                                className="flex items-center gap-2.5 flex-1 min-w-0 text-left"
                               >
-                                {selected && <Check size="0.625rem" />}
-                              </div>
-                              <div className="min-w-0 flex-1">
-                                <p className="truncate font-medium">{src.originalName}</p>
-                                <p className="text-[0.625rem] text-white/40">{(src.size / 1024).toFixed(1)} KB</p>
-                              </div>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                deleteSource.mutate(src.id, {
-                                  onSuccess: () => {
-                                    setLocalSourceFileIds((prev) => prev.filter((id) => id !== src.id));
-                                  },
-                                });
-                              }}
-                              className="shrink-0 p-1 rounded text-white/20 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                              title="Delete file"
-                            >
-                              <Trash2 size="0.75rem" />
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                                <div
+                                  className={cn(
+                                    "flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-all",
+                                    selected ? "border-amber-500/50 bg-amber-500/20" : "border-white/20 bg-white/5",
+                                  )}
+                                >
+                                  {selected && <Check size="0.625rem" />}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <p className="truncate font-medium">{src.originalName}</p>
+                                  <p className="text-[0.625rem] text-white/40">{(src.size / 1024).toFixed(1)} KB</p>
+                                </div>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  deleteSource.mutate(src.id, {
+                                    onSuccess: () => {
+                                      setLocalSourceFileIds((prev) => prev.filter((id) => id !== src.id));
+                                    },
+                                  });
+                                }}
+                                className="shrink-0 p-1 rounded text-white/20 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                                title="Delete file"
+                              >
+                                <Trash2 size="0.75rem" />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
 
-                  {/* Upload button */}
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".txt,.md,.csv,.json,.xml,.html,.htm,.log,.yaml,.yml,.tsv,.pdf"
-                    className="hidden"
-                    onChange={async (e) => {
-                      const file = e.target.files?.[0];
-                      if (!file) return;
-                      try {
-                        const uploaded = await uploadSource.mutateAsync(file);
-                        setLocalSourceFileIds((prev) => [...prev, uploaded.id]);
-                        setDirty(true);
-                      } catch {
-                        /* error handled by mutation */
-                      }
-                      // Reset so same file can be re-uploaded if needed
-                      e.target.value = "";
-                    }}
-                  />
-                  <button
-                    type="button"
-                    disabled={uploadSource.isPending}
-                    onClick={() => fileInputRef.current?.click()}
-                    className={cn(
-                      "flex items-center gap-2 rounded-lg border border-dashed px-3 py-2.5 text-xs font-medium transition-all w-full justify-center",
-                      uploadSource.isPending
-                        ? "border-white/10 text-white/30 cursor-wait"
-                        : "border-white/15 text-white/50 hover:border-amber-500/30 hover:text-amber-400 hover:bg-amber-500/5",
-                    )}
-                  >
-                    {uploadSource.isPending ? (
-                      <>
-                        <Loader2 size="0.875rem" className="animate-spin" />
-                        Uploading...
-                      </>
-                    ) : (
-                      <>
-                        <Upload size="0.875rem" />
-                        Upload File
-                      </>
-                    )}
-                  </button>
-                </div>
+                    {/* Upload button */}
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".txt,.md,.csv,.json,.xml,.html,.htm,.log,.yaml,.yml,.tsv,.pdf"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        try {
+                          const uploaded = await uploadSource.mutateAsync(file);
+                          setLocalSourceFileIds((prev) => [...prev, uploaded.id]);
+                          setDirty(true);
+                        } catch {
+                          /* error handled by mutation */
+                        }
+                        // Reset so same file can be re-uploaded if needed
+                        e.target.value = "";
+                      }}
+                    />
+                    <button
+                      type="button"
+                      disabled={uploadSource.isPending}
+                      onClick={() => fileInputRef.current?.click()}
+                      className={cn(
+                        "flex items-center gap-2 rounded-lg border border-dashed px-3 py-2.5 text-xs font-medium transition-all w-full justify-center",
+                        uploadSource.isPending
+                          ? "border-white/10 text-white/30 cursor-wait"
+                          : "border-white/15 text-white/50 hover:border-amber-500/30 hover:text-amber-400 hover:bg-amber-500/5",
+                      )}
+                    >
+                      {uploadSource.isPending ? (
+                        <>
+                          <Loader2 size="0.875rem" className="animate-spin" />
+                          Uploading...
+                        </>
+                      ) : (
+                        <>
+                          <Upload size="0.875rem" />
+                          Upload File
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
 
                 {/* Summary */}
                 {(localSourceLorebookIds.length > 0 || localSourceFileIds.length > 0) && (

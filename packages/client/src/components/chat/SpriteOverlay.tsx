@@ -2,7 +2,7 @@
 // Sprite Overlay — VN-style character sprites in chat
 // Supports persisted free placement to avoid group-chat overlap.
 // ──────────────────────────────────────────────
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, type CSSProperties } from "react";
 import { motion, AnimatePresence, type TargetAndTransition } from "framer-motion";
 import type { SpritePlacement, SpriteSide } from "@marinara-engine/shared";
 import { useCharacterSprites, type SpriteInfo } from "../../hooks/use-characters";
@@ -28,6 +28,8 @@ interface SpriteOverlayProps {
   onPlacementChange?: (characterId: string, placement: SpritePlacement) => void;
   /** When true, only show full-body sprites (full_ prefix) and hide characters without any */
   fullBodyOnly?: boolean;
+  /** Multiplier for sprite size. Game mode passes this for full-body sprites. */
+  spriteScale?: number;
 }
 
 type Transition = "crossfade" | "bounce" | "shake" | "hop" | "none";
@@ -74,6 +76,7 @@ export function SpriteOverlay({
   onExpressionChange,
   onPlacementChange,
   fullBodyOnly = false,
+  spriteScale = 1,
 }: SpriteOverlayProps) {
   const stageRef = useRef<HTMLDivElement>(null);
 
@@ -210,6 +213,7 @@ export function SpriteOverlay({
           stageRef={stageRef}
           onPlacementChange={onPlacementChange}
           fullBodyOnly={fullBodyOnly}
+          spriteScale={spriteScale}
         />
       ))}
 
@@ -281,6 +285,7 @@ function CharacterSprite({
   stageRef,
   onPlacementChange,
   fullBodyOnly = false,
+  spriteScale = 1,
 }: {
   characterId: string;
   expression: string;
@@ -292,6 +297,7 @@ function CharacterSprite({
   stageRef: React.RefObject<HTMLDivElement | null>;
   onPlacementChange?: (characterId: string, placement: SpritePlacement) => void;
   fullBodyOnly?: boolean;
+  spriteScale?: number;
 }) {
   const { data: sprites } = useCharacterSprites(characterId);
   const prevExpressionRef = useRef(expression);
@@ -334,10 +340,14 @@ function CharacterSprite({
 
   const sizeClass =
     spriteCount >= 3
-      ? "max-h-[50vh] max-w-[55vw] md:max-h-[44vh] md:max-w-[26vw]"
+      ? "max-h-[min(68vh,calc(50vh*var(--game-sprite-scale)))] max-w-[min(82vw,calc(55vw*var(--game-sprite-scale)))] md:max-h-[min(70vh,calc(44vh*var(--game-sprite-scale)))] md:max-w-[min(38vw,calc(26vw*var(--game-sprite-scale)))]"
       : spriteCount === 2
-        ? "max-h-[55vh] max-w-[60vw] md:max-h-[52vh] md:max-w-[32vw]"
-        : "max-h-[65vh] max-w-[80vw] md:max-h-[60vh] md:max-w-[38vw]";
+        ? "max-h-[min(74vh,calc(55vh*var(--game-sprite-scale)))] max-w-[min(86vw,calc(60vw*var(--game-sprite-scale)))] md:max-h-[min(76vh,calc(52vh*var(--game-sprite-scale)))] md:max-w-[min(46vw,calc(32vw*var(--game-sprite-scale)))]"
+        : "max-h-[min(82vh,calc(65vh*var(--game-sprite-scale)))] max-w-[min(92vw,calc(80vw*var(--game-sprite-scale)))] md:max-h-[min(78vh,calc(60vh*var(--game-sprite-scale)))] md:max-w-[min(58vw,calc(38vw*var(--game-sprite-scale)))]";
+  const spriteScaleStyle = useMemo<CSSProperties>(
+    () => ({ "--game-sprite-scale": Math.max(0.75, Math.min(1.75, spriteScale)) }) as CSSProperties,
+    [spriteScale],
+  );
 
   useEffect(() => {
     currentPlacementRef.current = currentPlacement;
@@ -434,6 +444,7 @@ function CharacterSprite({
           src={spriteUrl}
           alt={`${expression} sprite`}
           className={`${sizeClass} w-auto object-contain drop-shadow-[0_0_20px_rgba(0,0,0,0.5)] ${editing ? "cursor-grab active:cursor-grabbing" : ""}`}
+          style={spriteScaleStyle}
           draggable={false}
           initial={variant.initial}
           animate={variant.animate}

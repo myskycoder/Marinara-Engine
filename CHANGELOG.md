@@ -2,12 +2,59 @@
 
 This file is the release-notes source of truth for Marinara Engine. Reuse these entries when publishing GitHub Releases for tags in the `vX.Y.Z` format.
 
-## [Unreleased]
+## [1.5.6]
 
 ### Added
 
-- New connection provider **Claude (Subscription)** that routes chat through the locally-installed Claude Agent SDK so requests bill against your Anthropic Pro / Max subscription instead of an `sk-ant-*` API key. Requires `npm i -g @anthropic-ai/claude-code` and a one-time `claude login` on the host running Marinara. This is the same auth mechanism Anthropic-endorsed integrations like Zed use; no proxy or third-party shim is involved. Built-in agent tools are disabled — use Marinara's own agent/tool layer. Embeddings are not supported on this provider; configure a separate connection for them.
-- "Mari is thinking…" indicator appears above the composer while Professor Mari executes her embedded commands (create/update character, fetch, create chat, navigate). Makes it clear her background work is running and not frozen.
+- New connection provider Claude (Subscription) that routes chat through the locally installed Claude Agent SDK so requests bill against your Anthropic Pro / Max subscription instead of an `sk-ant-*` API key. Requires `npm i -g @anthropic-ai/claude-code` and a one-time `claude login` on the host running Marinara. This is the same auth mechanism Anthropic-endorsed integrations like Zed use; no proxy or third-party shim is involved. Built-in agent tools are disabled and use Marinara's own agent/tool layer. Embeddings are not supported on this provider; configure a separate connection for them.
+- The "Mari is thinking…" indicator appears above the composer while Professor Mari executes her embedded commands (create/update character, fetch, create chat, navigate). Makes it clear that her background work is running, not frozen. Bonus: Dottore is doing jumping jacks.
+- Dry-run generation endpoint (`POST /api/generate/dryRun`) that runs the full generation pipeline without side effects; no messages persisted, no agents or tools invoked, no Discord webhooks. Extensions can send a `userMessage` to preview "what if I said this", use `impersonate: true` to preview the user's next in-character line, enable optional injections (lorebook, trackers, chat summary), override the preset or connection, and optionally receive the assembled prompt instead of a completion (`returnPrompt: true`). Supports both non-streaming JSON responses and SSE streaming with abort capability. Intended as a stopgap extension API for flexible prompt inspection and silent generation.
+- In Game mode, NPCs can be added/removed from your party, plus now you can manage the party manually.
+- If you have Image Generation enabled in Game mode, during important scenes, the model now generates immersive VN-like scenes from the player's POV.
+- Overall improvements to generating expressions/full-body sprites for your characters.
+- Guided generations with a visible indicator.
+- Schedule generation preferences added for conversations.
+- Pygmalion, Jenny, and DataCat added to the Browser.
+- Pinnable taskbar shortcut via custom launcher.
+- Universal Tool Support for agents.
+- New Knowledge Router agent.
+- You can now link Personas to Lorebooks.
+- Drag-and-drop Lorebook entries.
+- Added ElevenLabs for TTS support.
+- You can now see spoilers for Game mode and edit the plot accordingly to your needs in the History section.
+- Upon ending the Game session, you can now optionally include what you want to happen in the next session.
+- Separate volume levels for different sounds in Game mode.
+- Added the `/impersonate_prompt` command that allows you to change the impersonate prompt.
+- Added manual mode in Conversations that only makes the character respond when you ping them with `@name`.
+- Resizing sprites in game mode.
+
+### Fixed
+
+- UI and other minor glitches in Game Mode.
+- Image Generation in game mode is not firing up for named NPCs in a scene.
+- More ComfyUI fixes.
+- Various general fixes and improvements.
+- Anchor link error.
+- We now enable the send button immediately after branching.
+- Remove background actually sticks across switches.
+- Sidecar CUDA runtime setup fix.
+- Light Mode readability issues.
+- Removed the ability to apply presets to Conversations, which broke the format.
+- Improved usability on mobile devices with small screens, where tapping tiny buttons could be difficult.
+- Navigational icons under messages now scale with the display size.
+- When selecting Personas during chat setups, you can now see their avatars.
+- Switching between chats doesn't cancel generations in progress.
+- Parameters added to Conversations and Roleplay setups.
+- Bugged NPC entries in Game mode journal.
+- Creating a new agent doesn't delete the old one.
+- Preset names are no longer set to Default upon being selected.
+- Black screen on search bar typing in chats was fixed.
+- Various UI fixes applied.
+- DeepSeek V4 is now supported.
+- Addressed the bug that deleted your Persona fields when uploading an avatar in an unsaved state.
+- Minor adjustments to some agent widgets.
+- Game mode now supports multiple maps.
+- Debug mode restored.
 
 ## [1.5.5]
 

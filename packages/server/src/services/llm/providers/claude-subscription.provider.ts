@@ -20,12 +20,7 @@
 //     same mechanism Zed and other IDE integrations use.
 //   • SDK docs: https://docs.anthropic.com/en/docs/claude-code/sdk
 //
-import {
-  BaseLLMProvider,
-  type ChatMessage,
-  type ChatOptions,
-  type LLMUsage,
-} from "../base-provider.js";
+import { BaseLLMProvider, type ChatMessage, type ChatOptions, type LLMUsage } from "../base-provider.js";
 import { logger } from "../../../lib/logger.js";
 
 /**
@@ -126,10 +121,13 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
       systemPrompt,
       includePartialMessages: options.stream ?? true,
       // Disable agent tooling — Marinara has its own tool/agent pipeline and
-      // we only want plain text completions out of this provider.
+      // we only want plain text completions out of this provider. With tools
+      // empty, no agentic loop runs, so we leave maxTurns unset; setting it
+      // to 1 caused the SDK to bail with `error_max_turns` because thinking
+      // and other internal steps consume turn budget alongside the assistant
+      // response.
       tools: [],
       permissionMode: "bypassPermissions",
-      maxTurns: 1,
     };
 
     if (options.enableThinking) {

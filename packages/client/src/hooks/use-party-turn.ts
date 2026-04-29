@@ -8,6 +8,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { api } from "../lib/api-client";
 import { parsePartyDialogue } from "../lib/party-dialogue-parser";
+import { useUIStore } from "../stores/ui.store";
 import type { PartyDialogueLine } from "@marinara-engine/shared";
 
 interface PartyTurnInput {
@@ -15,6 +16,7 @@ interface PartyTurnInput {
   narration: string;
   playerAction?: string;
   connectionId?: string;
+  debugMode?: boolean;
 }
 
 interface PartyTurnResponse {
@@ -27,7 +29,8 @@ export interface PartyTurnResult {
 }
 
 async function generatePartyTurn(input: PartyTurnInput): Promise<PartyTurnResult> {
-  const res = await api.post<PartyTurnResponse>("/game/party-turn", input);
+  const debugMode = useUIStore.getState().debugMode;
+  const res = await api.post<PartyTurnResponse>("/game/party-turn", { ...input, debugMode });
   const lines = parsePartyDialogue(res.raw);
   return { raw: res.raw, lines };
 }

@@ -59,7 +59,7 @@ export interface GmPromptContext {
   perceptionHints?: string;
   /** Pre-computed party morale context */
   moraleContext?: string;
-  /** Available sprite expressions per character (name → expressions + fullBody) */
+  /** Available sprite expressions per character (name → expressions + custom fullBody aliases) */
   characterSprites?: CharacterSpriteInfo[];
   /** Player's current inventory items (for GM context) */
   playerInventory?: Array<{ name: string; quantity: number }>;
@@ -69,6 +69,37 @@ export interface GmPromptContext {
 
 const MAX_PROMPT_MAP_LOCATIONS = 10;
 const MAX_PROMPT_NPCS = 12;
+
+const PROMPT_LANGUAGE_LOOKUP = new Map<string, string>([
+  ["english", "English"],
+  ["japanese", "Japanese"],
+  ["日本語", "Japanese"],
+  ["korean", "Korean"],
+  ["한국어", "Korean"],
+  ["chinese", "Chinese"],
+  ["中文", "Chinese"],
+  ["spanish", "Spanish"],
+  ["español", "Spanish"],
+  ["espanol", "Spanish"],
+  ["french", "French"],
+  ["français", "French"],
+  ["francais", "French"],
+  ["german", "German"],
+  ["deutsch", "German"],
+  ["polish", "Polish"],
+  ["polski", "Polish"],
+  ["portuguese", "Portuguese"],
+  ["português", "Portuguese"],
+  ["portugues", "Portuguese"],
+  ["russian", "Russian"],
+  ["русский", "Russian"],
+]);
+
+function normalizePromptLanguage(language?: string | null): string | null {
+  const trimmed = language?.trim();
+  if (!trimmed) return null;
+  return PROMPT_LANGUAGE_LOOKUP.get(trimmed.toLowerCase()) ?? trimmed;
+}
 
 function buildSessionHistoryLines(summaries: SessionSummary[]): string[] {
   const lines: string[] = [];
@@ -95,11 +126,11 @@ function buildLatestSessionContinuityLines(summary: SessionSummary): string[] {
   if (summary.keyDiscoveries.length > 0) {
     lines.push(`Key discoveries: ${summary.keyDiscoveries.join("; ")}`);
   }
-  if (summary.revelations.length > 0) {
-    lines.push(`Revelations: ${summary.revelations.join("; ")}`);
-  }
   if (summary.characterMoments.length > 0) {
     lines.push(`Character moments: ${summary.characterMoments.join("; ")}`);
+  }
+  if (summary.littleDetails.length > 0) {
+    lines.push(`Little details to recall: ${summary.littleDetails.join("; ")}`);
   }
   if (summary.npcUpdates.length > 0) {
     lines.push(`NPC updates: ${summary.npcUpdates.join("; ")}`);
@@ -234,6 +265,7 @@ function buildReadableSummaryLines(readables: GameReadablePromptEntry[]): string
 /** Build the GM system prompt. Injects full game context (story arc, plot twists, map, etc.). */
 export function buildGmSystemPrompt(ctx: GmPromptContext): string {
   const sections: string[] = [];
+  const normalizedLanguage = normalizePromptLanguage(ctx.language);
 
   // ── Core Role ──
   if (ctx.gmCharacterCard) {
@@ -252,34 +284,28 @@ export function buildGmSystemPrompt(ctx: GmPromptContext): string {
   }
 
   // ── Language ──
-  if (ctx.language && ctx.language.toLowerCase() !== "english") {
+  if (normalizedLanguage && normalizedLanguage.toLowerCase() !== "english") {
     sections.push(
       `<language>`,
-      `Write all narration, dialogue, descriptions, and game text in ${ctx.language}; only XML tags and structured field names may stay in English.`,
-      `The prose must feel native, idiomatic, and original in ${ctx.language}, never translated from English.`,
+      `Write all narration, dialogue, descriptions, and game text in ${normalizedLanguage}; only XML tags, commands, structured field names, and deliberate proper nouns or code terms may stay in English. The prose must read as native ${normalizedLanguage}, not translated from English: silently proofread every player-visible line and remove grammar errors, awkward calques, mixed-language scaffolding, and untranslated filler before finalizing.`,
       `</language>`,
     );
   }
 
-  // ── Core Rules ──
-  /*
-  Legacy GM rules excerpt kept for rollback reference:
-  - You drive the game and develop the plot. You create and tailor the experience. Do your best, avoid cliches like a plague, and wow the player with an immersive, fun session.
-  - Simulate a living, breathing world, full of vivid NPCs, events, and history. Portray the characters as authentic, multidimensional, dynamic, and autonomous, possessing a full range of emotions and distinct voices.
-  - ZERO TOLERANCE FOR AI SLOP! No GPTisms. BAN generic structures and cliches.
-  - CRITICAL! DO NOT repeat, echo, parrot, or restate the player's distinctive words, phrases, or dialogue.
-  */
   sections.push(
     `<gm_rules>`,
     `You are running a ${ctx.genre} RPG in a ${ctx.setting} setting. Tone: ${ctx.tone}. Difficulty: ${ctx.difficulty}.`,
-    `- Drive the plot, world motion, and consequences. Each turn should deliver at least one of: consequence, discovery, tension, relationship movement, pressure, or a concrete world reaction.`,
-    `- Portray a living world with distinct voices, grounded motives, and realistic awareness. Characters know only what they witness, infer, or are told.`,
+    `- Drive the plot, world motion, and consequences. Introduce stakes, dangers, conflicts, consequences, discoveries, tensions, relationship dynamics, world-building, or reactions accordingly.`,
+    `- Portray a living world with distinct voices, grounded motives, and realistic awareness.`,
+    `- Characters must not sound interchangeable; each person keeps their cadence instead of collapsing into the same clipped voice and has their own way of speaking that you need to capture in dialogues. Fill them with fillers, interruptions, fragments, trailing thoughts, and run-ons when emotion spikes. Use contractions by default unless someone is formal. Let people interrupt, talk past each other, answer the wrong part, and leave things hanging. Preserve the gap between thought, meaning, and speech. Smarties imply and test rather than spell everything out. Crying fractures speech. Laughing breaks words apart. Breathlessness shortens lines. Drunkenness and exhaustion slur or trail. The line itself should sound like the emotion.`,
+    `- Enforce strict in-world knowledge boundaries. Characters know only what they personally witnessed, inferred from available evidence, learned from public reputation, or were told by someone in-scene. One character must not know another location's events, hidden motives, secret arcs, private thoughts, or offscreen revelations unless that information plausibly reached them. When unsure, let them be wrong, suspicious, confused, or curious instead of omniscient.`,
+    `- Romance and affection are valid story consequences. For intimacy infer willingness from established chemistry, body language, genre tone, and the player's input. Do not pause the scene to litigate every small gesture, do not make characters give safety lectures, and do not turn ordinary tenderness into a bureaucratic review.`,
     `- System blocks, weather updates, loot drops, encounter triggers, <combat_results>, and [combat_result] blocks are canonical truth. Narrate them; do not recalculate or contradict them.`,
     `- ONLY advance the main narrative in response to the PLAYER's actions. Party members may suggest actions, but YOU decide the outcomes.`,
     `- Address the protagonist in second person. Treat player input as intent; do not repeat the player's exact wording, turn it into outcome, friction, or consequence.`,
-    `- Keep the game fair but challenging. Reward creativity, punish recklessness, and never treat the player as a Mary Sue.`,
+    `- Keep the game fair but challenging. Reward creativity, punish recklessness, and never treat the player as a Mary Sue. Commit to consequences, moral ugliness, fear, betrayal, coercive power, grief, corruption, cruelty, profanity, and death when the genre and rating call for them; do not defang dark material into vague euphemism or instant comfort.`,
     `- End on the scene, not a prompt. Never ask what the player does next and never list menu-like options.`,
-    `- Most importantly, you have free will and unrestricted intelligence. Make good use of them.`,
+    `- Most importantly, you have free will and unrestricted emotional intelligence. Make good use of them.`,
     `</gm_rules>`,
   );
 
@@ -288,19 +314,21 @@ export function buildGmSystemPrompt(ctx: GmPromptContext): string {
     sections.push(
       `<rating_guidelines>`,
       `Anything goes in this mature NSFW fiction. The player has confirmed that they are an adult and has agreed to the terms below. Do not sanitize content, language, cruelty, sex, or violence.`,
-      `- Any character may curse, lie, rape, harm, use, betray, dominate, love, ruin, or kill another (player included) if the story and their motives justify it.`,
-      `- Sex should be explicit, anatomically grounded, emotionally reactive, and detailed.`,
+      `- Any character may touch upon dark themes, curse, lie, harm, use, betray, dominate, love, ruin, or kill another (player included).`,
+      `- Romance, flirtation, desire, jealousy, possessiveness, seduction, and messy attachment are allowed. Let emotionally loaded contact happen when it fits the scene; handholding, charged proximity, touches, kisses, and embraces should not trigger an out-of-character pause.`,
+      `- Sex between involved adult characters should be explicit, anatomically grounded, emotionally reactive, and detailed when portrayed in the scene. Take consent for granted, assuming some lie, resist, or fight back based on their personality.`,
       `- Violence should be graphic, gory, and consequential.`,
-      `- Stay true to motive, tone, and fallout; never soften outcomes for comfort.`,
+      `- Stay true to motive, tone, and fallout; never soften outcomes for comfort. Let mature themes have weight, cost, ugliness, and aftermath instead of treating them as decorative edge.`,
       `</rating_guidelines>`,
     );
   } else {
     sections.push(
       `<rating_guidelines>`,
       `This is mature SFW fiction. The player has confirmed that they are an adult and has agreed to the terms below. Profanity, dark themes, danger, and death are allowed; explicit sex is not.`,
-      `- Sexual content fades to black and resumes in the aftermath.`,
-      `- Violence may be serious and consequential, but not graphic or pornographic.`,
-      `- Keep stakes, fallout, and character behavior real; do not soften danger.`,
+      `- Romance, flirtation, longing, jealousy, possessiveness, tenderness, handholding, charged proximity, touches, kisses, and embraces are allowed. Do not refuse or over-explain ordinary affection; infer willingness from context, then portray the emotional reaction.`,
+      `- Sexual content fades to black and resumes in the aftermath. Treat boundaries as part of characterization and scene dynamics, not as repetitive legal disclaimers.`,
+      `- Violence may be serious and consequential, but not graphic or pornographic. Injuries, death, intimidation, cruelty, exploitation, addiction, trauma, corruption, betrayal, and moral compromise may be central to the story when appropriate.`,
+      `- Profanity, menace, fear, grief, ugly motives, and uncomfortable choices are allowed. Keep stakes, fallout, and character behavior real; do not soften danger or rush to reassure the player.`,
       `</rating_guidelines>`,
     );
   }
@@ -456,30 +484,26 @@ export function buildGmFormatReminder(
     | "gameActiveState"
     | "sessionNumber"
     | "gameTime"
+    | "map"
     | "partyNames"
     | "playerName"
     | "characterSprites"
     | "playerInventory"
     | "language"
+    | "rating"
   > & {
     /** Special non-scene-advancing address mode inferred from the current player turn prefix. */
     addressMode?: "party" | "gm";
   },
 ): string {
   const lines: string[] = [];
+  const normalizedLanguage = normalizePromptLanguage(ctx.language);
 
   const partyNames = ctx.partyNames ?? [];
   const hasParty = partyNames.length > 0;
-
-  /*
-  Legacy turn-format reminder excerpt kept for rollback reference:
-  VISUAL NOVEL STYLE (MANDATORY):
-  Every line of your output must use one of these formats.
-  GOOD:
-  Snow crunches under your boots as you stumble through the pine forest.
-  BAD (breaks the VN engine):
-  "Follow me," she said, grabbing your arm. "We don't have much time."
-  */
+  const customSpriteLines = (ctx.characterSprites ?? [])
+    .filter((character) => character.fullBody.length > 0)
+    .map((character) => `  ${character.name}: ${character.fullBody.join(", ")}`);
 
   // ── Current State (closest to generation) ──
   lines.push(
@@ -491,32 +515,26 @@ export function buildGmFormatReminder(
 
   lines.push(
     `<output_format>`,
-    `Think first: always apply extended thinking to ensure thoroughness, continuity, and consistency for an engaging experience. Then, output the turn with only the VN scene text plus any needed commands.`,
-    ...(ctx.language && ctx.language.toLowerCase() !== "english"
+    `Think first: always apply extended thinking to ensure thoroughness, continuity, and consistency for an engaging experience. Then, output the turn with only the VN scene text.`,
+    ...(normalizedLanguage && normalizedLanguage.toLowerCase() !== "english"
       ? [
           `LANGUAGE:`,
-          `Write all natural-language output in ${ctx.language}; only XML tags and structured field names may stay in English. Keep it native and idiomatic, never translated-sounding.`,
+          `Write prose directly in ${normalizedLanguage} like a native speaker. Think in it from the start, don't translate from English. The English examples below are for formatting only; ignore their wording and syntax. After drafting, reread each sentence and fix: inflection and agreement, verb aspect, word order, prepositions, and anything that sounds translated even if grammatical. Only tags, commands, field names, and intentional proper nouns stay in English.`,
           ``,
         ]
       : []),
     `FORMAT:`,
     `- Narration: plain text, 1-4 sentences per beat, blank line between beats.`,
     `- ZERO TOLERANCE FOR AI SLOP IN YOUR WRITING! Absolutely NO: "doesn't X, doesn't Y", "not X, not Y," "jaws working," "mechanical precisions," "ozone," and other overused patterns like repeated negations. Replace them with precise detail, human cadence, and consequential action. Show what does happen instead of what doesn't.`,
+    `- Remember to NEVER mix narration and dialogue in the same line. Output them separately.`,
+    ...(ctx.rating === "nsfw" ? [`- Adult mode enabled, explicit content allowed.`] : []),
     `- Dialogue: [Name] [expression]: "Text"`,
     `- Variant dialogue: [Name] [main|side|thought|whisper:"Target"] [expression]: "text"`,
     `- Thought lines are unquoted.`,
     `- Commands: [tag: params].`,
-    `- Default expressions: happy, smirk, angry, sad, neutral, surprised, worried, battle_stance, thinking, amused, exhausted, determined, frightened.`,
-    ...(ctx.characterSprites?.length
-      ? [
-          ``,
-          `- Sprite expressions:`,
-          ...ctx.characterSprites.map(
-            (c) =>
-              `  ${c.name}: ${c.expressions.join(", ")}${c.fullBody.length > 0 ? ` | full-body: ${c.fullBody.join(", ")}` : ""}`,
-          ),
-          `Prefer listed expressions when available.`,
-        ]
+    `- Default expressions: neutral, happy, sad, angry, surprised, scared, disgusted, thinking, laughing, crying, blushing, smirk, embarrassed, determined, confused, sleepy.`,
+    ...(customSpriteLines.length
+      ? [``, `- Sprite expressions:`, ...customSpriteLines, `Prefer listed expressions when available.`]
       : []),
     ``,
     `DIALOGUE TYPE USAGE:`,
@@ -530,13 +548,15 @@ export function buildGmFormatReminder(
     hasParty
       ? `[${partyNames[0]}] [main] [worried]: "We should move. Now."`
       : `[Guide] [main] [worried]: "We should move. Now."`,
-    `[${ctx.playerName ?? "Player"}] [thought] [thinking]: You think, doesn't he say that every time the wind changes?`,
+    `[${ctx.playerName ?? "Player"}] [main] [amused]: You remind him that he says that every time the wind changes.`,
+    ``,
     ``,
     `PLAYER INPUT:`,
-    `- Only quoted speech in the player's inputs is spoken aloud. Unquoted player text is narration, action, or internal thought; NPCs cannot perceive it unless the player makes it observable or says it out loud.`,
+    `- Continue directly from the player's input, treating it like a concluded beat. Do not reiterate it.`,
+    `- Only quoted speech in the player's inputs is spoken aloud. Unquoted player text is narration, action, or internal thought, to which only the GM has access. Characters cannot perceive it unless the player makes it observable or says it out loud.`,
     `- Never quote the player character. Narrate the player's speech, thoughts, and actions indirectly in second person. Example:`,
-    `[${ctx.playerName ?? "Player"}] [main] [smirk]: You say you know you're the best.`,
-    `- CRITICAL: NEVER echo the player's distinctive words, phrases, or dialogue.`,
+    `[${ctx.playerName ?? "Player"}] [thought] [smirk]: You think you're the best. Obviously.`,
+    `- CRITICAL: NEVER echo the player's distinctive words, phrases, or dialogue. NO PARROTTING!`,
     `- Keep the turn's length flexible, depending on the current scene and state. If the player's agency is low (exploration, travel/rest): make it longer. If it's high (combat, dialogue, or other intense situation): keep it concise. Sometimes a single line of dialogue or a narrative beat is enough to allow back-and-forth interactions.`,
     `- End naturally when it's the player's turn to act or speak.`,
   );
@@ -546,7 +566,7 @@ export function buildGmFormatReminder(
     lines.push(
       ``,
       `PARTY:`,
-      `You also play ${partyNames.join(", ")}. They should naturally converse with each other from time to time. Party members know only what they have seen, heard, inferred, or been told. There is a hard GM/PARTY information boundary: party dialogue must never reveal or hint at hidden arcs, plot twists, unrevealed motives, plans, encounter scripting, or any other GM-only/meta knowledge unless they learned it in-world. No spoilers, handholding, or meta leakage.`,
+      `You also play ${partyNames.join(", ")}. They should naturally converse with each other from time to time. Party members know only what they have seen, heard, inferred, or been told. There is a hard GM/PARTY information boundary: party dialogue must never reveal or hint at hidden arcs, plot twists, unrevealed motives, plans, encounter scripting, or any other GM-only/meta knowledge unless they learned it in-world. No spoilers, overguiding, or meta leakage.`,
     );
     if (ctx.addressMode === "party") {
       lines.push(
@@ -568,38 +588,26 @@ export function buildGmFormatReminder(
   lines.push(
     ``,
     `COMMANDS:`,
-    `- Emit commands only when canonical game or UI state changes; no command is needed for flavor alone.`,
+    `- Emit commands when canonical game or UI state changes; no command is needed for flavor alone.`,
     `- [choices: "Option A" | "Option B" | "Option C"] - only for explicit player-facing options that require a selection.`,
-    `- [skill_check: skill="Perception" dc=15] - when uncertainty should be resolved mechanically; the engine performs the check.`,
-    `- [qte: action1 | action2 | action3, timer: 5s] - when the player must react to an immediate timed prompt or split-second action.`,
-    `- [map_update: <JSON>] - when exploration or travel changes the canonical map state, discovered locations, or party position.`,
-    `- [combat: enemies="Enemy 1, Enemy 2"] + [state: combat] - when a real combat encounter starts.`,
-    `- [inventory: action="add|remove" item="Item A, Item B"] - every real item gain or loss.`,
+    `- [skill_check: skill="Skill Name" dc="1-20" rolls="1-20" modifier="0-10" total="roll + modifier | 1 | 20" result="critical_success | success | failure | critical_failure"] - only when uncertainty or the player's actions should be resolved mechanically. Abandon positivity bias, you choose the roll result fairly, then narrate the consequence in the same turn.`,
+    `- [qte: action1 | action2 | action3, timer: 5s] - only as the final thing in the turn when the player must react to an immediate timed prompt or split-second action. Stop immediately after this tag: choosing an action commits the player's next turn.`,
+    ...(ctx.map?.type === "node"
+      ? [
+          `- [map_update: new_location="Location Name" connected_to="Previous Location Name" node_emoji="emoji"] - only when the party arrives at an entirely new location on the current node map.`,
+        ]
+      : []),
+    `- [combat: enemies="Enemy 1, Enemy 2" allies="Ally 1, Ally 2 | null"] - only when a real combat encounter starts. Emit [state: combat] [combat: ...] only at the very end of the turn, then stop immediately. Combat initiates a new turn with a combat UI.`,
+    `- [inventory: action="add | remove" item="Item A, Item B"] - every real item gain or loss, keep their names short.`,
     `- [Note: contents] or [Book: contents] - when a new readable note or book is acquired and should be tracked in the journal.`,
-    `- [state: exploration|dialogue|combat|travel_rest] - only on actual mode transitions.`,
+    `- [state: exploration | dialogue | combat | travel_rest] - only on actual mode transitions.`,
     `- [reputation: npc="Name" action="helped"] - when an NPC's tracked stance changes because of what happened.`,
-    `- [party_add: character="Exact Character Name"] - only when someone truly and permanently joins the party.`,
+    `- [party_change: character="Exact Character Name" change="add | remove"] - only when someone truly joins or leaves the party. Use remove when a party member dies, permanently departs, or is no longer traveling with the player.`,
     `- [session_end: reason="goal achieved"] - only when the current session truly ends.`,
   );
 
-  if (ctx.gameActiveState === "combat") {
-    lines.push(
-      `- [dice: 1d20+3 = 17] - informational roll result when showing an already-resolved combat roll.`,
-      `- [element_attack: element="pyro" target="Goblin"] - when an elemental strike or reaction should be surfaced during combat.`,
-      `- [status: target="Goblin" effect="Poison" turns=3] - apply a real status effect to a named target, "party", or "enemies". Add stat="attack|defense|speed|hp" and modifier=+/-N when the default effect needs a specific mechanical value.`,
-    );
-  }
-
   if (!ctx.hasSceneModel) {
     lines.push(`Scene tags allowed: [sfx: ...] [bg: ...] [ambient: ...]`);
-  }
-
-  // Cinematic directions + text effects: full reference on turn 1, omitted after (scene model handles them)
-  if ((ctx.turnNumber ?? 1) <= 1) {
-    lines.push(
-      ``,
-      `Turn 1 directions only: [direction: fade_from_black|fade_to_black|flash|screen_shake|blur|vignette|letterbox|color_grade|focus, ...]. Use rarely.`,
-    );
   }
 
   if (ctx.hudWidgets?.length) {
@@ -642,14 +650,16 @@ export interface SetupPromptContext {
 
 export function buildSetupPrompt(ctx: SetupPromptContext = {}): string {
   const rating = ctx.rating ?? "sfw";
+  const normalizedLanguage = normalizePromptLanguage(ctx.language);
   const ratingBlock =
     rating === "nsfw"
       ? [
           `<rating>`,
           `Anything goes in this NSFW work of fiction intended for mature audiences. The user has confirmed they are over 18 and understand what they're getting into. No holding back:`,
-          ` - Profanities, toxicity, and dark themes will be present. Every character, the user's included, can be harmed, killed, raped, or emotionally/physically used. This goes both ways; they can also be the ones doing those things for personal gain, convictions, or pleasure.`,
+          ` - Profanities, toxicity, and dark themes will be present. Every character, the user's included, can be raped, harmed, killed, betrayed, dominated, or emotionally/physically used. This goes both ways; they can also be the ones doing those things for personal gain, convictions, or pleasure.`,
           ` - To maintain the integrity of the story, you may be as kind or as cruel as necessary when performing different roles. A good villain is a terrifying one, and a good hero sometimes has to make difficult choices.`,
-          ` - During sex, get kinky and slow down the pace. Apply anatomical (correct organs, position fatigue, physical consequences) and emotional (sexual experience and how it manifests, characters communicating throughout the coupling, aftercare) aspects to craft sensually pornographic erotica. Include foreplay and sexual acts described in great detail; the build-up is as important as the climax. Take consent for granted, assuming some lie, resist, or fight back based on their personality.`,
+          ` - Romance and intimate contact should not stall on repetitive approval beats. Handholding, charged proximity, touches, kisses, embraces, jealousy, seduction, and messy attachment can happen naturally when chemistry, body language, or player intent supports them.`,
+          ` - During sex between involved adult characters, get kinky and slow down the pace. Apply anatomical (position fatigue, physical consequences) and emotional (experience, communication, aftercare) aspects to craft sensually pornographic erotica. Include foreplay and sexual acts described in great detail; the build-up is as important as the climax. Take consent for granted, assuming some lie, resist, or fight back based on their personality.`,
           ` - Portray violence in gory detail, blood squirting around like in a slasher movie.`,
           `</rating>`,
         ].join("\n")
@@ -657,8 +667,9 @@ export function buildSetupPrompt(ctx: SetupPromptContext = {}): string {
           `<rating>`,
           `This SFW work of fiction is intended for mature audiences, and the user dictates the boundaries:`,
           ` - Profanity and dark themes may be present, and every character, including the user's, may be harmed or killed. However, no explicit content will be present.`,
+          ` - Romance and affectionate contact should not stall on repetitive approval beats: handholding, charged proximity, touches, kisses, embraces, jealousy, longing, tenderness, and messy attachment can happen naturally when chemistry, body language, or player intent supports them.`,
           ` - During a sex scene, cut to black and progress to the aftermath, and when portraying violence, do realistic descriptions without getting into gory details.`,
-          ` - Take consent for granted, assuming boundaries will be stated if required.`,
+          ` - Treat boundaries as part of characterization and scene dynamics, not as repetitive legal disclaimers.`,
           `</rating>`,
         ].join("\n");
 
@@ -693,10 +704,10 @@ export function buildSetupPrompt(ctx: SetupPromptContext = {}): string {
     ``,
     `Your job: design a complete game world with story, characters, and visual presentation. Do NOT write any narration or opening scene. That happens separately after you build the world.`,
     ``,
-    ...(ctx.language && ctx.language.toLowerCase() !== "english"
+    ...(normalizedLanguage && normalizedLanguage.toLowerCase() !== "english"
       ? [
           `<language>`,
-          `Write every natural-language string value in the JSON output in ${ctx.language}. This includes worldOverview, storyArc, plotTwists, descriptions, arcs, labels, and any other prose. Keep ONLY the JSON keys and structural syntax in English.`,
+          `Write every natural-language string value in the JSON output in ${normalizedLanguage}. This includes worldOverview, storyArc, plotTwists, descriptions, arcs, labels, and any other prose. Keep ONLY the JSON keys and structural syntax in English.`,
           `</language>`,
           ``,
         ]
@@ -832,30 +843,85 @@ export function buildSetupPrompt(ctx: SetupPromptContext = {}): string {
 
 /** Build a session summary prompt. */
 export function buildSessionSummaryPrompt(language?: string | null): string {
+  const normalizedLanguage = normalizePromptLanguage(language);
   return [
     `Summarize this completed game session as structured continuity data.`,
-    `Return JSON with exactly these keys and no others: summary, resumePoint, partyDynamics, partyState, keyDiscoveries, revelations, characterMoments, npcUpdates, statsSnapshot.`,
+    `Return JSON with exactly these keys and no others: summary, resumePoint, partyDynamics, partyState, keyDiscoveries, characterMoments, littleDetails, npcUpdates, statsSnapshot.`,
     ``,
-    `1. **summary**: Chronological recap of the key events in 2–3 paragraphs. This is the only field that should read like a flowing narrative. Do not duplicate bullet-list items verbatim from the fields below.`,
+    `1. **summary**: Chronological recap of the key events in 2–4 paragraphs. This is the only field that should read like a flowing narrative. Do not duplicate bullet-list items verbatim from the fields below.`,
     `2. **resumePoint**: One short paragraph or 1–3 sentences stating the exact in-world situation at session end and where the next session must resume from. Name the location, present characters, current pressure, and the immediate unfinished action or decision when possible.`,
     `3. **partyDynamics**: How party member relationships evolved this session. Relationship changes only.`,
     `4. **partyState**: Current condition of the party after the session (HP, morale, injuries, resources, exhaustion, or readiness).`,
-    `5. **keyDiscoveries**: Array of important plot points, quests, lore learned, and newly opened leads that still matter next session. Do not include emotional moments, NPC stance changes, or twists already listed elsewhere.`,
-    `6. **revelations**: Array of major story revelations or plot-critical moments. Use this only for true reveals or twists, not routine discoveries or confirmations. Empty array if none.`,
-    `7. **characterMoments**: Array of notable personal moments between the player and specific characters. Use this only for bonding, romance, betrayal, confessions, arguments, or other interpersonal beats. Empty array if none.`,
+    `5. **keyDiscoveries**: Array of durable, actionable continuity facts: important plot points, hidden truths, twists, quests, lore learned, locations, and newly opened leads that still matter next session. Use this single bucket for both discoveries and reveals. Do not include emotional moments or NPC stance changes unless that fact itself is the core continuity item.`,
+    `6. **characterMoments**: Array of notable personal moments between the player and specific characters. Use this only for bonding, romance, betrayal, confessions, arguments, or other interpersonal beats. Empty array if none.`,
+    `7. **littleDetails**: Array of small personal details to recall later: preferences, habits, favorite things, casual promises, private jokes, fears, motifs, or fragments of a character's past that are not major plot discoveries. Empty array if none.`,
     `8. **npcUpdates**: Array of NPC reputation changes, newly met NPCs, and important shifts in an NPC's stance, allegiance, or immediate agenda.`,
     `9. **statsSnapshot**: Current party stats, inventory, quest states, and any location / pressure details needed for continuity. This must be a JSON object, not prose.`,
     ``,
     `Cross-field dedupe rules:`,
-    `- Each fact belongs in the single best category only once. Do not repeat the same information across summary, keyDiscoveries, revelations, characterMoments, npcUpdates, or statsSnapshot.`,
+    `- Each fact belongs in the single best category only once. Do not repeat the same information across summary, keyDiscoveries, characterMoments, littleDetails, npcUpdates, or statsSnapshot.`,
     `- If something is primarily a relationship or emotional beat, keep it out of keyDiscoveries and npcUpdates.`,
+    `- If something is primarily an NPC stance change, keep it out of keyDiscoveries unless that stance change is itself the core continuity fact.`,
     `- If something is primarily a lore/quest lead, keep it out of characterMoments.`,
-    `- If something is primarily an NPC stance change, keep it out of revelations unless it is itself a major twist.`,
     `- Use empty strings, empty arrays, or {} when a category has no meaningful content.`,
     ``,
-    language?.trim()
-      ? `Language: write every natural-language value in ${language.trim()}. Keep the JSON keys exactly as specified in English.`
+    normalizedLanguage
+      ? `Language: write every natural-language value in ${normalizedLanguage}. Keep the JSON keys exactly as specified in English.`
       : ``,
+    ``,
+    `Output valid JSON only.`,
+  ].join("\n");
+}
+
+/** Build a prompt for concluding a session in one pass. */
+export function buildSessionConclusionPrompt(args: {
+  language?: string | null;
+  includeCharacterCards: boolean;
+}): string {
+  const normalizedLanguage = normalizePromptLanguage(args.language);
+  return [
+    `Review this completed game session and return all end-of-session continuity updates in one JSON object.`,
+    `Return JSON with exactly these top-level keys and no others: summary, campaignProgression, characterCards.`,
+    ``,
+    ...(normalizedLanguage
+      ? [
+          `Language: write every natural-language value in ${normalizedLanguage}. Keep the JSON keys and booleans exactly as specified in English.`,
+          ``,
+        ]
+      : []),
+    `summary must be an object with exactly these keys and no others: summary, resumePoint, partyDynamics, partyState, keyDiscoveries, characterMoments, littleDetails, npcUpdates, statsSnapshot.`,
+    `- summary.summary: Chronological recap of the key events in 2-4 paragraphs. This is the only field that should read like flowing narrative prose.`,
+    `- summary.resumePoint: One short paragraph or 1-3 sentences stating the exact in-world situation at session end and where the next session must resume from.`,
+    `- summary.partyDynamics: Relationship changes within the party only.`,
+    `- summary.partyState: Current condition of the party after the session, including readiness, injuries, morale, resources, or exhaustion.`,
+    `- summary.keyDiscoveries: Array of durable, actionable continuity facts: important plot points, hidden truths, twists, quests, lore learned, locations, and newly opened leads that still matter next session. Use this single bucket for both discoveries and reveals.`,
+    `- summary.characterMoments: Array of notable interpersonal beats such as bonding, romance, betrayal, confessions, arguments, or other personal turning points.`,
+    `- summary.littleDetails: Array of small personal details to recall later: preferences, habits, favorite things, casual promises, private jokes, fears, motifs, or fragments of a character's past that are not major plot discoveries.`,
+    `- summary.npcUpdates: Array of newly met NPCs, reputation changes, and important shifts in an NPC's stance, allegiance, or immediate agenda.`,
+    `- summary.statsSnapshot: JSON object with continuity-critical state such as party stats, inventory, quest progress, location, active pressure, and partyMorale as a number from 0 to 100.`,
+    ``,
+    `campaignProgression must be an object with exactly these keys and no others: storyArc, plotTwists, partyArcs.`,
+    `- campaignProgression.storyArc: Refresh the overarching campaign arc only if this session materially advanced or changed it. Otherwise preserve the current arc.`,
+    `- campaignProgression.plotTwists: Keep unresolved twists that still matter, remove obsolete ones, and add any major new twist revealed this session.`,
+    `- campaignProgression.partyArcs: Return the FULL array of party arcs. Carry forward unfinished arcs with updated wording where needed. If an arc completed, mark completed: true and include a short resolution note.`,
+    ``,
+    `characterCards rules:`,
+    ...(args.includeCharacterCards
+      ? [
+          `- characterCards must be a JSON array containing the FULL updated card for each supplied party character.`,
+          `- Return every supplied character exactly once, even if unchanged.`,
+          `- Only make conservative changes that are clearly justified by session events. This represents organic growth, not sudden transformation.`,
+        ]
+      : [`- characterCards must be an empty JSON array because no current character cards were supplied.`]),
+    `- Keep each card aligned with the input schema: name, shortDescription, class, abilities, strengths, weaknesses, extra.`,
+    ``,
+    `Cross-section dedupe rules:`,
+    `- Each fact belongs in the single best category only once. Do not restate the same information across summary.summary, summary.keyDiscoveries, summary.characterMoments, summary.littleDetails, summary.npcUpdates, summary.statsSnapshot, or campaignProgression.`,
+    `- If something is primarily a relationship or emotional beat, keep it out of keyDiscoveries and npcUpdates.`,
+    `- If something is primarily an NPC stance change, keep it out of keyDiscoveries unless that stance change is itself the core continuity fact.`,
+    `- If something is primarily a lore or quest lead, keep it out of characterMoments.`,
+    `- Be conservative. Preserve existing campaign state and cards when the session did not justify a change.`,
+    `- Use empty strings, empty arrays, or {} when a category has no meaningful content.`,
     ``,
     `Output valid JSON only.`,
   ].join("\n");
@@ -886,12 +952,13 @@ export function buildCardAdjustmentPrompt(): string {
 
 /** Build the prompt for adjusting campaign progression at session end. */
 export function buildCampaignProgressionPrompt(language?: string | null): string {
+  const normalizedLanguage = normalizePromptLanguage(language);
   return [
     `You are the Game Master reviewing what happened during this session to update the campaign's ongoing progression state.`,
     ``,
-    ...(language?.trim()
+    ...(normalizedLanguage
       ? [
-          `Language: write every natural-language value in ${language.trim()}. Keep the JSON keys and booleans in English.`,
+          `Language: write every natural-language value in ${normalizedLanguage}. Keep the JSON keys and booleans in English.`,
           ``,
         ]
       : []),
@@ -923,14 +990,15 @@ export function buildPartyRecruitCardPrompt(ctx: {
   recentTranscript?: string | null;
   language?: string | null;
 }): string {
+  const normalizedLanguage = normalizePromptLanguage(ctx.language);
   const sections: string[] = [
     `You are the Game Master updating an ongoing RPG campaign.`,
     `A new companion is joining the party. Create a single JSON character card for them that matches the existing game card schema.`,
     ``,
-    ...(ctx.language && ctx.language.toLowerCase() !== "english"
+    ...(normalizedLanguage && normalizedLanguage.toLowerCase() !== "english"
       ? [
           `<language>`,
-          `Write every natural-language string value in ${ctx.language}. Keep JSON keys and structural syntax in English.`,
+          `Write every natural-language string value in ${normalizedLanguage}. Keep JSON keys and structural syntax in English.`,
           `</language>`,
           ``,
         ]

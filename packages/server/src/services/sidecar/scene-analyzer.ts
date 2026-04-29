@@ -28,6 +28,8 @@ export interface SceneAnalyzerContext {
   currentBackground: string | null;
   /** Current music tag. */
   currentMusic: string | null;
+  /** Recently played music tags, most recent first. */
+  recentMusic?: string[];
   /** Current ambient tag. */
   currentAmbient?: string | null;
   /** Current weather. */
@@ -44,6 +46,10 @@ export interface SceneAnalyzerContext {
    * known place instead of inventing a new one.
    */
   knownLocationIds?: string[];
+  /** Whether image generation is configured and this turn is allowed to request a rare CG illustration. */
+  canGenerateIllustrations?: boolean;
+  /** Unified image style for generated game art. */
+  artStylePrompt?: string | null;
 }
 
 /** Build the system prompt for scene analysis — kept minimal so all token
@@ -117,6 +123,7 @@ export function buildSceneAnalyzerUserPrompt(
   ctx?: SceneAnalyzerContext,
 ): string {
   const parts: string[] = [];
+  const canGenerateIllustrations = !!ctx?.canGenerateIllustrations;
 
   // ── 1. Narration (longest — furthest from generation) ──
 
@@ -157,11 +164,18 @@ export function buildSceneAnalyzerUserPrompt(
     `4. REPUTATION — If an NPC relationship shifted, note it. Otherwise empty array.`,
     `5. PER-BEAT EFFECTS — Scan each narration beat [0]-[${lines.length - 1}]. For each beat you can optionally add:`,
     `   - "sfx": sound effects (door slam, explosion, footsteps, impact)`,
+    `   - "directions": rare cinematic effects at the exact beat they should happen, usually paired with a meaningful sound or reveal. Available per-beat: fade_from_black, fade_to_black, flash, screen_shake, blur, vignette, letterbox, color_grade (presets: warm, cold_blue, horror, noir, vintage, neon, dreamy), focus, pulse, slow_zoom, impact_zoom, tilt, desaturate, chromatic_aberration, film_grain, rain_streaks, spotlight.`,
     `   - "background"+"locationId"+"backgroundPrompt": when the characters PHYSICALLY MOVE to a new location at that beat. Same rules as the top-level fields: use a stable locationId, set backgroundPrompt only when no listed tag fits. The background stays the same until the NEXT segment that changes it, so only set these on the beat where characters actually arrive at a new place. Do NOT repeat the current background.`,
     `   Only include segments that HAVE at least one effect — omit empty segments.`,
     ...((ctx?.turnNumber ?? 1) > 1
       ? [
-          `6. CINEMATIC DIRECTIONS — If the narration warrants a visual effect (fade, screen shake, flash, blur, vignette, letterbox, color grade, focus), include it. Otherwise empty array. Available: fade_from_black, fade_to_black, flash, screen_shake, blur, vignette, letterbox, color_grade (presets: warm, cold_blue, horror, noir, vintage, neon, dreamy), focus.`,
+          `6. CINEMATIC DIRECTIONS — If the narration warrants an opening/establishing or turn-wide visual effect, include it. Otherwise empty array. Available: fade_from_black, fade_to_black, flash, screen_shake, blur, vignette, letterbox, color_grade (presets: warm, cold_blue, horror, noir, vintage, neon, dreamy), focus, pulse, slow_zoom, impact_zoom, tilt, desaturate, chromatic_aberration, film_grain, rain_streaks, spotlight.`,
+        ]
+      : []),
+    ...(canGenerateIllustrations
+      ? [
+          `${(ctx?.turnNumber ?? 1) > 1 ? "7" : "6"}. RARE ILLUSTRATION — You may request ONE generated VN CG background only for a major, story-defining moment: first kiss, duel climax, major revelation, sacrifice, council confrontation, boss entrance, or emotional peak. Do not request one for routine travel, normal dialogue, regular combat blows, room changes, shopping, exposition, or scenery.`,
+          `   The image must be from the player protagonist's POV, in the game's established art style${ctx?.artStylePrompt ? ` (${ctx.artStylePrompt})` : ""}. The protagonist should not be visible except hands/arms when the narration explicitly requires it.`,
         ]
       : []),
     ``,
@@ -170,9 +184,18 @@ export function buildSceneAnalyzerUserPrompt(
     `- Prefer "backgrounds:generated:..." when the listed tags don't capture the locale, era, or cultural setting of the scene. A bad fit from the list is worse than a fresh generation.`,
     `- "backgroundPrompt" MUST be set whenever "background" is "backgrounds:generated:..." and MUST be null otherwise. Cyrillic and other non-Latin descriptions are fine — image models read them.`,
     `- "locationId" should be ASCII kebab-case (a-z, 0-9, hyphens, max ~60 chars). Stable across turns for the same place.`,
-    `- widgetUpdates are handled by the GM model. Do NOT include widgetUpdates in your output.`,
+    `- Use ONLY the exact tags listed in the template below for music, ambient, sfx, and other enumerated fields.`,
+    `- Expressions and widget updates are handled by the GM model. Do NOT include them in your output.`,
     `- segmentEffects can be an EMPTY array [] when nothing changed.`,
+    `- Cinematic directions are spice, not punctuation. Use at most 2 total directions per turn, and never more than 1 direction in any 3-beat span. Prefer none for routine dialogue.`,
+    `- Use directions for real visual beats: a door slamming, a blade impact, thunder, a memory fracture, a kiss/reveal close-up, a panic spike, a scene transition, or a major emotional turn. Do not attach directions to every line.`,
     `- The background should stay the SAME as long as the characters remain in the same location. Only change it in a segment when characters physically move to a different place.`,
+    ...(canGenerateIllustrations
+      ? [
+          `- Use "illustration" rarely. Most turns MUST keep it null. If you request it, the prompt must describe the exact illustrated moment, visible characters, player POV, mood, lighting, and composition.`,
+          `- "illustration.characters" should list only visible named characters in the image so their reference pictures can be attached.`,
+        ]
+      : [`- Do not include image-generation or illustration requests.`]),
     ...(ctx?.currentBackground
       ? [
           `- Current background is "${ctx.currentBackground}" (locationId="${ctx.currentLocationId ?? "unknown"}"). Keep it unless the characters move to a new location.`,
@@ -208,6 +231,9 @@ export function buildSceneAnalyzerUserPrompt(
   const segmentFields: string[] = [];
   segmentFields.push(`      "segment": <0-${lines.length - 1}>`);
   if (sfxLine) segmentFields.push(sfxLine);
+  segmentFields.push(
+    `      "directions": [{"effect":"<flash|screen_shake|pulse|slow_zoom|impact_zoom|tilt|desaturate|chromatic_aberration|film_grain|rain_streaks|spotlight|focus|vignette|letterbox|color_grade>","duration":<0.4-3>,"intensity":<0-1>}]  // optional, rare`,
+  );
   segmentFields.push(`${bgLine}  // optional — only when characters move to a new location`);
   segmentFields.push(`${locIdLine}  // optional — required when "background" is set on this segment`);
   segmentFields.push(`${bgPromptLine}  // optional — required when "background" is "backgrounds:generated:..."`);
@@ -230,7 +256,12 @@ export function buildSceneAnalyzerUserPrompt(
     `  ]`,
     ...((ctx?.turnNumber ?? 1) > 1
       ? [
-          `,  "directions": [{"effect":"<fade_from_black|fade_to_black|flash|screen_shake|blur|vignette|letterbox|color_grade|focus>","duration":<number>}]`,
+          `,  "directions": [{"effect":"<fade_from_black|fade_to_black|flash|screen_shake|blur|vignette|letterbox|color_grade|focus|pulse|slow_zoom|impact_zoom|tilt|desaturate|chromatic_aberration|film_grain|rain_streaks|spotlight>","duration":<number>}]`,
+        ]
+      : []),
+    ...(canGenerateIllustrations
+      ? [
+          `,  "illustration": null OR {"segment":<0-${lines.length - 1}>,"prompt":"<important CG image prompt from player POV>","characters":["<visible named character>"],"reason":"<why this is CG-worthy>","slug":"<short-safe-slug>"}`,
         ]
       : []),
     `}`,

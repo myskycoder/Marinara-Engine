@@ -11,6 +11,7 @@ import {
   nameToXmlTag,
   summariesPatchSchema,
 } from "@marinara-engine/shared";
+import type { ChatMemoryChunk } from "@marinara-engine/shared";
 import { createChatsStorage } from "../services/storage/chats.storage.js";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { createRegexScriptsStorage } from "../services/storage/regex-scripts.storage.js";
@@ -18,8 +19,11 @@ import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "../services/llm/lo
 import { createLLMProvider } from "../services/llm/provider-registry.js";
 import { wrapContent } from "../services/prompt/format-engine.js";
 import { newId } from "../utils/id-generator.js";
-import { characters } from "../db/schema/index.js";
-import { eq, inArray } from "drizzle-orm";
+import { characters, memoryChunks } from "../db/schema/index.js";
+import { and, desc, eq, inArray } from "drizzle-orm";
+import { existsSync } from "fs";
+import { join } from "path";
+import { DATA_DIR } from "../utils/data-dir.js";
 import type { ChatMode, GameNpc } from "@marinara-engine/shared";
 import { copyBranchMessagesAndSnapshots } from "../services/chats/branch-chat-copy.service.js";
 import { resolvePresentCharacterAvatars } from "../services/game/npc-avatar-resolver.js";
@@ -82,8 +86,17 @@ export async function chatsRoutes(app: FastifyInstance) {
   });
 
   // Update chat
-  app.patch<{ Params: { id: string } }>("/:id", async (req) => {
+  app.patch<{ Params: { id: string } }>("/:id", async (req, reply) => {
     const data = createChatSchema.partial().parse(req.body);
+    const existing = await storage.getById(req.params.id);
+    if (!existing) return reply.status(404).send({ error: "Chat not found" });
+    const nextMode = data.mode ?? existing.mode;
+    if (nextMode === "conversation") {
+      if (data.promptPresetId) {
+        return reply.status(400).send({ error: "Prompt presets cannot be applied to conversation chats" });
+      }
+      data.promptPresetId = null;
+    }
     return storage.update(req.params.id, data);
   });
 
@@ -206,6 +219,53 @@ export async function chatsRoutes(app: FastifyInstance) {
   // Total message count for a chat (lightweight, for absolute numbering)
   app.get<{ Params: { id: string } }>("/:id/message-count", async (req) => {
     return { count: await storage.countMessages(req.params.id) };
+  });
+
+  // List memory-recall chunks for this chat only.
+  app.get<{ Params: { id: string } }>("/:id/memories", async (req, reply) => {
+    const chat = await storage.getById(req.params.id);
+    if (!chat) return reply.status(404).send({ error: "Chat not found" });
+
+    const chunks = await app.db
+      .select({
+        id: memoryChunks.id,
+        chatId: memoryChunks.chatId,
+        content: memoryChunks.content,
+        embedding: memoryChunks.embedding,
+        messageCount: memoryChunks.messageCount,
+        firstMessageAt: memoryChunks.firstMessageAt,
+        lastMessageAt: memoryChunks.lastMessageAt,
+        createdAt: memoryChunks.createdAt,
+      })
+      .from(memoryChunks)
+      .where(eq(memoryChunks.chatId, req.params.id))
+      .orderBy(desc(memoryChunks.lastMessageAt));
+
+    return chunks.map(
+      ({ embedding, ...chunk }) =>
+        ({
+          ...chunk,
+          hasEmbedding: !!embedding,
+        }) satisfies ChatMemoryChunk,
+    );
+  });
+
+  // Clear all memory-recall chunks for this chat.
+  app.delete<{ Params: { id: string } }>("/:id/memories", async (req, reply) => {
+    const chat = await storage.getById(req.params.id);
+    if (!chat) return reply.status(404).send({ error: "Chat not found" });
+    await app.db.delete(memoryChunks).where(eq(memoryChunks.chatId, req.params.id));
+    return reply.status(204).send();
+  });
+
+  // Delete one memory-recall chunk from this chat.
+  app.delete<{ Params: { id: string; memoryId: string } }>("/:id/memories/:memoryId", async (req, reply) => {
+    const chat = await storage.getById(req.params.id);
+    if (!chat) return reply.status(404).send({ error: "Chat not found" });
+    await app.db
+      .delete(memoryChunks)
+      .where(and(eq(memoryChunks.chatId, req.params.id), eq(memoryChunks.id, req.params.memoryId)));
+    return reply.status(204).send();
   });
 
   // Create message
@@ -475,7 +535,7 @@ export async function chatsRoutes(app: FastifyInstance) {
     // ── Fallback: live assembly preview (no generation has happened yet) ──
     // This is a best-effort approximation; it won't include runtime-only
     // injections like lorebooks, game state, scene context, semantic memory, etc.
-    const presetId = chat.promptPresetId ?? chatMeta.presetId;
+    const presetId = chat.mode === "conversation" ? null : (chat.promptPresetId ?? chatMeta.presetId);
     if (presetId) {
       try {
         const { createPromptsStorage } = await import("../services/storage/prompts.storage.js");
@@ -575,6 +635,7 @@ export async function chatsRoutes(app: FastifyInstance) {
           })();
 
           let personaName = "User";
+          let personaId: string | null = null;
           let personaDescription = "";
           let personaFields: Record<string, string> = {};
           const allPersonas = await charStore.listPersonas();
@@ -582,6 +643,7 @@ export async function chatsRoutes(app: FastifyInstance) {
             (chat.personaId ? allPersonas.find((p: any) => p.id === chat.personaId) : null) ??
             allPersonas.find((p: any) => p.isActive === "true");
           if (persona) {
+            personaId = persona.id as string;
             personaName = persona.name;
             personaDescription = persona.description;
 
@@ -630,6 +692,7 @@ export async function chatsRoutes(app: FastifyInstance) {
             chatChoices,
             chatId: req.params.id,
             characterIds,
+            personaId,
             personaName,
             personaDescription,
             personaFields,
@@ -1028,10 +1091,10 @@ export async function chatsRoutes(app: FastifyInstance) {
       await storage.update(req.params.id, { groupId });
     }
 
-    // Create a new chat as a branch
-    const branchName = `${sourceChat.name} (branch)`;
+    // Create a new chat as a branch. Keep the main thread/chat name stable and
+    // store the per-branch display label in metadata instead.
     const newChat = await storage.create({
-      name: branchName,
+      name: sourceChat.name,
       mode: sourceChat.mode as ChatMode,
       characterIds: (() => {
         try {
@@ -1049,11 +1112,12 @@ export async function chatsRoutes(app: FastifyInstance) {
     if (!newChat) return reply.status(500).send({ error: "Failed to create branch" });
 
     // Copy metadata (preset, lorebooks, agents, persona settings, etc.) from source chat
-    if (sourceChat.metadata) {
-      // Preserve all settings but clear transient state like summaries
-      const { summary, daySummaries, weekSummaries, ...settingsToKeep } = sourceMeta;
-      await storage.updateMetadata(newChat.id, settingsToKeep);
-    }
+    // but keep branch labels separate from the stable thread name.
+    const { summary, daySummaries, weekSummaries, ...settingsToKeep } = sourceMeta;
+    await storage.updateMetadata(newChat.id, {
+      ...settingsToKeep,
+      branchName: "New Branch",
+    });
 
     await copyBranchMessagesAndSnapshots(app.db, storage, req.params.id, newChat.id, {
       upToMessageId: upToMessageId ?? undefined,

@@ -287,8 +287,8 @@ if [ ! -d "packages/client/dist" ]; then
     # Vite doesn't need tsc output (tsconfig has noEmit: true).
     if ! SKIP_PWA=1 run_pnpm --filter @marinara-engine/client exec vite build 2>&1; then
         echo "  [WARN] Vite build failed — native binaries may not match Node.js $(node -v)."
-        echo "  [..] Installing WASM fallback for rollup and retrying..."
-        run_pnpm --filter @marinara-engine/client add -D @rollup/wasm-node 2>/dev/null || true
+        echo "  [..] Ensuring WASM fallback for rollup is installed and retrying..."
+        run_pnpm install --filter @marinara-engine/client 2>/dev/null || true
         SKIP_PWA=1 run_pnpm --filter @marinara-engine/client exec vite build
     fi
 fi

@@ -19,7 +19,8 @@ export function normalizeGameSegmentEdit(value: unknown): GameSegmentEdit | null
   const speaker =
     typeof record.speaker === "string" && record.speaker.trim().length > 0 ? record.speaker.trim() : undefined;
   const readableContent = typeof record.readableContent === "string" ? record.readableContent : undefined;
-  const readableType = record.readableType === "book" || record.readableType === "note" ? record.readableType : undefined;
+  const readableType =
+    record.readableType === "book" || record.readableType === "note" ? record.readableType : undefined;
 
   return content !== undefined || speaker !== undefined || readableContent !== undefined || readableType !== undefined
     ? { content, speaker, readableContent, readableType }

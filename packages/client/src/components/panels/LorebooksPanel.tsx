@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 import { useUIStore } from "../../stores/ui.store";
 import { useLorebooks, useDeleteLorebook, useUpdateLorebook } from "../../hooks/use-lorebooks";
-import { useCharacters } from "../../hooks/use-characters";
+import { useCharacters, usePersonas } from "../../hooks/use-characters";
 import type { Lorebook, LorebookCategory } from "@marinara-engine/shared";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { cn } from "../../lib/utils";
@@ -61,6 +61,7 @@ export function LorebooksPanel() {
 
   const { data: lorebooks, isLoading } = useLorebooks(activeCategory === "all" ? undefined : activeCategory);
   const { data: rawCharacters } = useCharacters();
+  const { data: rawPersonas } = usePersonas();
   const deleteLorebook = useDeleteLorebook();
   const updateLorebook = useUpdateLorebook();
   const openModal = useUIStore((s) => s.openModal);
@@ -79,6 +80,14 @@ export function LorebooksPanel() {
     }
     return map;
   }, [rawCharacters]);
+  const personaNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    if (!rawPersonas) return map;
+    for (const p of rawPersonas as Array<{ id: string; name: string; comment?: string | null }>) {
+      map.set(p.id, p.comment ? `${p.name} - ${p.comment}` : p.name || "Unknown");
+    }
+    return map;
+  }, [rawPersonas]);
 
   const parseTags = (lb: Lorebook): string[] => {
     const raw = lb.tags;
@@ -141,9 +150,11 @@ export function LorebooksPanel() {
       (lb: Lorebook) =>
         lb.name.toLowerCase().includes(q) ||
         lb.description.toLowerCase().includes(q) ||
+        (lb.characterId ? (characterNameById.get(lb.characterId) ?? "").toLowerCase().includes(q) : false) ||
+        (lb.personaId ? (personaNameById.get(lb.personaId) ?? "").toLowerCase().includes(q) : false) ||
         parseTags(lb).some((t) => t.toLowerCase().includes(q)),
     );
-  }, [lorebooks, searchQuery, activeTag]);
+  }, [lorebooks, searchQuery, activeTag, characterNameById, personaNameById]);
 
   const sorted = useMemo(() => {
     const list = [...filtered];
@@ -475,6 +486,7 @@ export function LorebooksPanel() {
                         key={lb.id}
                         lorebook={lb}
                         characterName={lb.characterId ? characterNameById.get(lb.characterId) : undefined}
+                        personaName={lb.personaId ? personaNameById.get(lb.personaId) : undefined}
                         onClick={() => {
                           if (selectionMode) toggleSelection(lb.id);
                           else openLorebookDetail(lb.id);
@@ -505,6 +517,7 @@ export function LorebooksPanel() {
                   key={lb.id}
                   lorebook={lb}
                   characterName={lb.characterId ? characterNameById.get(lb.characterId) : undefined}
+                  personaName={lb.personaId ? personaNameById.get(lb.personaId) : undefined}
                   onClick={() => {
                     if (selectionMode) toggleSelection(lb.id);
                     else openLorebookDetail(lb.id);
@@ -535,6 +548,7 @@ export function LorebooksPanel() {
 function LorebookRow({
   lorebook,
   characterName,
+  personaName,
   onClick,
   onDelete,
   selectionMode,
@@ -543,6 +557,7 @@ function LorebookRow({
 }: {
   lorebook: Lorebook;
   characterName?: string;
+  personaName?: string;
   onClick: () => void;
   onDelete: () => void;
   selectionMode?: boolean;
@@ -596,10 +611,10 @@ function LorebookRow({
           )}
         </div>
         <div className="truncate text-[0.6875rem] text-[var(--muted-foreground)]">
-          {characterName ? (
+          {characterName || personaName ? (
             <span className="inline-flex items-center gap-1">
               <UserRound size="0.625rem" className="shrink-0" />
-              {characterName}
+              {characterName ?? personaName}
               {lorebook.description ? ` · ${lorebook.description}` : ""}
             </span>
           ) : (

@@ -17,12 +17,9 @@ export function GameSkillCheckResult({ result, onDismiss }: GameSkillCheckResult
   useEffect(() => {
     setAnimate(false);
     const raf = requestAnimationFrame(() => setAnimate(true));
-    const timer = setTimeout(() => onDismiss(), 6000);
     return () => {
       cancelAnimationFrame(raf);
-      clearTimeout(timer);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [result]);
 
   const label = result.criticalSuccess
@@ -44,11 +41,11 @@ export function GameSkillCheckResult({ result, onDismiss }: GameSkillCheckResult
   return (
     <div
       className={cn(
-        "absolute bottom-24 left-1/2 z-40 -translate-x-1/2 transition-all duration-300",
+        "pointer-events-auto mx-auto mb-2 flex w-full max-w-md justify-center transition-all duration-300",
         animate ? "translate-y-0 opacity-100" : "translate-y-4 opacity-0",
       )}
     >
-      <div className="flex items-center gap-3 rounded-xl bg-black/80 px-5 py-3 shadow-lg shadow-black/30 backdrop-blur-sm ring-1 ring-white/10">
+      <div className="relative flex w-full items-center gap-3 rounded-xl bg-black/80 px-5 py-3 pr-10 shadow-lg shadow-black/30 backdrop-blur-sm ring-1 ring-white/10">
         <span className="game-dice-animate text-2xl">🎲</span>
         <div>
           <div className="text-xs font-mono text-white/60">
@@ -64,7 +61,12 @@ export function GameSkillCheckResult({ result, onDismiss }: GameSkillCheckResult
           </div>
           <div className={cn("text-xs font-bold", color)}>{label}</div>
         </div>
-        <button onClick={onDismiss} className="ml-2 rounded p-1 text-white/40 hover:text-white">
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="absolute right-2 top-2 rounded p-1 text-white/40 transition hover:bg-white/10 hover:text-white"
+          aria-label="Dismiss skill check result"
+        >
           <X size={14} />
         </button>
       </div>

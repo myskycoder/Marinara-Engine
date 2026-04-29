@@ -3,12 +3,12 @@
 // ──────────────────────────────────────────────
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api-client";
-import type { TTSConfig, TTSVoicesResponse } from "@marinara-engine/shared";
+import type { TTSConfig, TTSVoicesResponse, TTSSource } from "@marinara-engine/shared";
 import { TTS_API_KEY_MASK } from "@marinara-engine/shared";
 
 const KEYS = {
   config: ["tts", "config"] as const,
-  voices: (baseUrl: string) => ["tts", "voices", baseUrl] as const,
+  voices: (source: TTSSource, baseUrl: string) => ["tts", "voices", source, baseUrl] as const,
 };
 
 // ── Config ───────────────────────────────────────
@@ -34,9 +34,9 @@ export function useUpdateTTSConfig() {
 
 // ── Voices ───────────────────────────────────────
 
-export function useTTSVoices(baseUrl: string, enabled: boolean) {
+export function useTTSVoices(source: TTSSource, baseUrl: string, enabled: boolean) {
   return useQuery({
-    queryKey: KEYS.voices(baseUrl),
+    queryKey: KEYS.voices(source, baseUrl),
     queryFn: () => api.get<TTSVoicesResponse>("/tts/voices"),
     enabled: enabled && Boolean(baseUrl),
     staleTime: 5 * 60_000,

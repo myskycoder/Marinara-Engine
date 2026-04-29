@@ -134,6 +134,19 @@ export function useBulkCreateEntries() {
   });
 }
 
+export function useReorderLorebookEntries() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ lorebookId, entryIds }: { lorebookId: string; entryIds: string[] }) =>
+      api.put<LorebookEntry[]>(`/lorebooks/${lorebookId}/entries/reorder`, { entryIds }),
+    onSuccess: (entries, variables) => {
+      qc.setQueryData(lorebookKeys.entries(variables.lorebookId), entries);
+      qc.invalidateQueries({ queryKey: lorebookKeys.entries(variables.lorebookId) });
+      qc.invalidateQueries({ queryKey: [...lorebookKeys.all, "active"] });
+    },
+  });
+}
+
 export function useSearchLorebookEntries(query: string) {
   return useQuery({
     queryKey: lorebookKeys.search(query),

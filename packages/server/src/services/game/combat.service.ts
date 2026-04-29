@@ -129,6 +129,37 @@ function resolveSkillAction(
   return { ...result, skillName: skill.name };
 }
 
+function resolveItemAction(attacker: CombatantStats, target: CombatantStats, itemId?: string): AttackResult {
+  const itemName = itemId?.trim() || "Item";
+  const lowerName = itemName.toLowerCase();
+  const potency = /mega|greater|large|strong|elixir|max/.test(lowerName)
+    ? 0.5
+    : /minor|small|snack|ration/.test(lowerName)
+      ? 0.2
+      : 0.3;
+  const desiredHeal = Math.max(1, Math.floor(target.maxHp * potency));
+  const remainingHp = Math.min(target.maxHp, target.hp + desiredHeal);
+  const actualHeal = Math.max(0, remainingHp - target.hp);
+
+  return {
+    attackerId: attacker.id,
+    defenderId: target.id,
+    attackRoll: 0,
+    defenseRoll: 0,
+    rawDamage: actualHeal,
+    mitigated: 0,
+    finalDamage: actualHeal,
+    isCritical: false,
+    isMiss: false,
+    remainingHp,
+    isKo: remainingHp <= 0,
+    isHeal: true,
+    skillName: itemName,
+    element: attacker.element,
+    reaction: null,
+  };
+}
+
 function chooseAutoSkill(
   attacker: CombatantStats,
   allies: CombatantStats[],
@@ -382,6 +413,14 @@ export function resolveCombatRound(
           const result = skill
             ? resolveSkillAction(attacker, target, skill, difficulty, elementPreset)
             : resolveAttack(attacker, target, difficulty, elementPreset);
+          pushResult(target, result);
+          continue;
+        }
+
+        if (playerAction.type === "item") {
+          let target = playerAction.targetId ? allies.find((c) => c.id === playerAction.targetId) : undefined;
+          if (!target) target = attacker;
+          const result = resolveItemAction(attacker, target, playerAction.itemId);
           pushResult(target, result);
           continue;
         }

@@ -91,23 +91,37 @@ export function addLocationEntry(journal: Journal, location: string, description
 
 /** Add an NPC interaction to the journal. */
 export function addNpcEntry(journal: Journal, npc: GameNpc, interaction: string): Journal {
+  const normalizedInteraction = interaction.trim();
+  if (!normalizedInteraction) return journal;
+
   const existing = journal.npcLog.find((n) => n.npcName === npc.name);
   const updatedLog = existing
-    ? journal.npcLog.map((n) => (n.npcName === npc.name ? { ...n, interactions: [...n.interactions, interaction] } : n))
-    : [...journal.npcLog, { npcName: npc.name, interactions: [interaction] }];
+    ? journal.npcLog.map((n) =>
+        n.npcName === npc.name && !n.interactions.includes(normalizedInteraction)
+          ? { ...n, interactions: [...n.interactions, normalizedInteraction] }
+          : n,
+      )
+    : [...journal.npcLog, { npcName: npc.name, interactions: [normalizedInteraction] }];
+
+  const hasEntry = journal.entries.some(
+    (entry) =>
+      entry.type === "npc" && entry.title === `${npc.emoji} ${npc.name}` && entry.content === normalizedInteraction,
+  );
 
   return {
     ...journal,
     npcLog: updatedLog,
-    entries: [
-      ...journal.entries,
-      {
-        timestamp: new Date().toISOString(),
-        type: "npc",
-        title: `${npc.emoji} ${npc.name}`,
-        content: interaction,
-      },
-    ],
+    entries: hasEntry
+      ? journal.entries
+      : [
+          ...journal.entries,
+          {
+            timestamp: new Date().toISOString(),
+            type: "npc",
+            title: `${npc.emoji} ${npc.name}`,
+            content: normalizedInteraction,
+          },
+        ],
   };
 }
 
@@ -382,8 +396,8 @@ export function buildDeterministicSummary(
     partyDynamics,
     partyState: `${journal.locations.length} locations explored, ${questEntries.filter((q) => q.status === "active").length} active quests`,
     keyDiscoveries,
-    revelations: [],
     characterMoments: [],
+    littleDetails: [],
     statsSnapshot: {},
     npcUpdates,
   };

@@ -89,12 +89,10 @@ async function executeGroup(
   const toolAgents = group.agents.filter((a) => a.toolContext?.tools.length);
   const batchAgents = group.agents.filter((a) => !a.toolContext?.tools.length);
 
-  logger.debug(
-    "[agent-pipeline] executeGroup: %d batchable, %d tool-using %j",
-    batchAgents.length,
-    toolAgents.length,
-    batchAgents.map((a) => a.type),
-  );
+  logger.debug("[agent-pipeline] executeGroup: %d batchable, %d tool-using %j", batchAgents.length, toolAgents.length, {
+    batch: batchAgents.map((a) => a.type),
+    tools: toolAgents.map((a) => a.type),
+  });
 
   // Safe callback wrapper — errors in the callback (e.g. writing to a
   // closed SSE stream) must never crash the group and silently drop results.

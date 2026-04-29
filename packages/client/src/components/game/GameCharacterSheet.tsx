@@ -17,7 +17,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { cn } from "../../lib/utils";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
 
 export interface GameCharacterSheetGameCard {
   shortDescription: string;
@@ -39,6 +39,7 @@ export interface CharacterSheetCard {
   status?: string;
   level?: number;
   avatarUrl?: string | null;
+  avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null;
   stats?: Array<{ name: string; value: number; max?: number; color?: string }>;
   inventory?: Array<{ name: string; quantity?: number; location?: string }>;
   customFields?: Record<string, string>;
@@ -405,11 +406,14 @@ export function GameCharacterSheet({ card, onClose, onSave }: GameCharacterSheet
         <div className="relative border-b border-[var(--border)] bg-[var(--secondary)]/50 px-5 py-4">
           <div className="flex items-center gap-4">
             {card.avatarUrl ? (
-              <img
-                src={card.avatarUrl}
-                alt={card.title}
-                className="h-20 w-20 rounded-xl border-2 border-[var(--border)] object-cover shadow-xl"
-              />
+              <span className="block h-20 w-20 overflow-hidden rounded-xl border-2 border-[var(--border)] shadow-xl">
+                <img
+                  src={card.avatarUrl}
+                  alt={card.title}
+                  className="h-full w-full object-cover"
+                  style={getAvatarCropStyle(card.avatarCrop)}
+                />
+              </span>
             ) : (
               <div className="flex h-20 w-20 items-center justify-center rounded-xl border-2 border-[var(--border)] bg-[var(--secondary)] text-2xl font-bold text-[var(--muted-foreground)]">
                 {card.title[0]}

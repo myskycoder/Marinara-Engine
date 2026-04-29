@@ -29,12 +29,21 @@ export interface LorebookScanResult {
 type LorebookFilters = {
   chatId?: string;
   characterIds?: string[];
+  personaId?: string | null;
   activeLorebookIds?: string[];
 };
 
 type RelevantLorebook = Pick<
   Lorebook,
-  "id" | "enabled" | "scanDepth" | "tokenBudget" | "recursiveScanning" | "maxRecursionDepth" | "characterId" | "chatId"
+  | "id"
+  | "enabled"
+  | "scanDepth"
+  | "tokenBudget"
+  | "recursiveScanning"
+  | "maxRecursionDepth"
+  | "characterId"
+  | "personaId"
+  | "chatId"
 >;
 
 export function filterRelevantLorebooks(lorebooks: RelevantLorebook[], filters?: LorebookFilters): RelevantLorebook[] {
@@ -44,6 +53,7 @@ export function filterRelevantLorebooks(lorebooks: RelevantLorebook[], filters?:
   return enabledBooks.filter((book) => {
     if (filters.activeLorebookIds?.includes(book.id)) return true;
     if (book.characterId && filters.characterIds?.includes(book.characterId)) return true;
+    if (book.personaId && book.personaId === filters.personaId) return true;
     if (book.chatId && book.chatId === filters.chatId) return true;
     return false;
   });
@@ -99,6 +109,7 @@ export async function processLorebooks(
   options?: {
     chatId?: string;
     characterIds?: string[];
+    personaId?: string | null;
     activeLorebookIds?: string[];
     tokenBudget?: number;
     enableRecursive?: boolean;
@@ -121,6 +132,7 @@ export async function processLorebooks(
     ? {
         chatId: options.chatId,
         characterIds: options.characterIds,
+        personaId: options.personaId,
         activeLorebookIds: options.activeLorebookIds,
       }
     : undefined;

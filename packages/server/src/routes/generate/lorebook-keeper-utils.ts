@@ -61,6 +61,7 @@ export async function resolveLorebookKeeperTarget(args: {
   lorebooksStore: LorebooksStore;
   chatId: string;
   characterIds: string[];
+  personaId?: string | null;
   activeLorebookIds: string[];
   preferredTargetLorebookId: string | null;
 }): Promise<{
@@ -68,12 +69,13 @@ export async function resolveLorebookKeeperTarget(args: {
   targetLorebookId: string | null;
   targetLorebookName: string | null;
 }> {
-  const { lorebooksStore, chatId, characterIds, activeLorebookIds, preferredTargetLorebookId } = args;
+  const { lorebooksStore, chatId, characterIds, personaId, activeLorebookIds, preferredTargetLorebookId } = args;
   const allBooks = (await lorebooksStore.list()) as unknown as Array<{
     id: string;
     name?: string | null;
     enabled?: unknown;
     characterId?: string | null;
+    personaId?: string | null;
     chatId?: string | null;
   }>;
 
@@ -82,6 +84,7 @@ export async function resolveLorebookKeeperTarget(args: {
     if (!isEnabledLorebook(book.enabled)) return false;
     if (activeLorebookIds.includes(book.id)) return true;
     if (book.characterId && characterIds.includes(book.characterId)) return true;
+    if (book.personaId && book.personaId === personaId) return true;
     if (book.chatId && book.chatId === chatId) return true;
     return false;
   });

@@ -39,6 +39,19 @@ function resolveBaseUrl(connection: { baseUrl: string | null; provider: string }
   return providerDef?.defaultBaseUrl ?? "";
 }
 
+function hasSchedules(value: unknown): value is CharacterSchedules {
+  return !!value && typeof value === "object" && Object.keys(value as Record<string, unknown>).length > 0;
+}
+
+function areConversationSchedulesEnabled(meta: Record<string, unknown>): boolean {
+  if (typeof meta.conversationSchedulesEnabled === "boolean") return meta.conversationSchedulesEnabled;
+  return hasSchedules(meta.characterSchedules);
+}
+
+function getEnabledConversationSchedules(meta: Record<string, unknown>): CharacterSchedules {
+  return areConversationSchedulesEnabled(meta) && hasSchedules(meta.characterSchedules) ? meta.characterSchedules : {};
+}
+
 export async function conversationRoutes(app: FastifyInstance) {
   const chats = createChatsStorage(app.db);
   const chars = createCharactersStorage(app.db);
@@ -48,9 +61,21 @@ export async function conversationRoutes(app: FastifyInstance) {
   // POST /schedule/generate — Generate or refresh weekly schedules
   // ─────────────────────────────────────────────
   app.post<{
-    Body: { chatId: string; forceRefresh?: boolean; characterIds?: string[] };
+    Body: {
+      chatId: string;
+      forceRefresh?: boolean;
+      characterIds?: string[];
+      scheduleGenerationPreferences?: string;
+    };
   }>("/schedule/generate", async (req, reply) => {
     const { chatId, forceRefresh } = req.body;
+    // Runtime guard: TypeScript's Body type is compile-time only. If a client sends a non-string,
+    // .trim() would throw and surface as a 500. Reject explicitly with 400 instead.
+    const rawPrefs: unknown = req.body.scheduleGenerationPreferences;
+    if (rawPrefs != null && typeof rawPrefs !== "string") {
+      return reply.status(400).send({ error: "scheduleGenerationPreferences must be a string" });
+    }
+    const userSchedulePreferences = typeof rawPrefs === "string" ? rawPrefs.trim() : "";
 
     const chat = await chats.getById(chatId);
     if (!chat) return reply.status(404).send({ error: "Chat not found" });
@@ -65,7 +90,7 @@ export async function conversationRoutes(app: FastifyInstance) {
     if (!baseUrl) return reply.status(400).send({ error: "No base URL" });
 
     const meta = typeof chat.metadata === "string" ? JSON.parse(chat.metadata) : (chat.metadata ?? {});
-    const existingSchedules: CharacterSchedules = meta.characterSchedules ?? {};
+    const existingSchedules: CharacterSchedules = hasSchedules(meta.characterSchedules) ? meta.characterSchedules : {};
     // Prefer client-supplied characterIds (avoids race condition with DB persistence)
     const characterIds: string[] =
       Array.isArray(req.body.characterIds) && req.body.characterIds.length > 0
@@ -115,7 +140,8 @@ export async function conversationRoutes(app: FastifyInstance) {
       for (const c of allChats) {
         if (c.id === chatId || c.mode !== "conversation") continue;
         const m = typeof c.metadata === "string" ? JSON.parse(c.metadata as string) : (c.metadata ?? {});
-        const scheds: CharacterSchedules = m.characterSchedules ?? {};
+        if (!areConversationSchedulesEnabled(m)) continue;
+        const scheds: CharacterSchedules = getEnabledConversationSchedules(m);
         for (const [cid, sched] of Object.entries(scheds)) {
           if (sched && !otherChatSchedules.has(cid) && !scheduleNeedsRefresh(sched)) {
             otherChatSchedules.set(cid, sched);
@@ -174,6 +200,7 @@ export async function conversationRoutes(app: FastifyInstance) {
           charData.name,
           charData.description ?? "",
           charData.personality ?? "",
+          userSchedulePreferences,
         );
         logger.info("[schedule] Generated schedule for %s, days: %s", charData.name, Object.keys(schedule.days ?? {}));
 
@@ -207,6 +234,7 @@ export async function conversationRoutes(app: FastifyInstance) {
         typeof freshChat?.metadata === "string" ? JSON.parse(freshChat.metadata) : (freshChat?.metadata ?? {});
       await chats.updateMetadata(chatId, {
         ...freshMeta,
+        conversationSchedulesEnabled: true,
         characterSchedules: newSchedules,
         scheduleWeekStart: mondayStr,
       });
@@ -224,7 +252,8 @@ export async function conversationRoutes(app: FastifyInstance) {
           const overlap = generatedCharIds.filter((id) => cCharIds.includes(id));
           if (overlap.length === 0) continue;
           const cMeta = typeof c.metadata === "string" ? JSON.parse(c.metadata as string) : (c.metadata ?? {});
-          const cSchedules: CharacterSchedules = cMeta.characterSchedules ?? {};
+          if (!areConversationSchedulesEnabled(cMeta)) continue;
+          const cSchedules: CharacterSchedules = hasSchedules(cMeta.characterSchedules) ? cMeta.characterSchedules : {};
           let changed = false;
           for (const cid of overlap) {
             cSchedules[cid] = preserveTimingSettings(newSchedules[cid]!, cSchedules[cid]);
@@ -233,6 +262,7 @@ export async function conversationRoutes(app: FastifyInstance) {
           if (changed) {
             await chats.updateMetadata(c.id, {
               ...cMeta,
+              conversationSchedulesEnabled: true,
               characterSchedules: cSchedules,
               scheduleWeekStart: mondayStr,
             });
@@ -254,7 +284,7 @@ export async function conversationRoutes(app: FastifyInstance) {
     if (!chat) return reply.status(404).send({ error: "Chat not found" });
 
     const meta = typeof chat.metadata === "string" ? JSON.parse(chat.metadata) : (chat.metadata ?? {});
-    const schedules: CharacterSchedules = meta.characterSchedules ?? {};
+    const schedules: CharacterSchedules = getEnabledConversationSchedules(meta);
     const characterIds: string[] =
       typeof chat.characterIds === "string" ? JSON.parse(chat.characterIds) : chat.characterIds;
 
@@ -342,7 +372,7 @@ export async function conversationRoutes(app: FastifyInstance) {
       return reply.send({ shouldTrigger: false, characterIds: [], reason: "disabled", inactivityMs: 0 });
     }
 
-    const schedules: CharacterSchedules = meta.characterSchedules ?? {};
+    const schedules: CharacterSchedules = getEnabledConversationSchedules(meta);
     const characterIds: string[] =
       typeof chat.characterIds === "string" ? JSON.parse(chat.characterIds) : chat.characterIds;
     const isGroup = characterIds.length > 1;
@@ -427,7 +457,7 @@ export async function conversationRoutes(app: FastifyInstance) {
     if (!chat) return reply.status(404).send({ error: "Chat not found" });
 
     const meta = typeof chat.metadata === "string" ? JSON.parse(chat.metadata) : (chat.metadata ?? {});
-    const schedules: CharacterSchedules = meta.characterSchedules ?? {};
+    const schedules: CharacterSchedules = getEnabledConversationSchedules(meta);
     const schedule = schedules[characterId];
 
     if (!schedule) {
@@ -464,7 +494,7 @@ export async function conversationRoutes(app: FastifyInstance) {
       return reply.send({ shouldTrigger: false, characterIds: [], reason: "exchanges_disabled", inactivityMs: 0 });
     }
 
-    const schedules: CharacterSchedules = meta.characterSchedules ?? {};
+    const schedules: CharacterSchedules = getEnabledConversationSchedules(meta);
     const messages = await chats.listMessages(chatId);
     initializeActivityFromMessages(
       chatId,

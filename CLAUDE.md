@@ -16,6 +16,12 @@ This file is a thin maintainer note for contributors using Claude. Canonical wor
 - When preparing a PR, make the why explicit in the description so reviewers can see the user problem or rationale, not just the file changes.
 - Check `README.md`, `android/README.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `docs/CONFIGURATION.md`, `docs/TROUBLESHOOTING.md`, and `docs/FAQ.md` together when install, update, or release behavior changes.
 
+## AI-Generated Pull Request
+
+- **Never auto-check validation or test-plan checkboxes in a PR.** Those boxes are a to-do list for the human contributor, not evidence that work is done. If you generate a test plan, leave every box unchecked.
+- When preparing a PR description, list what needs manual verification clearly and explicitly. Write entries like "Manually verify X in browser" rather than "Works correctly."
+- If there is no linked issue or feature request, note that one should be opened before the PR is submitted. See `CONTRIBUTING.md § Before You Open a Pull Request`.
+
 ## Version Truth
 
 - Canonical version: root `package.json`
@@ -26,8 +32,8 @@ This file is a thin maintainer note for contributors using Claude. Canonical wor
   - `packages/server/package.json`
   - `packages/shared/package.json`
   - `packages/shared/src/constants/defaults.ts`
-  - `installer/installer.nsi`
-  - `installer/install.bat`
+  - `win/installer/installer.nsi`
+  - `win/installer/install.bat`
   - `android/app/build.gradle`
 
 Android-specific rule:

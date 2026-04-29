@@ -10,7 +10,7 @@
 // - Status effect icons
 // - Victory / defeat overlays
 // ──────────────────────────────────────────────
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "../../lib/utils";
 import { audioManager } from "../../lib/game-audio";
 import { useGameAssetStore } from "../../stores/game-asset.store";
@@ -44,6 +44,7 @@ type CombatPhase =
   | "intro"
   | "player-turn"
   | "skill-select"
+  | "item-select"
   | "target-select"
   | "resolving"
   | "animating"
@@ -68,10 +69,20 @@ interface GameCombatUIProps {
   party: Combatant[];
   /** Enemy combatants. */
   enemies: Combatant[];
+  /** Player inventory items available during combat. */
+  inventoryItems?: Array<{ name: string; quantity: number; description?: string }>;
   /** Called when combat ends (victory, defeat, or flee). Receives a summary for GM narration. */
   onCombatEnd: (outcome: "victory" | "defeat" | "flee", summary: CombatSummary) => void;
+  /** Called after a combat item successfully resolves so the used item can be consumed. */
+  onInventoryItemUsed?: (itemName: string) => void | Promise<void>;
+  /** Opens the full inventory panel for inspection/management. */
+  onOpenInventory?: () => void;
   /** GM narration to display alongside combat. */
   narration?: string;
+  /** Optional controls rendered immediately above the bottom combat panel. */
+  combatControlsSlot?: ReactNode;
+  /** Suggested sprite focus for the full-body overlay. */
+  onSpriteSuggestionChange?: (suggestion: { name: string; pose: string } | null) => void;
   /** Whether we're waiting for a GM response. */
   _isStreaming?: boolean;
 }
@@ -159,8 +170,13 @@ export function GameCombatUI({
   chatId,
   party: initialParty,
   enemies: initialEnemies,
+  inventoryItems = [],
   onCombatEnd,
+  onInventoryItemUsed,
+  onOpenInventory,
   narration,
+  combatControlsSlot,
+  onSpriteSuggestionChange,
 }: GameCombatUIProps) {
   // Combat state
   const [phase, setPhase] = useState<CombatPhase>("intro");
@@ -231,6 +247,61 @@ export function GameCombatUI({
   const activePlayer = party[activePlayerIndex] ?? null;
   const selectedSkill = activePlayer?.skills?.find((skill) => skill.id === selectedSkillId) ?? null;
   const selectingAllyTarget = selectedAction === "skill" && selectedSkill?.type === "heal";
+
+  const combatSpriteSuggestion = useMemo(() => {
+    if (phase === "victory") {
+      const celebrant = activePlayer ?? party.find((member) => member.hp > 0) ?? party[0] ?? null;
+      return celebrant ? { name: celebrant.name, pose: "victory" } : null;
+    }
+
+    if (phase === "defeat") {
+      const fallenMember = activePlayer ?? party[0] ?? null;
+      return fallenMember ? { name: fallenMember.name, pose: "hurt" } : null;
+    }
+
+    if (phase === "animating" && roundResult && animatingActionIndex >= 0) {
+      const action = roundResult.actions[animatingActionIndex] ?? null;
+      if (action) {
+        const attacker = allCombatants.find((combatant) => combatant.id === action.attackerId) ?? null;
+        const defender = allCombatants.find((combatant) => combatant.id === action.defenderId) ?? null;
+
+        if (attacker?.side === "player") {
+          return { name: attacker.name, pose: action.skillName ? "casting" : "attack" };
+        }
+        if (defender?.side === "player") {
+          return { name: defender.name, pose: action.isHeal ? "casting" : "hurt" };
+        }
+      }
+    }
+
+    if (activePlayer) {
+      if (phase === "resolving") {
+        if (selectedAction === "defend") return { name: activePlayer.name, pose: "defend" };
+        if (selectedAction === "item") return { name: activePlayer.name, pose: "casting" };
+        if (selectedAction === "skill") return { name: activePlayer.name, pose: "casting" };
+        if (selectedAction === "attack") return { name: activePlayer.name, pose: "attack" };
+      }
+
+      if (
+        phase === "skill-select" ||
+        phase === "item-select" ||
+        (phase === "target-select" && selectedAction === "skill")
+      ) {
+        return { name: activePlayer.name, pose: "casting" };
+      }
+
+      return { name: activePlayer.name, pose: "battle_stance" };
+    }
+
+    return null;
+  }, [activePlayer, allCombatants, animatingActionIndex, party, phase, roundResult, selectedAction]);
+
+  useEffect(() => {
+    onSpriteSuggestionChange?.(combatSpriteSuggestion);
+    return () => {
+      onSpriteSuggestionChange?.(null);
+    };
+  }, [combatSpriteSuggestion, onSpriteSuggestionChange]);
 
   // ── Play SFX helper ──
   const playSfx = useCallback(
@@ -379,7 +450,7 @@ export function GameCombatUI({
 
   // ── Resolve a combat round on the server ──
   const resolveRound = useCallback(
-    (playerAction: CombatPlayerAction) => {
+    (playerAction: CombatPlayerAction, usedItemName?: string) => {
       setPhase("resolving");
 
       combatRound.mutate(
@@ -411,6 +482,9 @@ export function GameCombatUI({
           onSuccess: (data) => {
             const result = data.result as CombatRoundResult;
             const updatedCombatants = data.combatants as Combatant[];
+            if (usedItemName) {
+              void onInventoryItemUsed?.(usedItemName);
+            }
             setRoundResult(result);
             setTurnOrder(result.initiative.map((e) => ({ id: e.id, name: e.name })));
             animateRoundResults(result, updatedCombatants);
@@ -419,7 +493,7 @@ export function GameCombatUI({
         },
       );
     },
-    [chatId, allCombatants, round, combatRound, animateRoundResults],
+    [chatId, allCombatants, round, combatRound, onInventoryItemUsed, animateRoundResults],
   );
 
   // ── Handle action selection ──
@@ -449,13 +523,25 @@ export function GameCombatUI({
         return;
       }
       if (actionId === "item") {
-        /* No items yet — defend instead */ setSelectedAction("defend");
+        setSelectedAction("item");
         setSelectedSkillId(null);
-        resolveRound({ type: "defend" });
+        setPhase("item-select");
         return;
       }
     },
     [playSfx, onCombatEnd, resolveRound, buildSummary],
+  );
+
+  const handleItemSelect = useCallback(
+    (itemName: string) => {
+      const normalizedItemName = itemName.trim();
+      if (!activePlayer || !normalizedItemName) return;
+      playSfx(COMBAT_SFX.menuSelect);
+      setSelectedAction("item");
+      setSelectedSkillId(null);
+      resolveRound({ type: "item", itemId: normalizedItemName, targetId: activePlayer.id }, normalizedItemName);
+    },
+    [activePlayer, playSfx, resolveRound],
   );
 
   // ── Handle target selection ──
@@ -497,9 +583,9 @@ export function GameCombatUI({
   // ── Render ──
 
   return (
-    <div className="absolute inset-0 z-30 flex flex-col overflow-hidden">
+    <div className="absolute inset-0 z-30 flex min-h-0 flex-col overflow-hidden">
       {/* ── Battle scene ── */}
-      <div className="relative flex flex-1 flex-col">
+      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
         {/* Intro overlay */}
         {phase === "intro" && (
           <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 animate-in fade-in duration-300">
@@ -511,44 +597,8 @@ export function GameCombatUI({
           </div>
         )}
 
-        {/* Turn order bar */}
-        {turnOrder.length > 0 && phase !== "intro" && (
-          <div className="absolute left-0 right-0 top-0 z-20 flex items-center gap-1 bg-black/60 px-3 py-1.5 backdrop-blur-sm">
-            <span className="mr-2 text-[0.6rem] font-semibold uppercase tracking-widest text-white/50">Turn</span>
-            {turnOrder.map((entry, i) => {
-              const isParty = party.some((p) => p.id === entry.id);
-              return (
-                <div
-                  key={entry.id}
-                  className={cn(
-                    "flex items-center gap-1 rounded-full px-2 py-0.5 text-[0.65rem] font-medium transition-all",
-                    i === 0
-                      ? "bg-amber-500/30 text-amber-200 ring-1 ring-amber-400/40"
-                      : isParty
-                        ? "bg-blue-500/15 text-blue-300/80"
-                        : "bg-red-500/15 text-red-300/80",
-                  )}
-                >
-                  <ChevronRight size={10} className={i === 0 ? "text-amber-400" : "opacity-0"} />
-                  {entry.name}
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* Round counter */}
-        {phase !== "intro" && (
-          <div className="absolute right-3 top-12 z-20">
-            <div className="rounded-lg border border-white/10 bg-black/50 px-2.5 py-1 text-center backdrop-blur-sm">
-              <div className="text-[0.55rem] font-semibold uppercase tracking-widest text-white/40">Round</div>
-              <div className="text-lg font-bold tabular-nums text-white">{round}</div>
-            </div>
-          </div>
-        )}
-
         {/* ── Enemy area (top section) ── */}
-        <div className="relative flex flex-1 items-start justify-center gap-6 px-6 pt-14">
+        <div className="relative flex min-h-0 flex-1 items-start justify-center gap-3 overflow-hidden px-3 pt-4 sm:gap-6 sm:px-6 sm:pt-6">
           {enemies.map((enemy) => (
             <CombatantCard
               key={enemy.id}
@@ -563,7 +613,7 @@ export function GameCombatUI({
         </div>
 
         {/* ── Party area (bottom section) ── */}
-        <div className="relative flex items-end justify-center gap-6 px-6 pb-4">
+        <div className="relative flex shrink-0 items-end justify-center gap-3 overflow-hidden px-3 pb-3 sm:gap-6 sm:px-6 sm:pb-4">
           {party.map((member, i) => (
             <CombatantCard
               key={member.id}
@@ -583,8 +633,49 @@ export function GameCombatUI({
         </div>
       </div>
 
+      {(combatControlsSlot || phase !== "intro") && (
+        <div className="relative z-30 flex shrink-0 items-center justify-between gap-2 px-3 pb-1.5 sm:px-4 sm:pb-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">{combatControlsSlot}</div>
+          {phase !== "intro" && (
+            <div className="shrink-0 rounded-lg border border-white/10 bg-black/65 px-2.5 py-1 text-center shadow-lg backdrop-blur-md">
+              <div className="text-[0.55rem] font-semibold uppercase tracking-widest text-white/40">Round</div>
+              <div className="text-lg font-bold leading-none tabular-nums text-white">{round}</div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {turnOrder.length > 0 && phase !== "intro" && (
+        <div className="relative z-30 shrink-0 border-y border-white/10 bg-black/60 px-3 py-1.5 backdrop-blur-md sm:px-4">
+          <div className="flex items-center gap-1 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            <span className="mr-1 shrink-0 text-[0.6rem] font-semibold uppercase tracking-widest text-white/50">
+              Turn
+            </span>
+            {turnOrder.map((entry, i) => {
+              const isParty = party.some((p) => p.id === entry.id);
+              return (
+                <div
+                  key={`${entry.id}-${i}`}
+                  className={cn(
+                    "flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[0.65rem] font-medium transition-all",
+                    i === 0
+                      ? "bg-amber-500/30 text-amber-200 ring-1 ring-amber-400/40"
+                      : isParty
+                        ? "bg-blue-500/15 text-blue-300/80"
+                        : "bg-red-500/15 text-red-300/80",
+                  )}
+                >
+                  <ChevronRight size={10} className={i === 0 ? "text-amber-400" : "opacity-0"} />
+                  <span className="max-w-28 truncate sm:max-w-40">{entry.name}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* ── Bottom panel: Action menu / Narration ── */}
-      <div className="relative z-20 border-t border-white/10 bg-gradient-to-t from-black/90 to-black/70 backdrop-blur-md">
+      <div className="relative z-20 max-h-[52svh] shrink-0 overflow-y-auto border-t border-white/10 bg-gradient-to-t from-black/90 to-black/70 backdrop-blur-md sm:max-h-none">
         {/* Resolving / animating state */}
         {(phase === "resolving" || phase === "animating") && (
           <div className="flex flex-col gap-2 px-4 py-3">
@@ -699,6 +790,71 @@ export function GameCombatUI({
           </div>
         )}
 
+        {phase === "item-select" && activePlayer && (
+          <div className="flex flex-col gap-3 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Backpack size={14} className="text-green-400" />
+                <div>
+                  <div className="text-xs font-semibold text-white">{activePlayer.name}'s Items</div>
+                  <div className="text-[0.65rem] text-white/45">Choose an item to use this turn.</div>
+                </div>
+              </div>
+              {onOpenInventory && (
+                <button
+                  type="button"
+                  onClick={onOpenInventory}
+                  className="rounded border border-white/15 px-2 py-1 text-xs text-white/60 hover:bg-white/10 hover:text-white"
+                >
+                  Open Inventory
+                </button>
+              )}
+            </div>
+
+            {inventoryItems.length > 0 ? (
+              <div className="grid max-h-[24svh] grid-cols-1 gap-2 overflow-y-auto pr-1 sm:max-h-44 sm:grid-cols-2 lg:grid-cols-3">
+                {inventoryItems.map((item) => (
+                  <button
+                    key={item.name}
+                    type="button"
+                    onClick={() => handleItemSelect(item.name)}
+                    className="rounded-lg border border-green-400/20 bg-green-500/10 px-3 py-2 text-left text-xs text-white/80 transition-all hover:border-green-400/40 hover:bg-green-500/15"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="min-w-0 truncate font-semibold text-white/90">{item.name}</span>
+                      {item.quantity > 1 && (
+                        <span className="shrink-0 rounded-full bg-white/10 px-1.5 py-0.5 text-[0.6rem] tabular-nums text-white/60">
+                          x{item.quantity}
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 line-clamp-2 text-[0.65rem] text-white/45">
+                      {item.description || "Use on the active party member."}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-3 text-xs text-white/45">
+                No items are available in your inventory.
+              </div>
+            )}
+
+            <div>
+              <button
+                onClick={() => {
+                  setPhase("player-turn");
+                  setSelectedAction(null);
+                  setSelectedSkillId(null);
+                }}
+                className="rounded border border-white/15 px-2 py-1 text-xs text-white/60 hover:bg-white/10 hover:text-white"
+              >
+                Back
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Target selection hint */}
         {phase === "target-select" && (
           <div className="flex items-center gap-2 px-4 py-3">
@@ -728,7 +884,7 @@ export function GameCombatUI({
 
         {/* Victory overlay */}
         {phase === "victory" && (
-          <div className="flex flex-col items-center gap-3 px-4 py-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+          <div className="flex flex-col items-center gap-3 px-3 py-4 animate-in fade-in slide-in-from-bottom-4 duration-500 sm:px-4 sm:py-6">
             <Trophy className="h-8 w-8 text-amber-400" />
             <AnimatedText html="{bounce:Victory!}" className="text-lg font-bold text-amber-200" />
             {loot && loot.length > 0 && (
@@ -751,7 +907,7 @@ export function GameCombatUI({
 
         {/* Defeat overlay */}
         {phase === "defeat" && (
-          <div className="flex flex-col items-center gap-3 px-4 py-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+          <div className="flex flex-col items-center gap-3 px-3 py-4 animate-in fade-in slide-in-from-bottom-4 duration-500 sm:px-4 sm:py-6">
             <SkullIcon className="h-8 w-8 text-red-400" />
             <AnimatedText html="{shake:Defeat...}" className="text-lg font-bold text-red-200" />
             <AnimatedText html="{pulse:Your party has fallen.}" className="text-xs text-white/50" />

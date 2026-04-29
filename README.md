@@ -100,7 +100,7 @@
 
 ## Latest Release
 
-Current stable release: **[v1.5.5](https://github.com/Pasta-Devs/Marinara-Engine/releases/tag/v1.5.5)**.
+Current stable release: **[v1.5.6](https://github.com/Pasta-Devs/Marinara-Engine/releases/tag/v1.5.6)**.
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed release notes. Tagged releases use the `vX.Y.Z` format and are published on the [Releases](https://github.com/Pasta-Devs/Marinara-Engine/releases) page.
 
@@ -201,7 +201,16 @@ Export chats as JSONL or plain text. Fully local SQLite database — all data st
 - [Shadota](https://github.com/Shadota)
 - [Teuku Rezhaldy](https://github.com/0-trspace)
 - [Mohammad Javed](https://github.com/Javedz678)
+- [Loungemeister](https://github.com/loungemeister)
 - [Cha1latte](https://github.com/cha1latte)
+- [Trade-Mottoes](https://github.com/Trade-Mottoes)
+- [OnlyJimmy](https://github.com/Trade-Mottoes)
+- [Xelvanis](https://github.com/Xelvanis)
+- [Anarchistcowboy](https://github.com/Anarchistcowboy)
+- [Adunato](https://github.com/adunato)
+- [DarthTheMonster](https://github.com/DarthTheMonster)
+- [Morgul](https://github.com/Morgul)
+- [Kevin Ho](https://github.com/kevin-ho)
 
 ---
 

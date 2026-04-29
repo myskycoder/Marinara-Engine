@@ -11,6 +11,7 @@ import { useUIStore } from "../../stores/ui.store";
 import { Loader2, Wand2, CheckCircle, AlertCircle, ChevronDown, BookOpen, Plus } from "lucide-react";
 import { api } from "../../lib/api-client";
 import type { Lorebook } from "@marinara-engine/shared";
+import { ProfessorMariWorkingWindow } from "../ui/ProfessorMariWorkingWindow";
 
 interface Props {
   open: boolean;
@@ -241,6 +242,7 @@ export function LorebookMakerModal({ open, onClose }: Props) {
 
   return (
     <Modal open={open} onClose={handleClose} title="✦ AI Lorebook Maker" width="max-w-lg">
+      <ProfessorMariWorkingWindow visible={streaming || saving} />
       <div className="space-y-4">
         {/* Connection selector */}
         <div className="space-y-1.5">

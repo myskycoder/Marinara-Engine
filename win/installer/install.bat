@@ -11,7 +11,7 @@ set "INSTALL_ERROR="
 echo.
 echo  +==========================================+
 echo  ^|   Marinara Engine - Windows Installer     ^|
-echo  ^|   v1.5.5                                  ^|
+echo  ^|   v1.5.6                                  ^|
 
 echo  +==========================================+
 echo.
@@ -158,7 +158,51 @@ goto :deps
 :update_repo
 echo  [..] Existing installation found, updating...
 cd /d "%INSTALL_DIR%"
-git pull
+set "OLD_HEAD="
+set "TARGET_HEAD="
+set "NEW_HEAD="
+for /f "tokens=*" %%i in ('git rev-parse HEAD 2^>nul') do set "OLD_HEAD=%%i"
+git fetch origin main --quiet
+if errorlevel 1 (
+    set "INSTALL_ERROR=Failed to fetch latest repository changes."
+    goto :fatal
+)
+for /f "tokens=*" %%i in ('git rev-parse origin/main 2^>nul') do set "TARGET_HEAD=%%i"
+if not defined TARGET_HEAD (
+    set "INSTALL_ERROR=Could not resolve origin/main after fetch."
+    goto :fatal
+)
+if /I "!OLD_HEAD!"=="!TARGET_HEAD!" (
+    echo  [OK] Repository already up to date
+    goto :deps
+)
+
+set "STASHED=0"
+set "STASH_REF="
+set "DIRTY=0"
+git diff --quiet >nul 2>&1
+if errorlevel 1 set "DIRTY=1"
+git diff --cached --quiet >nul 2>&1
+if errorlevel 1 set "DIRTY=1"
+if "!DIRTY!"=="1" (
+    git stash push -q -m "installer auto-stash before update" >nul 2>&1 && set "STASHED=1"
+    if "!STASHED!"=="1" for /f "tokens=*" %%i in ('git stash list -1 --format^=%%gd 2^>nul') do set "STASH_REF=%%i"
+)
+
+git merge --ff-only origin/main
+if errorlevel 1 (
+    if "!STASHED!"=="1" call :restore_stashed_changes
+    set "INSTALL_ERROR=Failed to fast-forward existing installation to origin/main."
+    goto :fatal
+)
+for /f "tokens=*" %%i in ('git rev-parse HEAD 2^>nul') do set "NEW_HEAD=%%i"
+if /I not "!NEW_HEAD!"=="!TARGET_HEAD!" (
+    if "!STASHED!"=="1" call :restore_stashed_changes
+    set "INSTALL_ERROR=Repository update did not land on origin/main."
+    goto :fatal
+)
+if "!STASHED!"=="1" call :restore_stashed_changes
+echo  [OK] Repository updated
 
 :deps
 
@@ -203,7 +247,7 @@ set "VBS=%TEMP%\create_shortcut.vbs"
     echo Set oLink = oWS.CreateShortcut^(sLinkFile^)
     echo oLink.TargetPath = "%INSTALL_DIR%\start.bat"
     echo oLink.WorkingDirectory = "%INSTALL_DIR%"
-    echo oLink.IconLocation = "%INSTALL_DIR%\installer\app-icon.ico,0"
+    echo oLink.IconLocation = "%INSTALL_DIR%\win\installer\app-icon.ico,0"
     echo oLink.Description = "Marinara Engine - AI Chat ^& Roleplay"
     echo oLink.Save
 ) > "%VBS%"
@@ -239,6 +283,20 @@ if /I "%PNPM_RUNNER%"=="corepack" (
     )
 )
 exit /b %errorlevel%
+
+:restore_stashed_changes
+if not "!STASHED!"=="1" goto :eof
+if "!STASH_REF!"=="" goto :eof
+git stash apply -q "!STASH_REF!" >nul 2>&1
+if errorlevel 1 (
+    echo  [WARN] Could not reapply local changes cleanly.
+    echo         Your changes are preserved in !STASH_REF!.
+    echo         Reapply them manually after installation if needed.
+    git reset --hard HEAD >nul 2>&1
+    goto :eof
+)
+git stash drop -q "!STASH_REF!" >nul 2>&1
+goto :eof
 
 :: -- Fatal error handler: always visible, never silent --
 :fatal

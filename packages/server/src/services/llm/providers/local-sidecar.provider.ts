@@ -26,7 +26,9 @@ export class LocalSidecarProvider extends BaseLLMProvider {
   private applyRuntimeSettings(options: ChatOptions): ChatOptions {
     const config = sidecarModelService.getConfig();
     const requestedMaxTokens =
-      typeof options.maxTokens === "number" && Number.isFinite(options.maxTokens) ? Math.max(1, Math.floor(options.maxTokens)) : undefined;
+      typeof options.maxTokens === "number" && Number.isFinite(options.maxTokens)
+        ? Math.max(1, Math.floor(options.maxTokens))
+        : undefined;
     return {
       ...options,
       maxTokens: requestedMaxTokens !== undefined ? Math.min(requestedMaxTokens, config.maxTokens) : config.maxTokens,

@@ -52,6 +52,7 @@ import { BUILT_IN_AGENTS } from "@marinara-engine/shared";
 import { useTranslationStore } from "../../stores/translation.store";
 import { ttsService } from "../../lib/tts-service";
 import { useTTSConfig } from "../../hooks/use-tts";
+import { buildTTSMessageText, resolveTTSVoiceForSpeaker } from "../../lib/tts-dialogue";
 import { mirrorSpritePlacements, normalizeSpritePlacements } from "./sprite-placement";
 import type { CharacterMap, MessageSelectionToggle, MessageWithSwipes, PeekPromptData } from "./chat-area.types";
 import { RecentChats } from "./RecentChats";
@@ -83,10 +84,12 @@ export function ChatArea() {
   const isStreaming = isStreamingGlobal && streamingChatId === activeChatId;
   const isPageActive = usePageActivity();
   const regenerateMessageId = useChatStore((s) => s.regenerateMessageId);
+  const currentInput = useChatStore((s) => s.currentInput);
   const chatBackground = useUIStore((s) => s.chatBackground);
   const weatherEffects = useUIStore((s) => s.weatherEffects);
   const messagesPerPage = useUIStore((s) => s.messagesPerPage);
   const centerCompact = useUIStore((s) => s.centerCompact);
+  const guideGenerations = useUIStore((s) => s.guideGenerations);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevScrollHeightRef = useRef(0);
@@ -292,7 +295,7 @@ export function ChatArea() {
   const chatMode = rawMode ?? lastModeRef.current;
   const isRoleplay = chatMode === "roleplay" || chatMode === "visual_novel";
   const { startEncounter } = useEncounter();
-  const { concludeScene, abandonScene } = useScene();
+  const { concludeScene, abandonScene, forkScene, isForking } = useScene();
   const encounterActive = useEncounterStore((s) => s.active || s.showConfigModal);
 
   // Sprite sidebar settings from chat metadata
@@ -373,27 +376,41 @@ export function ChatArea() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chat?.id, msgPageCount]);
 
-  // Restore per-chat background from metadata when switching chats.
-  // If the new chat has a saved background, apply it; otherwise keep the current
-  // background so newly-created chats don't flash to black.
+  // Sync chat background from metadata when switching chats. Set the UI store
+  // to whatever the chat's metadata says — including null. The previous version
+  // only set on truthy values, leaving the global chatBackground stale when
+  // switching to a chat whose metadata has been cleared, which made a removed
+  // background re-appear after a chat switch round-trip.
   useEffect(() => {
-    const bg = chatMeta.background as string | undefined;
-    if (bg) {
-      useUIStore.getState().setChatBackground(`/api/backgrounds/file/${encodeURIComponent(bg)}`);
-    }
+    if (!chat?.id) return;
+    const bg = chatMeta.background as string | null | undefined;
+    useUIStore.getState().setChatBackground(bg ? `/api/backgrounds/file/${encodeURIComponent(bg)}` : null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chat?.id]);
 
   // Persist background choice to chat metadata so it survives page refresh.
   // Catches all sources: manual picker, background agent, scene commands, slash commands.
-  // Only persist non-null backgrounds — never write null to metadata (avoids wiping
-  // the user's background when opening a new chat that hasn't had one set yet).
+  // When the user clears the background, we must persist null so the removal
+  // sticks across chat switches; otherwise the restore effect re-applies the
+  // stale saved background. We only write null when metadata already had a
+  // background — that way a global UI background carried over from a previous
+  // chat doesn't pollute a fresh chat's metadata on switch.
   const bgPersistTimer = useRef<ReturnType<typeof setTimeout>>(null);
   useEffect(() => {
-    if (!chat?.id || !chatBackground) return;
+    if (!chat?.id) return;
+    const savedFilename = (chatMeta.background as string | null | undefined) ?? null;
+
+    if (!chatBackground) {
+      if (savedFilename === null) return;
+      if (bgPersistTimer.current) clearTimeout(bgPersistTimer.current);
+      bgPersistTimer.current = setTimeout(() => {
+        updateMeta.mutate({ id: chat!.id, background: null });
+      }, 500);
+      return;
+    }
+
     const filename = decodeURIComponent(chatBackground.replace(/^\/api\/backgrounds\/file\//, ""));
-    // Skip if metadata already matches (avoids pointless writes on restore)
-    if (filename === (chatMeta.background ?? null)) return;
+    if (filename === savedFilename) return;
     if (bgPersistTimer.current) clearTimeout(bgPersistTimer.current);
     bgPersistTimer.current = setTimeout(() => {
       updateMeta.mutate({ id: chat!.id, background: filename });
@@ -653,12 +670,22 @@ export function ChatArea() {
       }
       try {
         // Regenerate as a new swipe on the existing message
-        await generate({ chatId: activeChatId, connectionId: null, regenerateMessageId: messageId });
+        const hasInput = currentInput ? currentInput.trim().length > 0 : false;
+        await generate(
+          guideGenerations && hasInput
+            ? {
+                chatId: activeChatId,
+                connectionId: null,
+                regenerateMessageId: messageId,
+                generationGuide: currentInput?.toString(),
+              }
+            : { chatId: activeChatId, connectionId: null, regenerateMessageId: messageId },
+        );
       } catch {
         // Error toast is shown by the generate hook
       }
     },
-    [activeChatId, isStreaming, generate],
+    [activeChatId, isStreaming, generate, currentInput, guideGenerations],
   );
 
   const _handleRetryAgents = useCallback(async () => {
@@ -723,6 +750,14 @@ export function ChatArea() {
       );
     },
     [activeChatId, branchChat],
+  );
+
+  const handleCloneSceneFromHere = useCallback(
+    (messageId: string) => {
+      if (!activeChatId || isForking || isStreaming) return;
+      forkScene(activeChatId, "clone", { upToMessageId: messageId });
+    },
+    [activeChatId, forkScene, isForking, isStreaming],
   );
 
   // Peek prompt state
@@ -842,11 +877,7 @@ export function ChatArea() {
 
     const mode = chatModeRef.current;
     const shouldAutoplay =
-      mode === "roleplay" || mode === "visual_novel"
-        ? cfg.autoplayRP
-        : mode === "game"
-          ? cfg.autoplayGame
-          : cfg.autoplayConvo;
+      mode === "roleplay" || mode === "visual_novel" ? cfg.autoplayRP : mode === "game" ? false : cfg.autoplayConvo;
     if (!shouldAutoplay) return;
 
     const msgs = messagesRef.current ?? [];
@@ -860,8 +891,14 @@ export function ChatArea() {
     }
     if (!lastMsg?.content) return;
 
-    void ttsService.speak(lastMsg.content, lastMsg.id);
-  }, [isStreaming]);
+    const fallbackSpeaker = lastMsg.characterId ? characterMap.get(lastMsg.characterId)?.name : undefined;
+    const ttsText = buildTTSMessageText(lastMsg.content, cfg, fallbackSpeaker);
+    if (!ttsText) return;
+    const ttsVoice = resolveTTSVoiceForSpeaker(cfg, fallbackSpeaker, lastMsg.characterId);
+    if (cfg.source === "elevenlabs" && !ttsVoice) return;
+
+    void ttsService.speak(ttsText, lastMsg.id, { speaker: fallbackSpeaker, voice: ttsVoice });
+  }, [characterMap, isStreaming]);
 
   const newestMsgId = msgData?.pages[0]?.[msgData.pages[0].length - 1]?.id;
   const newestMsgSwipeIndex = msgData?.pages[0]?.[msgData.pages[0].length - 1]?.activeSwipeIndex;
@@ -1105,11 +1142,11 @@ export function ChatArea() {
 
               {/* Special thanks */}
               <p className="mt-1 max-w-xs text-center text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]/40">
-                Special thanks to Cha1latte, Javedz678, Teuku, Shadota, Romu, Mm14141, MagicGoddess, John, Pwildani,
-                Romu, Felor, MuniMuni, Guybrush01, Joshellis625, LukaTheHero, Coxde, JorgeLTE, Seele The Seal King,
-                Loungemeister, Kale, Tabris, GREGOR OVECH, Coins, Tacoman, Jorge, Promansis, Kitsumiro, Sheep, Pod042,
-                Prolix, PlutoMayhem, Mezzeh, Kuc0, Exalted, Yang Best Girl, MidnightSleeper, Geechan, TheLonelyDevil,
-                Artus, and you!
+                Special thanks to Jorge, Cha1latte, Javedz678, Teuku, Shadota, Romu, Mm14141, MagicGoddess, John,
+                Pwildani, Romu, Felor, MuniMuni, Guybrush01, Joshellis625, LukaTheHero, Coxde, JorgeLTE, Seele The Seal
+                King, Loungemeister, Kale, Tabris, GREGOR OVECH, Coins, Tacoman, Jorge, Promansis, Kitsumiro, Sheep,
+                Pod042, Prolix, PlutoMayhem, Mezzeh, Kuc0, Exalted, Yang Best Girl, MidnightSleeper, Geechan,
+                TheLonelyDevil, Artus, and you!
               </p>
 
               {/* Restart tutorial */}
@@ -1179,6 +1216,8 @@ export function ChatArea() {
   // Game mode — RPG surface with GM narration, map, party chat
   // ═══════════════════════════════════════════════
   if (chatMode === "game") {
+    if (!chat) return surfaceFallback;
+
     const gameCharacters = allCharacters
       ? (allCharacters as Array<{ id: string; data: string; comment?: string | null; avatarPath: string | null }>).map(
           (c) => {
@@ -1190,6 +1229,7 @@ export function ChatArea() {
                 name: display.name,
                 comment: display.comment,
                 avatarUrl: c.avatarPath ?? undefined,
+                avatarCrop: parsed.extensions?.avatarCrop || null,
                 description: parsed.description ?? "",
                 personality: parsed.personality ?? "",
                 backstory: parsed.extensions?.backstory ?? "",
@@ -1420,12 +1460,16 @@ export function ChatArea() {
           onToggleConversationStart={handleToggleConversationStart}
           onPeekPrompt={handlePeekPrompt}
           onBranch={isSceneChat ? undefined : handleBranch}
+          onCloneSceneFromHere={isSceneChat ? handleCloneSceneFromHere : undefined}
+          isCloneSceneFromHereDisabled={isForking || isStreaming}
           onToggleSelectMessage={handleToggleSelectMessage}
           onSummaryContextSizeChange={handleSummaryContextSizeChange}
           onRerunTrackers={handleRerunTrackers}
           onStartEncounter={() => startEncounter()}
           onConcludeScene={() => concludeScene(activeChatId)}
           onAbandonScene={() => abandonScene(activeChatId)}
+          onForkScene={forkScene}
+          isForkingScene={isForking || isStreaming}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenFiles={() => setFilesOpen(true)}
           onOpenGallery={() => setGalleryOpen(true)}

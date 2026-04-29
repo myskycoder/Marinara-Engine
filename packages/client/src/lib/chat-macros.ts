@@ -66,7 +66,9 @@ export function getChatCharacterIds(chat: { characterIds?: unknown } | null | un
   return [];
 }
 
-export function parseCharacterMacroData(raw: { id?: string; data: unknown } | null | undefined): MacroCharacterData | null {
+export function parseCharacterMacroData(
+  raw: { id?: string; data: unknown } | null | undefined,
+): MacroCharacterData | null {
   if (!raw) return null;
 
   try {
@@ -129,9 +131,7 @@ export function selectActivePersona(
   const allowGlobalFallback = chat?.mode !== "game";
   const selectedPersona =
     (chatPersonaId ? personas.find((persona) => getString(persona.id) === chatPersonaId) : null) ??
-    (allowGlobalFallback
-      ? personas.find((persona) => persona.isActive === true || persona.isActive === "true")
-      : null);
+    (allowGlobalFallback ? personas.find((persona) => persona.isActive === true || persona.isActive === "true") : null);
 
   return parsePersonaMacroData(selectedPersona ?? null) ?? undefined;
 }

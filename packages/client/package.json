@@ -1,7 +1,7 @@
 {
   "name": "@marinara-engine/client",
   "private": true,
-  "version": "1.5.5",
+  "version": "1.5.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -28,6 +28,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
+    "@rollup/wasm-node": "4.59.0",
     "@tailwindcss/vite": "^4.1.8",
     "@types/dompurify": "^3.2.0",
     "@types/react": "^19.1.6",

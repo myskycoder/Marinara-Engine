@@ -30,6 +30,7 @@ import {
   isAutoCreateDefaultConnectionDisabled,
 } from "./config/runtime-config.js";
 import { sidecarProcessService } from "./services/sidecar/sidecar-process.service.js";
+import { migrateTaskbarShortcuts } from "./services/setup/taskbar-shortcut-migration.js";
 
 const isLite = process.env.MARINARA_LITE === "true" || process.env.MARINARA_LITE === "1";
 const REVALIDATE_FILES = new Set(["index.html"]);
@@ -79,6 +80,25 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
 
   // ── Recover orphaned gallery images (files on disk without DB records) ──
   await recoverGalleryImages(db);
+
+  // ── One-time taskbar shortcut migration (Windows) ──
+  // Re-points the Start Menu / Desktop "Marinara Engine" shortcut at the
+  // bundled MarinaraLauncher.exe so pinning to the taskbar groups the
+  // running console under the pinned icon. Idempotent.
+  //
+  // Deferred off the boot path via setImmediate — the migration shells out
+  // to powershell.exe synchronously, and a hung COM call must not be able
+  // to delay the server starting to listen. setImmediate runs the work on
+  // the next event-loop tick, after `app.listen()` completes in index.ts.
+  setImmediate(() => {
+    try {
+      // app.ts compiles to <installDir>/packages/server/dist/app.js — three levels up from dist/.
+      const installDir = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+      migrateTaskbarShortcuts(installDir);
+    } catch (err) {
+      app.log.warn({ err }, "taskbar shortcut migration skipped");
+    }
+  });
 
   // ── IP Allowlist ──
   app.addHook("onRequest", ipAllowlistHook);
