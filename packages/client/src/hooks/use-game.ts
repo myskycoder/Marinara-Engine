@@ -660,6 +660,9 @@ interface RegenerateNpcAssetsResponse {
   reason?: "npc-not-found" | "no-image-connection" | "nothing-to-do";
 }
 
+/** Shared key so other UI (e.g. journal chrome) can observe in-flight NPC asset regen. */
+export const GAME_NPC_REGENERATE_MUTATION_KEY = ["game", "npc-regenerate-assets"] as const;
+
 /**
  * Manually regenerate an NPC's avatar and/or sprite. The server deletes the
  * existing on-disk artifacts (otherwise the existsSync short-circuits in the
@@ -671,6 +674,7 @@ interface RegenerateNpcAssetsResponse {
 export function useRegenerateNpcAssets() {
   const qc = useQueryClient();
   return useMutation({
+    mutationKey: [...GAME_NPC_REGENERATE_MUTATION_KEY],
     mutationFn: (data: RegenerateNpcAssetsRequest) =>
       api.post<RegenerateNpcAssetsResponse>("/game/npc/regenerate", data),
     onSuccess: (res, vars) => {

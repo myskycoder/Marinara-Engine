@@ -52,3 +52,33 @@ test("scene postprocess preserves valid cinematic directions and drops invalid o
     },
   ]);
 });
+
+test("scene postprocess normalizes segment locationId like top-level", () => {
+  const raw: SceneAnalysis = {
+    background: "backgrounds:generated:street",
+    locationId: "main-street",
+    backgroundPrompt: "Wide cobblestone street at dusk.",
+    music: null,
+    ambient: null,
+    weather: null,
+    timeOfDay: null,
+    reputationChanges: [],
+    segmentEffects: [
+      {
+        segment: 2,
+        background: "backgrounds:generated:alley",
+        locationId: "  Back_Alley  ",
+        backgroundPrompt: "Narrow brick alley with steam vents.",
+      },
+    ],
+  };
+
+  const result = postProcessSceneResult(raw, {
+    availableBackgrounds: [],
+    availableSfx: [],
+    validWidgetIds: new Set(),
+    characterNames: [],
+  });
+
+  assert.equal(result.segmentEffects?.[0]?.locationId, "back-alley");
+});

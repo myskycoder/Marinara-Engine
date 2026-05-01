@@ -439,6 +439,8 @@ export interface SceneIllustrationGenRequest {
   reason?: string;
   characters?: string[];
   characterDescriptions?: string[];
+  /** Location, weather, narration excerpt, background brief — keeps CG on-model. */
+  sceneContinuity?: string | null;
   slug?: string;
   genre?: string;
   setting?: string;
@@ -468,10 +470,15 @@ function buildBackgroundImagePrompt(req: BackgroundGenRequest): string {
   if (conditionParts.length) sentences.push(`Atmosphere — ${conditionParts.join(", ")}.`);
   if (req.setting?.trim()) sentences.push(`Setting: ${req.setting.trim()}.`);
   if (req.artStyle?.trim()) sentences.push(`Style: ${req.artStyle.trim()}.`);
+  // Composition: backgrounds are shown behind full-body VN sprites — keep the
+  // overlay zone legible and proportional (models respond well to explicit layout).
+  sentences.push(
+    "Visual-novel composition: wide 16:9 establishing shot; keep the lower third and bottom-center visually open and uncluttered so standing character sprites read at a natural scale. Place doors, signage, faces-on-posters, and story-critical props away from that overlay zone — stronger depth, architecture, and sky in mid-ground and upper frame.",
+  );
   // Hard negative — repeated multi-phrase form because diffusion models
   // respond better to several restatements than to a single "no characters".
   sentences.push(
-    "Empty environment plate — no people, no figures, no characters, no humans, no faces, no text, no UI, no logos, no watermarks. Wide establishing shot, cinematic composition, atmospheric, high detail, high quality.",
+    "Empty environment plate — no people, no figures, no characters, no humans, no faces, no text, no UI, no logos, no watermarks. Cinematic perspective, atmospheric, high detail, high quality.",
   );
 
   return sentences.join(" ").slice(0, 1500);
@@ -610,9 +617,16 @@ export async function generateSceneIllustration(req: SceneIllustrationGenRequest
   const descriptionHint = req.characterDescriptions?.length
     ? `Appearance notes for visible characters without an attached reference image:\n- ${req.characterDescriptions.join("\n- ")}`
     : "";
+  const continuityHint = req.sceneContinuity?.trim()
+    ? [
+        "Scene continuity (mandatory — same place, era, and cast as the live scene; do not invent a different room, biome, or unrelated people):",
+        req.sceneContinuity.trim(),
+      ].join("\n")
+    : "";
   const prompt = [
     "Image type: polished visual novel CG illustration replacing the game background for one important scene.",
     "Camera / POV: first-person view from the player protagonist's eyes. Do not show the protagonist except hands or arms when the moment explicitly requires them.",
+    continuityHint,
     `Scene moment: ${req.prompt}`,
     req.reason ? `Narrative purpose: ${req.reason}.` : "",
     characterHint,
@@ -620,11 +634,12 @@ export async function generateSceneIllustration(req: SceneIllustrationGenRequest
     descriptionHint,
     styleHint ? `Art direction: ${styleHint}.` : "",
     "Composition: cinematic 16:9 visual novel CG, emotionally specific staging, clear focal point, high-quality finished illustration.",
+    "Mandatory: match named characters to reference images and appearance notes; match environment and props to the continuity block. Do not substitute different individuals or a generic unrelated location.",
     "Avoid: text, UI, captions, speech bubbles, watermarks, and unrelated characters.",
   ]
     .filter(Boolean)
     .join("\n")
-    .slice(0, 2200);
+    .slice(0, 2600);
 
   try {
     const result = await generateImage(
@@ -646,10 +661,10 @@ export async function generateSceneIllustration(req: SceneIllustrationGenRequest
     writeFileSync(targetPath, Buffer.from(result.base64, "base64"));
     buildAssetManifest();
 
-    console.log(`[game-asset-gen] Generated scene illustration "${slug}" -> tag: ${tag}`);
+    logger.info('[game-asset-gen] Generated scene illustration "%s" -> tag: %s', slug, tag);
     return tag;
   } catch (err) {
-    console.warn(`[game-asset-gen] Failed to generate scene illustration "${slug}":`, err);
+    logger.warn(err, '[game-asset-gen] Failed to generate scene illustration "%s"', slug);
     return null;
   }
 }

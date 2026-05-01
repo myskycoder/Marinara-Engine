@@ -32,7 +32,11 @@ import {
   buildSceneAnalyzerUserPrompt,
   type SceneAnalyzerContext,
 } from "../services/sidecar/scene-analyzer.js";
-import { postProcessSceneResult, type PostProcessContext } from "../services/sidecar/scene-postprocess.js";
+import {
+  normalizeSceneLocationId,
+  postProcessSceneResult,
+  type PostProcessContext,
+} from "../services/sidecar/scene-postprocess.js";
 import { buildRecapPrompt } from "../services/game/session.service.js";
 import { buildMapGenerationPrompt } from "../services/game/map.service.js";
 import {
@@ -111,6 +115,7 @@ import {
   readAvatarBase64,
   type BackgroundConditions,
 } from "../services/game/game-asset-generation.js";
+import { buildIllustrationContinuity, excerptNarrationForIllustration } from "../services/game/scene-illustration-context.js";
 import { regenerateNpcAssets } from "../services/game/npc-materializer.service.js";
 import { npcNameKey, sha1HexLegacy, slugifyForFs } from "../services/game/npc-name-server.js";
 import { saveImageToDisk } from "../services/image/image-generation.js";
@@ -351,13 +356,17 @@ function findCatalogBackgroundRegeneratePayload(
     return null;
   }
   const catalog = (meta.locationCatalog as Record<string, LocationCatalogEntry> | undefined) ?? {};
+  const preferredLoc = normalizeSceneLocationId(meta.currentLocationId);
+
+  type Hit = { locationId: string; backgroundPrompt: string; conditions: BackgroundConditions };
+  const hits: Hit[] = [];
   for (const [mapKey, entry] of Object.entries(catalog)) {
     const variants = entry?.variants ?? [];
     if (!variants.length) continue;
     const locId = entry.locationId || mapKey;
     for (const v of variants) {
       if (v.tag === sceneBackgroundTag && typeof v.prompt === "string" && v.prompt.trim()) {
-        return {
+        hits.push({
           locationId: locId,
           backgroundPrompt: v.prompt.trim(),
           conditions: {
@@ -365,11 +374,16 @@ function findCatalogBackgroundRegeneratePayload(
             timeOfDay: v.timeOfDay ?? null,
             season: v.season ?? null,
           },
-        };
+        });
       }
     }
   }
-  return null;
+  if (!hits.length) return null;
+  if (preferredLoc && hits.length > 1) {
+    const pick = hits.find((h) => normalizeSceneLocationId(h.locationId) === preferredLoc);
+    if (pick) return pick;
+  }
+  return hits[0] ?? null;
 }
 
 /** Normalize plain-text output from the background-brief LLM. */
@@ -4826,12 +4840,25 @@ export async function gameRoutes(app: FastifyInstance) {
                 charAvatarByName,
                 charDescriptionByName,
               });
+              const illustrationSeason =
+                coerceSeason((sceneResult as Record<string, unknown>).season) ?? coerceSeason(meta.gameCurrentSeason);
+              const illustrationContinuity = buildIllustrationContinuity({
+                narrationExcerpt: excerptNarrationForIllustration(input.narration, 1400),
+                backgroundTag: (sceneResult.background as string) ?? null,
+                backgroundPrompt: (sceneResult.backgroundPrompt as string) ?? null,
+                locationId: (sceneResult.locationId as string) ?? null,
+                weather: (sceneResult.weather as string) ?? input.context.currentWeather,
+                timeOfDay: (sceneResult.timeOfDay as string) ?? input.context.currentTimeOfDay,
+                season: illustrationSeason,
+                priorBackgroundTag: input.context.currentBackground,
+              });
               const generatedTag = await generateSceneIllustration({
                 chatId: input.chatId,
                 prompt: illustration.prompt,
                 reason: illustration.reason,
                 characters: illustration.characters,
                 characterDescriptions: illustrationAssets.characterDescriptions,
+                sceneContinuity: illustrationContinuity || undefined,
                 slug: illustration.slug,
                 genre,
                 setting,
@@ -5379,6 +5406,7 @@ export async function gameRoutes(app: FastifyInstance) {
         "You write concise English visual briefs for fantasy and realistic environment illustrations. " +
         "Output ONLY the new brief as 1–2 plain sentences — no JSON, no markdown fences, no bullet list, no preamble. " +
         "Describe only the environment: architecture, landscape, lighting, weather, props. " +
+        "Favor a visual-novel-friendly layout: lower third and bottom-center stay relatively open for standing character sprites; keep story-important props and focal points out of that overlay band when possible. " +
         "Never include people, figures, faces, crowds, text, UI, logos, or watermarks.";
 
       const userBody = [
@@ -5602,7 +5630,7 @@ export async function gameRoutes(app: FastifyInstance) {
       const allMsgs = await chats.listMessages(input.chatId);
       const approxTurnNumber = Math.max(1, allMsgs.filter((message) => message.role === "user").length + 1);
       if (!isIllustrationAllowed(meta, approxTurnNumber)) {
-        console.log("[game/generate-assets] illustration skipped: cooldown active");
+        logger.debug("[game/generate-assets] illustration skipped: cooldown active");
       } else {
         const charStore = createCharactersStorage(app.db);
         const allChars = await charStore.list();
@@ -5624,13 +5652,46 @@ export async function gameRoutes(app: FastifyInstance) {
         }
 
         const illustration = input.illustration as SceneIllustrationRequest;
+        let narrationExcerptForIll: string | undefined;
+        for (let i = allMsgs.length - 1; i >= 0; i--) {
+          const row = allMsgs[i];
+          if (row && (row.role === "assistant" || row.role === "narrator") && row.content?.trim()) {
+            narrationExcerptForIll = excerptNarrationForIllustration(row.content, 1400);
+            break;
+          }
+        }
+        const latestStateForIll = await createGameStateStorage(app.db).getLatest(input.chatId);
+        const presentNames = (
+          parseStoredJson<Array<Record<string, unknown>>>(latestStateForIll?.presentCharacters) ?? []
+        )
+          .map((p) => (typeof p.name === "string" ? p.name.trim() : ""))
+          .filter(Boolean);
+        const npcMetaNames = ((meta.gameNpcs as GameNpc[]) ?? [])
+          .map((n) => n.name?.trim())
+          .filter((n): n is string => !!n);
+        const characterNamesForIll = Array.from(
+          new Set([...(illustration.characters ?? []), ...presentNames, ...npcMetaNames]),
+        ).slice(0, 10);
         const illustrationAssets = collectIllustrationCharacterAssets({
           illustration,
-          characterNames: illustration.characters ?? [],
-          trackedNpcs: [],
+          characterNames: characterNamesForIll,
+          trackedNpcs: ((meta.gameNpcs ?? []) as unknown as Array<Record<string, unknown>>) ?? [],
           gameNpcs: (meta.gameNpcs as GameNpc[]) ?? [],
           charAvatarByName,
           charDescriptionByName,
+        });
+        const metaBg = (meta.gameSceneBackground as string) ?? null;
+        const metaLoc = (meta.currentLocationId as string) ?? null;
+        const illustrationSeasonGen = input.conditions?.season ?? coerceSeason(meta.gameCurrentSeason);
+        const illustrationContinuityGen = buildIllustrationContinuity({
+          narrationExcerpt: narrationExcerptForIll,
+          backgroundTag: metaBg,
+          backgroundPrompt: input.backgroundPrompt ?? null,
+          locationId: input.locationId ?? metaLoc,
+          weather: input.conditions?.weather ?? null,
+          timeOfDay: input.conditions?.timeOfDay ?? null,
+          season: illustrationSeasonGen,
+          priorBackgroundTag: input.placeholderTag ?? null,
         });
         const tag = await generateSceneIllustration({
           chatId: input.chatId,
@@ -5638,6 +5699,7 @@ export async function gameRoutes(app: FastifyInstance) {
           reason: illustration.reason,
           characters: illustration.characters,
           characterDescriptions: illustrationAssets.characterDescriptions,
+          sceneContinuity: illustrationContinuityGen || undefined,
           slug: illustration.slug,
           genre,
           setting,

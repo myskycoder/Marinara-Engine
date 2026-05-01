@@ -6,7 +6,7 @@
 // all assembled from committed snapshots, no LLM.
 // ──────────────────────────────────────────────
 import { useState, useEffect, useRef, useCallback } from "react";
-import { X, MapPin, Swords, ScrollText, Package, Users, PenLine, BookOpen, RotateCw, Trash2 } from "lucide-react";
+import { X, MapPin, Swords, ScrollText, Package, Users, PenLine, BookOpen, RotateCw, Trash2, Loader2 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { api } from "../../lib/api-client";
 import { AnimatedText } from "./AnimatedText";
@@ -43,6 +43,8 @@ interface Journal {
 interface GameJournalProps {
   chatId: string;
   npcs?: GameNpc[];
+  /** True while auto NPC assets, batch portrait gen, or manual regen is in flight (shows NPC tab + header hint). */
+  npcAssetsActivityPending?: boolean;
   onClose: () => void;
   onNpcPortraitClick?: (npcName: string) => void;
   onNpcRemove?: (npcName: string) => Promise<void> | void;
@@ -109,7 +111,14 @@ function shouldShowNpcDescription(npc: GameNpc): boolean {
   return (npc as GameNpc & { descriptionSource?: string }).descriptionSource === "model" && !!npc.description?.trim();
 }
 
-export function GameJournal({ chatId, npcs, onClose, onNpcPortraitClick, onNpcRemove }: GameJournalProps) {
+export function GameJournal({
+  chatId,
+  npcs,
+  npcAssetsActivityPending = false,
+  onClose,
+  onNpcPortraitClick,
+  onNpcRemove,
+}: GameJournalProps) {
   const [journal, setJournal] = useState<Journal | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>("all");
   const [playerNotes, setPlayerNotes] = useState("");
@@ -186,7 +195,15 @@ export function GameJournal({ chatId, npcs, onClose, onNpcPortraitClick, onNpcRe
     <div className="absolute inset-0 z-40 flex flex-col bg-black/85 backdrop-blur-md">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
-        <h2 className="text-sm font-bold text-white/90">📖 Adventure Journal</h2>
+        <div className="flex min-w-0 items-center gap-2">
+          <h2 className="text-sm font-bold text-white/90">📖 Adventure Journal</h2>
+          {npcAssetsActivityPending && (
+            <span className="flex items-center gap-1 text-[0.625rem] font-medium text-sky-300/90" title="NPC portraits or sprites are still generating">
+              <Loader2 size={12} className="shrink-0 animate-spin" aria-hidden />
+              <span className="hidden sm:inline">NPC assets…</span>
+            </span>
+          )}
+        </div>
         <button
           onClick={onClose}
           className="flex h-7 w-7 items-center justify-center rounded-lg text-white/60 transition-colors hover:bg-white/10 hover:text-white"
@@ -200,10 +217,12 @@ export function GameJournal({ chatId, npcs, onClose, onNpcPortraitClick, onNpcRe
         <div className="flex gap-1 w-max min-w-full">
           {TABS.map((tab) => {
             const Icon = tab.icon;
+            const showNpcLoader = tab.id === "npcs" && npcAssetsActivityPending;
             return (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
+                title={showNpcLoader ? "NPC portraits or sprites are still generating" : undefined}
                 className={cn(
                   "flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[0.625rem] font-medium transition-colors",
                   activeTab === tab.id
@@ -213,6 +232,7 @@ export function GameJournal({ chatId, npcs, onClose, onNpcPortraitClick, onNpcRe
               >
                 <Icon size={12} />
                 {tab.label}
+                {showNpcLoader && <Loader2 size={11} className="shrink-0 animate-spin text-sky-300" aria-hidden />}
               </button>
             );
           })}

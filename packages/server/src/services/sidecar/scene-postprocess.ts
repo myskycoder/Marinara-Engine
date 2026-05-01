@@ -206,6 +206,30 @@ export interface PostProcessContext {
 }
 
 /**
+ * Canonical kebab-case location id for scene analysis + background cache keys.
+ * Must match top-level `locationId` rules so segment beats reuse the same ids
+ * as the catalog and `knownLocationIds` hints.
+ */
+export function normalizeSceneLocationId(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.toLowerCase() === "null") return null;
+  const cleaned = trimmed
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  if (!cleaned) {
+    logger.debug(`[postprocess] locationId: empty after normalisation, dropping ("${trimmed.slice(0, 80)}")`);
+    return null;
+  }
+  return cleaned;
+}
+
+/**
  * Post-process a single segment's per-beat effects:
  * fuzzy-match SFX and normalize generated background tags.
  */
@@ -279,6 +303,19 @@ function postProcessSegment(seg: SceneSegmentEffect, ctx: PostProcessContext): S
       .slice(0, 1);
   }
 
+  // locationId — same kebab rules as top-level (segments were missing this)
+  if ((out.locationId as unknown) === "null") out.locationId = null;
+  if (out.locationId != null) {
+    const cleaned = normalizeSceneLocationId(out.locationId);
+    if (!cleaned) {
+      logger.debug(`[postprocess] seg[${seg.segment}] locationId: dropped after normalisation`);
+      out.locationId = null;
+    } else if (cleaned !== out.locationId) {
+      logger.debug(`[postprocess] seg[${seg.segment}] locationId: "${out.locationId}" → "${cleaned}"`);
+      out.locationId = cleaned;
+    }
+  }
+
   return out;
 }
 
@@ -344,13 +381,7 @@ export function postProcessSceneResult(raw: SceneAnalysis, ctx: PostProcessConte
 
   // ── locationId — normalise to kebab-case (LLM occasionally drifts) ──
   if (result.locationId) {
-    const cleaned = String(result.locationId)
-      .toLowerCase()
-      .normalize("NFKD")
-      .replace(/[\u0300-\u036f]/g, "") // strip combining marks
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 80);
+    const cleaned = normalizeSceneLocationId(result.locationId);
     if (!cleaned) {
       logger.debug(`[postprocess] locationId: empty after normalisation, dropping ("${result.locationId}")`);
       result.locationId = null;

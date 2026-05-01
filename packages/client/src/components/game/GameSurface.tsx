@@ -33,10 +33,11 @@ import {
   useRecruitPartyMember,
   useRemovePartyMember,
   gameKeys,
+  GAME_NPC_REGENERATE_MUTATION_KEY,
 } from "../../hooks/use-game";
 import { chatKeys, useCreateMessage, useDeleteChat, useUpdateChatMetadata, useUpdateMessage } from "../../hooks/use-chats";
 import { useGenerate } from "../../hooks/use-generate";
-import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { spriteKeys, type SpriteInfo } from "../../hooks/use-characters";
 import { api, ApiError } from "../../lib/api-client";
 import { showConfirmDialog } from "../../lib/app-dialogs";
@@ -1336,6 +1337,8 @@ export function GameSurface({
   // Asset store
   const assetManifest = useGameAssetStore((s) => s.manifest);
   const currentBackground = useGameAssetStore((s) => s.currentBackground);
+  /** CG illustration replaces the plate — hide full-body NPC sprites so they are not double-drawn. */
+  const cgIllustrationBackground = Boolean(currentBackground?.startsWith("backgrounds:illustrations:"));
   const audioMuted = useGameAssetStore((s) => s.audioMuted);
   const fetchManifest = useGameAssetStore((s) => s.fetchManifest);
 
@@ -2190,6 +2193,18 @@ export function GameSurface({
 
   const retryableAssetGeneration = pendingAssetGeneration ?? missingSceneAssetGeneration;
 
+  const npcRegenerateMutating = useIsMutating({ mutationKey: [...GAME_NPC_REGENERATE_MUTATION_KEY] }) > 0;
+
+  /** Journal / NPC pipeline: materializer, sprite batch, or manual regen — drives chrome loaders. */
+  const journalNpcActivityPending = useMemo(() => {
+    const pipelinePending =
+      npcs.length > 0 && npcs.some((n) => !n.avatarUrl || n.spriteStatus === "pending");
+    const npcAvatarBatchPending =
+      (pendingAssetGeneration?.npcsNeedingAvatars?.length ?? 0) > 0 ||
+      (missingSceneAssetGeneration?.npcsNeedingAvatars?.length ?? 0) > 0;
+    return pipelinePending || npcAvatarBatchPending || npcRegenerateMutating;
+  }, [npcs, pendingAssetGeneration, missingSceneAssetGeneration, npcRegenerateMutating]);
+
   useEffect(() => {
     autoAssetGenerationKeyRef.current = null;
   }, [activeChatId]);
@@ -3020,6 +3035,28 @@ export function GameSurface({
           }
           if (fx.directions?.length) {
             playDirections(fx.directions);
+          }
+        }
+      }
+
+      // No top-level background but a later beat changes the plate (e.g. house then office in one
+      // message) — segment 0 may still show the old room; adopt the last segment's background as the
+      // default view when it is strictly after any segment-0 background change.
+      if (!result.background && !skipBgUpdate) {
+        const candidates = result.segmentEffects.filter(
+          (fx) => fx.background && fx.background !== "black" && fx.background !== "none",
+        );
+        if (candidates.length > 0) {
+          const lastFx = candidates.reduce((a, b) => (a.segment >= b.segment ? a : b));
+          const seg0Bg = candidates.find((c) => c.segment === 0);
+          if (!seg0Bg || lastFx.segment > seg0Bg.segment) {
+            const skipPromoted =
+              !!result.pendingBackgroundGeneration &&
+              (!assetMap?.[lastFx.background!] || lastFx.background!.startsWith("backgrounds:generated:"));
+            if (!skipPromoted && lastFx.background) {
+              const resolved = resolveAssetTag(lastFx.background, "backgrounds", assetMap);
+              useGameAssetStore.getState().setCurrentBackground(resolved);
+            }
           }
         }
       }
@@ -5631,12 +5668,15 @@ export function GameSurface({
             if (!playing && introCinematicActive) setIntroCinematicActive(false);
           }}
         >
-          {/* Full-body VN sprite — active speaker only */}
+          {/* Full-body VN sprite — active speaker only (hidden during CG illustration backgrounds) */}
           <div
             className="transition-opacity duration-700 ease-in-out"
-            style={{ opacity: spriteVisible ? 1 : 0, pointerEvents: spriteVisible ? "auto" : "none" }}
+            style={{
+              opacity: spriteVisible && !cgIllustrationBackground ? 1 : 0,
+              pointerEvents: spriteVisible && !cgIllustrationBackground ? "auto" : "none",
+            }}
           >
-            {displaySpriteIds.length > 0 && (
+            {displaySpriteIds.length > 0 && !cgIllustrationBackground && (
               <Suspense fallback={null}>
                 <SpriteOverlay
                   characterIds={displaySpriteIds}
@@ -5713,13 +5753,24 @@ export function GameSurface({
                       {startSessionLocked ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
                     </button>
                   )}
-                  <button
-                    onClick={() => setJournalOpen(true)}
-                    className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white"
-                    title="Journal"
-                  >
-                    <BookOpen size={14} />
-                  </button>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setJournalOpen(true)}
+                      aria-busy={journalNpcActivityPending}
+                      className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white"
+                      title={journalNpcActivityPending ? "Journal — NPC portraits or sprites are still generating" : "Journal"}
+                    >
+                      <BookOpen size={14} />
+                    </button>
+                    {journalNpcActivityPending && (
+                      <Loader2
+                        size={12}
+                        className="pointer-events-none absolute -bottom-0.5 -right-0.5 animate-spin text-sky-300 drop-shadow-[0_0_4px_rgba(0,0,0,0.9)]"
+                        aria-hidden
+                      />
+                    )}
+                  </div>
                   <div className="relative" ref={volumePopoverRef}>
                     <button
                       onClick={() => setVolumePopoverOpen((v) => !v)}
@@ -5933,16 +5984,31 @@ export function GameSurface({
                             {startSessionLocked ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
                           </button>
                         )}
-                        <button
-                          onClick={() => {
-                            setJournalOpen(true);
-                            setMobileActionsOpen(false);
-                          }}
-                          className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white"
-                          title="Journal"
-                        >
-                          <BookOpen size={14} />
-                        </button>
+                        <div className="relative">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setJournalOpen(true);
+                              setMobileActionsOpen(false);
+                            }}
+                            aria-busy={journalNpcActivityPending}
+                            className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+                            title={
+                              journalNpcActivityPending
+                                ? "Journal — NPC portraits or sprites are still generating"
+                                : "Journal"
+                            }
+                          >
+                            <BookOpen size={14} />
+                          </button>
+                          {journalNpcActivityPending && (
+                            <Loader2
+                              size={11}
+                              className="pointer-events-none absolute -bottom-0.5 -right-0.5 animate-spin text-sky-300 drop-shadow-[0_0_4px_rgba(0,0,0,0.9)]"
+                              aria-hidden
+                            />
+                          )}
+                        </div>
                         <div className="relative" ref={mobileVolumePopoverRef}>
                           <button
                             onClick={() => {
@@ -6578,6 +6644,7 @@ export function GameSurface({
                 <GameJournal
                   chatId={activeChatId}
                   npcs={npcs}
+                  npcAssetsActivityPending={journalNpcActivityPending}
                   onClose={() => setJournalOpen(false)}
                   onNpcPortraitClick={handleNpcPortraitClick}
                   onNpcRemove={handleRemoveNpcFromJournal}

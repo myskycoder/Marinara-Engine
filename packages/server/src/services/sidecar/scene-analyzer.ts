@@ -158,9 +158,9 @@ export function buildSceneAnalyzerUserPrompt(
     ``,
     `TASK: You are the scene director for a visual novel game. Read the narration above and decide:`,
     // music and ambient are scored deterministically on the server — not requested from the model
-    `1. SCENE SETTING — Pick the BEST overall background, weather, time of day, and season that fit the narration. The top-level "background" is the DEFAULT background for this turn. Change it from the current state only if the scene warrants it (new location, mood shift). Use null on "background" to keep unchanged.`,
+    `1. SCENE SETTING — Pick the BEST overall background, weather, time of day, and season that fit the narration. The top-level "background" is what the player sees first when this message appears — it MUST match where the narration ENDS (the room/area the party occupies after the turn). If characters move house → office (or any room change), top-level "background" MUST be the office (tag or backgrounds:generated:...) and top-level "locationId" MUST match — do NOT leave "background": null just because the move happens mid-text; null is ONLY when the party stays in the exact same place with no plate change.`,
     `2. LOCATION ID — Output a stable kebab-case "locationId" for the place currently in frame (e.g. "chernorechye-village-edge", "aunt-zoya-izba-kitchen", "abandoned-bell-tower"). REUSE the same id whenever the narration returns to a previously-visited place — even if phrasing differs. Inventing a new id for an already-visited location creates a duplicate cadre and wastes generation.`,
-    `3. BACKGROUND PROMPT — When you cannot find a STRONG match in the listed availableBackgrounds (locale, era, geography, language/cultural context — e.g. nothing matches a snowy Russian village or a 1990s post-Soviet bus stop), set "background" to "backgrounds:generated:<short-slug>" AND fill "backgroundPrompt" with a rich 1–2 sentence visual description: location type, materials, lighting, atmosphere, and key visual details from the narration. When you DO pick a tag from availableBackgrounds, set "backgroundPrompt": null.`,
+    `3. BACKGROUND PROMPT — When you cannot find a STRONG match in the listed availableBackgrounds (locale, era, geography, language/cultural context — e.g. nothing matches a snowy Russian village or a 1990s post-Soviet bus stop), set "background" to "backgrounds:generated:<short-slug>" AND fill "backgroundPrompt" with a rich 1–2 sentence visual description: location type, materials, lighting, atmosphere, and key visual details from the narration. For generated backgrounds, describe a composition that works behind full-body character sprites: keep the lower foreground and bottom-center relatively clear; put focal interest, important props, doors, and readable text-like signage in mid-ground or upper frame or off-center so sprites are not parked on top of the scene's key beats. When you DO pick a tag from availableBackgrounds, set "backgroundPrompt": null.`,
     `4. REPUTATION — If an NPC relationship shifted, note it. Otherwise empty array.`,
     `5. PER-BEAT EFFECTS — Scan each narration beat [0]-[${lines.length - 1}]. For each beat you can optionally add:`,
     `   - "sfx": sound effects (door slam, explosion, footsteps, impact)`,
@@ -193,12 +193,13 @@ export function buildSceneAnalyzerUserPrompt(
     ...(canGenerateIllustrations
       ? [
           `- Use "illustration" rarely. Most turns MUST keep it null. If you request it, the prompt must describe the exact illustrated moment, visible characters, player POV, mood, lighting, and composition.`,
-          `- "illustration.characters" should list only visible named characters in the image so their reference pictures can be attached.`,
+          `- "illustration.characters" MUST name every visible on-screen character who appears in the CG (same names as in narration), so reference portraits attach correctly — never invent a different cast.`,
+          `- The illustration prompt MUST stay in the SAME location as the current scene: reuse props, architecture, and weather/lighting from the narration and from top-level "background" / "backgroundPrompt" / "locationId" — do not relocate to a generic stock setting.`,
         ]
       : [`- Do not include image-generation or illustration requests.`]),
     ...(ctx?.currentBackground
       ? [
-          `- Current background is "${ctx.currentBackground}" (locationId="${ctx.currentLocationId ?? "unknown"}"). Keep it unless the characters move to a new location.`,
+          `- Current background is "${ctx.currentBackground}" (locationId="${ctx.currentLocationId ?? "unknown"}"). If narration ends in a different place, change top-level "background" + "locationId" accordingly — do not rely only on segmentEffects for the final location; segmentEffects are for mid-line beats (sfx, flashes, earlier sub-locations), not for skipping the end-of-turn plate.`,
         ]
       : [
           `- There is no background yet (game just started). You MUST set a "background", a "locationId", and (if "background" is "backgrounds:generated:...") a "backgroundPrompt".`,
@@ -261,7 +262,7 @@ export function buildSceneAnalyzerUserPrompt(
       : []),
     ...(canGenerateIllustrations
       ? [
-          `,  "illustration": null OR {"segment":<0-${lines.length - 1}>,"prompt":"<important CG image prompt from player POV>","characters":["<visible named character>"],"reason":"<why this is CG-worthy>","slug":"<short-safe-slug>"}`,
+          `,  "illustration": null OR {"segment":<0-${lines.length - 1}>,"prompt":"<CG from player POV — same room/props as narration + backgroundPrompt; no new location>","characters":["<every visible named character>"],"reason":"<why this is CG-worthy>","slug":"<short-safe-slug>"}`,
         ]
       : []),
     `}`,
