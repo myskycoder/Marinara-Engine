@@ -303,7 +303,9 @@ export const useGameModeStore = create<GameModeStore>((set) => ({
         if (prev?.portraitPrompt?.trim() && !incoming.portraitPrompt?.trim()) {
           out = { ...out, portraitPrompt: prev.portraitPrompt };
         }
-        if (!out.avatarUrl) {
+        // Only fill missing portrait when the server row did not specify `avatarUrl` at all (stale metadata).
+        // If the server sent `avatarUrl: null` (regeneration cleared portrait), do not resurrect the old URL.
+        if (!out.avatarUrl && !Object.prototype.hasOwnProperty.call(incoming, "avatarUrl")) {
           const preserved = existingByName.get((out.name ?? "").toLowerCase());
           if (preserved) out = { ...out, avatarUrl: preserved };
         }
@@ -316,7 +318,7 @@ export const useGameModeStore = create<GameModeStore>((set) => ({
       let modified = false;
       const nextNpcs = s.npcs.map((npc) => {
         const match = avatars.find((a) => a.name.toLowerCase() === npc.name.toLowerCase());
-        if (match && !npc.avatarUrl) {
+        if (match && match.avatarUrl && match.avatarUrl !== npc.avatarUrl) {
           modified = true;
           return { ...npc, avatarUrl: match.avatarUrl };
         }

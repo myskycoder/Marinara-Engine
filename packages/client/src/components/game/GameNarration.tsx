@@ -31,7 +31,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { cn, getAvatarCropStyle, type AvatarCrop } from "../../lib/utils";
-import { findNamedMapValue } from "../../lib/game-character-name-match";
+import { findNamedEntry, findNamedMapValue } from "../../lib/game-character-name-match";
 import type { GameSegmentEdit } from "../../lib/game-segment-edits";
 import { parseGmTags, stripGmTagsKeepReadables } from "../../lib/game-tag-parser";
 import { audioManager } from "../../lib/game-audio";
@@ -159,6 +159,8 @@ interface GameNarrationProps {
   onActiveSpeakerChange?: (speaker: { name: string; avatarUrl: string; expression?: string } | null) => void;
   /** Called when the user enters a new narration segment (for segment-tied effects). Index is 0-based. */
   onSegmentEnter?: (segmentIndex: number) => void;
+  /** Increment when deferred segmentEffects (e.g. async CG) update so onSegmentEnter re-fires for the current segment. */
+  segmentEffectsSignal?: number;
   /** Render prop: shown inside the narration box once the player has read all segments */
   inputSlot?: ReactNode;
   /** When true, the latest user message is shown as an animated narration/dialogue segment before the AI turn */
@@ -545,6 +547,15 @@ function formatSkillCheckLogContent(message: NarrationMessage): NarrationSegment
   });
 }
 
+/** Elapsed / total duration label for the GM streaming indicator (under 60s → decimal seconds). */
+function formatGmStreamDuration(ms: number): string {
+  const sec = Math.max(0, ms) / 1000;
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
 export function GameNarration({
   messages,
   isStreaming,
@@ -555,6 +566,7 @@ export function GameNarration({
   speakerAvatarMap,
   onActiveSpeakerChange,
   onSegmentEnter,
+  segmentEffectsSignal = 0,
   inputSlot,
   showUserMessages,
   partyDialogue,
@@ -622,6 +634,40 @@ export function GameNarration({
   const gameVoiceGenerationTailRef = useRef<Promise<void>>(Promise.resolve());
   const lastAutoPlayedVoiceKeyRef = useRef<string | null>(null);
   const lastAutoPlayedSideVoiceGroupRef = useRef<string | null>(null);
+
+  const streamStartPerfRef = useRef<number | null>(null);
+  const [, setStreamTick] = useState(0);
+  const [lastGeneratedMs, setLastGeneratedMs] = useState<number | null>(null);
+  const hideStreamCompletionRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (hideStreamCompletionRef.current) {
+      clearTimeout(hideStreamCompletionRef.current);
+      hideStreamCompletionRef.current = null;
+    }
+    if (isStreaming) {
+      setLastGeneratedMs(null);
+      streamStartPerfRef.current = performance.now();
+      setStreamTick((n) => n + 1);
+      const id = setInterval(() => setStreamTick((n) => n + 1), 300);
+      return () => clearInterval(id);
+    }
+    const start = streamStartPerfRef.current;
+    streamStartPerfRef.current = null;
+    if (start == null) return;
+    const ms = Math.max(0, performance.now() - start);
+    setLastGeneratedMs(ms);
+    hideStreamCompletionRef.current = setTimeout(() => {
+      hideStreamCompletionRef.current = null;
+      setLastGeneratedMs(null);
+    }, 6000);
+    return () => {
+      if (hideStreamCompletionRef.current) {
+        clearTimeout(hideStreamCompletionRef.current);
+        hideStreamCompletionRef.current = null;
+      }
+    };
+  }, [isStreaming]);
 
   // Clear edit state when the active segment changes
   useEffect(() => {
@@ -1658,7 +1704,7 @@ export function GameNarration({
     if (activeSegment.sourceMessageId !== latestAssistant?.id) return;
     if (activeSegment.sourceSegmentIndex == null || activeSegment.sourceSegmentIndex < 0) return;
     onSegmentEnter(activeSegment.sourceSegmentIndex);
-  }, [activeIndex, latestAssistant?.id, onSegmentEnter, segments]);
+  }, [activeIndex, latestAssistant?.id, onSegmentEnter, segments, segmentEffectsSignal]);
 
   // Trigger readable overlay when the typewriter finishes a readable segment
   const readableFiredRef = useRef<Set<string>>(new Set());
@@ -2070,7 +2116,17 @@ export function GameNarration({
 
   const activeAvatar = useMemo<SpeakerAvatarInfo | null>(() => {
     if (!active || active.type !== "dialogue" || !active.speaker) return null;
-    // Try to resolve a sprite image matching the expression (exclude full-body sprites for avatar)
+
+    // Tracked Game-mode NPC with a portrait wins over expression-sprites for the
+    // small dialogue avatar — uploaded portraits and auto-generated avatars
+    // become the canonical face shown next to the speaker's lines, while the
+    // sprite sheet still drives the full-body VN overlay.
+    const trackedNpc = findNamedEntry(gameNpcs, active.speaker, (npc) => npc.name);
+    if (trackedNpc?.avatarUrl) {
+      return { url: trackedNpc.avatarUrl };
+    }
+
+    // Library characters / personas keep expression-based avatar resolution.
     if (active.sprite && spriteMap) {
       const sprites = findNamedMapValue(spriteMap, active.speaker);
       if (sprites?.length) {
@@ -2091,7 +2147,7 @@ export function GameNarration({
     }
     // Fall back to base avatar
     return findNamedMapValue(speakerAvatarInfos, active.speaker) ?? null;
-  }, [active, speakerAvatarInfos, spriteMap]);
+  }, [active, gameNpcs, speakerAvatarInfos, spriteMap]);
 
   const NARRATION_ACTION_BTN =
     "flex items-center gap-1.5 rounded-lg bg-[var(--muted)]/30 px-3 py-1.5 text-xs text-[var(--foreground)]/70 transition-colors hover:bg-[var(--muted)]/50 hover:text-[var(--foreground)] dark:bg-white/10 dark:text-white/70 dark:hover:bg-white/20 dark:hover:text-white";
@@ -2700,9 +2756,21 @@ export function GameNarration({
           )}
 
           {isStreaming && (
-            <div className="mt-2 flex items-center gap-1 text-xs text-[var(--muted-foreground)]">
-              <span className="animate-pulse">●</span>
-              <span>The Game Master is writing the next segment...</span>
+            <div className="mt-2 flex min-w-0 items-center justify-between gap-2 text-xs text-[var(--muted-foreground)]">
+              <div className="flex min-w-0 items-center gap-1">
+                <span className="animate-pulse shrink-0">●</span>
+                <span className="min-w-0">The Game Master is writing the next segment...</span>
+              </div>
+              {streamStartPerfRef.current != null && (
+                <span className="shrink-0 tabular-nums text-white/50">
+                  {formatGmStreamDuration(performance.now() - streamStartPerfRef.current)}
+                </span>
+              )}
+            </div>
+          )}
+          {!isStreaming && lastGeneratedMs != null && (
+            <div className="mt-2 text-xs tabular-nums text-[var(--muted-foreground)]">
+              Generated in {formatGmStreamDuration(lastGeneratedMs)}
             </div>
           )}
         </div>

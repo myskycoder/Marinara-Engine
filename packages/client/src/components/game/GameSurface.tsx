@@ -235,6 +235,21 @@ function normalizeGameNpcJournalName(value: string): string {
   return normalizeSceneAssetName(cleanGameNpcDisplayName(value));
 }
 
+/** Same canonical name key as `GameJournal` NPC merging — use for portrait upload resolution. */
+function findGameNpcForPortraitUpload(npcs: GameNpc[], npcName: string): GameNpc | undefined {
+  const key = normalizeGameNpcJournalName(npcName);
+  if (!key) return undefined;
+  return npcs.find((npc) => normalizeGameNpcJournalName(npc.name) === key);
+}
+
+/** NPC portrait URL is stable per id; after re-upload the file changes but the path does not — bust browser cache. */
+function appendNpcPortraitCacheBust(url: string): string {
+  const trimmed = url.trim();
+  if (!trimmed) return trimmed;
+  const base = trimmed.split("?")[0] ?? trimmed;
+  return `${base}?v=${Date.now()}`;
+}
+
 function pruneGameJournalNpc(rawJournal: unknown, npcName: string): unknown {
   if (!rawJournal || typeof rawJournal !== "object" || Array.isArray(rawJournal)) {
     return rawJournal;
@@ -1443,6 +1458,8 @@ export function GameSurface({
   const [narrationDone, setNarrationDone] = useState(false);
   const [directionsPlaying, setDirectionsPlaying] = useState(false);
   const [pendingSegmentEffects, setPendingSegmentEffects] = useState<SceneSegmentEffect[]>([]);
+  /** Bumps when deferred segment-tied backgrounds change so GameNarration can re-fire onSegmentEnter. */
+  const [segmentEffectsSignal, setSegmentEffectsSignal] = useState(0);
   const [pendingInventorySegmentUpdates, setPendingInventorySegmentUpdates] = useState<
     Array<{ segment: number; update: InventoryTag }>
   >([]);
@@ -1623,7 +1640,8 @@ export function GameSurface({
   );
   const [introPresented, setIntroPresented] = useState(false);
   const npcPortraitUploadInputRef = useRef<HTMLInputElement>(null);
-  const [pendingNpcPortraitUploadName, setPendingNpcPortraitUploadName] = useState<string | null>(null);
+  /** Ref (not state) so `onChange` always sees the name set immediately before `input.click()`. */
+  const pendingNpcPortraitUploadNameRef = useRef<string | null>(null);
 
   const narrationAutoPlayBlocked =
     !!activeReadable ||
@@ -2968,20 +2986,25 @@ export function GameSurface({
   const installGeneratedIllustration = useCallback(
     (illustration: { tag: string; segment?: number }) => {
       void queryClient.invalidateQueries({ queryKey: ["gallery", activeChatId] });
+      const seg =
+        typeof illustration.segment === "number" && Number.isFinite(illustration.segment) && illustration.segment >= 0
+          ? Math.floor(illustration.segment)
+          : 0;
       fetchManifest().then(() => {
-        if (illustration.segment !== undefined && illustration.segment > 0) {
-          setPendingSegmentEffects((previous) => {
-            const existingIndex = previous.findIndex((effect) => effect.segment === illustration.segment);
-            if (existingIndex >= 0) {
-              return previous.map((effect, index) =>
-                index === existingIndex ? { ...effect, background: illustration.tag } : effect,
-              );
-            }
-            return [...previous, { segment: illustration.segment!, background: illustration.tag }];
-          });
-          return;
+        setPendingSegmentEffects((previous) => {
+          const list = [...previous];
+          const existingIndex = list.findIndex((effect) => effect.segment === seg);
+          if (existingIndex >= 0) {
+            return list.map((effect, index) =>
+              index === existingIndex ? { ...effect, background: illustration.tag } : effect,
+            );
+          }
+          return [...list, { segment: seg, background: illustration.tag }];
+        });
+        if (seg <= 0) {
+          appliedSegmentsRef.current.delete(0);
+          setSegmentEffectsSignal((n) => n + 1);
         }
-        useGameAssetStore.getState().setCurrentBackground(illustration.tag);
       });
     },
     [activeChatId, fetchManifest, queryClient],
@@ -3108,37 +3131,46 @@ export function GameSurface({
       setPendingSegmentEffects(result.segmentEffects);
       appliedSegmentsRef.current = new Set();
       const seg0 = result.segmentEffects.filter((e) => e.segment === 0);
+      const seg0DefersIllustrationSync = seg0.some(
+        (fx) => typeof fx.background === "string" && fx.background.startsWith("backgrounds:illustrations:"),
+      );
       if (seg0.length > 0) {
-        appliedSegmentsRef.current.add(0);
-        for (const fx of seg0) {
-          if (fx.background) {
-            if (locationMoved && fx.background.startsWith("backgrounds:illustrations:")) continue;
-            if (skipSeg0IllustrationWhenTopIsConcretePlate && fx.background.startsWith("backgrounds:illustrations:"))
-              continue;
-            // Match top-level `skipBgUpdate`: do not fuzzy-resolve an unresolved
-            // or placeholder generated tag while async /generate-assets is pending.
-            const skipSegBg =
-              skipBgUpdate &&
-              (!assetMap?.[fx.background] || fx.background.startsWith("backgrounds:generated:"));
-            if (skipSegBg) continue;
-            const resolved = resolveAssetTag(fx.background, "backgrounds", assetMap);
-            useGameAssetStore.getState().setCurrentBackground(resolved);
+        if (!seg0DefersIllustrationSync) {
+          appliedSegmentsRef.current.add(0);
+        }
+        if (!seg0DefersIllustrationSync) {
+          for (const fx of seg0) {
+            if (fx.background) {
+              if (locationMoved && fx.background.startsWith("backgrounds:illustrations:")) continue;
+              if (skipSeg0IllustrationWhenTopIsConcretePlate && fx.background.startsWith("backgrounds:illustrations:"))
+                continue;
+              // Match top-level `skipBgUpdate`: do not fuzzy-resolve an unresolved
+              // or placeholder generated tag while async /generate-assets is pending.
+              const skipSegBg =
+                skipBgUpdate &&
+                (!assetMap?.[fx.background] || fx.background.startsWith("backgrounds:generated:"));
+              if (skipSegBg) continue;
+              const resolved = resolveAssetTag(fx.background, "backgrounds", assetMap);
+              useGameAssetStore.getState().setCurrentBackground(resolved);
+            }
+            if (fx.music) {
+              const resolved = resolveAssetTag(fx.music, "music", assetMap);
+              audioManager.playMusic(resolved, assetMap);
+              useGameAssetStore.getState().setCurrentMusic(resolved);
+            }
+            if (fx.sfx?.length)
+              for (const s of fx.sfx) audioManager.playSfx(resolveAssetTag(s, "sfx", assetMap), assetMap);
+            if (fx.ambient) {
+              const resolved = resolveAssetTag(fx.ambient, "ambient", assetMap);
+              audioManager.playAmbient(resolved, assetMap);
+              useGameAssetStore.getState().setCurrentAmbient(resolved);
+            }
+            if (fx.directions?.length) {
+              playDirections(fx.directions);
+            }
           }
-          if (fx.music) {
-            const resolved = resolveAssetTag(fx.music, "music", assetMap);
-            audioManager.playMusic(resolved, assetMap);
-            useGameAssetStore.getState().setCurrentMusic(resolved);
-          }
-          if (fx.sfx?.length)
-            for (const s of fx.sfx) audioManager.playSfx(resolveAssetTag(s, "sfx", assetMap), assetMap);
-          if (fx.ambient) {
-            const resolved = resolveAssetTag(fx.ambient, "ambient", assetMap);
-            audioManager.playAmbient(resolved, assetMap);
-            useGameAssetStore.getState().setCurrentAmbient(resolved);
-          }
-          if (fx.directions?.length) {
-            playDirections(fx.directions);
-          }
+        } else {
+          setSegmentEffectsSignal((n) => n + 1);
         }
       }
 
@@ -3774,15 +3806,10 @@ export function GameSurface({
     (npcName: string) => {
       if (!activeChatId) return;
 
-      const normalizedName = npcName.trim().toLowerCase();
-      if (!normalizedName) return;
-
-      const targetNpc = useGameModeStore
-        .getState()
-        .npcs.find((npc) => npc.name.trim().toLowerCase() === normalizedName);
+      const targetNpc = findGameNpcForPortraitUpload(useGameModeStore.getState().npcs, npcName);
       if (!targetNpc) return;
 
-      setPendingNpcPortraitUploadName(targetNpc.name);
+      pendingNpcPortraitUploadNameRef.current = targetNpc.name;
       npcPortraitUploadInputRef.current?.click();
     },
     [activeChatId],
@@ -3792,13 +3819,11 @@ export function GameSurface({
     async (npcName: string, file: File) => {
       if (!activeChatId) return;
 
-      const normalizedName = npcName.trim().toLowerCase();
-      if (!normalizedName) return;
-
-      const targetNpc = useGameModeStore
-        .getState()
-        .npcs.find((npc) => npc.name.trim().toLowerCase() === normalizedName);
+      const targetNpc = findGameNpcForPortraitUpload(useGameModeStore.getState().npcs, npcName);
       if (!targetNpc) return;
+
+      const journalKey = normalizeGameNpcJournalName(targetNpc.name);
+      if (!journalKey) return;
 
       try {
         const avatar = await readFileAsDataUrl(file);
@@ -3808,10 +3833,12 @@ export function GameSurface({
           avatar,
         });
 
+        const avatarUrl = appendNpcPortraitCacheBust(response.avatarPath);
+
         const nextNpcs = useGameModeStore
           .getState()
           .npcs.map((npc) =>
-            npc.name.trim().toLowerCase() === normalizedName ? { ...npc, avatarUrl: response.avatarPath } : npc,
+            normalizeGameNpcJournalName(npc.name) === journalKey ? { ...npc, avatarUrl } : npc,
           );
 
         await updateChatMetadata.mutateAsync({
@@ -3819,7 +3846,7 @@ export function GameSurface({
           gameNpcs: nextNpcs,
         });
 
-        useGameModeStore.getState().patchNpcAvatars([{ name: targetNpc.name, avatarUrl: response.avatarPath }]);
+        useGameModeStore.getState().patchNpcAvatars([{ name: targetNpc.name, avatarUrl }]);
         toast.success(`${targetNpc.name} portrait updated.`);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : `Failed to update ${npcName} portrait.`);
@@ -6685,6 +6712,7 @@ export function GameSurface({
                           speakerAvatarMap={librarySpeakerAvatars}
                           onActiveSpeakerChange={handleActiveSpeakerChange}
                           onSegmentEnter={handleSegmentEnter}
+                          segmentEffectsSignal={segmentEffectsSignal}
                           showUserMessages
                           partyDialogue={partyDialogue}
                           partyChatMessageId={partyChatMessageId}
@@ -6750,6 +6778,7 @@ export function GameSurface({
                       speakerAvatarMap={librarySpeakerAvatars}
                       onActiveSpeakerChange={handleActiveSpeakerChange}
                       onSegmentEnter={handleSegmentEnter}
+                      segmentEffectsSignal={segmentEffectsSignal}
                       showUserMessages
                       partyDialogue={partyDialogue}
                       partyChatMessageId={partyChatMessageId}
@@ -6942,11 +6971,12 @@ export function GameSurface({
                 ref={npcPortraitUploadInputRef}
                 type="file"
                 accept="image/*"
-                className="hidden"
+                className="sr-only"
+                tabIndex={-1}
                 onChange={(e) => {
-                  const targetName = pendingNpcPortraitUploadName;
+                  const targetName = pendingNpcPortraitUploadNameRef.current;
+                  pendingNpcPortraitUploadNameRef.current = null;
                   const file = e.target.files?.[0];
-                  setPendingNpcPortraitUploadName(null);
                   e.target.value = "";
                   if (file && targetName) {
                     void handleNpcPortraitUpload(targetName, file);

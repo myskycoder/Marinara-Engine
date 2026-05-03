@@ -259,18 +259,20 @@ async function patchNpcAvatarUrl(
   portraitPrompt?: string | null,
 ): Promise<void> {
   const chats = createChatsStorage(db);
+  const baseUrl = avatarUrl.split("?")[0] || avatarUrl;
+  const avatarUrlWithBust = `${baseUrl}?v=${Date.now()}`;
   let stored = false;
   await chats.updateMetadataWithMerge(chatId, (meta) => {
     const npcs = Array.isArray(meta.gameNpcs) ? ([...(meta.gameNpcs as GameNpc[])] as GameNpc[]) : [];
     let changed = false;
     const nextNpcs = npcs.map((npc) => {
-      if (npc.id !== npcId || npc.avatarUrl) return npc;
+      if (npc.id !== npcId) return npc;
       changed = true;
       const trimmedPortrait =
         typeof portraitPrompt === "string" && portraitPrompt.trim() ? portraitPrompt.trim() : undefined;
       return {
         ...npc,
-        avatarUrl,
+        avatarUrl: avatarUrlWithBust,
         ...(trimmedPortrait ? { portraitPrompt: trimmedPortrait } : {}),
       };
     });
@@ -279,13 +281,9 @@ async function patchNpcAvatarUrl(
     return { ...meta, gameNpcs: nextNpcs };
   });
   if (stored) {
-    logger.info("[npc-materializer] Stored avatarUrl for npc id=%s in chat %s → %s", npcId, chatId, avatarUrl);
+    logger.info("[npc-materializer] Stored avatarUrl for npc id=%s in chat %s → %s", npcId, chatId, avatarUrlWithBust);
   } else {
-    logger.debug(
-      "[npc-materializer] patchNpcAvatarUrl: no matching npc id=%s in chat %s (or avatarUrl already set)",
-      npcId,
-      chatId,
-    );
+    logger.debug("[npc-materializer] patchNpcAvatarUrl: no matching npc id=%s in chat %s", npcId, chatId);
   }
 }
 
@@ -551,7 +549,7 @@ function startNpcAssetPipeline(args: {
  *      (otherwise `generateNpcPortrait` short-circuits on `existsSync`).
  *      Sprite regeneration uses a **new** `spriteId` folder so previous sprite
  *      generations stay on disk for history/version switching.
- *   2. We reset metadata fields (`avatarUrl = undefined`, `spriteStatus =
+ *   2. We reset metadata fields (`avatarUrl = null`, `spriteStatus =
  *      "pending"`) up-front, which both makes the `assetCandidates` filter
  *      pick up this NPC again AND signals the client to show a loading state
  *      via the existing `useNpcAssetWatcher` polling.
@@ -619,7 +617,9 @@ export async function regenerateNpcAssets(
 
     const next: GameNpc = { ...found };
     if (wantAvatar) {
-      next.avatarUrl = undefined;
+      // Persist `null` in JSON so clients merge `{ ...prev, ...incoming }` and clear the portrait;
+      // `undefined` is omitted and leaves stale `avatarUrl` in the UI + illustration refs.
+      next.avatarUrl = null;
     }
     if (wantSprite) {
       const baseSpriteId = `game-npc-${input.chatId}-${found.id}`;

@@ -193,6 +193,7 @@ export function buildSceneAnalyzerUserPrompt(
     ...(canGenerateIllustrations
       ? [
           `- Use "illustration" rarely. Most turns MUST keep it null. If you request it, the prompt must describe the exact illustrated moment, visible characters, player POV, mood, lighting, and composition.`,
+          `- Set "illustration.segment" to the narration line index [N] where the CG beat STARTS (same numbering as segmentEffects). Keep top-level "background" as the room/area plate for the turn; the engine shows CG only when the player reaches that segment, then restores the room on the next segment.`,
           `- "illustration.characters" MUST name every visible on-screen character who appears in the CG (same names as in narration), so reference portraits attach correctly — never invent a different cast.`,
           `- The illustration prompt MUST stay in the SAME location as the current scene: reuse props, architecture, and weather/lighting from the narration and from top-level "background" / "backgroundPrompt" / "locationId" — do not relocate to a generic stock setting.`,
         ]

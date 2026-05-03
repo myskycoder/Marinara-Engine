@@ -196,16 +196,18 @@ function collectIllustrationCharacterAssets(opts: {
 }): { referenceImages: string[]; characterDescriptions: string[] } {
   const npcAvatarByName = new Map<string, string>();
   const npcDescriptionByName = new Map<string, string>();
+  // `gameNpcs` (persisted metadata) is authoritative; `trackedNpcs` is often a snapshot and can lag after regen.
+  for (const npc of opts.gameNpcs) {
+    if (npc.name && npc.avatarUrl) npcAvatarByName.set(npc.name.toLowerCase(), npc.avatarUrl);
+    if (npc.name && npc.description) npcDescriptionByName.set(npc.name.toLowerCase(), npc.description);
+  }
   for (const npc of opts.trackedNpcs) {
     const name = typeof npc.name === "string" ? npc.name : null;
     const avatarUrl = typeof npc.avatarUrl === "string" ? npc.avatarUrl : null;
     const description = typeof npc.description === "string" ? npc.description.trim() : "";
-    if (name && avatarUrl) npcAvatarByName.set(name.toLowerCase(), avatarUrl);
-    if (name && description) npcDescriptionByName.set(name.toLowerCase(), description);
-  }
-  for (const npc of opts.gameNpcs) {
-    if (npc.name && npc.avatarUrl) npcAvatarByName.set(npc.name.toLowerCase(), npc.avatarUrl);
-    if (npc.name && npc.description) npcDescriptionByName.set(npc.name.toLowerCase(), npc.description);
+    const key = name?.toLowerCase();
+    if (name && key && avatarUrl && !npcAvatarByName.has(key)) npcAvatarByName.set(key, avatarUrl);
+    if (name && key && description && !npcDescriptionByName.has(key)) npcDescriptionByName.set(key, description);
   }
 
   const requestedNames = (opts.illustration.characters?.length ? opts.illustration.characters : opts.characterNames)
@@ -239,25 +241,71 @@ function collectIllustrationCharacterAssets(opts: {
   return { referenceImages: references, characterDescriptions: characterDescriptions.slice(0, 5) };
 }
 
+function isIllustrationBgTag(tag: unknown): boolean {
+  return typeof tag === "string" && tag.startsWith("backgrounds:illustrations:");
+}
+
+/** Prefer the scene's establishing (non-CG) plate for re-showing after the illustration segment. */
+function pickRoomPlateAfterIllustration(sceneResult: Record<string, unknown>): string | null {
+  const top = sceneResult.background;
+  if (typeof top === "string" && top.trim() && top !== "black" && top !== "none" && !isIllustrationBgTag(top)) {
+    return top;
+  }
+  const effects = Array.isArray(sceneResult.segmentEffects)
+    ? ([...(sceneResult.segmentEffects as Record<string, unknown>[])].sort(
+        (a, b) => Number(a.segment) - Number(b.segment),
+      ) as Record<string, unknown>[])
+    : [];
+  for (const fx of effects) {
+    const bg = fx.background;
+    if (typeof bg === "string" && bg.trim() && bg !== "black" && bg !== "none" && !isIllustrationBgTag(bg)) {
+      return bg;
+    }
+  }
+  return null;
+}
+
+/**
+ * Attach a generated VN illustration to `segmentEffects` at segment S (default 0).
+ * Never overwrites top-level `background` with the illustration tag — that caused
+ * the client to flash CG then immediately re-apply the room plate from `segmentEffects`.
+ * Optionally inserts `{ segment: S+1, background: <room> }` so narration advance restores the plate.
+ */
 function applyGeneratedIllustration(
   sceneResult: Record<string, unknown>,
   generatedTag: string,
   segment: number | undefined,
 ): void {
   sceneResult.generatedIllustration = { tag: generatedTag, ...(segment !== undefined ? { segment } : {}) };
-  if (segment !== undefined && segment > 0) {
-    const effects = Array.isArray(sceneResult.segmentEffects)
-      ? (sceneResult.segmentEffects as Record<string, unknown>[])
-      : [];
-    sceneResult.segmentEffects = effects;
-    let target = effects.find((effect) => effect.segment === segment);
-    if (!target) {
-      target = { segment };
-      effects.push(target);
+  const roomTag = pickRoomPlateAfterIllustration(sceneResult);
+  const S =
+    typeof segment === "number" && Number.isFinite(segment) && segment >= 0 ? Math.floor(segment) : 0;
+
+  const effects = Array.isArray(sceneResult.segmentEffects)
+    ? (sceneResult.segmentEffects as Record<string, unknown>[])
+    : [];
+  sceneResult.segmentEffects = effects;
+
+  let target = effects.find((effect) => effect.segment === S);
+  if (!target) {
+    target = { segment: S };
+    effects.push(target);
+  }
+  target.background = generatedTag;
+
+  if (roomTag) {
+    const nextSeg = S + 1;
+    const hasNextBg = effects.some(
+      (e) =>
+        e.segment === nextSeg &&
+        typeof e.background === "string" &&
+        (e.background as string).trim() !== "" &&
+        e.background !== "black" &&
+        e.background !== "none",
+    );
+    if (!hasNextBg) {
+      effects.push({ segment: nextSeg, background: roomTag });
     }
-    target.background = generatedTag;
-  } else {
-    sceneResult.background = generatedTag;
   }
 }
 
