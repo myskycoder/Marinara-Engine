@@ -650,6 +650,12 @@ interface RegenerateNpcAssetsRequest {
   avatar?: boolean;
   /** Defaults to true on the server. Pass `false` to skip sprite regeneration. */
   sprite?: boolean;
+  /** Sprite expression labels (server clamps to 6). */
+  spriteExpressions?: string[];
+  /** Optional appearance text for sprite prompts (replaces NPC description for that run). */
+  spriteAppearanceOverride?: string | null;
+  /** Which sheet expression to use as the mood for the full-body `full_idle` sprite. */
+  spriteFullBodyExpression?: string | null;
 }
 
 interface RegenerateNpcAssetsResponse {
@@ -665,11 +671,11 @@ export const GAME_NPC_REGENERATE_MUTATION_KEY = ["game", "npc-regenerate-assets"
 
 /**
  * Manually regenerate an NPC's avatar and/or sprite. The server deletes the
- * existing on-disk artifacts (otherwise the existsSync short-circuits in the
- * generators would skip work), resets metadata fields, and re-runs the
- * unified asset pipeline. We invalidate `chatKeys.detail` on success so the
- * NPC's cleared-out `avatarUrl` is reflected immediately, then the existing
- * `useNpcAssetWatcher` polling picks up the regenerated assets.
+ * portrait file when the avatar is regenerated; sprite regeneration uses a new
+ * on-disk folder so prior sprite generations remain available. Metadata is
+ * reset and the unified asset pipeline runs. We invalidate `chatKeys.detail`
+ * on success so the NPC's cleared-out `avatarUrl` is reflected immediately,
+ * then the existing `useNpcAssetWatcher` polling picks up the regenerated assets.
  */
 export function useRegenerateNpcAssets() {
   const qc = useQueryClient();
@@ -697,6 +703,93 @@ export function useRegenerateNpcAssets() {
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Regeneration failed");
+    },
+  });
+}
+
+export const GAME_NPC_FULLBODY_EMOTIONS_MUTATION_KEY = ["game", "npc-fullbody-emotions"] as const;
+
+interface NpcFullBodyEmotionSetRequest {
+  chatId: string;
+  npcId: string;
+  spriteId: string;
+  spriteExpressions?: string[];
+  spriteAppearanceOverride?: string | null;
+  force?: boolean;
+}
+
+type NpcFullBodyEmotionSetResponse =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: "chat-not-found" | "npc-not-found" | "invalid-sprite" | "no-image-connection";
+    };
+
+/**
+ * Generate `full_<expression>.png` files for an existing NPC sprite folder (one version row).
+ */
+export function useNpcFullBodyEmotionSet() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: [...GAME_NPC_FULLBODY_EMOTIONS_MUTATION_KEY],
+    mutationFn: (data: NpcFullBodyEmotionSetRequest) =>
+      api.post<NpcFullBodyEmotionSetResponse>("/game/npc/sprite/full-body-expressions", data),
+    onSuccess: (res, vars) => {
+      void qc.invalidateQueries({ queryKey: chatKeys.detail(vars.chatId) });
+      void qc.invalidateQueries({ queryKey: spriteKeys.list(vars.spriteId) });
+      if (!res.ok) {
+        const msg =
+          res.reason === "no-image-connection"
+            ? "Image generation is not configured for this game"
+            : res.reason === "npc-not-found"
+              ? "NPC not found"
+              : res.reason === "chat-not-found"
+                ? "Chat not found"
+                : res.reason === "invalid-sprite"
+                  ? "Sprite folder not found or not linked to this NPC"
+                  : "Could not start full-body emotion generation";
+        toast.error(msg);
+        return;
+      }
+      toast.success("Generating full-body emotion sprites…");
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Full-body emotion generation failed");
+    },
+  });
+}
+
+interface SetActiveNpcSpriteRequest {
+  chatId: string;
+  npcId: string;
+  spriteId: string;
+  /** Invalidate React Query sprite lists for these sheet ids after a successful switch. */
+  spriteIdsToInvalidate: string[];
+}
+
+/**
+ * Switch a tracked NPC's active sprite folder to a previous generation (no image API).
+ */
+export function useSetActiveNpcSprite() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: SetActiveNpcSpriteRequest) => {
+      await api.post<{ ok: boolean }>("/game/npc/active-sprite", {
+        chatId: data.chatId,
+        npcId: data.npcId,
+        spriteId: data.spriteId,
+      });
+      return data;
+    },
+    onSuccess: (vars) => {
+      void qc.invalidateQueries({ queryKey: chatKeys.detail(vars.chatId) });
+      for (const id of vars.spriteIdsToInvalidate) {
+        void qc.invalidateQueries({ queryKey: spriteKeys.list(id) });
+      }
+      toast.success("Active sprite updated");
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Could not switch sprite version");
     },
   });
 }

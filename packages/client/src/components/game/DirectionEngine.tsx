@@ -158,30 +158,41 @@ export function DirectionEngine({ directions, backgroundUrl, onPlayingChange, ch
     (e) => e.command.target === "background" || e.command.target === "all" || !e.command.target,
   );
 
+  const motionEffectKinds = new Set<string>(["screen_shake", "impact_zoom", "slow_zoom", "tilt"]);
+  const filterEffectKinds = new Set<string>(["blur", "desaturate"]);
+  const motionEffects = bgEffects.filter((e) => motionEffectKinds.has(e.command.effect));
+  const filterEffects = bgEffects.filter((e) => filterEffectKinds.has(e.command.effect));
+
   return (
     <div className="relative h-full w-full overflow-hidden">
-      {/* Scene visual layer. Transform/filter effects live here so HUD widgets remain stable. */}
-      <div className="absolute inset-0 z-0 h-full w-full" style={buildVisualStyle(bgEffects)}>
-        <CrossfadeBackground url={backgroundUrl} />
+      {/*
+        Motion (shake / impact zoom / tilt / slow zoom) applies to BOTH the background plate and
+        the game UI so hits read clearly. Blur + desaturate stay on the background layer only so
+        narration text stays sharp during typical GM color grading.
+      */}
+      <div className="absolute inset-0 h-full w-full will-change-transform" style={buildMotionStyle(motionEffects)}>
+        <div className="absolute inset-0 z-0 h-full w-full" style={buildFilterStyle(filterEffects)}>
+          <CrossfadeBackground url={backgroundUrl} />
+        </div>
+
+        {/* Background/all overlay effects (flash, pulse, etc.) */}
+        {bgEffects.map((eff) => (
+          <EffectOverlay key={eff.id} effect={eff} />
+        ))}
+
+        <div className="relative z-[2] h-full w-full">{children}</div>
+
+        {/* Click to dismiss persistent effects — only visible while effects are actively playing */}
+        {activeEffects.some((e) => !e.expiring) && (
+          <button
+            type="button"
+            onClick={clearAll}
+            className="absolute bottom-4 right-4 z-[110] rounded-full bg-black/50 px-3 py-1 text-xs text-white/60 backdrop-blur-sm transition-opacity hover:text-white/80"
+          >
+            Skip effects
+          </button>
+        )}
       </div>
-
-      {/* Background/all overlay effects */}
-      {bgEffects.map((eff) => (
-        <EffectOverlay key={eff.id} effect={eff} />
-      ))}
-
-      {/* Interactive/game UI content remains outside transformed effect layers to avoid widget jitter. */}
-      <div className="relative z-[2] h-full w-full">{children}</div>
-
-      {/* Click to dismiss persistent effects — only visible while effects are actively playing */}
-      {activeEffects.some((e) => !e.expiring) && (
-        <button
-          onClick={clearAll}
-          className="absolute bottom-4 right-4 z-50 rounded-full bg-black/50 px-3 py-1 text-xs text-white/60 backdrop-blur-sm transition-opacity hover:text-white/80"
-        >
-          Skip effects
-        </button>
-      )}
     </div>
   );
 }
@@ -223,11 +234,10 @@ function EffectOverlay({ effect }: { effect: ActiveEffect }) {
       const flashDur = Math.max(dur, 0.5);
       return (
         <div
-          className="pointer-events-none absolute inset-0 z-40"
+          className="pointer-events-none absolute inset-0 z-[100]"
           style={{
             backgroundColor: command.params?.color ?? "white",
-            animation: `dirFlash ${flashDur}s ease-out forwards`,
-            opacity: 0,
+            animation: `dirFlash ${flashDur}s ease-out both`,
           }}
         />
       );
@@ -316,7 +326,7 @@ function EffectOverlay({ effect }: { effect: ActiveEffect }) {
     case "pulse":
       return (
         <div
-          className="pointer-events-none absolute inset-0 z-[35]"
+          className="pointer-events-none absolute inset-0 z-[95]"
           style={{
             background: `radial-gradient(circle at center, rgba(255,255,255,${0.18 + intensity * 0.32}) 0%, transparent 55%)`,
             animation: effect.expiring ? undefined : `dirPulse ${Math.max(0.45, dur)}s ease-out forwards`,
@@ -409,13 +419,57 @@ const COLOR_GRADE_PRESETS: Record<string, string> = {
   dreamy: "saturate(0.6) brightness(1.2) blur(0.5px)",
 };
 
-function buildVisualStyle(effects: ActiveEffect[]): React.CSSProperties {
+/** Transform / motion directions applied to the full scene (background + UI). */
+function buildMotionStyle(effects: ActiveEffect[]): React.CSSProperties {
   const style: React.CSSProperties = {};
-  const filters: string[] = [];
   const animations: string[] = [];
-  // Always include filter transition so blur fades out smoothly when effects expire
   let maxDur = 0.5;
   const fadeOutSec = FADE_OUT_MS / 1000;
+
+  for (const eff of effects) {
+    const { command } = eff;
+    const dur = command.duration ?? 1;
+
+    if (command.effect === "screen_shake") {
+      if (eff.expiring) {
+        animations.push(`dirShakeDecay ${fadeOutSec}s ease-out forwards`);
+      } else {
+        const shakeDur = Math.min(dur, 4);
+        animations.push(`dirShakeDecay ${shakeDur}s ease-out forwards`);
+      }
+      maxDur = Math.max(maxDur, dur);
+    }
+
+    if (command.effect === "slow_zoom" && !eff.expiring) {
+      animations.push(`dirSlowZoom ${Math.max(dur, 1.5)}s ease-out forwards`);
+      maxDur = Math.max(maxDur, dur);
+    }
+
+    if (command.effect === "impact_zoom" && !eff.expiring) {
+      animations.push(`dirImpactZoom ${Math.max(0.35, Math.min(dur, 1.2))}s cubic-bezier(.2,.8,.2,1) forwards`);
+      maxDur = Math.max(maxDur, dur);
+    }
+
+    if (command.effect === "tilt" && !eff.expiring) {
+      const tiltDur = Math.max(0.5, Math.min(dur, 2));
+      animations.push(`dirTilt ${tiltDur}s ease-in-out forwards`);
+      maxDur = Math.max(maxDur, dur);
+    }
+  }
+
+  if (animations.length > 0) {
+    style.animation = animations.join(", ");
+    style.transition = `transform ${maxDur}s ease-out`;
+  }
+
+  return style;
+}
+
+/** Blur / desaturate on the background plate only (keeps HUD text readable). */
+function buildFilterStyle(effects: ActiveEffect[]): React.CSSProperties {
+  const style: React.CSSProperties = {};
+  const filters: string[] = [];
+  let maxDur = 0.5;
 
   for (const eff of effects) {
     const { command } = eff;
@@ -430,41 +484,12 @@ function buildVisualStyle(effects: ActiveEffect[]): React.CSSProperties {
       maxDur = Math.max(maxDur, dur);
     }
 
-    if (command.effect === "screen_shake") {
-      if (eff.expiring) {
-        // Decaying micro-shake during fade-out
-        animations.push(`dirShakeDecay ${fadeOutSec}s ease-out forwards`);
-      } else {
-        // Full shake with built-in decay over its duration
-        const shakeDur = Math.min(dur, 4);
-        animations.push(`dirShakeDecay ${shakeDur}s ease-out forwards`);
-      }
-    }
-
     if (command.effect === "desaturate") {
       if (!eff.expiring) filters.push(`grayscale(${0.35 + intensity * 0.65}) contrast(${1 + intensity * 0.2})`);
       maxDur = Math.max(maxDur, dur);
     }
-
-    if (command.effect === "slow_zoom" && !eff.expiring) {
-      animations.push(`dirSlowZoom ${Math.max(dur, 1.5)}s ease-out forwards`);
-    }
-
-    if (command.effect === "impact_zoom" && !eff.expiring) {
-      animations.push(`dirImpactZoom ${Math.max(0.35, Math.min(dur, 1.2))}s cubic-bezier(.2,.8,.2,1) forwards`);
-    }
-
-    if (command.effect === "tilt" && !eff.expiring) {
-      const tiltDur = Math.max(0.5, Math.min(dur, 2));
-      animations.push(`dirTilt ${tiltDur}s ease-in-out forwards`);
-    }
   }
 
-  if (animations.length > 0) {
-    style.animation = animations.join(", ");
-  }
-
-  // Always set transition so blur/filter can fade out smoothly
   style.transition = `filter ${maxDur}s ease-out`;
 
   if (filters.length > 0) {

@@ -13,7 +13,13 @@
 
 import { createHash } from "node:crypto";
 
-export { npcNameKey, isSameNpcName, slugifyForFs } from "@marinara-engine/shared";
+export {
+  npcNameKey,
+  isSameNpcName,
+  isNpcNameStrictPrefixClusterMatch,
+  findSingleNpcCandidateByNameCluster,
+  slugifyForFs,
+} from "@marinara-engine/shared";
 
 /** SHA-1 hex digest — used to preserve legacy filename hashes. */
 export function sha1HexLegacy(input: string): string {

@@ -5,14 +5,32 @@
 // NPC notes, locations, inventory, and events —
 // all assembled from committed snapshots, no LLM.
 // ──────────────────────────────────────────────
-import { useState, useEffect, useRef, useCallback } from "react";
-import { X, MapPin, Swords, ScrollText, Package, Users, PenLine, BookOpen, RotateCw, Trash2, Loader2 } from "lucide-react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { toast } from "sonner";
+import {
+  X,
+  MapPin,
+  Swords,
+  ScrollText,
+  Package,
+  Users,
+  PenLine,
+  BookOpen,
+  RotateCw,
+  Trash2,
+  Loader2,
+  Info,
+  Upload,
+} from "lucide-react";
 import { cn } from "../../lib/utils";
 import { api } from "../../lib/api-client";
 import { AnimatedText } from "./AnimatedText";
 import { useRegenerateNpcAssets } from "../../hooks/use-game";
+import { GameNpcCardPanel } from "./GameNpcCardPanel";
+import { GameMediaLightbox } from "./GameMediaLightbox";
 
 import type { GameNpc } from "@marinara-engine/shared";
+import { DEFAULT_NPC_SPRITE_EXPRESSIONS } from "@marinara-engine/shared";
 
 interface JournalEntry {
   timestamp: string;
@@ -45,6 +63,8 @@ interface GameJournalProps {
   npcs?: GameNpc[];
   /** True while auto NPC assets, batch portrait gen, or manual regen is in flight (shows NPC tab + header hint). */
   npcAssetsActivityPending?: boolean;
+  /** Character Tracker sprite expressions from chat metadata (falls back to defaults in the regen dialog). */
+  npcSpriteExpressions?: string[];
   onClose: () => void;
   onNpcPortraitClick?: (npcName: string) => void;
   onNpcRemove?: (npcName: string) => Promise<void> | void;
@@ -115,6 +135,7 @@ export function GameJournal({
   chatId,
   npcs,
   npcAssetsActivityPending = false,
+  npcSpriteExpressions,
   onClose,
   onNpcPortraitClick,
   onNpcRemove,
@@ -124,6 +145,17 @@ export function GameJournal({
   const [playerNotes, setPlayerNotes] = useState("");
   const [notesSaved, setNotesSaved] = useState(true);
   const [removingNpcName, setRemovingNpcName] = useState<string | null>(null);
+  const [npcCardNpc, setNpcCardNpc] = useState<GameNpc | null>(null);
+  const [portraitPreview, setPortraitPreview] = useState<{ src: string; alt: string } | null>(null);
+  const npcCardResolved = useMemo(() => {
+    if (!npcCardNpc) return null;
+    const fresh = npcs?.find((n) => n.id === npcCardNpc.id);
+    return fresh ?? npcCardNpc;
+  }, [npcCardNpc, npcs]);
+  const npcCardSpriteExpressionLabels = useMemo(
+    () => npcSpriteExpressionPool(npcSpriteExpressions),
+    [npcSpriteExpressions],
+  );
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestNotesRef = useRef("");
 
@@ -192,6 +224,7 @@ export function GameJournal({
   }
 
   return (
+    <>
     <div className="absolute inset-0 z-40 flex flex-col bg-black/85 backdrop-blur-md">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
@@ -247,7 +280,10 @@ export function GameJournal({
             chatId={chatId}
             npcLog={journal.npcLog}
             npcs={npcs}
+            npcSpriteExpressions={npcSpriteExpressions}
             onNpcPortraitClick={onNpcPortraitClick}
+            onNpcOpenCard={setNpcCardNpc}
+            onPreviewPortrait={(src, alt) => setPortraitPreview({ src, alt })}
             onNpcRemove={onNpcRemove ? handleRemoveNpc : undefined}
             removingNpcName={removingNpcName}
           />
@@ -258,6 +294,22 @@ export function GameJournal({
         {activeTab === "notes" && <NotesView notes={playerNotes} onChange={handleNotesChange} saved={notesSaved} />}
       </div>
     </div>
+    {npcCardResolved && (
+      <GameNpcCardPanel
+        chatId={chatId}
+        npc={npcCardResolved}
+        spriteExpressionLabels={npcCardSpriteExpressionLabels}
+        onClose={() => setNpcCardNpc(null)}
+      />
+    )}
+    {portraitPreview && (
+      <GameMediaLightbox
+        src={portraitPreview.src}
+        alt={portraitPreview.alt}
+        onClose={() => setPortraitPreview(null)}
+      />
+    )}
+    </>
   );
 }
 
@@ -294,22 +346,91 @@ function reputationLabel(rep: number): { text: string; color: string } {
   return { text: "Enemy", color: "text-red-400" };
 }
 
+function sanitizeSpriteExpressionKey(expression: string): string {
+  return expression
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+/** Deduped pool: chat tracker list first, then defaults for any missing labels. */
+function npcSpriteExpressionPool(meta?: string[]): string[] {
+  const primary = meta && meta.length > 0 ? meta : [...DEFAULT_NPC_SPRITE_EXPRESSIONS];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const e of primary) {
+    const key = sanitizeSpriteExpressionKey(e);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(key);
+  }
+  if (meta && meta.length > 0) {
+    for (const e of DEFAULT_NPC_SPRITE_EXPRESSIONS) {
+      const key = sanitizeSpriteExpressionKey(e);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(key);
+    }
+  }
+  return out;
+}
+
 function NpcsView({
   chatId,
   npcLog,
   npcs,
+  npcSpriteExpressions,
   onNpcPortraitClick,
+  onNpcOpenCard,
+  onPreviewPortrait,
   onNpcRemove,
   removingNpcName,
 }: {
   chatId: string;
   npcLog: Array<{ npcName: string; interactions: string[] }>;
   npcs?: GameNpc[];
+  npcSpriteExpressions?: string[];
   onNpcPortraitClick?: (npcName: string) => void;
+  onNpcOpenCard?: (npc: GameNpc) => void;
+  onPreviewPortrait?: (src: string, alt: string) => void;
   onNpcRemove?: (npcName: string) => void;
   removingNpcName?: string | null;
 }) {
   const regenerate = useRegenerateNpcAssets();
+  const expressionPool = useMemo(() => npcSpriteExpressionPool(npcSpriteExpressions), [npcSpriteExpressions]);
+  const [regenNpc, setRegenNpc] = useState<GameNpc | null>(null);
+  const [regenExpressions, setRegenExpressions] = useState<string[]>([]);
+  const [regenFullBodyExpr, setRegenFullBodyExpr] = useState("");
+  const [regenAppearance, setRegenAppearance] = useState("");
+
+  const openRegenDialog = useCallback(
+    (npc: GameNpc) => {
+      setRegenNpc(npc);
+      setRegenFullBodyExpr("");
+      setRegenAppearance(npc.spritePrompt?.trim() || npc.description?.trim() || "");
+      const pool = npcSpriteExpressionPool(npcSpriteExpressions);
+      setRegenExpressions(pool.slice(0, Math.min(6, pool.length)));
+    },
+    [npcSpriteExpressions],
+  );
+
+  useEffect(() => {
+    setRegenFullBodyExpr((prev) => (prev && !regenExpressions.includes(prev) ? "" : prev));
+  }, [regenExpressions]);
+
+  const toggleRegenExpression = useCallback((expr: string) => {
+    setRegenExpressions((sel) => {
+      const i = sel.indexOf(expr);
+      if (i >= 0) return sel.filter((x) => x !== expr);
+      if (sel.length >= 6) {
+        toast.error("Не больше 6 выражений");
+        return sel;
+      }
+      return [...sel, expr];
+    });
+  }, []);
+
   const trackedNpcs = npcs ?? [];
   const hasContent = trackedNpcs.length > 0 || npcLog.length > 0;
 
@@ -348,9 +469,120 @@ function NpcsView({
   // Track which NPC's regen button is currently busy so we can show a spinner
   // even while the upstream `regenerate` mutation is shared across all rows.
   const busyNpcId = regenerate.isPending ? regenerate.variables?.npcId : null;
+  const regenBusy = Boolean(
+    regenerate.isPending && regenNpc !== null && regenerate.variables?.npcId === regenNpc.id,
+  );
 
   return (
     <div className="flex flex-col gap-2">
+      {regenNpc ? (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+          role="presentation"
+          onClick={() => !regenBusy && setRegenNpc(null)}
+        >
+          <div
+            role="dialog"
+            aria-labelledby="npc-regen-title"
+            className="w-full max-w-md rounded-xl border border-white/10 bg-zinc-950/95 p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="npc-regen-title" className="mb-3 text-sm font-semibold text-white/90">
+              Регенерация: {regenNpc.emoji ? `${regenNpc.emoji} ` : ""}
+              {regenNpc.name}
+            </h3>
+            <div className="mb-3">
+              <div className="mb-1 text-[0.65rem] font-semibold uppercase tracking-wide text-white/40">
+                Выражения (до 6)
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {expressionPool.map((expr) => {
+                  const on = regenExpressions.includes(expr);
+                  return (
+                    <button
+                      key={expr}
+                      type="button"
+                      disabled={regenBusy}
+                      onClick={() => toggleRegenExpression(expr)}
+                      className={cn(
+                        "rounded-md border px-2 py-1 text-[0.65rem] font-medium transition-colors",
+                        on
+                          ? "border-sky-500/50 bg-sky-500/15 text-sky-100"
+                          : "border-white/10 bg-white/[0.04] text-white/55 hover:bg-white/10",
+                      )}
+                    >
+                      {expr}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="mb-3">
+              <label className="block">
+                <span className="mb-1 block text-[0.65rem] font-semibold uppercase tracking-wide text-white/40">
+                  Выражение для full-body (full_idle)
+                </span>
+                <select
+                  value={regenFullBodyExpr}
+                  onChange={(e) => setRegenFullBodyExpr(e.target.value)}
+                  disabled={regenBusy || regenExpressions.length === 0}
+                  className="w-full rounded-lg border border-white/10 bg-black/40 px-2 py-1.5 text-[0.7rem] text-white/80 outline-none focus:border-sky-500/40"
+                >
+                  <option value="">Авто — neutral, если есть в списке, иначе первое выбранное</option>
+                  {regenExpressions.map((ex) => (
+                    <option key={ex} value={ex}>
+                      {ex}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <label className="mb-3 block">
+              <span className="mb-1 block text-[0.65rem] font-semibold uppercase tracking-wide text-white/40">
+                Промпт внешности (спрайт)
+              </span>
+              <textarea
+                value={regenAppearance}
+                onChange={(e) => setRegenAppearance(e.target.value)}
+                disabled={regenBusy}
+                rows={5}
+                className="w-full resize-y rounded-lg border border-white/10 bg-black/40 px-2 py-1.5 font-mono text-[0.7rem] text-white/80 outline-none focus:border-sky-500/40"
+              />
+            </label>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={regenBusy}
+                onClick={() => setRegenNpc(null)}
+                className="rounded-lg border border-white/10 px-3 py-1.5 text-xs text-white/70 hover:bg-white/5"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                disabled={regenBusy || regenExpressions.length === 0}
+                onClick={() => {
+                  regenerate.mutate(
+                    {
+                      chatId,
+                      npcId: regenNpc.id,
+                      avatar: true,
+                      sprite: true,
+                      spriteExpressions: regenExpressions,
+                      spriteAppearanceOverride: regenAppearance.trim() || undefined,
+                      spriteFullBodyExpression: regenFullBodyExpr.trim() || undefined,
+                    },
+                    { onSettled: () => setRegenNpc(null) },
+                  );
+                }}
+                className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+              >
+                {regenBusy ? "Запуск…" : "Запустить"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {entries.map((entry) => {
         const name = cleanNpcDisplayName(entry.npc?.name ?? entry.displayName);
         const rep = entry.npc ? reputationLabel(entry.npc.reputation) : null;
@@ -372,22 +604,39 @@ function NpcsView({
             <div className="flex items-center gap-2">
               {entry.npc ? (
                 canUploadPortrait ? (
-                  <button
-                    type="button"
-                    onClick={() => onNpcPortraitClick?.(entry.npc!.name)}
-                    className="shrink-0 rounded-full transition-transform hover:scale-[1.05] focus:outline-none focus:ring-2 focus:ring-white/20"
-                    title="Upload or replace NPC portrait"
-                  >
-                    {entry.npc.avatarUrl ? (
-                      <img
-                        src={entry.npc.avatarUrl}
-                        alt={name}
-                        className={cn(
-                          "h-6 w-6 rounded-full object-cover ring-1 ring-white/10 transition-colors hover:ring-white/25",
-                          isAssetPending && "animate-pulse",
-                        )}
-                      />
-                    ) : (
+                  entry.npc.avatarUrl ? (
+                    <div className="flex shrink-0 items-center gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() => onPreviewPortrait?.(entry.npc!.avatarUrl!, `${name} portrait`)}
+                        className="rounded-full transition-transform hover:scale-[1.05] focus:outline-none focus:ring-2 focus:ring-white/20"
+                        title="View portrait"
+                      >
+                        <img
+                          src={entry.npc.avatarUrl}
+                          alt=""
+                          className={cn(
+                            "h-6 w-6 rounded-full object-cover ring-1 ring-white/10 transition-colors hover:ring-white/25",
+                            isAssetPending && "animate-pulse",
+                          )}
+                        />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onNpcPortraitClick?.(entry.npc!.name)}
+                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/10 text-white/55 ring-1 ring-white/10 transition-colors hover:bg-white/15 hover:text-white/90 hover:ring-white/25"
+                        title="Upload or replace NPC portrait"
+                      >
+                        <Upload size={11} aria-hidden />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => onNpcPortraitClick?.(entry.npc!.name)}
+                      className="shrink-0 rounded-full transition-transform hover:scale-[1.05] focus:outline-none focus:ring-2 focus:ring-white/20"
+                      title="Upload or replace NPC portrait"
+                    >
                       <div
                         className={cn(
                           "flex h-6 w-6 items-center justify-center rounded-full bg-white/10 text-[0.6rem] font-semibold text-white/60 ring-1 ring-white/10 transition-colors hover:ring-white/25",
@@ -396,14 +645,21 @@ function NpcsView({
                       >
                         {name[0]?.toUpperCase() ?? "?"}
                       </div>
-                    )}
-                  </button>
+                    </button>
+                  )
                 ) : entry.npc.avatarUrl ? (
-                  <img
-                    src={entry.npc.avatarUrl}
-                    alt={name}
-                    className={cn("h-6 w-6 shrink-0 rounded-full object-cover", isAssetPending && "animate-pulse")}
-                  />
+                  <button
+                    type="button"
+                    onClick={() => onPreviewPortrait?.(entry.npc!.avatarUrl!, `${name} portrait`)}
+                    className="shrink-0 rounded-full focus:outline-none focus:ring-2 focus:ring-white/20"
+                    title="View portrait"
+                  >
+                    <img
+                      src={entry.npc!.avatarUrl!}
+                      alt=""
+                      className={cn("h-6 w-6 rounded-full object-cover ring-1 ring-white/10", isAssetPending && "animate-pulse")}
+                    />
+                  </button>
                 ) : (
                   <div
                     className={cn(
@@ -423,6 +679,17 @@ function NpcsView({
                 {entry.npc?.emoji ? `${entry.npc.emoji} ` : ""}
                 {name}
               </span>
+              {entry.npc && onNpcOpenCard && (
+                <button
+                  type="button"
+                  onClick={() => onNpcOpenCard(entry.npc!)}
+                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-white/40 transition-colors hover:bg-white/10 hover:text-white/80"
+                  title="NPC details, prompts, and sprite versions"
+                  aria-label="NPC details"
+                >
+                  <Info size={13} />
+                </button>
+              )}
               <span
                 className={cn(
                   "rounded-full px-1.5 py-0.5 text-[10px] font-medium",
@@ -435,9 +702,7 @@ function NpcsView({
               {entry.npc?.id && (
                 <button
                   type="button"
-                  onClick={() =>
-                    regenerate.mutate({ chatId, npcId: entry.npc!.id, avatar: true, sprite: true })
-                  }
+                  onClick={() => openRegenDialog(entry.npc!)}
                   disabled={isRegenInFlight}
                   title={
                     isRegenInFlight

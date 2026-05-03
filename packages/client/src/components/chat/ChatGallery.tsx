@@ -2,7 +2,7 @@
 // Chat Gallery — Image grid for per-chat generated images
 // ──────────────────────────────────────────────
 import { useState, useRef } from "react";
-import { ImagePlus, Paintbrush, Trash2, X, ZoomIn, Download, Sparkles, Pin, Minimize2 } from "lucide-react";
+import { ImagePlus, Paintbrush, Trash2, X, ZoomIn, Download, Sparkles, Pin, Minimize2, ImageOff } from "lucide-react";
 import {
   useGalleryImages,
   useUploadGalleryImage,
@@ -15,9 +15,13 @@ interface ChatGalleryProps {
   chatId: string;
   /** Manually trigger the Illustrator agent */
   onIllustrate?: () => void;
+  /** Game mode: запросить ещё одну CG-иллюстрацию текущего момента */
+  onManualImpact?: () => void;
+  /** Game mode: снять CG-подложку и вернуть фон локации */
+  onClearCgPlate?: () => void;
 }
 
-export function ChatGallery({ chatId, onIllustrate }: ChatGalleryProps) {
+export function ChatGallery({ chatId, onIllustrate, onManualImpact, onClearCgPlate }: ChatGalleryProps) {
   const { data: images, isLoading } = useGalleryImages(chatId);
   const upload = useUploadGalleryImage(chatId);
   const remove = useDeleteGalleryImage(chatId);
@@ -45,15 +49,40 @@ export function ChatGallery({ chatId, onIllustrate }: ChatGalleryProps) {
 
   return (
     <div className="flex flex-col gap-3 p-4">
-      {/* Illustrate button */}
-      {onIllustrate && (
-        <button
-          onClick={onIllustrate}
-          className="flex items-center justify-center gap-2 rounded-xl bg-[var(--primary)]/15 px-4 py-3 text-xs font-medium text-[var(--primary)] transition-all hover:bg-[var(--primary)]/25"
-        >
-          <Paintbrush size="1rem" />
-          Illustrate
-        </button>
+      {(onIllustrate || onManualImpact || onClearCgPlate) && (
+        <div className="flex flex-wrap gap-2">
+          {onIllustrate && (
+            <button
+              type="button"
+              onClick={onIllustrate}
+              className="flex min-h-[2.75rem] flex-1 min-w-[6rem] items-center justify-center gap-2 rounded-xl bg-[var(--primary)]/15 px-3 py-3 text-xs font-medium text-[var(--primary)] transition-all hover:bg-[var(--primary)]/25"
+            >
+              <Paintbrush size="1rem" />
+              Illustrate
+            </button>
+          )}
+          {onManualImpact && (
+            <button
+              type="button"
+              onClick={onManualImpact}
+              title="Дополнительная CG-иллюстрация текущего момента (игровой режим): та же цепочка, что и редкая иллюстрация со сцены"
+              className="flex min-h-[2.75rem] min-w-[2.75rem] shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--muted)]/10 px-3 py-3 text-xs font-semibold tabular-nums text-[var(--foreground)] transition-all hover:bg-[var(--muted)]/20"
+            >
+              +1
+            </button>
+          )}
+          {onClearCgPlate && (
+            <button
+              type="button"
+              onClick={onClearCgPlate}
+              title="Снять CG-подложку (illustrations:…) и показать обычный фон локации из каталога или метаданных"
+              className="flex min-h-[2.75rem] min-w-[2.75rem] shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--muted)]/10 px-3 py-3 text-[var(--foreground)] transition-all hover:bg-[var(--muted)]/20"
+              aria-label="Снять CG"
+            >
+              <ImageOff size="1rem" />
+            </button>
+          )}
+        </div>
       )}
 
       {/* Upload button */}

@@ -2749,7 +2749,7 @@ summary[class*="cursor-pointer"],
 
 @keyframes dirFlash {
   0% {
-    opacity: 0.7;
+    opacity: 0.85;
   }
   100% {
     opacity: 0;

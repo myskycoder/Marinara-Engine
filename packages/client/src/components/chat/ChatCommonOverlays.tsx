@@ -199,6 +199,10 @@ type ChatCommonOverlaysProps = {
   onCloseSceneJournal: () => void;
   /** Manually trigger the Illustrator agent */
   onIllustrate?: () => void;
+  /** Game mode: extra scene illustration from gallery (+1) */
+  onManualImpact?: () => void;
+  /** Game mode: clear CG plate from gallery */
+  onClearCgPlate?: () => void;
   /** Manually trigger the Scene Painter agent */
   onPaintScene?: () => void;
   onWizardFinish: () => void;
@@ -235,6 +239,8 @@ export function ChatCommonOverlays({
   onCloseGallery,
   onCloseSceneJournal,
   onIllustrate,
+  onManualImpact,
+  onClearCgPlate,
   onPaintScene,
   onWizardFinish,
   onClosePeekPrompt,
@@ -273,7 +279,14 @@ export function ChatCommonOverlays({
       {chat && (
         <Suspense fallback={null}>
           {galleryOpen && (
-            <ChatGalleryDrawer chat={chat} open={galleryOpen} onClose={onCloseGallery} onIllustrate={onIllustrate} />
+            <ChatGalleryDrawer
+              chat={chat}
+              open={galleryOpen}
+              onClose={onCloseGallery}
+              onIllustrate={onIllustrate}
+              onManualImpact={onManualImpact}
+              onClearCgPlate={onClearCgPlate}
+            />
           )}
         </Suspense>
       )}

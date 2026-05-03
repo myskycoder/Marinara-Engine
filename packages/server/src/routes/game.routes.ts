@@ -116,7 +116,11 @@ import {
   type BackgroundConditions,
 } from "../services/game/game-asset-generation.js";
 import { buildIllustrationContinuity, excerptNarrationForIllustration } from "../services/game/scene-illustration-context.js";
-import { regenerateNpcAssets } from "../services/game/npc-materializer.service.js";
+import {
+  regenerateNpcAssets,
+  scheduleNpcFullBodyEmotionSet,
+  setActiveNpcSpriteGeneration,
+} from "../services/game/npc-materializer.service.js";
 import { npcNameKey, sha1HexLegacy, slugifyForFs } from "../services/game/npc-name-server.js";
 import { saveImageToDisk } from "../services/image/image-generation.js";
 
@@ -5273,6 +5277,8 @@ export async function gameRoutes(app: FastifyInstance) {
         slug: z.string().max(80).optional(),
       })
       .optional(),
+    /** With `illustration`, bypass the automatic per-turn illustration cooldown (player-triggered). */
+    skipIllustrationCooldown: z.boolean().optional(),
   });
 
   app.post("/generate-assets", async (req, reply) => {
@@ -5629,7 +5635,9 @@ export async function gameRoutes(app: FastifyInstance) {
     if (input.illustration) {
       const allMsgs = await chats.listMessages(input.chatId);
       const approxTurnNumber = Math.max(1, allMsgs.filter((message) => message.role === "user").length + 1);
-      if (!isIllustrationAllowed(meta, approxTurnNumber)) {
+      const illustrationAllowed =
+        input.skipIllustrationCooldown === true || isIllustrationAllowed(meta, approxTurnNumber);
+      if (!illustrationAllowed) {
         logger.debug("[game/generate-assets] illustration skipped: cooldown active");
       } else {
         const charStore = createCharactersStorage(app.db);
@@ -5861,6 +5869,12 @@ export async function gameRoutes(app: FastifyInstance) {
     avatar: z.boolean().optional(),
     /** Defaults to true. */
     sprite: z.boolean().optional(),
+    /** Up to 6 expression labels after server normalization; empty uses chat defaults. */
+    spriteExpressions: z.array(z.string().min(1).max(64)).max(12).optional(),
+    /** Replaces NPC description in the sprite appearance block for this regeneration only. */
+    spriteAppearanceOverride: z.string().max(4000).optional().nullable(),
+    /** Which selected expression drives the full-body `full_idle` mood (must match a normalized sheet label). */
+    spriteFullBodyExpression: z.string().min(1).max(64).optional().nullable(),
   });
 
   app.post("/npc/regenerate", async (req) => {
@@ -5874,9 +5888,66 @@ export async function gameRoutes(app: FastifyInstance) {
       npcId: input.npcId,
       regenerateAvatar: input.avatar !== false,
       regenerateSprite: input.sprite !== false,
+      spriteExpressions: input.spriteExpressions,
+      spriteAppearanceOverride: input.spriteAppearanceOverride ?? null,
+      spriteFullBodyExpression: input.spriteFullBodyExpression ?? null,
     });
 
     return result;
+  });
+
+  // ── POST /game/npc/sprite/full-body-expressions ──
+  // Adds `full_<expression>.png` into an existing NPC sprite folder (selected version).
+  const fullBodyEmotionSetSchema = z.object({
+    chatId: z.string().min(1),
+    npcId: z.string().min(1).max(120),
+    spriteId: z.string().min(1).max(200),
+    spriteExpressions: z.array(z.string().min(1).max(64)).max(12).optional(),
+    spriteAppearanceOverride: z.string().max(4000).optional().nullable(),
+    force: z.boolean().optional(),
+  });
+
+  app.post("/npc/sprite/full-body-expressions", async (req) => {
+    const body = fullBodyEmotionSetSchema.parse(req.body);
+    const connections = createConnectionsStorage(app.db);
+    return scheduleNpcFullBodyEmotionSet({
+      db: app.db,
+      connections,
+      chatId: body.chatId,
+      npcId: body.npcId,
+      spriteId: body.spriteId,
+      spriteExpressions: body.spriteExpressions,
+      spriteAppearanceOverride: body.spriteAppearanceOverride ?? null,
+      force: body.force === true,
+    });
+  });
+
+  // ── POST /game/npc/active-sprite ──
+  // Switch which on-disk sprite folder is active for a tracked NPC (no generation).
+  const setActiveNpcSpriteSchema = z.object({
+    chatId: z.string().min(1),
+    npcId: z.string().min(1).max(120),
+    spriteId: z.string().min(1).max(200),
+  });
+
+  app.post("/npc/active-sprite", async (req, reply) => {
+    const input = setActiveNpcSpriteSchema.parse(req.body);
+    const result = await setActiveNpcSpriteGeneration({
+      db: app.db,
+      chatId: input.chatId,
+      npcId: input.npcId,
+      spriteId: input.spriteId,
+    });
+    if (!result.ok) {
+      const status =
+        result.reason === "chat-not-found"
+          ? 404
+          : result.reason === "sprite-not-on-disk" || result.reason === "invalid-sprite"
+            ? 400
+            : 404;
+      return reply.status(status).send({ ok: false, reason: result.reason });
+    }
+    return { ok: true };
   });
 
   // ── POST /game/:chatId/fork-timeline ──

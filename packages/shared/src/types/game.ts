@@ -100,6 +100,18 @@ export interface GameCharacterCard {
 
 // ── NPCs ──
 
+/** One successful NPC sprite generation (folder under sprites/). */
+export interface GameNpcSpriteGeneration {
+  spriteId: string;
+  createdAt: string;
+  /** Appearance block (same role as legacy single prompt; shown as primary in UI). */
+  prompt: string;
+  /** Full prompt sent for the multi-cell expression sheet (newer saves only). */
+  expressionSheetPrompt?: string | null;
+  /** Full prompt sent for the full-body idle sprite (newer saves only). */
+  fullBodyPrompt?: string | null;
+}
+
 /** A tracked NPC in the game world. */
 export interface GameNpc {
   id: string;
@@ -125,6 +137,12 @@ export interface GameNpc {
   spriteId?: string | null;
   /** Current server-side sprite generation status */
   spriteStatus?: "pending" | "ready" | "failed";
+  /** Prompt text used for the last successful sprite generation (mirrors latest history entry). */
+  spritePrompt?: string | null;
+  /** Successful sprite runs, oldest-first; active sheet is `spriteId`. */
+  spriteGenerations?: GameNpcSpriteGeneration[];
+  /** Prompt text used for the last successful portrait generation. */
+  portraitPrompt?: string | null;
 }
 
 // ── Sessions ──

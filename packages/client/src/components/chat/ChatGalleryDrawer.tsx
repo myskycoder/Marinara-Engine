@@ -11,9 +11,13 @@ interface ChatGalleryDrawerProps {
   onClose: () => void;
   /** Manually trigger the Illustrator agent */
   onIllustrate?: () => void;
+  /** Game mode: request one extra VN scene illustration from current narration (+1) */
+  onManualImpact?: () => void;
+  /** Game mode: remove CG illustration plate and restore location background */
+  onClearCgPlate?: () => void;
 }
 
-export function ChatGalleryDrawer({ chat, open, onClose, onIllustrate }: ChatGalleryDrawerProps) {
+export function ChatGalleryDrawer({ chat, open, onClose, onIllustrate, onManualImpact, onClearCgPlate }: ChatGalleryDrawerProps) {
   if (!open) return null;
 
   return (
@@ -35,7 +39,12 @@ export function ChatGalleryDrawer({ chat, open, onClose, onIllustrate }: ChatGal
         </div>
 
         <div className="flex-1 overflow-y-auto">
-          <ChatGallery chatId={chat.id} onIllustrate={onIllustrate} />
+          <ChatGallery
+            chatId={chat.id}
+            onIllustrate={onIllustrate}
+            onManualImpact={onManualImpact}
+            onClearCgPlate={onClearCgPlate}
+          />
         </div>
       </div>
     </>

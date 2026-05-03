@@ -117,6 +117,54 @@ type GamePartyMemberInfo = {
   canRemove?: boolean;
 };
 
+function normalizeSceneLocationIdClient(id: string | null | undefined): string | null {
+  const t = typeof id === "string" ? id.trim().toLowerCase() : "";
+  return t.length > 0 ? t : null;
+}
+
+/** Latest segment plate that is not a VN CG illustration (used when changing location). */
+function pickNonIllustrationSegmentPlate(segmentEffects: SceneSegmentEffect[] | undefined): string | null {
+  if (!segmentEffects?.length) return null;
+  for (const fx of [...segmentEffects].sort((a, b) => b.segment - a.segment)) {
+    const bg = fx.background?.trim();
+    if (!bg || bg === "black" || bg === "none") continue;
+    if (bg.startsWith("backgrounds:illustrations:")) continue;
+    return bg;
+  }
+  return null;
+}
+
+type LocationCatalogRow = { variants?: Array<{ tag: string }> };
+
+/** Resolve a non-CG plate tag after clearing an illustration (metadata → catalog → manifest). */
+function pickPlateTagAfterClearingCg(opts: {
+  gameSceneBackgroundMeta: string | null | undefined;
+  currentLocationId: string | null | undefined;
+  locationCatalog: Record<string, LocationCatalogRow> | undefined;
+  manifestBgKeys: string[];
+}): string | null {
+  const metaBg = opts.gameSceneBackgroundMeta?.trim();
+  if (metaBg && metaBg !== "black" && metaBg !== "none" && !metaBg.startsWith("backgrounds:illustrations:")) {
+    return metaBg;
+  }
+  const locNorm = normalizeSceneLocationIdClient(opts.currentLocationId);
+  const catalog = opts.locationCatalog;
+  if (locNorm && catalog) {
+    const rawId = typeof opts.currentLocationId === "string" ? opts.currentLocationId.trim() : "";
+    let row: LocationCatalogRow | undefined = rawId ? catalog[rawId] : undefined;
+    if (!row) {
+      const keyHit = Object.keys(catalog).find((k) => normalizeSceneLocationIdClient(k) === locNorm);
+      if (keyHit) row = catalog[keyHit];
+    }
+    for (const v of row?.variants ?? []) {
+      const t = v.tag?.trim();
+      if (t && t !== "black" && t !== "none" && !t.startsWith("backgrounds:illustrations:")) return t;
+    }
+  }
+  const keys = opts.manifestBgKeys.filter((k) => !k.startsWith("backgrounds:illustrations:"));
+  return keys.find((k) => /town|village|forest|field|default|start/i.test(k)) ?? keys[0] ?? null;
+}
+
 const NARRATION_NPC_SPEECH_VERB_PATTERN =
   "(?:said|says|whispered|whispers|muttered|mutters|replied|replies|called|calls|shouted|shouts|asked|asks|warned|warns|growled|growls|hissed|hisses|exclaimed|exclaims|murmured|murmurs|sighed|sighs|snapped|snaps|barked|barks|declared|declares|continued|continues|added|adds|spoke|speaks|began|begins|remarked|remarks|chuckled|chuckles|laughed|laughs|cried|cries)";
 
@@ -957,6 +1005,7 @@ import {
   HelpCircle,
   History,
   Image,
+  ImageOff,
   Loader2,
   Sparkles,
   Wand2,
@@ -2205,6 +2254,13 @@ export function GameSurface({
     return pipelinePending || npcAvatarBatchPending || npcRegenerateMutating;
   }, [npcs, pendingAssetGeneration, missingSceneAssetGeneration, npcRegenerateMutating]);
 
+  const journalNpcSpriteExpressions = useMemo((): string[] | undefined => {
+    const raw = chatMeta.npcSpriteExpressions;
+    if (!Array.isArray(raw)) return undefined;
+    const list = raw.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
+    return list.length > 0 ? list : undefined;
+  }, [chatMeta.npcSpriteExpressions]);
+
   useEffect(() => {
     autoAssetGenerationKeyRef.current = null;
   }, [activeChatId]);
@@ -2580,6 +2636,20 @@ export function GameSurface({
     const manifest = useGameAssetStore.getState().manifest;
     const assets = manifest?.assets ?? null;
 
+    const useSidecar = sidecarConfig.useForGameScene && sidecarReady;
+    const setupConfig = chatMeta.gameSetupConfig as Record<string, unknown> | null;
+    const sceneConnId =
+      (chatMeta.gameSceneConnectionId as string) || (setupConfig?.sceneConnectionId as string) || null;
+    const needsRemoteScene = useSidecar || !!sceneConnId;
+    const bgTagCount = assets ? Object.keys(assets).filter((k) => k.startsWith("backgrounds:")).length : 0;
+    // If we call the scene model with an empty background list, tags often hallucinate and
+    // resolveAssetTag fuzzy-matches the wrong plate; Retry Scene later works because the
+    // manifest is hydrated. Wait for at least one backgrounds:* entry before remote scene-wrap.
+    if (needsRemoteScene && bgTagCount === 0) {
+      console.warn("[scene-process] deferring until manifest has background tags", msg.id);
+      return;
+    }
+
     console.warn("[scene-process] FIRING for message:", msg.id, "| assets:", !!assets);
     lastProcessedMsgRef.current = msg.id;
     setNarrationDone(false);
@@ -2617,10 +2687,6 @@ export function GameSurface({
         : tags.stateChange === "exploration" || tags.stateChange === "dialogue" || tags.stateChange === "travel_rest"
           ? tags.stateChange
           : gameState;
-    const useSidecar = sidecarConfig.useForGameScene && sidecarReady;
-    const setupConfig = chatMeta.gameSetupConfig as Record<string, unknown> | null;
-    const sceneConnId =
-      (chatMeta.gameSceneConnectionId as string) || (setupConfig?.sceneConnectionId as string) || null;
 
     // Inline directions can come from the GM model; sidecar scene analysis can
     // also return cinematic directions for the fully generated turn.
@@ -2972,6 +3038,16 @@ export function GameSurface({
       }));
       _updateReputation.mutate({ chatId: activeChatId, actions: repActions });
     }
+    // Persist scene location id so the next turn's `locationMoved` compares against the real previous place
+    // (sidecar/connection path did not always mirror this into chat metadata before).
+    if (typeof result.locationId === "string" && result.locationId.trim()) {
+      void api
+        .patch(`/chats/${activeChatId}/metadata`, { currentLocationId: result.locationId.trim() })
+        .then(() => {
+          void queryClient.invalidateQueries({ queryKey: chatKeys.detail(activeChatId) });
+        })
+        .catch(() => {});
+    }
     const assetMap = useGameAssetStore.getState().manifest?.assets ?? null;
     // When the server signalled async background generation, keep showing the
     // previous background until /generate-assets returns the real tag —
@@ -2980,8 +3056,32 @@ export function GameSurface({
     // pipeline was built to avoid.
     const skipBgUpdate =
       !!result.pendingBackgroundGeneration && (!result.background || result.background.startsWith("backgrounds:generated:"));
-    if (result.background && !skipBgUpdate) {
-      const resolved = resolveAssetTag(result.background, "backgrounds", assetMap);
+
+    const prevLoc = normalizeSceneLocationIdClient(chatMeta.currentLocationId as string | undefined);
+    const nextLoc = normalizeSceneLocationIdClient(result.locationId as string | undefined);
+    const locationMoved = Boolean(prevLoc && nextLoc && prevLoc !== nextLoc);
+
+    let plateTag: string | null = result.background ?? null;
+    if (locationMoved && plateTag?.startsWith("backgrounds:illustrations:")) {
+      plateTag = pickNonIllustrationSegmentPlate(result.segmentEffects);
+    }
+
+    // Only treat the *raw* top-level field as authoritative for suppressing seg0
+    // illustrations. Using `plateTag` after `locationMoved` substitution could mark a
+    // resolved catalog/generated placeholder as "concrete" and block the real scene
+    // illustration in segment 0. Skip `generated:` / `chat:` so async scene plates and
+    // seg0 VN beats still apply.
+    const rawTopBg = typeof result.background === "string" ? result.background.trim() : "";
+    const skipSeg0IllustrationWhenTopIsConcretePlate =
+      rawTopBg.length > 0 &&
+      rawTopBg !== "black" &&
+      rawTopBg !== "none" &&
+      !rawTopBg.startsWith("backgrounds:illustrations:") &&
+      !rawTopBg.startsWith("backgrounds:generated:") &&
+      !rawTopBg.startsWith("backgrounds:chat:");
+
+    if (plateTag && !skipBgUpdate) {
+      const resolved = resolveAssetTag(plateTag, "backgrounds", assetMap);
       useGameAssetStore.getState().setCurrentBackground(resolved);
     } else if (!useGameAssetStore.getState().currentBackground && !skipBgUpdate) {
       const bgKeys = Object.keys(assetMap ?? {}).filter((k) => k.startsWith("backgrounds:"));
@@ -3012,6 +3112,9 @@ export function GameSurface({
         appliedSegmentsRef.current.add(0);
         for (const fx of seg0) {
           if (fx.background) {
+            if (locationMoved && fx.background.startsWith("backgrounds:illustrations:")) continue;
+            if (skipSeg0IllustrationWhenTopIsConcretePlate && fx.background.startsWith("backgrounds:illustrations:"))
+              continue;
             // Match top-level `skipBgUpdate`: do not fuzzy-resolve an unresolved
             // or placeholder generated tag while async /generate-assets is pending.
             const skipSegBg =
@@ -3042,10 +3145,20 @@ export function GameSurface({
       // No top-level background but a later beat changes the plate (e.g. house then office in one
       // message) — segment 0 may still show the old room; adopt the last segment's background as the
       // default view when it is strictly after any segment-0 background change.
-      if (!result.background && !skipBgUpdate) {
-        const candidates = result.segmentEffects.filter(
-          (fx) => fx.background && fx.background !== "black" && fx.background !== "none",
-        );
+      const topMissingForPromotion =
+        !result.background ||
+        (locationMoved &&
+          typeof result.background === "string" &&
+          result.background.startsWith("backgrounds:illustrations:"));
+      if (topMissingForPromotion && !skipBgUpdate) {
+        const candidates =
+          result.segmentEffects?.filter(
+            (fx) =>
+              fx.background &&
+              fx.background !== "black" &&
+              fx.background !== "none" &&
+              (!locationMoved || !fx.background.startsWith("backgrounds:illustrations:")),
+          ) ?? [];
         if (candidates.length > 0) {
           const lastFx = candidates.reduce((a, b) => (a.segment >= b.segment ? a : b));
           const seg0Bg = candidates.find((c) => c.segment === 0);
@@ -3058,6 +3171,22 @@ export function GameSurface({
               useGameAssetStore.getState().setCurrentBackground(resolved);
             }
           }
+        }
+      }
+    }
+
+    // Location changed but scene still pointed at a stale CG plate — drop it so the next catalog / async path can show.
+    if (locationMoved && !skipBgUpdate) {
+      const cur = useGameAssetStore.getState().currentBackground;
+      if (cur?.startsWith("backgrounds:illustrations:")) {
+        const bgKeys = Object.keys(assetMap ?? {}).filter(
+          (k) => k.startsWith("backgrounds:") && !k.startsWith("backgrounds:illustrations:"),
+        );
+        if (bgKeys.length > 0) {
+          const pick = bgKeys.find((k) => /town|village|forest|field|default|start/i.test(k)) ?? bgKeys[0]!;
+          useGameAssetStore.getState().setCurrentBackground(pick);
+        } else {
+          useGameAssetStore.getState().setCurrentBackground(null);
         }
       }
     }
@@ -3114,6 +3243,7 @@ export function GameSurface({
           placeholderTag?: string;
           npcsNeedingAvatars?: Array<{ id?: string; name: string; description: string }>;
           illustration?: import("@marinara-engine/shared").SceneIllustrationRequest;
+          skipIllustrationCooldown?: boolean;
         } = {
           chatId: activeChatId,
           illustration: pendingIllustration ?? undefined,
@@ -3206,8 +3336,9 @@ export function GameSurface({
         placeholderTag?: string;
         npcsNeedingAvatars?: Array<{ id?: string; name: string; description: string }>;
         illustration?: import("@marinara-engine/shared").SceneIllustrationRequest;
+        skipIllustrationCooldown?: boolean;
       },
-      options?: { showSuccessToast?: boolean },
+      options?: { showSuccessToast?: boolean; softFailure?: boolean },
     ) => {
       setPendingAssetGeneration(assetPayload);
       setAssetGenerationFailed(false);
@@ -3241,12 +3372,133 @@ export function GameSurface({
 
         return res;
       } catch {
-        setAssetGenerationFailed(true);
+        if (!options?.softFailure) setAssetGenerationFailed(true);
         return null;
       }
     },
     [fetchManifest, installGeneratedIllustration, queryClient],
   );
+
+  /** Gallery "+1": one extra VN scene illustration from the latest narration (server /game/generate-assets). */
+  const requestManualExtraIllustration = useCallback(async () => {
+    const enableGen = !!chatMeta.enableSpriteGeneration;
+    const imgConn = (chatMeta.gameImageConnectionId as string | undefined) || null;
+    if (!enableGen || !imgConn) {
+      toast.error("Включите генерацию спрайтов и укажите image connection в настройках игры.");
+      return;
+    }
+    if (isStreaming) {
+      toast.error("Дождитесь окончания ответа GM.");
+      return;
+    }
+    if (pendingAssetGeneration) {
+      toast.error("Уже идёт генерация ассетов сцены — подождите.");
+      return;
+    }
+    const excerpt = latestNarrationText.replace(/\s+/g, " ").trim().slice(0, 1000);
+    if (!excerpt) {
+      toast.error("Нет текста последнего хода — сначала нужна реплика GM.");
+      return;
+    }
+    const preamble =
+      "Player-requested VN CG still: exact moment below, first-person view. Match venue, lighting, weather, and visible cast. ";
+    let prompt = `${preamble}\n\n${excerpt}`;
+    if (prompt.length < 40) {
+      prompt = `${preamble}Location: ${gameSnapshot?.location ?? "current"}. ${metaWeather ?? ""} ${metaTime ?? ""}\n\n${excerpt}`.slice(
+        0,
+        1200,
+      );
+    }
+    prompt = prompt.slice(0, 1200);
+
+    const seasonRaw = chatMeta.gameCurrentSeason as string | undefined;
+    const season =
+      seasonRaw === "spring" || seasonRaw === "summer" || seasonRaw === "autumn" || seasonRaw === "winter"
+        ? seasonRaw
+        : null;
+
+    const locId = (chatMeta.currentLocationId as string | undefined)?.trim() || undefined;
+
+    const res = await requestAssetGeneration(
+      {
+        chatId: activeChatId,
+        skipIllustrationCooldown: true,
+        locationId: locId,
+        conditions: {
+          weather: gameSnapshot?.weather ?? metaWeather,
+          timeOfDay: gameSnapshot?.time ?? metaTime,
+          season,
+        },
+        illustration: {
+          prompt,
+          reason: "Player requested extra illustration (+1) from gallery",
+          characters: sceneWrapCharacterNames.slice(0, 6),
+          slug: `manual-${Date.now().toString(36)}`,
+          segment: 0,
+        },
+      },
+      { softFailure: true },
+    );
+
+    if (res?.generatedIllustration) {
+      toast.success("Иллюстрация сгенерирована и добавлена в галерею.", { duration: 3200 });
+    } else if (res) {
+      toast.info("Генерация завершена без новой картинки (лимиты, модель или короткий контекст).", {
+        duration: 4000,
+      });
+    } else {
+      toast.error("Не удалось запросить иллюстрацию. Проверьте соединение и логи сервера.");
+    }
+  }, [
+    activeChatId,
+    chatMeta.currentLocationId,
+    chatMeta.enableSpriteGeneration,
+    chatMeta.gameCurrentSeason,
+    chatMeta.gameImageConnectionId,
+    gameSnapshot?.location,
+    gameSnapshot?.time,
+    gameSnapshot?.weather,
+    isStreaming,
+    latestNarrationText,
+    metaTime,
+    metaWeather,
+    pendingAssetGeneration,
+    requestAssetGeneration,
+    sceneWrapCharacterNames,
+  ]);
+
+  /** Gallery: drop VN CG plate and show last catalog / metadata plate (game mode). */
+  const handleClearCgPlate = useCallback(() => {
+    const cur = useGameAssetStore.getState().currentBackground;
+    if (!cur?.startsWith("backgrounds:illustrations:")) {
+      toast.info("Сейчас активна не CG-подложка (illustrations:…).");
+      return;
+    }
+    const manifest = useGameAssetStore.getState().manifest;
+    const assetMap = manifest?.assets ?? null;
+    const manifestKeys = Object.keys(assetMap ?? {}).filter((k) => k.startsWith("backgrounds:"));
+    const tag = pickPlateTagAfterClearingCg({
+      gameSceneBackgroundMeta: chatMeta.gameSceneBackground as string | undefined,
+      currentLocationId: chatMeta.currentLocationId as string | undefined,
+      locationCatalog: chatMeta.locationCatalog as Record<string, LocationCatalogRow> | undefined,
+      manifestBgKeys: manifestKeys,
+    });
+    if (tag) {
+      const resolved = resolveAssetTag(tag, "backgrounds", assetMap);
+      useGameAssetStore.getState().setCurrentBackground(resolved);
+      toast.success("CG снята — показан обычный фон локации.", { duration: 2600 });
+    } else {
+      useGameAssetStore.getState().setCurrentBackground(null);
+      toast.success("CG снята.", { duration: 2200 });
+    }
+    void queryClient.invalidateQueries({ queryKey: chatKeys.detail(activeChatId) });
+  }, [
+    activeChatId,
+    chatMeta.currentLocationId,
+    chatMeta.gameSceneBackground,
+    chatMeta.locationCatalog,
+    queryClient,
+  ]);
 
   const retryAssetGeneration = useCallback(
     (options?: { showSuccessToast?: boolean }) => {
@@ -3375,7 +3627,7 @@ export function GameSurface({
     if (!latestAssistantMsg?.content) return;
     if (lastProcessedMsgRef.current === latestAssistantMsg.id) return;
     processSceneRef.current?.();
-  }, [isMessagesLoading, isStreaming, latestAssistantMsg?.content, latestAssistantMsg?.id]);
+  }, [isMessagesLoading, isStreaming, latestAssistantMsg?.content, latestAssistantMsg?.id, assetManifest]);
 
   // Listen for generation-error event to show retry button.
   useEffect(() => {
@@ -5842,6 +6094,23 @@ export function GameSurface({
                           <span>Retry Scene Analysis</span>
                         </button>
                         <button
+                          type="button"
+                          onClick={() => {
+                            setRetryMenuOpen(false);
+                            handleClearCgPlate();
+                          }}
+                          disabled={!cgIllustrationBackground}
+                          title={
+                            cgIllustrationBackground
+                              ? "Снять CG-подложку (illustrations:…) и показать обычный фон локации"
+                              : "Сейчас активна не CG-подложка"
+                          }
+                          className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-white/85 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
+                        >
+                          <ImageOff size={13} />
+                          <span>Снять CG</span>
+                        </button>
+                        <button
                           onClick={() => void handleRegenerateBackground()}
                           disabled={!canRegenerateBackground || bgCatalogActionPending}
                           title={
@@ -6092,6 +6361,23 @@ export function GameSurface({
                         >
                           <RefreshCw size={14} className={sceneAnalysis.isPending ? "animate-spin" : ""} />
                           <span>Retry Scene Analysis</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMobileActionsOpen(false);
+                            handleClearCgPlate();
+                          }}
+                          disabled={!cgIllustrationBackground}
+                          className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-white/80 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
+                          title={
+                            cgIllustrationBackground
+                              ? "Снять CG-подложку (illustrations:…) и показать обычный фон локации"
+                              : "Сейчас активна не CG-подложка"
+                          }
+                        >
+                          <ImageOff size={14} />
+                          <span>Снять CG</span>
                         </button>
                         <button
                           onClick={() => {
@@ -6645,6 +6931,7 @@ export function GameSurface({
                   chatId={activeChatId}
                   npcs={npcs}
                   npcAssetsActivityPending={journalNpcActivityPending}
+                  npcSpriteExpressions={journalNpcSpriteExpressions}
                   onClose={() => setJournalOpen(false)}
                   onNpcPortraitClick={handleNpcPortraitClick}
                   onNpcRemove={handleRemoveNpcFromJournal}
@@ -6673,6 +6960,8 @@ export function GameSurface({
                 open={galleryOpen}
                 onClose={() => setGalleryOpen(false)}
                 onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
+                onManualImpact={requestManualExtraIllustration}
+                onClearCgPlate={handleClearCgPlate}
               />
 
               <ChatSceneJournalDrawer

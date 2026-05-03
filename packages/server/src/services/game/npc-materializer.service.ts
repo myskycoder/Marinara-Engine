@@ -1,19 +1,58 @@
-import type { GameMap, GameNpc, PresentCharacter } from "@marinara-engine/shared";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import type { GameMap, GameNpc, GameNpcSpriteGeneration, PresentCharacter } from "@marinara-engine/shared";
 import type { DB } from "../../db/connection.js";
+import { DATA_DIR } from "../../utils/data-dir.js";
 import { logger } from "../../lib/logger.js";
 import { createChatsStorage } from "../storage/chats.storage.js";
 import type { createConnectionsStorage } from "../storage/connections.storage.js";
 import {
+  buildNpcPortraitImagePrompt,
   deleteNpcAvatar,
   generateNpcPortrait,
   getInFlightNpcPortrait,
   readNpcAvatarBase64,
 } from "./game-asset-generation.js";
-import { deleteNpcSpriteFolder, generateNpcSprites } from "./npc-sprite-generation.service.js";
+import {
+  buildNpcSpriteAppearancePrompt,
+  deleteNpcSpriteFolder,
+  generateNpcFullBodyEmotionSet,
+  generateNpcSprites,
+  getNpcSpriteFullIdleFsPath,
+  normalizeNpcSpriteExpressionList,
+  sanitizeNpcSpriteExpression,
+  type NpcSpritePromptBundle,
+} from "./npc-sprite-generation.service.js";
 import { addNpcEntry, createJournal, type Journal } from "./journal.service.js";
-import { isSameNpcName, npcNameKey, sha1HexLegacy, slugifyForFs } from "./npc-name-server.js";
+import {
+  findSingleNpcCandidateByNameCluster,
+  isNpcNameStrictPrefixClusterMatch,
+  isSameNpcName,
+  npcNameKey,
+  sha1HexLegacy,
+  slugifyForFs,
+} from "./npc-name-server.js";
 
 type ConnectionsStorage = ReturnType<typeof createConnectionsStorage>;
+
+/** Max stored sprite generations per NPC; oldest removable folders are deleted from disk. */
+export const SPRITE_GEN_HISTORY_CAP = 10;
+
+export function trimOldestRemovableSpriteGenerations(
+  generations: GameNpcSpriteGeneration[],
+  activeSpriteId: string | null | undefined,
+): { next: GameNpcSpriteGeneration[]; removedSpriteIds: string[] } {
+  const removedSpriteIds: string[] = [];
+  const next = [...generations];
+  while (next.length > SPRITE_GEN_HISTORY_CAP) {
+    const idx = next.findIndex((g) => g.spriteId !== activeSpriteId);
+    if (idx === -1) break;
+    const removed = next.splice(idx, 1)[0];
+    if (!removed) break;
+    removedSpriteIds.push(removed.spriteId);
+  }
+  return { next, removedSpriteIds };
+}
 
 export interface NpcMaterializerSettings {
   autoMaterializeNpcs?: boolean;
@@ -154,14 +193,17 @@ function shouldMaterializeCharacter(args: {
   const characterHit = args.existingCharacterNames.find((characterName) => isSameNpcName(name, characterName));
   if (characterHit) return { ok: false, reason: "existing-character", detail: characterHit };
 
-  const npcHit = args.existingNpcs.find((npc) => isSameNpcName(name, npc.name));
+  const npcHit = findSingleNpcCandidateByNameCluster(name, args.existingNpcs);
   if (npcHit) return { ok: false, reason: "already-materialized", detail: npcHit.name };
 
   const descriptor = describePresentCharacter(args.char);
   if (isGenericName(name)) {
     if (descriptor.trim().length < 12) return { ok: false, reason: "generic-too-thin" };
     const matchingGeneric = args.existingNpcs.find(
-      (npc) => isGenericName(npc.name) || isSameNpcName(name, npc.name),
+      (npc) =>
+        isGenericName(npc.name) ||
+        isSameNpcName(name, npc.name) ||
+        isNpcNameStrictPrefixClusterMatch(name, npc.name),
     );
     if (matchingGeneric) return { ok: false, reason: "generic-duplicate", detail: matchingGeneric.name };
   }
@@ -196,7 +238,10 @@ function ensureNpcAssetDescription(npc: GameNpc): GameNpc {
 }
 
 function isPresentNpc(npc: GameNpc, presentCharacters: PresentCharacter[]): boolean {
-  return presentCharacters.some((char) => isSameNpcName(char.name, npc.name));
+  return presentCharacters.some(
+    (char) =>
+      isSameNpcName(char.name, npc.name) || isNpcNameStrictPrefixClusterMatch(char.name, npc.name),
+  );
 }
 
 function resolveImageConnectionId(settings: NpcMaterializerSettings, meta: Record<string, unknown>): string | null {
@@ -206,7 +251,13 @@ function resolveImageConnectionId(settings: NpcMaterializerSettings, meta: Recor
   return metaId || null;
 }
 
-async function patchNpcAvatarUrl(db: DB, chatId: string, npcId: string, avatarUrl: string): Promise<void> {
+async function patchNpcAvatarUrl(
+  db: DB,
+  chatId: string,
+  npcId: string,
+  avatarUrl: string,
+  portraitPrompt?: string | null,
+): Promise<void> {
   const chats = createChatsStorage(db);
   let stored = false;
   await chats.updateMetadataWithMerge(chatId, (meta) => {
@@ -215,7 +266,13 @@ async function patchNpcAvatarUrl(db: DB, chatId: string, npcId: string, avatarUr
     const nextNpcs = npcs.map((npc) => {
       if (npc.id !== npcId || npc.avatarUrl) return npc;
       changed = true;
-      return { ...npc, avatarUrl };
+      const trimmedPortrait =
+        typeof portraitPrompt === "string" && portraitPrompt.trim() ? portraitPrompt.trim() : undefined;
+      return {
+        ...npc,
+        avatarUrl,
+        ...(trimmedPortrait ? { portraitPrompt: trimmedPortrait } : {}),
+      };
     });
     if (!changed) return null;
     stored = true;
@@ -238,23 +295,62 @@ async function patchNpcSpriteStatus(
   npcId: string,
   spriteId: string,
   spriteStatus: NonNullable<GameNpc["spriteStatus"]>,
+  options?: {
+    spritePrompt?: string | null;
+    /** When present (e.g. after a successful image pass), stored on the history row alongside `prompt`. */
+    spritePrompts?: NpcSpritePromptBundle | null;
+    artStyleFallback?: string | null;
+  },
 ): Promise<void> {
   const chats = createChatsStorage(db);
+  const removedSpriteIds: string[] = [];
   await chats.updateMetadataWithMerge(chatId, (meta) => {
     const npcs = Array.isArray(meta.gameNpcs) ? ([...(meta.gameNpcs as GameNpc[])] as GameNpc[]) : [];
     let changed = false;
     const nextNpcs = npcs.map((npc) => {
       if (npc.id !== npcId) return npc;
       changed = true;
+      const resolvedSpriteId = npc.spriteId || spriteId;
+      if (spriteStatus !== "ready") {
+        return {
+          ...npc,
+          spriteId: resolvedSpriteId,
+          spriteStatus,
+        };
+      }
+      const trimmed = options?.spritePrompt?.trim();
+      const bundle = options?.spritePrompts ?? null;
+      const prompt =
+        bundle?.appearance?.trim() ||
+        trimmed ||
+        buildNpcSpriteAppearancePrompt(npc, options?.artStyleFallback ?? null);
+      const expressionSheetPrompt = bundle?.expressionSheet?.trim() || null;
+      const fullBodyPrompt = bundle?.fullBody?.trim() || null;
+      let gens = [...(npc.spriteGenerations ?? [])].filter((g) => g.spriteId !== resolvedSpriteId);
+      gens.push({
+        spriteId: resolvedSpriteId,
+        createdAt: new Date().toISOString(),
+        prompt,
+        ...(expressionSheetPrompt ? { expressionSheetPrompt } : {}),
+        ...(fullBodyPrompt ? { fullBodyPrompt } : {}),
+      });
+      const trimmedGens = trimOldestRemovableSpriteGenerations(gens, resolvedSpriteId);
+      gens = trimmedGens.next;
+      removedSpriteIds.push(...trimmedGens.removedSpriteIds);
       return {
         ...npc,
-        spriteId: npc.spriteId || spriteId,
+        spriteId: resolvedSpriteId,
         spriteStatus,
+        spritePrompt: prompt,
+        spriteGenerations: gens,
       };
     });
     if (!changed) return null;
     return { ...meta, gameNpcs: nextNpcs };
   });
+  for (const id of removedSpriteIds) {
+    deleteNpcSpriteFolder(id);
+  }
 }
 
 /**
@@ -289,6 +385,10 @@ function startNpcAssetPipeline(args: {
   generateSprites: boolean;
   spriteExpressions: string[];
   artStylePrompt?: string | null;
+  /** Replaces `npc.description` in sprite appearance prompts for this pipeline run only. */
+  spriteAppearanceOverride?: string | null;
+  /** Which normalized sheet expression to use as the facial mood for `full_idle` (omit = neutral if listed else first). */
+  spriteFullBodyExpression?: string | null;
 }): void {
   const npcsNeedingAvatars = args.generateAvatars
     ? args.createdNpcs.filter((npc) => !npc.avatarUrl && npc.id)
@@ -352,7 +452,12 @@ function startNpcAssetPipeline(args: {
               imgComfyWorkflow: connection.comfyuiWorkflow || undefined,
             });
             if (avatarUrl) {
-              await patchNpcAvatarUrl(args.db, args.chatId, npc.id, avatarUrl);
+              const portraitPrompt = buildNpcPortraitImagePrompt(
+                npc.name,
+                npc.description,
+                args.artStylePrompt || undefined,
+              );
+              await patchNpcAvatarUrl(args.db, args.chatId, npc.id, avatarUrl, portraitPrompt);
             }
           } catch (err) {
             logger.error(err, "[npc-materializer] Avatar generation failed for '%s' (id=%s)", npc.name, npc.id);
@@ -392,12 +497,19 @@ function startNpcAssetPipeline(args: {
           referenceBase64 ? "avatar-bytes" : "no-avatar",
         );
 
+        const spriteAppearancePrompt = buildNpcSpriteAppearancePrompt(
+          npc,
+          args.artStylePrompt || null,
+          args.spriteAppearanceOverride ?? null,
+        );
         try {
-          const ok = await generateNpcSprites({
+          const spriteResult = await generateNpcSprites({
             chatId: args.chatId,
             npc,
             spriteId,
             expressions: args.spriteExpressions,
+            appearanceOverride: args.spriteAppearanceOverride ?? null,
+            fullBodyExpression: args.spriteFullBodyExpression ?? null,
             artStyle: args.artStylePrompt || undefined,
             imgSource: connection.imageGenerationSource,
             imgModel: connection.model || "",
@@ -407,15 +519,22 @@ function startNpcAssetPipeline(args: {
             imgComfyWorkflow: connection.comfyuiWorkflow || undefined,
             referenceImage: referenceBase64,
           });
-          await patchNpcSpriteStatus(args.db, args.chatId, npc.id, spriteId, ok ? "ready" : "failed");
-          if (ok) {
+          if (spriteResult.ok) {
+            await patchNpcSpriteStatus(args.db, args.chatId, npc.id, spriteId, "ready", {
+              spritePrompt: spriteResult.prompts?.appearance ?? spriteAppearancePrompt,
+              spritePrompts: spriteResult.prompts ?? null,
+              artStyleFallback: args.artStylePrompt ?? null,
+            });
             logger.info("[npc-materializer] Sprite generation succeeded for '%s' (id=%s)", npc.name, npc.id);
           } else {
+            await patchNpcSpriteStatus(args.db, args.chatId, npc.id, spriteId, "failed");
+            deleteNpcSpriteFolder(spriteId);
             logger.warn("[npc-materializer] Sprite generation failed for '%s' (id=%s)", npc.name, npc.id);
           }
         } catch (err) {
           logger.error(err, "[npc-materializer] Sprite generation threw for '%s' (id=%s)", npc.name, npc.id);
           await patchNpcSpriteStatus(args.db, args.chatId, npc.id, spriteId, "failed");
+          deleteNpcSpriteFolder(spriteId);
         }
       }
     } catch (err) {
@@ -428,10 +547,10 @@ function startNpcAssetPipeline(args: {
  * User-triggered manual regeneration for a single NPC's assets.
  *
  * Differs from the automatic pipeline (`startNpcAssetPipeline`) in two ways:
- *   1. We deliberately delete the existing avatar file and/or sprite folder
- *      first — both `generateNpcPortrait` and `generateNpcSprites` short-circuit
- *      when their output already exists on disk, so without deletion this
- *      endpoint would be a no-op for any NPC that already has assets.
+ *   1. We delete the existing **avatar** file when regenerating portraits
+ *      (otherwise `generateNpcPortrait` short-circuits on `existsSync`).
+ *      Sprite regeneration uses a **new** `spriteId` folder so previous sprite
+ *      generations stay on disk for history/version switching.
  *   2. We reset metadata fields (`avatarUrl = undefined`, `spriteStatus =
  *      "pending"`) up-front, which both makes the `assetCandidates` filter
  *      pick up this NPC again AND signals the client to show a loading state
@@ -453,6 +572,10 @@ export interface RegenerateNpcAssetsInput {
   spriteExpressions?: string[];
   /** Art style prompt; falls back to chat's gameSetupConfig.artStylePrompt. */
   artStylePrompt?: string | null;
+  /** Optional appearance block override for sprite prompts (replaces NPC description for that pass). */
+  spriteAppearanceOverride?: string | null;
+  /** Optional: which sheet expression label to use as the mood for the full-body `full_idle` render. */
+  spriteFullBodyExpression?: string | null;
 }
 
 export interface RegenerateNpcAssetsResult {
@@ -499,7 +622,9 @@ export async function regenerateNpcAssets(
       next.avatarUrl = undefined;
     }
     if (wantSprite) {
-      next.spriteId = found.spriteId || `game-npc-${input.chatId}-${found.id}`;
+      const baseSpriteId = `game-npc-${input.chatId}-${found.id}`;
+      // Keep the first-ever folder stable; each regeneration uses a new folder so history stays addressable.
+      next.spriteId = found.spriteId ? `${baseSpriteId}-${Date.now()}` : baseSpriteId;
       next.spriteStatus = "pending";
     }
     holder.next = next;
@@ -533,9 +658,8 @@ export async function regenerateNpcAssets(
   if (wantAvatar) {
     deleteNpcAvatar(input.chatId, npc.id);
   }
-  if (wantSprite && next.spriteId) {
-    deleteNpcSpriteFolder(next.spriteId);
-  }
+  // Sprite: do not delete previous folders — they remain in `spriteGenerations` for version switching.
+  // `next.spriteId` is always a fresh path for regeneration, so no delete call is needed here.
 
   logger.info(
     "[npc-materializer] Regenerating assets for '%s' (id=%s, chat=%s) — avatar=%s, sprite=%s",
@@ -556,6 +680,13 @@ export async function regenerateNpcAssets(
     ? (meta.npcSpriteExpressions as string[])
     : [];
 
+  const normalizedSpriteExpr = normalizeNpcSpriteExpressionList(input.spriteExpressions ?? fallbackExpressions);
+  const fullBodyCandidate = input.spriteFullBodyExpression?.trim()
+    ? sanitizeNpcSpriteExpression(input.spriteFullBodyExpression)
+    : "";
+  const spriteFullBodyExpression =
+    fullBodyCandidate && normalizedSpriteExpr.includes(fullBodyCandidate) ? fullBodyCandidate : null;
+
   startNpcAssetPipeline({
     db: input.db,
     connections: input.connections,
@@ -564,8 +695,10 @@ export async function regenerateNpcAssets(
     imageConnectionId,
     generateAvatars: wantAvatar,
     generateSprites: wantSprite,
-    spriteExpressions: input.spriteExpressions ?? fallbackExpressions,
+    spriteExpressions: normalizedSpriteExpr,
     artStylePrompt: artStyle,
+    spriteAppearanceOverride: input.spriteAppearanceOverride ?? null,
+    spriteFullBodyExpression,
   });
 
   return {
@@ -574,6 +707,164 @@ export async function regenerateNpcAssets(
     npcName: npc.name,
     regenerated: { avatar: wantAvatar, sprite: wantSprite },
   };
+}
+
+export type ScheduleNpcFullBodyEmotionSetResult =
+  | { ok: true }
+  | { ok: false; reason: "chat-not-found" | "npc-not-found" | "invalid-sprite" | "no-image-connection" };
+
+export interface ScheduleNpcFullBodyEmotionSetInput {
+  db: DB;
+  connections: ConnectionsStorage;
+  chatId: string;
+  npcId: string;
+  spriteId: string;
+  spriteExpressions?: string[];
+  spriteAppearanceOverride?: string | null;
+  force?: boolean;
+}
+
+/**
+ * Validates chat/NPC/sprite folder, then kicks off async per-emotion full-body
+ * PNG writes (`full_<expr>.png`) into an existing sprite generation folder.
+ */
+export async function scheduleNpcFullBodyEmotionSet(
+  input: ScheduleNpcFullBodyEmotionSetInput,
+): Promise<ScheduleNpcFullBodyEmotionSetResult> {
+  const chats = createChatsStorage(input.db);
+  const chat = await chats.getById(input.chatId);
+  if (!chat) {
+    logger.warn("[npc-materializer] full-body emotions: chat %s not found", input.chatId);
+    return { ok: false, reason: "chat-not-found" };
+  }
+
+  const meta = parseMetadata(chat.metadata);
+  const npcs = Array.isArray(meta.gameNpcs) ? ([...(meta.gameNpcs as GameNpc[])] as GameNpc[]) : [];
+  const npc = npcs.find((n) => n.id === input.npcId);
+  if (!npc) {
+    logger.warn("[npc-materializer] full-body emotions: npc %s not in chat %s", input.npcId, input.chatId);
+    return { ok: false, reason: "npc-not-found" };
+  }
+
+  const sid = input.spriteId.trim();
+  const allowed = new Set<string>();
+  if (npc.spriteId?.trim()) allowed.add(npc.spriteId.trim());
+  for (const g of npc.spriteGenerations ?? []) {
+    if (typeof g?.spriteId === "string" && g.spriteId.trim()) allowed.add(g.spriteId.trim());
+  }
+  if (!allowed.has(sid)) {
+    logger.warn("[npc-materializer] full-body emotions: spriteId %s not allowed for npc %s", sid, input.npcId);
+    return { ok: false, reason: "invalid-sprite" };
+  }
+
+  const spriteRoot = join(DATA_DIR, "sprites", sid);
+  if (!existsSync(spriteRoot)) {
+    logger.warn("[npc-materializer] full-body emotions: sprite folder missing on disk: %s", sid);
+    return { ok: false, reason: "invalid-sprite" };
+  }
+
+  const imageConnectionId = (meta.gameImageConnectionId as string | null | undefined)?.trim() || null;
+  if (!imageConnectionId) {
+    logger.warn("[npc-materializer] full-body emotions: no image connection for chat %s", input.chatId);
+    return { ok: false, reason: "no-image-connection" };
+  }
+
+  const connection = await input.connections.getWithKey(imageConnectionId);
+  if (!connection) {
+    logger.warn("[npc-materializer] full-body emotions: image connection %s missing", imageConnectionId);
+    return { ok: false, reason: "no-image-connection" };
+  }
+
+  const setupCfg = (meta.gameSetupConfig as Record<string, unknown> | null | undefined) ?? null;
+  const artStyle = (setupCfg?.artStylePrompt as string | undefined) ?? null;
+  const fallbackExpressions = Array.isArray(meta.npcSpriteExpressions)
+    ? (meta.npcSpriteExpressions as string[])
+    : [];
+  const expressions = normalizeNpcSpriteExpressionList(input.spriteExpressions ?? fallbackExpressions);
+
+  void (async () => {
+    try {
+      const ref = readNpcAvatarBase64(input.chatId, npc.id);
+      const result = await generateNpcFullBodyEmotionSet({
+        chatId: input.chatId,
+        npc,
+        spriteId: sid,
+        expressions,
+        appearanceOverride: input.spriteAppearanceOverride ?? null,
+        artStyle,
+        force: input.force === true,
+        imgSource: connection.imageGenerationSource,
+        imgModel: connection.model || "",
+        imgBaseUrl: connection.baseUrl || "https://image.pollinations.ai",
+        imgApiKey: connection.apiKey || "",
+        imgService: connection.imageService || connection.imageGenerationSource,
+        imgComfyWorkflow: connection.comfyuiWorkflow || undefined,
+        referenceImage: ref || undefined,
+      });
+      logger.info(
+        "[npc-materializer] full-body emotion set finished for '%s' (spriteId=%s, generated=%d, skipped=%d)",
+        npc.name,
+        sid,
+        result.generated,
+        result.skipped,
+      );
+    } catch (err) {
+      logger.error(err, "[npc-materializer] full-body emotion set threw for '%s'", npc.name);
+    }
+  })();
+
+  logger.info("[npc-materializer] Scheduled full-body emotion set for '%s' (spriteId=%s)", npc.name, sid);
+  return { ok: true };
+}
+
+export type SetActiveNpcSpriteResult =
+  | { ok: true }
+  | { ok: false; reason: "chat-not-found" | "npc-not-found" | "invalid-sprite" | "sprite-not-on-disk" };
+
+/**
+ * Point an NPC's active `spriteId` at a previous successful generation folder
+ * (no image API calls).
+ */
+export async function setActiveNpcSpriteGeneration(input: {
+  db: DB;
+  chatId: string;
+  npcId: string;
+  spriteId: string;
+}): Promise<SetActiveNpcSpriteResult> {
+  const sid = input.spriteId.trim();
+  if (!sid) return { ok: false, reason: "invalid-sprite" };
+
+  const idlePath = getNpcSpriteFullIdleFsPath(sid);
+  if (!existsSync(idlePath)) return { ok: false, reason: "sprite-not-on-disk" };
+
+  const chats = createChatsStorage(input.db);
+  const holder: { err?: Exclude<SetActiveNpcSpriteResult, { ok: true }> } = {};
+
+  const updated = await chats.updateMetadataWithMerge(input.chatId, (meta) => {
+    const npcs = Array.isArray(meta.gameNpcs) ? ([...(meta.gameNpcs as GameNpc[])] as GameNpc[]) : [];
+    const found = npcs.find((candidate) => candidate.id === input.npcId);
+    if (!found) {
+      holder.err = { ok: false, reason: "npc-not-found" };
+      return null;
+    }
+    const allowed = new Set<string>();
+    if (found.spriteId?.trim()) allowed.add(found.spriteId.trim());
+    for (const g of found.spriteGenerations ?? []) {
+      if (g.spriteId?.trim()) allowed.add(g.spriteId.trim());
+    }
+    if (!allowed.has(sid)) {
+      holder.err = { ok: false, reason: "invalid-sprite" };
+      return null;
+    }
+    const nextNpcs = npcs.map((n) =>
+      n.id === input.npcId ? { ...n, spriteId: sid, spriteStatus: "ready" as const } : n,
+    );
+    return { ...meta, gameNpcs: nextNpcs };
+  });
+
+  if (!updated) return { ok: false, reason: "chat-not-found" };
+  if (holder.err) return holder.err;
+  return { ok: true };
 }
 
 export async function materializeGameNpcs(input: MaterializeGameNpcsInput): Promise<MaterializeGameNpcsResult> {
@@ -655,7 +946,10 @@ export async function materializeGameNpcs(input: MaterializeGameNpcsInput): Prom
 
     const existingJournal = (meta.gameJournal as Journal | undefined) ?? createJournal();
     const nextJournal = created.reduce((journal, npc) => {
-      const mood = input.presentCharacters.find((char) => isSameNpcName(char.name, npc.name))?.mood?.trim();
+      const mood = input.presentCharacters.find(
+        (char) =>
+          isSameNpcName(char.name, npc.name) || isNpcNameStrictPrefixClusterMatch(char.name, npc.name),
+      )?.mood?.trim();
       const interaction = mood ? `Encountered (${mood})` : "Encountered";
       return addNpcEntry(journal, npc, interaction);
     }, existingJournal);

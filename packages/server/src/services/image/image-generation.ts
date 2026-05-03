@@ -7,6 +7,7 @@
 import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { inflateRawSync } from "zlib";
+import { Agent } from "undici";
 import { logger } from "../../lib/logger.js";
 import { DATA_DIR } from "../../utils/data-dir.js";
 import { newId } from "../../utils/id-generator.js";
@@ -139,6 +140,21 @@ export function saveImageToDisk(chatId: string, base64: string, ext: string): st
 /** Default 5-minute timeout for image generation API calls (overridable via env). */
 const IMAGE_GEN_TIMEOUT = Number(process.env.IMAGE_GEN_TIMEOUT_MS ?? 300_000);
 
+/**
+ * TCP connect timeout for outbound image HTTP (undici defaults to 10s).
+ * Slow or flaky paths to OpenRouter etc. often fail at connect before `AbortSignal.timeout` applies.
+ */
+const IMAGE_FETCH_CONNECT_TIMEOUT_MS = Number(process.env.IMAGE_FETCH_CONNECT_TIMEOUT_MS ?? 120_000);
+
+const imageHttpDispatcher = new Agent({
+  connectTimeout: IMAGE_FETCH_CONNECT_TIMEOUT_MS,
+});
+
+function withImageHttpDispatcher(init: RequestInit): RequestInit {
+  // Cast: `RequestInit.dispatcher` comes from undici-types bundled with @types/node; runtime matches our `undici` dep.
+  return { ...init, dispatcher: imageHttpDispatcher } as unknown as RequestInit;
+}
+
 function isOpenAIGptImageModel(model?: string): boolean {
   return !!model && /^gpt-image-(?:1|1\.5|2)(?:$|-)/i.test(model.trim());
 }
@@ -196,7 +212,7 @@ function nanoGPTImagesUrl(baseUrl: string): string {
 }
 
 async function downloadImageUrl(imageUrl: string): Promise<ImageGenResult> {
-  const imgResp = await fetch(imageUrl, { signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT) });
+  const imgResp = await fetch(imageUrl, withImageHttpDispatcher({ signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT) }));
   if (!imgResp.ok) {
     throw new Error(`Failed to download generated image (${imgResp.status})`);
   }
@@ -235,15 +251,18 @@ async function generateOpenAI(baseUrl: string, apiKey: string, request: ImageGen
     body.response_format = "b64_json";
   }
 
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
-  });
+  const resp = await fetch(
+    url,
+    withImageHttpDispatcher({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
+    }),
+  );
 
   if (!resp.ok) {
     const errText = await resp.text().catch(() => "Unknown error");
@@ -282,15 +301,18 @@ async function generateNanoGPT(baseUrl: string, apiKey: string, request: ImageGe
     body.imageDataUrls = references.map(imageDataUrlFromReference);
   }
 
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
-  });
+  const resp = await fetch(
+    url,
+    withImageHttpDispatcher({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
+    }),
+  );
 
   if (!resp.ok) {
     const errText = await resp.text().catch(() => "Unknown error");
@@ -315,7 +337,7 @@ async function generatePollinations(request: ImageGenRequest): Promise<ImageGenR
   if (request.negativePrompt) params.set("negative", request.negativePrompt);
 
   const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(request.prompt)}?${params}`;
-  const resp = await fetch(url, { signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT) });
+  const resp = await fetch(url, withImageHttpDispatcher({ signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT) }));
 
   if (!resp.ok) {
     throw new Error(`Pollinations image generation failed (${resp.status})`);
@@ -351,15 +373,18 @@ async function generateStability(baseUrl: string, apiKey: string, request: Image
   }
   formData.append("output_format", "png");
 
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      Accept: "image/*",
-    },
-    body: formData,
-    signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
-  });
+  const resp = await fetch(
+    url,
+    withImageHttpDispatcher({
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: "image/*",
+      },
+      body: formData,
+      signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
+    }),
+  );
 
   if (!resp.ok) {
     const errText = await resp.text().catch(() => "Unknown error");
@@ -384,15 +409,18 @@ async function generateTogetherAI(baseUrl: string, apiKey: string, request: Imag
   };
   if (request.negativePrompt) body.negative_prompt = request.negativePrompt;
 
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
-  });
+  const resp = await fetch(
+    url,
+    withImageHttpDispatcher({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
+    }),
+  );
 
   if (!resp.ok) {
     const errText = await resp.text().catch(() => "Unknown error");
@@ -465,15 +493,18 @@ async function generateNovelAI(baseUrl: string, apiKey: string, request: ImageGe
     parameters,
   };
 
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
-  });
+  const resp = await fetch(
+    url,
+    withImageHttpDispatcher({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
+    }),
+  );
 
   if (!resp.ok) {
     const errText = await resp.text().catch(() => "Unknown error");
@@ -601,20 +632,23 @@ async function generateViaChatCompletions(
     messageContent = request.prompt;
   }
 
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: request.model || "nai-diffusion-4-5-full",
-      messages: [{ role: "user", content: messageContent }],
-      stream: false,
-      temperature: 0.7,
+  const resp = await fetch(
+    url,
+    withImageHttpDispatcher({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: request.model || "nai-diffusion-4-5-full",
+        messages: [{ role: "user", content: messageContent }],
+        stream: false,
+        temperature: 0.7,
+      }),
+      signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
     }),
-    signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
-  });
+  );
 
   if (!resp.ok) {
     const errText = await resp.text().catch(() => "Unknown error");
@@ -714,17 +748,20 @@ async function generateOpenRouter(
       stream: false,
     };
 
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-        "HTTP-Referer": process.env.OPENROUTER_REFERER ?? "https://marinara-engine.local",
-        "X-Title": process.env.OPENROUTER_TITLE ?? "Marinara Engine",
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
-    });
+    const resp = await fetch(
+      url,
+      withImageHttpDispatcher({
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+          "HTTP-Referer": process.env.OPENROUTER_REFERER ?? "https://marinara-engine.local",
+          "X-Title": process.env.OPENROUTER_TITLE ?? "Marinara Engine",
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
+      }),
+    );
 
     if (!resp.ok) {
       const errText = await resp.text().catch(() => "Unknown error");
@@ -765,7 +802,7 @@ async function generateOpenRouter(
       return { base64, mimeType, ext };
     }
 
-    const imgResp = await fetch(imageUrl, { signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT) });
+    const imgResp = await fetch(imageUrl, withImageHttpDispatcher({ signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT) }));
     if (!imgResp.ok) {
       throw new Error(`Failed to download OpenRouter image (${imgResp.status})`);
     }
@@ -877,12 +914,15 @@ async function generateComfyUI(baseUrl: string, request: ImageGenRequest): Promi
   const resolvedWorkflow = JSON.parse(wfStr);
 
   // Queue the workflow
-  const queueResp = await fetch(`${base}/prompt`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt: resolvedWorkflow }),
-    signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
-  });
+  const queueResp = await fetch(
+    `${base}/prompt`,
+    withImageHttpDispatcher({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: resolvedWorkflow }),
+      signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
+    }),
+  );
 
   if (!queueResp.ok) {
     const errText = await queueResp.text().catch(() => "Unknown error");
@@ -895,7 +935,7 @@ async function generateComfyUI(baseUrl: string, request: ImageGenRequest): Promi
   for (let i = 0; i < COMFYUI_GEN_TIMEOUT; i++) {
     await new Promise((r) => setTimeout(r, 1000));
 
-    const historyResp = await fetch(`${base}/history/${prompt_id}`);
+    const historyResp = await fetch(`${base}/history/${prompt_id}`, withImageHttpDispatcher({}));
     if (!historyResp.ok) continue;
 
     const history = (await historyResp.json()) as Record<
@@ -919,7 +959,7 @@ async function generateComfyUI(baseUrl: string, request: ImageGenRequest): Promi
           type: img.type || "output",
         });
 
-        const imgResp = await fetch(`${base}/view?${params}`);
+        const imgResp = await fetch(`${base}/view?${params}`, withImageHttpDispatcher({}));
         if (!imgResp.ok) {
           throw new Error(`ComfyUI image fetch failed (${imgResp.status})`);
         }
@@ -963,12 +1003,15 @@ async function generateAutomatic1111(baseUrl: string, request: ImageGenRequest):
 
   const endpoint = useImg2Img ? `${base}/sdapi/v1/img2img` : `${base}/sdapi/v1/txt2img`;
 
-  const resp = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
-  });
+  const resp = await fetch(
+    endpoint,
+    withImageHttpDispatcher({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
+    }),
+  );
 
   if (!resp.ok) {
     const errText = await resp.text().catch(() => "Unknown error");

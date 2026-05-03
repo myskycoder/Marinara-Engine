@@ -7,6 +7,7 @@ import type {
   GameActiveState,
   GameMap,
   GameNpc,
+  GameNpcSpriteGeneration,
   DiceRollResult,
   HudWidget,
   GameBlueprint,
@@ -169,6 +170,31 @@ function withMapId(map: GameMap, existingMaps: readonly GameMap[] = []): GameMap
   return { ...map, id };
 }
 
+function npcMergeKey(npc: GameNpc): string {
+  const id = npc.id?.trim();
+  if (id) return `id:${id}`;
+  return `name:${npc.name.trim().toLowerCase()}`;
+}
+
+/** Union sprite generations by spriteId (incoming wins on duplicate id). */
+function mergeSpriteGenerations(
+  prev: GameNpcSpriteGeneration[] | undefined,
+  incoming: GameNpcSpriteGeneration[] | undefined,
+): GameNpcSpriteGeneration[] | undefined {
+  const p = prev ?? [];
+  const i = incoming ?? [];
+  if (i.length === 0) return p.length > 0 ? p : undefined;
+  if (p.length === 0) return i;
+  const byId = new Map<string, GameNpcSpriteGeneration>();
+  for (const g of p) {
+    if (g.spriteId) byId.set(g.spriteId, g);
+  }
+  for (const g of i) {
+    if (g.spriteId) byId.set(g.spriteId, g);
+  }
+  return [...byId.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
 function upsertMapList(maps: readonly GameMap[], map: GameMap): GameMap[] {
   const mapId = getMapId(map);
   if (!mapId) return [...maps, map];
@@ -254,20 +280,34 @@ export const useGameModeStore = create<GameModeStore>((set) => ({
     }),
   setNpcs: (npcs) =>
     set((s) => {
-      // Preserve existing avatarUrls: the incoming list may come from a stale
-      // chat-metadata cache that predates a recent /generate-assets call. If
-      // we already have an avatarUrl for an NPC and the incoming record is
-      // missing one, keep ours rather than clobbering it to null.
+      const prevByKey = new Map<string, GameNpc>();
+      for (const p of s.npcs) {
+        prevByKey.set(npcMergeKey(p), p);
+      }
+      // Preserve avatarUrl when incoming row dropped it (stale cache).
       const existingByName = new Map<string, string>();
       for (const existing of s.npcs) {
         if (existing.avatarUrl && existing.name) {
           existingByName.set(existing.name.toLowerCase(), existing.avatarUrl);
         }
       }
-      const merged = npcs.map((npc) => {
-        if (npc.avatarUrl) return npc;
-        const preserved = existingByName.get((npc.name ?? "").toLowerCase());
-        return preserved ? { ...npc, avatarUrl: preserved } : npc;
+      const merged = npcs.map((incoming) => {
+        const prev = prevByKey.get(npcMergeKey(incoming));
+        const base: GameNpc = prev ? { ...prev, ...incoming } : { ...incoming };
+        const mergedGens = mergeSpriteGenerations(prev?.spriteGenerations, incoming.spriteGenerations);
+        let out: GameNpc =
+          mergedGens !== undefined ? { ...base, spriteGenerations: mergedGens } : { ...base };
+        if (prev?.spritePrompt?.trim() && !incoming.spritePrompt?.trim()) {
+          out = { ...out, spritePrompt: prev.spritePrompt };
+        }
+        if (prev?.portraitPrompt?.trim() && !incoming.portraitPrompt?.trim()) {
+          out = { ...out, portraitPrompt: prev.portraitPrompt };
+        }
+        if (!out.avatarUrl) {
+          const preserved = existingByName.get((out.name ?? "").toLowerCase());
+          if (preserved) out = { ...out, avatarUrl: preserved };
+        }
+        return out;
       });
       return { npcs: merged };
     }),

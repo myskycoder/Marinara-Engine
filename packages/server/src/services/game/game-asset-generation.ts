@@ -129,30 +129,21 @@ export function deleteNpcAvatar(chatId: string, npcId: string): boolean {
   }
 }
 
-function hasExplicitNonHumanCue(value: string): boolean {
-  return /\b(?:animal|cat|kitten|dog|puppy|wolf|fox|bird|raven|crow|owl|horse|deer|rabbit|rat|mouse|snake|lizard|dragon|beast|creature|monster|spirit|ghost|construct|golem|doll|object|statue|mascot|non[-\s]?human|anthropomorphic|feral|quadruped)\b/i.test(
-    value,
-  );
-}
-
-function buildNpcPortraitPrompt(req: NpcPortraitRequest): string {
-  const context = req.appearance.trim();
-  const explicitNonHuman = hasExplicitNonHumanCue(`${req.npcName} ${context}`);
+/**
+ * Exact portrait prompt sent to the image API (also stored on `GameNpc.portraitPrompt`).
+ */
+export function buildNpcPortraitImagePrompt(npcName: string, appearance: string, artStyle?: string): string {
+  const appearanceBlock = appearance?.trim() || "scene-relevant character";
   return [
-    `NPC portrait for ${req.npcName}.`,
-    context ? `Canonical visual description from the current game: ${context}.` : "",
-    explicitNonHuman
-      ? "The description explicitly indicates a non-human subject. Preserve that exact species, body plan, age category, and silhouette; do not turn it into a human or kemonomimi character unless the description says humanoid."
-      : "Unless the description explicitly says otherwise, depict this NPC as a human or humanoid person. Do not infer an animal species from the name, mood, speech verbs, or setting.",
-    req.artStyle ? `Art style: ${req.artStyle}.` : "",
-    explicitNonHuman
-      ? "Use a centered avatar composition appropriate to the subject, including a creature portrait or full head-and-body crop only when that best preserves the described non-human form."
-      : "Use a centered human/humanoid avatar composition: face and shoulders, readable expression, clear outfit cues.",
-    "High quality game avatar, clear readable design, no text, no UI, no watermark.",
+    `Character portrait, head and shoulders, detailed face, high quality.`,
+    `${appearanceBlock}.`,
+    `Match the described gender, age, build and features exactly — do not invent attributes that are not stated.`,
+    `Subject is named ${npcName} (name is for reference only, do not let it override the description above).`,
+    artStyle ? `Art style: ${artStyle}.` : "",
   ]
     .filter(Boolean)
     .join(" ")
-    .slice(0, 1400);
+    .slice(0, 1000);
 }
 
 // ── NPC Portrait Generation ──
@@ -264,17 +255,7 @@ export async function generateNpcPortrait(req: NpcPortraitRequest): Promise<stri
     // The "Match the description exactly..." line is an anti-drift directive:
     // models trained with instruction-tuning treat it as a constraint
     // rather than mere flavor text.
-    const appearance = req.appearance?.trim() || "scene-relevant character";
-    const prompt = [
-      `Character portrait, head and shoulders, detailed face, high quality.`,
-      `${appearance}.`,
-      `Match the described gender, age, build and features exactly — do not invent attributes that are not stated.`,
-      `Subject is named ${req.npcName} (name is for reference only, do not let it override the description above).`,
-      req.artStyle ? `Art style: ${req.artStyle}.` : "",
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .slice(0, 1000);
+    const prompt = buildNpcPortraitImagePrompt(req.npcName, req.appearance || "", req.artStyle);
 
     logger.info(
       '[game-asset-gen] Generating NPC portrait for "%s" (id=%s, chat=%s) via %s/%s',

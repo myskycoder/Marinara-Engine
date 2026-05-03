@@ -60,6 +60,14 @@ export function resolveAssetTag(
   // Already an exact match
   if (manifest[tag]) return tag;
 
+  // Gallery / VN illustration tags are path-like and share substrings (`illustrations`,
+  // slug fragments). When the new PNG is not in the manifest yet, fuzzy scoring often
+  // picks an unrelated older CG. Never remap these — keep the exact tag until manifest
+  // refresh (fetchManifest / gallery) adds the real entry.
+  if (category === "backgrounds" && tag.startsWith("backgrounds:illustrations:")) {
+    return tag;
+  }
+
   // Collect tags in this category
   const categoryTags = Object.keys(manifest).filter((k) => k.startsWith(category + ":"));
 

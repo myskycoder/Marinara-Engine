@@ -59,3 +59,13 @@ export const LIMITS = {
   /** Echo Chamber: messages per generation */
   ECHO_CHAMBER_MESSAGES: 5,
 } as const;
+
+/** Default NPC sprite expression labels (Character Tracker / sprite sheet). Max 6 used per generation. */
+export const DEFAULT_NPC_SPRITE_EXPRESSIONS: readonly string[] = [
+  "neutral",
+  "happy",
+  "sad",
+  "angry",
+  "surprised",
+  "thinking",
+];

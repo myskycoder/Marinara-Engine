@@ -9,7 +9,11 @@ import { DATA_DIR } from "../utils/data-dir.js";
 import { logger } from "../lib/logger.js";
 import { createChatsStorage } from "../services/storage/chats.storage.js";
 import { npcAvatarFilename, npcAvatarUrl } from "../services/game/game-asset-generation.js";
-import { isSameNpcName, sha1HexLegacy, slugifyForFs } from "../services/game/npc-name-server.js";
+import {
+  findSingleNpcCandidateByNameCluster,
+  sha1HexLegacy,
+  slugifyForFs,
+} from "../services/game/npc-name-server.js";
 
 const AVATAR_DIR = join(DATA_DIR, "avatars");
 const NPC_AVATAR_DIR = join(AVATAR_DIR, "npc");
@@ -29,7 +33,7 @@ function parseChatMetadata(raw: unknown): Record<string, unknown> {
 
 function findGameNpcByName(npcs: GameNpc[], name: string): GameNpc | null {
   if (!name?.trim()) return null;
-  return npcs.find((npc) => isSameNpcName(npc.name ?? "", name)) ?? null;
+  return findSingleNpcCandidateByNameCluster(name, npcs) ?? null;
 }
 
 function ensureDir() {

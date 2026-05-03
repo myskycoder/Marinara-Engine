@@ -55,6 +55,53 @@ export function isSameNpcName(left: string, right: string): boolean {
 }
 
 /**
+ * True when normalized keys differ but one is the other plus at least one
+ * more space-separated token on the longer side (e.g. `марина` vs
+ * `марина викторовна`). Used with {@link findSingleNpcCandidateByNameCluster}
+ * so the tracker can shorten names without spawning duplicate NPCs.
+ *
+ * The shorter key must be at least `minShortLength` characters so tiny
+ * fragments do not match unrelated names.
+ *
+ * Does not return true when keys are equal — use {@link isSameNpcName} for that.
+ */
+export function isNpcNameStrictPrefixClusterMatch(
+  left: string,
+  right: string,
+  opts?: { minShortLength?: number },
+): boolean {
+  const minShort = opts?.minShortLength ?? 3;
+  const ak = npcNameKey(left);
+  const bk = npcNameKey(right);
+  if (!ak || !bk) return false;
+  const [shortK, longK] = ak.length <= bk.length ? [ak, bk] : [bk, ak];
+  if (shortK.length < minShort) return false;
+  if (shortK === longK) return false;
+  return longK.startsWith(`${shortK} `);
+}
+
+/**
+ * Returns the unique NPC row whose name matches `incoming` by strict equality
+ * ({@link isSameNpcName}) or a single-token prefix cluster
+ * ({@link isNpcNameStrictPrefixClusterMatch}). If several candidates match
+ * (ambiguous), returns `undefined` so callers do not merge different people.
+ */
+export function findSingleNpcCandidateByNameCluster<T extends { name: string }>(
+  incoming: string,
+  candidates: readonly T[],
+): T | undefined {
+  const hits = candidates.filter(
+    (c) =>
+      isSameNpcName(incoming, c.name) || isNpcNameStrictPrefixClusterMatch(incoming, c.name),
+  );
+  if (hits.length === 0) return undefined;
+  if (hits.length === 1) return hits[0];
+  const strict = hits.filter((c) => isSameNpcName(incoming, c.name));
+  if (strict.length === 1) return strict[0];
+  return undefined;
+}
+
+/**
  * Filesystem-safe slug derived from an NPC name. ASCII-only, lowercase,
  * dash-separated. Falls back to `<prefix>-<hash[:10]>` for names that don't
  * survive ASCII normalization (Cyrillic, emoji-only, etc.) so we never write

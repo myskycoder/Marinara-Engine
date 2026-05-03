@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { GameNpc } from "@marinara-engine/shared";
+import { DEFAULT_NPC_SPRITE_EXPRESSIONS } from "@marinara-engine/shared";
 import { logger } from "../../lib/logger.js";
 import { DATA_DIR } from "../../utils/data-dir.js";
 import { generateImage } from "../image/image-generation.js";
@@ -13,11 +14,24 @@ import { getSharp } from "../image/sharp-loader.js";
 // `POST /api/sprites/generate-sheet` endpoint so users see the same result.
 const NPC_SPRITE_BG_CLEANUP_STRENGTH = 50;
 
+export interface NpcSpritePromptBundle {
+  appearance: string;
+  expressionSheet: string;
+  fullBody: string;
+}
+
 export interface NpcSpriteGenerationRequest {
   chatId: string;
   npc: GameNpc;
   spriteId: string;
   expressions: string[];
+  /** When set, used as the physical-description block instead of `npc.description` for sprite prompts. */
+  appearanceOverride?: string | null;
+  /**
+   * Facial mood for the full-body `full_idle` render only (must match one of the normalized `expressions` when set).
+   * When omitted, uses `neutral` if present in the sheet list else the first expression.
+   */
+  fullBodyExpression?: string | null;
   artStyle?: string | null;
   imgSource?: string | null;
   imgModel: string;
@@ -29,8 +43,11 @@ export interface NpcSpriteGenerationRequest {
 }
 
 const SPRITES_ROOT = join(DATA_DIR, "sprites");
-const DEFAULT_NPC_SPRITE_EXPRESSIONS = ["neutral", "happy", "sad", "angry", "surprised", "thinking"];
 
+/** Absolute path to the full-body idle PNG for an NPC sprite folder. */
+export function getNpcSpriteFullIdleFsPath(spriteId: string): string {
+  return join(SPRITES_ROOT, spriteId, "full_idle.png");
+}
 function ensureDir(dir: string): void {
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
@@ -69,16 +86,37 @@ function sanitizeExpression(expression: string): string {
     .replace(/^_+|_+$/g, "");
 }
 
+/** Same key normalization as expression filenames / metadata (exported for regenerate validation). */
+export function sanitizeNpcSpriteExpression(expression: string): string {
+  return sanitizeExpression(expression);
+}
+
 function normalizeExpressions(expressions: string[]): string[] {
   const seen = new Set<string>();
   const normalized: string[] = [];
-  for (const expression of expressions.length > 0 ? expressions : DEFAULT_NPC_SPRITE_EXPRESSIONS) {
+  for (const expression of expressions.length > 0 ? expressions : [...DEFAULT_NPC_SPRITE_EXPRESSIONS]) {
     const key = sanitizeExpression(expression);
     if (!key || seen.has(key)) continue;
     seen.add(key);
     normalized.push(key);
   }
   return normalized.slice(0, 6);
+}
+
+/** Normalized expression list (max 6) — same rules as sprite sheet generation. */
+export function normalizeNpcSpriteExpressionList(expressions: string[]): string[] {
+  return normalizeExpressions(expressions);
+}
+
+function resolveFullBodyIdleExpression(
+  sheetExpressions: string[],
+  explicit: string | null | undefined,
+): string {
+  if (sheetExpressions.length === 0) return "neutral";
+  const key = explicit?.trim() ? sanitizeExpression(explicit) : "";
+  if (key && sheetExpressions.includes(key)) return key;
+  if (sheetExpressions.includes("neutral")) return "neutral";
+  return sheetExpressions[0]!;
 }
 
 /**
@@ -91,8 +129,17 @@ function normalizeExpressions(expressions: string[]): string[] {
  * and is explicitly framed as reference-only so a gender-ambiguous name
  * (e.g. "Greta Iron-Tooth") doesn't override stated traits.
  */
-function buildAppearancePrompt(npc: GameNpc, artStyle?: string | null): string {
-  const description = npc.description?.trim() || `scene-relevant character`;
+export function buildNpcSpriteAppearancePrompt(
+  npc: GameNpc,
+  artStyle?: string | null,
+  appearanceOverride?: string | null,
+): string {
+  const fromOverride =
+    typeof appearanceOverride === "string" && appearanceOverride.trim()
+      ? appearanceOverride.trim()
+      : null;
+  const fromNpc = npc.description?.trim() || null;
+  const description = (fromOverride ?? fromNpc) || `scene-relevant character`;
   return [
     `${description}.`,
     `Match the described gender, age, build, hair, and features exactly — do not invent attributes.`,
@@ -105,21 +152,41 @@ function buildAppearancePrompt(npc: GameNpc, artStyle?: string | null): string {
     .slice(0, 1400);
 }
 
-async function saveSprite(spriteId: string, expression: string, base64: string): Promise<void> {
-  const dir = join(SPRITES_ROOT, spriteId);
-  ensureDir(dir);
-  const filename = `${sanitizeExpression(expression)}.png`;
-  await writeFile(join(dir, filename), Buffer.from(base64, "base64"));
+/**
+ * Full-body prompt for one sheet expression label (writes to `full_<expr>.png`).
+ * Used when augmenting an existing sprite folder with per-emotion full-body renders.
+ */
+export function buildNpcSpriteFullBodyPromptForExpression(
+  npc: GameNpc,
+  artStyle: string | null | undefined,
+  appearanceOverride: string | null | undefined,
+  allExpressions: string[],
+  moodExpression: string,
+  hasExistingFullIdle: boolean,
+): string {
+  const appearance = buildNpcSpriteAppearancePrompt(npc, artStyle ?? null, appearanceOverride ?? null);
+  const idleHint = hasExistingFullIdle
+    ? `General stance, silhouette, proportions, and outfit should stay consistent with the existing full-body idle reference for this character set (same sprite folder on disk). `
+    : "";
+  return [
+    `single full-body character sprite, one character only, entire body visible from head to toe, centered in frame,`,
+    `solid white studio background, ${appearance},`,
+    idleHint,
+    `facial expression and overall mood for this render (asset full_${moodExpression}): clearly readable as "${moodExpression}", body language consistent with that mood,`,
+    `the character also has portrait head variants for expressions: ${allExpressions.join(", ")} — keep identity, costume, proportions, and art style consistent with those variants,`,
+    `standing idle game pose, no text, no watermark`,
+  ].join(" ");
 }
 
-async function generateExpressionSprites(req: NpcSpriteGenerationRequest, expressions: string[]): Promise<void> {
+export function buildNpcSpritePromptBundle(
+  req: NpcSpriteGenerationRequest,
+  expressions: string[],
+): NpcSpritePromptBundle {
+  const appearance = buildNpcSpriteAppearancePrompt(req.npc, req.artStyle, req.appearanceOverride ?? null);
+  const idleFace = resolveFullBodyIdleExpression(expressions, req.fullBodyExpression ?? null);
   const cols = 2;
   const rows = Math.ceil(expressions.length / cols);
-  const cellSize = 512;
-  const sheetWidth = cols * cellSize;
-  const sheetHeight = rows * cellSize;
-  const appearance = buildAppearancePrompt(req.npc, req.artStyle);
-  const prompt = [
+  const expressionSheet = [
     `character expression sheet, strict ${cols} columns by ${rows} rows grid,`,
     `${cols * rows} equally sized square cells arranged in a perfectly uniform grid,`,
     `solid white background, thin straight lines separating each cell,`,
@@ -130,8 +197,37 @@ async function generateExpressionSprites(req: NpcSpriteGenerationRequest, expres
     `all cells same size, perfectly aligned, no overlapping, no merged cells, no text, no labels, no numbers`,
   ].join(" ");
 
+  const fullBody = [
+    `single full-body character sprite, one character only, entire body visible from head to toe, centered in frame,`,
+    `solid white studio background, ${appearance},`,
+    `facial expression and overall mood for this full-body idle reference (asset full_idle): clearly readable as "${idleFace}", body language consistent with that mood,`,
+    `the same character uses a separate multi-cell expression sheet with faces: ${expressions.join(", ")} — keep identity, costume, proportions, and art style consistent with those variants,`,
+    `standing idle game pose, no text, no watermark`,
+  ].join(" ");
+
+  return { appearance, expressionSheet, fullBody };
+}
+
+async function saveSprite(spriteId: string, expression: string, base64: string): Promise<void> {
+  const dir = join(SPRITES_ROOT, spriteId);
+  ensureDir(dir);
+  const filename = `${sanitizeExpression(expression)}.png`;
+  await writeFile(join(dir, filename), Buffer.from(base64, "base64"));
+}
+
+async function generateExpressionSprites(
+  req: NpcSpriteGenerationRequest,
+  expressions: string[],
+  expressionSheetPrompt: string,
+): Promise<void> {
+  const cols = 2;
+  const rows = Math.ceil(expressions.length / cols);
+  const cellSize = 512;
+  const sheetWidth = cols * cellSize;
+  const sheetHeight = rows * cellSize;
+
   const imageResult = await generateImage(req.imgModel, req.imgBaseUrl, req.imgApiKey, req.imgService || req.imgSource || "", {
-    prompt,
+    prompt: expressionSheetPrompt,
     model: req.imgModel,
     width: sheetWidth,
     height: sheetHeight,
@@ -165,13 +261,17 @@ async function generateExpressionSprites(req: NpcSpriteGenerationRequest, expres
   );
 }
 
-async function generateFullBodyIdle(req: NpcSpriteGenerationRequest): Promise<void> {
-  const appearance = buildAppearancePrompt(req.npc, req.artStyle);
-  const prompt = [
-    `single full-body character sprite, one character only, entire body visible from head to toe, centered in frame,`,
-    `solid white studio background, ${appearance},`,
-    `general standing idle game pose, no text, no watermark`,
-  ].join(" ");
+type FullBodyImageRequestFields = Pick<
+  NpcSpriteGenerationRequest,
+  "imgModel" | "imgBaseUrl" | "imgApiKey" | "imgService" | "imgSource" | "imgComfyWorkflow" | "referenceImage"
+>;
+
+async function generateAndSaveFullBodyPng(
+  req: FullBodyImageRequestFields,
+  spriteId: string,
+  fileStem: string,
+  prompt: string,
+): Promise<void> {
   const targetWidth = 832;
   const targetHeight = 1216;
   const imageResult = await generateImage(req.imgModel, req.imgBaseUrl, req.imgApiKey, req.imgService || req.imgSource || "", {
@@ -189,14 +289,121 @@ async function generateFullBodyIdle(req: NpcSpriteGenerationRequest): Promise<vo
   if (metadata.width && metadata.height && (metadata.width !== targetWidth || metadata.height !== targetHeight)) {
     spriteBuffer = await sharp(spriteBuffer).resize(targetWidth, targetHeight, { fit: "cover", position: "centre" }).png().toBuffer();
   }
-  // Same VN-overlay reasoning as the expression sheet: drop the white studio
-  // backdrop to alpha so the standing pose can be layered onto a scene.
   try {
     spriteBuffer = await removeNearWhiteBackgroundPng(spriteBuffer, NPC_SPRITE_BG_CLEANUP_STRENGTH);
   } catch (err) {
     logger.warn(err, "[npc-sprite-gen] Background removal failed for full-body sprite; saving with original background");
   }
-  await saveSprite(req.spriteId, "full_idle", spriteBuffer.toString("base64"));
+  await saveSprite(spriteId, fileStem, spriteBuffer.toString("base64"));
+}
+
+async function generateFullBodyIdle(req: NpcSpriteGenerationRequest, fullBodyPrompt: string): Promise<void> {
+  await generateAndSaveFullBodyPng(req, req.spriteId, "full_idle", fullBodyPrompt);
+}
+
+/** Request shape for per-emotion full-body augmentation (reuses image fields from sprite generation). */
+export interface NpcFullBodyEmotionSetRequest {
+  chatId: string;
+  npc: GameNpc;
+  spriteId: string;
+  expressions: string[];
+  appearanceOverride?: string | null;
+  artStyle?: string | null;
+  /** When true, replace existing `full_<expr>.png` files (not `full_idle.png`). */
+  force?: boolean;
+  imgSource?: string | null;
+  imgModel: string;
+  imgBaseUrl: string;
+  imgApiKey: string;
+  imgService?: string | null;
+  imgComfyWorkflow?: string | undefined;
+  referenceImage?: string | null;
+}
+
+export type NpcFullBodyEmotionSetResult = { ok: boolean; generated: number; skipped: number };
+
+const inFlightNpcFullBodyEmotionSets = new Map<string, Promise<NpcFullBodyEmotionSetResult>>();
+
+/**
+ * For each normalized expression, ensure `full_<expr>.png` exists in `spriteId`
+ * (head-and-shoulders sheet unchanged). Skips files that already exist unless
+ * `force` is set. Does not modify `full_idle.png`.
+ */
+export async function generateNpcFullBodyEmotionSet(req: NpcFullBodyEmotionSetRequest): Promise<NpcFullBodyEmotionSetResult> {
+  const spriteDir = join(SPRITES_ROOT, req.spriteId);
+  if (!existsSync(spriteDir)) {
+    logger.warn("[npc-sprite-gen] full-body emotion set: folder missing for %s", req.spriteId);
+    return { ok: false, generated: 0, skipped: 0 };
+  }
+
+  const coalesceKey = `fullbody:${req.spriteId}`;
+  const existing = inFlightNpcFullBodyEmotionSets.get(coalesceKey);
+  if (existing) {
+    logger.debug("[npc-sprite-gen] full-body emotion set already in-flight for %s — coalescing", req.spriteId);
+    return existing;
+  }
+
+  const promise = (async (): Promise<NpcFullBodyEmotionSetResult> => {
+    const normalized = normalizeNpcSpriteExpressionList(req.expressions);
+    if (normalized.length === 0) {
+      return { ok: false, generated: 0, skipped: 0 };
+    }
+    const hasFullIdle = existsSync(join(spriteDir, "full_idle.png"));
+    const imgReq: FullBodyImageRequestFields = {
+      imgModel: req.imgModel,
+      imgBaseUrl: req.imgBaseUrl,
+      imgApiKey: req.imgApiKey,
+      imgService: req.imgService,
+      imgSource: req.imgSource,
+      imgComfyWorkflow: req.imgComfyWorkflow,
+      referenceImage: req.referenceImage,
+    };
+
+    let generated = 0;
+    let skipped = 0;
+    for (const expr of normalized) {
+      const fileStem = `full_${expr}`;
+      const filename = `${sanitizeExpression(fileStem)}.png`;
+      const outPath = join(spriteDir, filename);
+      if (sanitizeExpression(fileStem) === "full_idle") {
+        skipped += 1;
+        continue;
+      }
+      if (!req.force && existsSync(outPath)) {
+        skipped += 1;
+        continue;
+      }
+      const prompt = buildNpcSpriteFullBodyPromptForExpression(
+        req.npc,
+        req.artStyle,
+        req.appearanceOverride ?? null,
+        normalized,
+        expr,
+        hasFullIdle,
+      );
+      try {
+        await generateAndSaveFullBodyPng(imgReq, req.spriteId, fileStem, prompt);
+        generated += 1;
+        logger.info(
+          "[npc-sprite-gen] Wrote full-body emotion %s for NPC %s (chat=%s, spriteId=%s)",
+          fileStem,
+          req.npc.name,
+          req.chatId,
+          req.spriteId,
+        );
+      } catch (err) {
+        logger.warn(err, '[npc-sprite-gen] Failed full-body emotion "%s" for "%s"', fileStem, req.npc.name);
+      }
+    }
+    return { ok: generated > 0 || skipped > 0, generated, skipped };
+  })();
+
+  inFlightNpcFullBodyEmotionSets.set(coalesceKey, promise);
+  try {
+    return await promise;
+  } finally {
+    inFlightNpcFullBodyEmotionSets.delete(coalesceKey);
+  }
 }
 
 /**
@@ -213,18 +420,22 @@ async function generateFullBodyIdle(req: NpcSpriteGenerationRequest): Promise<vo
  * when we're actually going to call the image API do we register the
  * promise.
  */
-const inFlightNpcSprites = new Map<string, Promise<boolean>>();
+const inFlightNpcSprites = new Map<string, Promise<{ ok: boolean; prompts?: NpcSpritePromptBundle }>>();
 
 /** Inspect whether a sprite generation is already running for `spriteId`. */
-export function getInFlightNpcSprite(spriteId: string): Promise<boolean> | undefined {
+export function getInFlightNpcSprite(
+  spriteId: string,
+): Promise<{ ok: boolean; prompts?: NpcSpritePromptBundle }> | undefined {
   return inFlightNpcSprites.get(spriteId);
 }
 
-export async function generateNpcSprites(req: NpcSpriteGenerationRequest): Promise<boolean> {
+export async function generateNpcSprites(
+  req: NpcSpriteGenerationRequest,
+): Promise<{ ok: boolean; prompts?: NpcSpritePromptBundle }> {
   const spriteDir = join(SPRITES_ROOT, req.spriteId);
   const existingFullIdle = join(spriteDir, "full_idle.png");
   if (existsSync(existingFullIdle)) {
-    return true;
+    return { ok: true };
   }
 
   const inFlight = inFlightNpcSprites.get(req.spriteId);
@@ -237,16 +448,17 @@ export async function generateNpcSprites(req: NpcSpriteGenerationRequest): Promi
   }
 
   const expressions = normalizeExpressions(req.expressions);
+  const prompts = buildNpcSpritePromptBundle(req, expressions);
   const promise = (async () => {
     try {
-      await generateExpressionSprites(req, expressions);
-      await generateFullBodyIdle(req);
+      await generateExpressionSprites(req, expressions, prompts.expressionSheet);
+      await generateFullBodyIdle(req, prompts.fullBody);
       const generated = existsSync(existingFullIdle) ? statSync(existingFullIdle).isFile() : false;
       logger.info("[npc-sprite-gen] Generated sprites for %s (%s)", req.npc.name, req.spriteId);
-      return generated;
+      return { ok: generated, prompts: generated ? prompts : undefined };
     } catch (err) {
       logger.warn(err, '[npc-sprite-gen] Failed to generate sprites for "%s"', req.npc.name);
-      return false;
+      return { ok: false };
     }
   })();
 

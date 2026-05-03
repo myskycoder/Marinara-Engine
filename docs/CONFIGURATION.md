@@ -24,6 +24,8 @@ cp .env.example .env
 | `SSL_KEY`                        | _(empty)_                                                | Path to the TLS private key.                                                                                                                                   |
 | `IP_ALLOWLIST`                   | _(empty)_                                                | Comma-separated IPs or CIDRs to allow. Loopback is always allowed.                                                                                             |
 | `GIPHY_API_KEY`                  | _(empty)_                                                | Optional Giphy API key. GIF search is unavailable when unset.                                                                                                  |
+| `IMAGE_GEN_TIMEOUT_MS`           | `300000` (5 min)                                         | Max time for a single image HTTP request (`AbortSignal.timeout`). Separate from TCP connect; see `IMAGE_FETCH_CONNECT_TIMEOUT_MS`.                               |
+| `IMAGE_FETCH_CONNECT_TIMEOUT_MS` | `120000` (2 min)                                         | TCP connect timeout for image backends (OpenRouter, OpenAI, ComfyUI, etc.). Undici defaults to 10s without this; raise on slow or flaky networks.               |
 
 ## Logging Levels
 
