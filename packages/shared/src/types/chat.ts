@@ -112,6 +112,15 @@ export interface ChatMemoryChunk {
   hasEmbedding: boolean;
 }
 
+/** Rolling summary of current-session game history hidden by contextMessageLimit. */
+export interface GameContextSummary {
+  summary: string;
+  coveredThroughMessageId: string;
+  coveredMessageCount: number;
+  updatedAt: string;
+  model: string;
+}
+
 /** Extra metadata stored on a chat. */
 export interface ChatMetadata {
   /** Summary text for context injection */
@@ -161,6 +170,8 @@ export interface ChatMetadata {
   appliedChatPresetId?: string | null;
   /** Custom prompt prefix used by the /impersonate slash command. */
   impersonatePrompt?: string | null;
+  /** Maximum number of recent messages to include in prompt history; null/omitted disables the limit. */
+  contextMessageLimit?: number | null;
 
   // ── Conversation Mode Fields ──
   /** Whether conversation character schedules are enabled for this chat. */
@@ -204,6 +215,8 @@ export interface ChatMetadata {
   activeGameMapId?: string | null;
   /** Summaries of all previous sessions */
   gamePreviousSessionSummaries?: import("./game.js").SessionSummary[];
+  /** Rolling summary of older current-session messages hidden by contextMessageLimit. */
+  gameContextSummary?: GameContextSummary | null;
   /** GM-only: overarching story arc and plot (never sent to party agent) */
   gameStoryArc?: string;
   /** GM-only: planned plot twists (never sent to party agent) */

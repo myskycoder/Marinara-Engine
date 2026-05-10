@@ -135,6 +135,12 @@ import {
 import { getMoraleTier, formatMoraleContext } from "../services/game/morale.service.js";
 import type { GameMap, GameNpc, LorebookEntry, PresentCharacter } from "@marinara-engine/shared";
 import { sidecarModelService } from "../services/sidecar/sidecar-model.service.js";
+import {
+  applyGameContextMessageLimit,
+  getStoredGameContextSummary,
+  normalizeContextMessageLimit,
+  type GameContextSummary,
+} from "../services/game/context-summary.service.js";
 
 function hasConversationSchedules(value: unknown): value is Record<string, any> {
   return !!value && typeof value === "object" && Object.keys(value as Record<string, unknown>).length > 0;
@@ -548,10 +554,62 @@ export async function generateRoutes(app: FastifyInstance) {
 
       // ── Context message limit (from chat metadata, off by default) ──
       const chatMeta = parseExtra(chat.metadata) as Record<string, unknown>;
+      const chatMode = (chat.mode as string) ?? "roleplay";
       const lorebookKeeperSettings = getLorebookKeeperSettings(chatMeta);
-      const contextMessageLimit = chatMeta.contextMessageLimit as number | null;
+      const contextMessageLimit = normalizeContextMessageLimit(chatMeta.contextMessageLimit);
+      let gameContextSummary: GameContextSummary | null = null;
       if (contextMessageLimit && contextMessageLimit > 0 && chatMessages.length > contextMessageLimit) {
-        chatMessages = chatMessages.slice(-contextMessageLimit);
+        if (chatMode === "game") {
+          sendProgress("game_context_summary");
+          let summaryMessages:
+            | Array<{ id: string; role: string; content: string; createdAt?: string | null }>
+            | undefined;
+          const summaryMappedMessages = chatMessages.map((message: any) => ({
+            role: message.role === "narrator" ? "system" : (message.role as string),
+            content: (message.content as string) ?? "",
+          }));
+          applyAllSegmentEdits(summaryMappedMessages, chatMeta as Record<string, unknown>, chatMessages);
+          if (summaryMappedMessages.length === chatMessages.length) {
+            summaryMessages = chatMessages.map((message: any, index: number) => ({
+              id: message.id as string,
+              role: message.role as string,
+              content: summaryMappedMessages[index]?.content ?? ((message.content as string) || ""),
+              createdAt: message.createdAt as string | null | undefined,
+            }));
+          }
+          const summaryProvider = createLLMProvider(
+            conn.provider,
+            baseUrl,
+            conn.apiKey,
+            conn.maxContext,
+            conn.openrouterProvider,
+            conn.maxTokensOverride,
+          );
+          const limited = await applyGameContextMessageLimit({
+            chatId: input.chatId,
+            messages: chatMessages,
+            summaryMessages,
+            contextMessageLimit,
+            metadata: chatMeta,
+            provider: summaryProvider,
+            model: conn.model,
+            persistSummary: async (summary) => {
+              await chats.updateMetadataWithMerge(input.chatId, (current) => {
+                const currentSummary = getStoredGameContextSummary(current);
+                if (currentSummary && currentSummary.coveredMessageCount > summary.coveredMessageCount) return null;
+                return { ...current, gameContextSummary: summary };
+              });
+            },
+          });
+          chatMessages = limited.messages;
+          gameContextSummary = limited.summary;
+          if (gameContextSummary) chatMeta.gameContextSummary = gameContextSummary;
+          const visibleIds = new Set(chatMessages.map((message: any) => message.id));
+          lorebookKeeperMessages = lorebookKeeperMessages.filter((message: any) => visibleIds.has(message.id));
+        } else {
+          chatMessages = chatMessages.slice(-contextMessageLimit);
+          lorebookKeeperMessages = lorebookKeeperMessages.slice(-contextMessageLimit);
+        }
       }
 
       const isGoogleProvider = conn.provider === "google";
@@ -669,8 +727,6 @@ export async function generateRoutes(app: FastifyInstance) {
       let personaDescription = "";
       let personaFields: { personality?: string; scenario?: string; backstory?: string; appearance?: string } = {};
       const allPersonas = await chars.listPersonas();
-      const chatMode = (chat.mode as string) ?? "roleplay";
-
       // ── Game mode: apply segment edit overlays to message content ──
       // Users can edit individual narration/dialogue segments in the VN UI.
       // Edits are stored as chat-metadata overlays; apply them so the model
@@ -2920,6 +2976,7 @@ export async function generateRoutes(app: FastifyInstance) {
           map: gameMap,
           npcs: gameNpcs,
           sessionSummaries,
+          contextSummary: gameContextSummary,
           readables: knownReadables.length > 0 ? knownReadables : undefined,
           sessionNumber,
           partyNames,

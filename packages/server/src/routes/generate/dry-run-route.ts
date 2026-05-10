@@ -21,6 +21,11 @@ import { findLastIndex, parseExtra, resolveBaseUrl } from "../generate/generate-
 import { gameStateSnapshots as gameStateSnapshotsTable } from "../../db/schema/index.js";
 import { and, desc, eq } from "drizzle-orm";
 import { logger } from "../../lib/logger.js";
+import {
+  formatGameContextSummaryPromptBlock,
+  getStoredGameContextSummary,
+  normalizeContextMessageLimit,
+} from "../../services/game/context-summary.service.js";
 
 type WrapFormat = "xml" | "markdown" | "none";
 
@@ -553,6 +558,8 @@ export async function registerDryRunRoute(app: FastifyInstance) {
     }
 
     // Pull existing messages, apply the same conversation-start + context limit filtering
+    const chatMode = ((chat as { mode?: string }).mode ?? "conversation") as string;
+    const contextMessageLimit = normalizeContextMessageLimit(chatMeta.contextMessageLimit);
     const allChatMessages = await chats.listMessages(chatId);
     let startIdx = 0;
     for (let i = allChatMessages.length - 1; i >= 0; i--) {
@@ -563,8 +570,10 @@ export async function registerDryRunRoute(app: FastifyInstance) {
       }
     }
     let chatMessages = startIdx > 0 ? allChatMessages.slice(startIdx) : allChatMessages;
-    const contextMessageLimit = chatMeta.contextMessageLimit as number | null;
-    if (contextMessageLimit && contextMessageLimit > 0 && chatMessages.length > contextMessageLimit) {
+    const hasContextOverflow =
+      !!contextMessageLimit && contextMessageLimit > 0 && chatMessages.length > contextMessageLimit;
+    const gameContextSummary = hasContextOverflow ? getStoredGameContextSummary(chatMeta) : null;
+    if (hasContextOverflow && contextMessageLimit) {
       chatMessages = chatMessages.slice(-contextMessageLimit);
     }
 
@@ -710,7 +719,6 @@ export async function registerDryRunRoute(app: FastifyInstance) {
       /* non-critical */
     }
 
-    const chatMode = ((chat as { mode?: string }).mode ?? "conversation") as string;
     const effectivePresetId =
       skipPreset || chatMode === "conversation"
         ? null
@@ -1124,6 +1132,13 @@ export async function registerDryRunRoute(app: FastifyInstance) {
         const insertAt = firstUserIdx >= 0 ? firstUserIdx : finalMessages.length;
         finalMessages.splice(insertAt, 0, { role: "system", content: block });
       }
+    }
+
+    if (chatMode === "game" && gameContextSummary?.summary) {
+      const block = formatGameContextSummaryPromptBlock(gameContextSummary);
+      const firstUserIdx = finalMessages.findIndex((m) => m.role === "user" || m.role === "assistant");
+      const insertAt = firstUserIdx >= 0 ? firstUserIdx : finalMessages.length;
+      finalMessages.splice(insertAt, 0, { role: "system", content: block });
     }
 
     // Optional injection: lorebooks (only for preset-less flows; presets handle lorebooks in the assembler)

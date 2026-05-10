@@ -4,6 +4,7 @@
 
 import type { GameActiveState, GameMap, GameNpc, SessionSummary, HudWidget } from "@marinara-engine/shared";
 import type { CharacterSpriteInfo } from "./sprite.service.js";
+import { formatGameContextSummaryPromptBlock, type GameContextSummary } from "./context-summary.service.js";
 
 export interface GameReadablePromptEntry {
   title: string;
@@ -41,6 +42,8 @@ export interface GmPromptContext {
   lootResults?: string;
   /** Journal recap string */
   journalRecap?: string;
+  /** Rolling summary of old current-session messages hidden by contextMessageLimit */
+  contextSummary?: GameContextSummary | null;
   /** Previously surfaced readable documents (notes/books) */
   readables?: GameReadablePromptEntry[];
   /** Player's personal notes (shared with GM) */
@@ -379,6 +382,10 @@ export function buildGmSystemPrompt(ctx: GmPromptContext): string {
 
   if (ctx.journalRecap) {
     sections.push(`<session_journal>`, ctx.journalRecap, `</session_journal>`);
+  }
+
+  if (ctx.contextSummary?.summary) {
+    sections.push(formatGameContextSummaryPromptBlock(ctx.contextSummary));
   }
 
   if (ctx.readables?.length) {

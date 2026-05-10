@@ -28,6 +28,11 @@ import type { ChatMode, GameNpc } from "@marinara-engine/shared";
 import { copyBranchMessagesAndSnapshots } from "../services/chats/branch-chat-copy.service.js";
 import { resolvePresentCharacterAvatars } from "../services/game/npc-avatar-resolver.js";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
+import {
+  formatGameContextSummaryPromptBlock,
+  getStoredGameContextSummary,
+  normalizeContextMessageLimit,
+} from "../services/game/context-summary.service.js";
 
 export async function chatsRoutes(app: FastifyInstance) {
   const storage = createChatsStorage(app.db);
@@ -535,7 +540,10 @@ export async function chatsRoutes(app: FastifyInstance) {
     // ── Fallback: live assembly preview (no generation has happened yet) ──
     // This is a best-effort approximation; it won't include runtime-only
     // injections like lorebooks, game state, scene context, semantic memory, etc.
-    const presetId = chat.mode === "conversation" ? null : (chat.promptPresetId ?? chatMeta.presetId);
+    const chatMode = (chat.mode as string) ?? "roleplay";
+    const activeContextLimit = normalizeContextMessageLimit(chatMeta.contextMessageLimit);
+    let gameContextSummary: ReturnType<typeof getStoredGameContextSummary> = null;
+    const presetId = chatMode === "conversation" ? null : (chat.promptPresetId ?? chatMeta.presetId);
     if (presetId) {
       try {
         const { createPromptsStorage } = await import("../services/storage/prompts.storage.js");
@@ -560,9 +568,11 @@ export async function chatsRoutes(app: FastifyInstance) {
           }
 
           // Apply context message limit
-          const contextLimit = chatMeta.contextMessageLimit as number | null;
-          if (contextLimit && contextLimit > 0 && filteredMessages.length > contextLimit) {
-            filteredMessages = filteredMessages.slice(-contextLimit);
+          const hasContextOverflow =
+            !!activeContextLimit && activeContextLimit > 0 && filteredMessages.length > activeContextLimit;
+          gameContextSummary = hasContextOverflow ? getStoredGameContextSummary(chatMeta) : null;
+          if (hasContextOverflow && activeContextLimit) {
+            filteredMessages = filteredMessages.slice(-activeContextLimit);
           }
 
           const mappedMessages = filteredMessages.map((m: any) => ({
@@ -712,7 +722,6 @@ export async function chatsRoutes(app: FastifyInstance) {
 
           // ── Strip <speaker> tags from chat history to save tokens (roleplay only) ──
           const isGroupChat = characterIds.length > 1;
-          const chatMode = (chat.mode as string) ?? "roleplay";
           if (isGroupChat && chatMode !== "conversation") {
             const speakerCloseRegex = /<\/speaker>/g;
             for (let i = 0; i < assembled.messages.length; i++) {
@@ -909,6 +918,13 @@ export async function chatsRoutes(app: FastifyInstance) {
             }
           }
 
+          if (chatMode === "game" && gameContextSummary?.summary) {
+            const block = formatGameContextSummaryPromptBlock(gameContextSummary);
+            const firstUserIdx = assembled.messages.findIndex((m) => m.role === "user" || m.role === "assistant");
+            const insertAt = firstUserIdx >= 0 ? firstUserIdx : assembled.messages.length;
+            assembled.messages.splice(insertAt, 0, { role: "system", content: block });
+          }
+
           return { messages: assembled.messages, parameters: assembled.parameters, generationInfo: null };
         }
       } catch (e) {
@@ -917,10 +933,31 @@ export async function chatsRoutes(app: FastifyInstance) {
     }
 
     // ── Last resort: return raw chat messages ──
-    const mappedMessages = chatMessages.map((m: any) => ({
+    let previewMessages = chatMessages;
+    for (let i = chatMessages.length - 1; i >= 0; i--) {
+      const extra =
+        typeof chatMessages[i]!.extra === "string"
+          ? JSON.parse(chatMessages[i]!.extra as string)
+          : (chatMessages[i]!.extra ?? {});
+      if (extra.isConversationStart) {
+        previewMessages = chatMessages.slice(i);
+        break;
+      }
+    }
+    const hasContextOverflow =
+      !!activeContextLimit && activeContextLimit > 0 && previewMessages.length > activeContextLimit;
+    gameContextSummary = hasContextOverflow ? getStoredGameContextSummary(chatMeta) : null;
+    if (hasContextOverflow && activeContextLimit) {
+      previewMessages = previewMessages.slice(-activeContextLimit);
+    }
+
+    const mappedMessages = previewMessages.map((m: any) => ({
       role: m.role === "narrator" ? "system" : m.role,
       content: m.content as string,
     }));
+    if (chatMode === "game" && gameContextSummary?.summary) {
+      mappedMessages.unshift({ role: "system", content: formatGameContextSummaryPromptBlock(gameContextSummary) });
+    }
     while (mappedMessages.length > 0 && mappedMessages[mappedMessages.length - 1]!.role === "assistant") {
       mappedMessages.pop();
     }
