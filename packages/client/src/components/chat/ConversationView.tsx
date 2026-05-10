@@ -1,21 +1,35 @@
 // ──────────────────────────────────────────────
 // Chat: Conversation View — Discord-style composite
 // ──────────────────────────────────────────────
-import { Suspense, lazy, useRef, useEffect, useLayoutEffect, useCallback, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
+import {
+  Suspense,
+  lazy,
+  useRef,
+  useEffect,
+  useLayoutEffect,
+  useCallback,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Loader2,
   ChevronUp,
   Settings2,
   FolderOpen,
+  Globe,
   Image as ImageIcon,
   ArrowRightLeft,
   ScrollText,
+  MoreHorizontal,
 } from "lucide-react";
 import { ConversationMessage } from "./ConversationMessage";
 import { ConversationInput } from "./ConversationInput";
 import { SceneBanner, EndSceneBar } from "./SceneBanner";
 import { ChatBranchSelector } from "./ChatBranchSelector";
+import { ActiveWorldInfoButton, ActiveWorldInfoModal } from "./ActiveWorldInfoButton";
 import { useChatStore } from "../../stores/chat.store";
 import { useUIStore } from "../../stores/ui.store";
 import { playNotificationPing } from "../../lib/notification-sound";
@@ -64,6 +78,7 @@ interface ConversationViewProps {
   sceneInfo?: {
     variant: "origin" | "scene";
     sceneChatId?: string;
+    sceneChatName?: string;
     originChatId?: string;
     description?: string;
   };
@@ -110,6 +125,15 @@ function hasNamePrefixFormat(msg: Message, characterMap: CharacterMap, chatChara
   return false;
 }
 
+function isHiddenFromUser(message: Message) {
+  try {
+    const extra = typeof message.extra === "string" ? JSON.parse(message.extra) : (message.extra ?? {});
+    return extra.hiddenFromUser === true;
+  } catch {
+    return false;
+  }
+}
+
 // Module-level set that remembers which message keys have been "seen" across
 // component remounts. This prevents stagger animations and notification sounds
 // from replaying when the user navigates away from a chat and comes back.
@@ -117,6 +141,65 @@ const globalSeenKeys = new Set<string>();
 
 const HEADER_BTN =
   "flex items-center justify-center rounded-lg bg-[var(--card)]/80 p-1.5 text-foreground/80 backdrop-blur-sm transition-colors hover:bg-[var(--card)] hover:text-foreground dark:bg-black/30 dark:hover:bg-black/50";
+const MOBILE_MENU_BTN =
+  "flex h-8 w-8 items-center justify-center rounded-lg text-foreground/80 transition-colors hover:bg-[var(--accent)] hover:text-foreground";
+
+function ConversationToolbarMenu({
+  desktopChildren,
+  mobileChildren,
+}: {
+  desktopChildren: ReactNode;
+  mobileChildren: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLDivElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ top: number; right: number }>({ top: 0, right: 0 });
+
+  useLayoutEffect(() => {
+    if (!open || !btnRef.current) return;
+    const rect = btnRef.current.getBoundingClientRect();
+    setPos({
+      top: rect.bottom + 4,
+      right: window.innerWidth - rect.right,
+    });
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handle = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (target instanceof Element && target.closest("[data-chat-branch-popover]")) return;
+      if (btnRef.current?.contains(target) || popRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    document.addEventListener("mousedown", handle);
+    return () => document.removeEventListener("mousedown", handle);
+  }, [open]);
+
+  return (
+    <>
+      <div className="hidden items-center gap-1.5 md:flex">{desktopChildren}</div>
+      <div className="relative shrink-0 md:hidden" ref={btnRef}>
+        <button onClick={() => setOpen(!open)} className={HEADER_BTN} title="More options" aria-label="More options">
+          <MoreHorizontal size="0.875rem" />
+        </button>
+        {open &&
+          createPortal(
+            <div
+              ref={popRef}
+              className="fixed z-[9999] flex w-9 flex-col items-center gap-0.5 rounded-xl border border-[var(--border)] bg-[var(--card)] p-1 shadow-xl backdrop-blur-xl animate-message-in"
+              style={{ top: pos.top, right: pos.right }}
+              onClick={() => setOpen(false)}
+            >
+              {mobileChildren}
+            </div>,
+            document.body,
+          )}
+      </div>
+    </>
+  );
+}
 
 export function ConversationView({
   chatId,
@@ -157,10 +240,21 @@ export function ConversationView({
   const streamingChatId = useChatStore((s) => s.streamingChatId);
   const isStreaming = useChatStore((s) => s.isStreaming) && streamingChatId === chatId;
   const streamBuffer = useChatStore((s) => s.streamBuffer);
+  const thinkingBuffer = useChatStore((s) => s.thinkingBuffer);
   const regenerateMessageId = useChatStore((s) => s.regenerateMessageId);
   const streamingCharacterId = useChatStore((s) => s.streamingCharacterId);
   const typingCharacterName = useChatStore((s) => s.typingCharacterName);
   const delayedCharacterInfo = useChatStore((s) => s.delayedCharacterInfo);
+  const liveTypingName = useMemo(() => {
+    if (typingCharacterName) return typingCharacterName;
+    if (streamingCharacterId) return characterMap.get(streamingCharacterId)?.name ?? "Character";
+    if (chatCharIds.length === 1) return characterMap.get(chatCharIds[0]!)?.name ?? "Character";
+    if (characterNames.length > 0) return characterNames.join(", ");
+    return "Character";
+  }, [characterMap, characterNames, chatCharIds, streamingCharacterId, typingCharacterName]);
+  const liveTypingVerb = liveTypingName.includes(",") || liveTypingName.includes(" & ") ? "are" : "is";
+  const showTypingIndicator =
+    isStreaming && !delayedCharacterInfo && (!regenerateMessageId || (!streamBuffer && !thinkingBuffer));
 
   // ── Periodic status refresh (every 60s) ──
   // Keeps status dots in sync with the character's schedule regardless of autonomous messaging
@@ -176,23 +270,78 @@ export function ConversationView({
         /* non-critical */
       }
     };
+    void refreshStatus();
     const timer = setInterval(refreshStatus, 60_000);
     return () => clearInterval(timer);
   }, [chatId, qc]);
 
-  // Global conversation gradient from settings
+  // Per-scheme conversation gradient from settings.
+  // When a scheme's values are still the defaults (user hasn't customized), use
+  // a CSS variable so custom themes can override the conversation background.
+  const convoGradient = useUIStore((s) => s.convoGradient);
   const theme = useUIStore((s) => s.theme);
-  const convoGradientFrom = useUIStore((s) => s.convoGradientFrom);
-  const convoGradientTo = useUIStore((s) => s.convoGradientTo);
   const gradientStyle = useMemo(() => {
-    // In light mode, only apply the gradient if the user has customized it away from the dark default.
-    // Otherwise use a subtle tinted lavender so the chat surface stands out from the page bg
-    // (matches the slightly-darker tone the RP surface has in light mode).
-    const isDefaultDark = convoGradientFrom === "#0a0a0e" && convoGradientTo === "#1c2133";
-    if (theme === "light" && isDefaultDark) return { background: "var(--secondary)" };
-    return { background: `linear-gradient(135deg, ${convoGradientFrom}, ${convoGradientTo})` };
-  }, [convoGradientFrom, convoGradientTo, theme]);
+    const g = convoGradient[theme];
+    const isDefaultDark = convoGradient.dark.from === "#0a0a0e" && convoGradient.dark.to === "#1c2133";
+    const isDefaultLight = convoGradient.light.from === "#f2eff7" && convoGradient.light.to === "#eae6f0";
+    if ((theme === "dark" && isDefaultDark) || (theme === "light" && isDefaultLight)) {
+      return { background: "var(--secondary)" };
+    }
+    return { background: `linear-gradient(135deg, ${g.from}, ${g.to})` };
+  }, [convoGradient, theme]);
   const hasAutonomousMessaging = !!chatMeta.autonomousMessages || !!chatMeta.characterExchanges;
+  const [mobileWorldInfoOpen, setMobileWorldInfoOpen] = useState(false);
+  const renderToolbarActions = (compact = false) => (
+    <>
+      <ChatBranchSelector
+        activeChatId={chatId}
+        activeChatName={chatName}
+        groupId={chatGroupId}
+        compact={compact}
+        className={
+          compact ? "bg-transparent text-foreground/80 hover:bg-[var(--accent)] hover:text-foreground" : undefined
+        }
+      />
+      {compact ? (
+        <button
+          onClick={() => setMobileWorldInfoOpen(true)}
+          className={MOBILE_MENU_BTN}
+          title="Active World Info"
+          aria-label="Active World Info"
+        >
+          <Globe size="0.875rem" />
+        </button>
+      ) : (
+        <ActiveWorldInfoButton chatId={chatId} buttonClassName={HEADER_BTN} />
+      )}
+      <button onClick={onOpenFiles} className={compact ? MOBILE_MENU_BTN : HEADER_BTN} title="Manage Chat Files">
+        <FolderOpen size="0.875rem" />
+      </button>
+      <button onClick={onOpenGallery} className={compact ? MOBILE_MENU_BTN : HEADER_BTN} title="Gallery">
+        <ImageIcon size="0.875rem" />
+      </button>
+      <button
+        type="button"
+        onClick={onOpenSceneJournal}
+        className={compact ? MOBILE_MENU_BTN : HEADER_BTN}
+        title="Scene descriptions"
+      >
+        <ScrollText size="0.875rem" />
+      </button>
+      {onSwitchChat && (
+        <button
+          onClick={onSwitchChat}
+          className={compact ? MOBILE_MENU_BTN : HEADER_BTN}
+          title={connectedChatName ? `Switch to ${connectedChatName}` : "Switch to connected chat"}
+        >
+          <ArrowRightLeft size="0.875rem" />
+        </button>
+      )}
+      <button onClick={onOpenSettings} className={compact ? MOBILE_MENU_BTN : HEADER_BTN} title="Chat Settings">
+        <Settings2 size="0.875rem" />
+      </button>
+    </>
+  );
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -252,7 +401,7 @@ export function ConversationView({
     if (isOptimistic || (isNearBottomRef.current && !userScrolledAwayRef.current)) {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
-  }, [newestMsgId, streamBuffer, isStreaming, delayedCharacterInfo, typingCharacterName, isOptimistic]);
+  }, [newestMsgId, streamBuffer, thinkingBuffer, isStreaming, delayedCharacterInfo, typingCharacterName, isOptimistic]);
 
   // Preserve scroll on load-more
   useLayoutEffect(() => {
@@ -293,6 +442,7 @@ export function ConversationView({
     let lastDay = "";
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i]!;
+      if (isHiddenFromUser(msg)) continue;
       const day = getDayKey(msg.createdAt);
       if (day !== lastDay) {
         items.push({ type: "separator", key: `sep-${day}`, label: formatDaySeparator(msg.createdAt) });
@@ -421,7 +571,7 @@ export function ConversationView({
     setHiddenLineKeys(new Set());
   }
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const currentKeys = new Set(renderedItems.filter((i) => i.type === "message").map((i) => i.key));
 
     // On the very first render that has messages, just snapshot the keys and
@@ -655,35 +805,15 @@ export function ConversationView({
             );
           })()}
 
-          <div className="flex items-center gap-1.5">
-            <ChatBranchSelector activeChatId={chatId} activeChatName={chatName} groupId={chatGroupId} />
-            <button onClick={onOpenFiles} className={HEADER_BTN} title="Manage Chat Files">
-              <FolderOpen size="0.875rem" />
-            </button>
-            <button onClick={onOpenGallery} className={HEADER_BTN} title="Gallery">
-              <ImageIcon size="0.875rem" />
-            </button>
-            <button
-              type="button"
-              onClick={onOpenSceneJournal}
-              className="flex items-center justify-center rounded-lg bg-black/30 p-1.5 text-foreground/80 backdrop-blur-sm transition-colors hover:bg-black/50 hover:text-foreground"
-              title="Scene descriptions"
-            >
-              <ScrollText size="0.875rem" />
-            </button>
-            {onSwitchChat && (
-              <button
-                onClick={onSwitchChat}
-                className={HEADER_BTN}
-                title={connectedChatName ? `Switch to ${connectedChatName}` : "Switch to connected chat"}
-              >
-                <ArrowRightLeft size="0.875rem" />
-              </button>
-            )}
-            <button onClick={onOpenSettings} className={HEADER_BTN} title="Chat Settings">
-              <Settings2 size="0.875rem" />
-            </button>
-          </div>
+          <ConversationToolbarMenu
+            desktopChildren={renderToolbarActions()}
+            mobileChildren={renderToolbarActions(true)}
+          />
+          <ActiveWorldInfoModal
+            chatId={chatId}
+            open={mobileWorldInfoOpen}
+            onClose={() => setMobileWorldInfoOpen(false)}
+          />
         </div>
 
         {/* Load More */}
@@ -768,6 +898,7 @@ export function ConversationView({
                   isStreaming={isStreaming}
                   regenerateMessageId={regenerateMessageId}
                   streamBuffer={streamBuffer}
+                  thinkingBuffer={thinkingBuffer}
                   lastAssistantMessageId={lastAssistantMessageId}
                   characterMap={characterMap}
                   personaInfo={personaInfo}
@@ -789,13 +920,17 @@ export function ConversationView({
             // During regeneration, don't pass isStreaming until content arrives — the
             // "X is typing..." indicator at the bottom provides visual feedback instead
             // of showing bouncing dots inside the message bubble.
-            const hasStreamContent = isRegenerating && !!streamBuffer;
+            const hasStreamContent = isRegenerating && (!!streamBuffer || !!thinkingBuffer);
             // Strip old-swipe attachments during regeneration so a previous
             // illustration doesn't linger while new text is streaming in.
             const displayMsg = isRegenerating
               ? (() => {
                   const parsed = typeof msg.extra === "string" ? JSON.parse(msg.extra) : (msg.extra ?? {});
-                  return { ...msg, content: streamBuffer || msg.content, extra: { ...parsed, attachments: null } };
+                  return {
+                    ...msg,
+                    content: streamBuffer || (thinkingBuffer ? "Thinking..." : msg.content),
+                    extra: { ...parsed, attachments: null, thinking: thinkingBuffer || parsed.thinking },
+                  };
                 })()
               : msg;
             elements.push(
@@ -826,7 +961,7 @@ export function ConversationView({
         })()}
 
         {/* Delayed indicator (DND/idle — waiting for character to become available) */}
-        {delayedCharacterInfo && isStreaming && !streamBuffer && (
+        {delayedCharacterInfo && isStreaming && !streamBuffer && !thinkingBuffer && (
           <div className="flex items-center gap-2 px-4 py-1.5 text-[0.8125rem] text-[var(--text-secondary)]">
             <span className="italic">
               {delayedCharacterInfo.status === "dnd"
@@ -837,7 +972,7 @@ export function ConversationView({
         )}
 
         {/* Typing indicator — shown when generation is actively running */}
-        {isStreaming && !streamBuffer && typingCharacterName && (
+        {showTypingIndicator && (
           <div className="flex items-center gap-2 px-4 py-1.5 text-[0.8125rem] text-[var(--text-secondary)]">
             <span className="flex gap-0.5">
               <span
@@ -853,37 +988,16 @@ export function ConversationView({
                 style={{ animationDelay: "300ms" }}
               />
             </span>
-            <span className="italic">{typingCharacterName} is typing...</span>
+            <span className="italic">
+              {liveTypingName} {liveTypingVerb} typing...
+            </span>
           </div>
         )}
 
-        {/* Streaming message — only shown once actual content starts arriving */}
-        {isStreaming && !regenerateMessageId && streamBuffer && (
-          <ConversationMessage
-            message={{
-              id: "__streaming__",
-              chatId,
-              role: "assistant",
-              characterId: streamingCharacterId ?? chatCharIds[0] ?? null,
-              content: streamBuffer,
-              activeSwipeIndex: 0,
-              extra: {
-                displayText: null,
-                isGenerated: true,
-                tokenCount: 0,
-                generationInfo: null,
-              },
-              createdAt: new Date().toISOString(),
-            }}
-            isStreaming
-            characterMap={characterMap}
-            personaInfo={personaInfo as any}
-            chatCharacterIds={chatCharIds}
-          />
-        )}
-
         {/* Scene banner — inline at bottom of messages (origin variant only) */}
-        {sceneInfo?.variant === "origin" && <SceneBanner variant="origin" sceneChatId={sceneInfo.sceneChatId} />}
+        {sceneInfo?.variant === "origin" && (
+          <SceneBanner variant="origin" sceneChatId={sceneInfo.sceneChatId} sceneChatName={sceneInfo.sceneChatName} />
+        )}
 
         <div ref={messagesEndRef} className="h-1" />
       </div>
@@ -924,19 +1038,22 @@ export function ConversationView({
         }
         chatCharacters={
           chatCharIds.length > 1
-            ? chatCharIds.map((id) => {
-                const info = characterMap.get(id);
-                return {
-                  id,
-                  name: info?.name ?? "Unknown",
-                  avatarUrl: info?.avatarUrl ?? null,
-                  avatarCrop: info?.avatarCrop ?? null,
-                  conversationStatus: info?.conversationStatus,
-                  conversationActivity: info?.conversationActivity,
-                };
-              })
+            ? chatCharIds
+                .filter((id) => characterMap.has(id))
+                .map((id) => {
+                  const info = characterMap.get(id)!;
+                  return {
+                    id,
+                    name: info.name,
+                    avatarUrl: info.avatarUrl ?? null,
+                    avatarCrop: info.avatarCrop ?? null,
+                    conversationStatus: info.conversationStatus,
+                    conversationActivity: info.conversationActivity,
+                  };
+                })
             : undefined
         }
+        onPeekPrompt={onPeekPrompt}
       />
     </div>
   );
@@ -948,6 +1065,7 @@ function SplitMessageGroup({
   isStreaming,
   regenerateMessageId,
   streamBuffer,
+  thinkingBuffer,
   lastAssistantMessageId,
   characterMap,
   chatCharacterIds,
@@ -962,6 +1080,7 @@ function SplitMessageGroup({
   isStreaming: boolean;
   regenerateMessageId: string | null;
   streamBuffer: string;
+  thinkingBuffer: string;
   lastAssistantMessageId: string | undefined | null;
   characterMap: CharacterMap;
   chatCharacterIds: string[];
@@ -1072,7 +1191,7 @@ function SplitMessageGroup({
         if (isRegen) {
           // While waiting for content, don't render — the "X is typing..." indicator
           // at the bottom of the message list provides the visual feedback.
-          if (!streamBuffer) {
+          if (!streamBuffer && !thinkingBuffer) {
             return (
               <ConversationMessage
                 key={firstItem.key}
@@ -1093,7 +1212,11 @@ function SplitMessageGroup({
               />
             );
           }
-          const dMsg = { ...firstItem.msg, content: streamBuffer, extra: regenExtra };
+          const dMsg = {
+            ...firstItem.msg,
+            content: streamBuffer || "Thinking...",
+            extra: { ...regenExtra, thinking: thinkingBuffer || regenExtra?.thinking },
+          };
           return (
             <ConversationMessage
               key={firstItem.key}

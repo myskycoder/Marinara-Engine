@@ -126,6 +126,8 @@ export function ChoiceSelectionModal({
   const allSelected = variables.every((v) => {
     const sel = selections[v.variableName];
     if (v.multiSelect) return Array.isArray(sel) && sel.length > 0;
+    // Single-option variables are boolean toggles — both ON and OFF are valid
+    if (v.options.length === 1) return sel !== undefined;
     return sel !== undefined && sel !== "";
   });
 
@@ -175,6 +177,11 @@ export function ChoiceSelectionModal({
                 <p className="text-[0.625rem] text-[var(--muted-foreground)]">
                   Variable: <code className="text-amber-400">{`{{${v.variableName}}}`}</code>
                 </p>
+                {v.options.length === 1 && !v.multiSelect && (
+                  <span className="flex items-center gap-0.5 rounded bg-purple-400/15 px-1.5 py-0.5 text-[0.5625rem] font-medium text-purple-400">
+                    Boolean toggle
+                  </span>
+                )}
                 {v.multiSelect && (
                   <span className="flex items-center gap-0.5 rounded bg-purple-400/15 px-1.5 py-0.5 text-[0.5625rem] font-medium text-purple-400">
                     {v.randomPick ? (
@@ -225,37 +232,80 @@ export function ChoiceSelectionModal({
                         </button>
                       );
                     })
-                  : // ── Single-select: radio-style ──
-                    v.options.map((opt) => {
-                      const isSelected = selections[v.variableName] === opt.value;
-                      return (
-                        <button
-                          key={opt.id}
-                          onClick={() => setOverrides((prev) => ({ ...prev, [v.variableName]: opt.value }))}
-                          className={cn(
-                            "flex w-full items-start gap-2.5 rounded-lg p-2.5 text-left transition-all",
-                            isSelected ? "bg-purple-400/10 ring-1 ring-purple-400/30" : "hover:bg-[var(--accent)]",
-                          )}
-                        >
-                          {isSelected ? (
-                            <CheckCircle2 size="0.875rem" className="mt-0.5 shrink-0 text-purple-400" />
-                          ) : (
-                            <Circle size="0.875rem" className="mt-0.5 shrink-0 text-[var(--muted-foreground)]" />
-                          )}
-                          <div className="min-w-0 flex-1">
-                            <span className={cn("text-xs font-medium", isSelected && "text-purple-400")}>
-                              {opt.label}
-                            </span>
-                            {opt.value && (
-                              <p className="mt-0.5 line-clamp-2 text-[0.625rem] text-[var(--muted-foreground)]">
-                                {opt.value.slice(0, 150)}
-                                {opt.value.length > 150 ? "…" : ""}
-                              </p>
+                  : v.options.length === 1
+                    ? // ── Boolean toggle: single option ──
+                      (() => {
+                        const opt = v.options[0];
+                        const isOn = selections[v.variableName] === opt.value;
+                        return (
+                          <button
+                            onClick={() =>
+                              setOverrides((prev) => ({
+                                ...prev,
+                                [v.variableName]: isOn ? "" : opt.value,
+                              }))
+                            }
+                            className={cn(
+                              "flex w-full items-center justify-between gap-2.5 rounded-lg p-2.5 text-left transition-all",
+                              isOn ? "bg-purple-400/10 ring-1 ring-purple-400/30" : "hover:bg-[var(--accent)]",
                             )}
-                          </div>
-                        </button>
-                      );
-                    })}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <span className={cn("text-xs font-medium", isOn && "text-purple-400")}>{opt.label}</span>
+                              {opt.value && (
+                                <p className="mt-0.5 line-clamp-2 text-[0.625rem] text-[var(--muted-foreground)]">
+                                  {opt.value.slice(0, 150)}
+                                  {opt.value.length > 150 ? "…" : ""}
+                                </p>
+                              )}
+                            </div>
+                            <div
+                              className={cn(
+                                "relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors",
+                                isOn ? "bg-purple-400" : "bg-[var(--border)]",
+                              )}
+                            >
+                              <span
+                                className={cn(
+                                  "pointer-events-none inline-block h-3 w-3 translate-y-0.5 rounded-full bg-white shadow transition-transform",
+                                  isOn ? "translate-x-3.5" : "translate-x-0.5",
+                                )}
+                              />
+                            </div>
+                          </button>
+                        );
+                      })()
+                    : // ── Single-select: radio-style ──
+                      v.options.map((opt) => {
+                        const isSelected = selections[v.variableName] === opt.value;
+                        return (
+                          <button
+                            key={opt.id}
+                            onClick={() => setOverrides((prev) => ({ ...prev, [v.variableName]: opt.value }))}
+                            className={cn(
+                              "flex w-full items-start gap-2.5 rounded-lg p-2.5 text-left transition-all",
+                              isSelected ? "bg-purple-400/10 ring-1 ring-purple-400/30" : "hover:bg-[var(--accent)]",
+                            )}
+                          >
+                            {isSelected ? (
+                              <CheckCircle2 size="0.875rem" className="mt-0.5 shrink-0 text-purple-400" />
+                            ) : (
+                              <Circle size="0.875rem" className="mt-0.5 shrink-0 text-[var(--muted-foreground)]" />
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <span className={cn("text-xs font-medium", isSelected && "text-purple-400")}>
+                                {opt.label}
+                              </span>
+                              {opt.value && (
+                                <p className="mt-0.5 line-clamp-2 text-[0.625rem] text-[var(--muted-foreground)]">
+                                  {opt.value.slice(0, 150)}
+                                  {opt.value.length > 150 ? "…" : ""}
+                                </p>
+                              )}
+                            </div>
+                          </button>
+                        );
+                      })}
               </div>
             </div>
           ))}

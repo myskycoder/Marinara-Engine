@@ -16,8 +16,10 @@ import {
   Swords,
   Target,
   Thermometer,
+  Trash2,
   Users,
   X,
+  RefreshCw,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { api } from "../../lib/api-client";
@@ -48,6 +50,37 @@ interface CombinedPlayerPanelProps {
   customTrackerFields: CustomTrackerField[];
   onUpdateCustomTracker: (fields: CustomTrackerField[]) => void;
   onClose: () => void;
+  onRerunSingleTracker?: (agentType: string) => void;
+  isTrackerRetryBusy?: boolean;
+}
+
+function TrackerSectionRefresh({
+  agentType,
+  onRerunSingleTracker,
+  busy,
+  title,
+}: {
+  agentType: string;
+  onRerunSingleTracker?: (agentType: string) => void;
+  busy?: boolean;
+  /** Tooltip when hovering the refresh control */
+  title?: string;
+}) {
+  if (!onRerunSingleTracker) return null;
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.preventDefault();
+        onRerunSingleTracker(agentType);
+      }}
+      disabled={busy}
+      title={title ?? `Re-run ${agentType} only`}
+      className="rounded p-0.5 text-[var(--muted-foreground)]/50 transition-colors hover:bg-[var(--accent)] hover:text-purple-300 disabled:opacity-40"
+    >
+      <RefreshCw size="0.625rem" className={busy ? "animate-spin" : ""} />
+    </button>
+  );
 }
 
 const EMPTY_STATE = "text-[0.625rem] text-[var(--muted-foreground)]/60 text-center py-1";
@@ -70,6 +103,8 @@ export function CombinedPlayerPanel({
   customTrackerFields,
   onUpdateCustomTracker,
   onClose,
+  onRerunSingleTracker,
+  isTrackerRetryBusy,
 }: CombinedPlayerPanelProps) {
   const updateBar = (idx: number, field: "value" | "max" | "name", val: number | string) => {
     const next = [...personaStats];
@@ -156,10 +191,16 @@ export function CombinedPlayerPanel({
         {showPersona && (
           <div className="p-2">
             <PersonaStatusField value={personaStatus} onSave={onUpdatePersonaStatus} />
-            <div className="px-1 pb-1">
+            <div className="flex items-center justify-between px-1 pb-1">
               <span className="text-[0.625rem] font-semibold text-violet-300/70 uppercase tracking-wider">
                 Persona Stats
               </span>
+              <TrackerSectionRefresh
+                agentType="persona-stats"
+                onRerunSingleTracker={onRerunSingleTracker}
+                busy={isTrackerRetryBusy}
+                title="Re-run persona tracker (stats + inventory)"
+              />
             </div>
             <div className="space-y-2">
               {personaStats.length === 0 && <div className={EMPTY_STATE}>No stats tracked</div>}
@@ -182,12 +223,20 @@ export function CombinedPlayerPanel({
               <span className="text-[0.625rem] font-semibold text-purple-300/70 uppercase tracking-wider flex items-center gap-1">
                 <Users size="0.5625rem" /> Characters ({characters.length})
               </span>
-              <button
-                onClick={addCharacter}
-                className="flex items-center gap-0.5 text-[0.625rem] text-purple-400 hover:text-purple-300 transition-colors"
-              >
-                <Plus size="0.625rem" /> Add
-              </button>
+              <span className="flex items-center gap-1">
+                <TrackerSectionRefresh
+                  agentType="character-tracker"
+                  onRerunSingleTracker={onRerunSingleTracker}
+                  busy={isTrackerRetryBusy}
+                  title="Re-run character tracker only"
+                />
+                <button
+                  onClick={addCharacter}
+                  className="flex items-center gap-0.5 text-[0.625rem] text-purple-400 hover:text-purple-300 transition-colors"
+                >
+                  <Plus size="0.625rem" /> Add
+                </button>
+              </span>
             </div>
             <div className="space-y-2">
               {characters.length === 0 && <div className={EMPTY_STATE}>No characters in scene</div>}
@@ -311,12 +360,20 @@ export function CombinedPlayerPanel({
               <span className="text-[0.625rem] font-semibold text-emerald-300/70 uppercase tracking-wider flex items-center gap-1">
                 <Scroll size="0.5625rem" /> Quests ({quests.length})
               </span>
-              <button
-                onClick={addQuest}
-                className="flex items-center gap-0.5 text-[0.625rem] text-emerald-400 hover:text-emerald-300 transition-colors"
-              >
-                <Plus size="0.625rem" /> Add
-              </button>
+              <span className="flex items-center gap-1">
+                <TrackerSectionRefresh
+                  agentType="quest"
+                  onRerunSingleTracker={onRerunSingleTracker}
+                  busy={isTrackerRetryBusy}
+                  title="Re-run quest tracker only"
+                />
+                <button
+                  onClick={addQuest}
+                  className="flex items-center gap-0.5 text-[0.625rem] text-emerald-400 hover:text-emerald-300 transition-colors"
+                >
+                  <Plus size="0.625rem" /> Add
+                </button>
+              </span>
             </div>
             <div className="space-y-2">
               {quests.length === 0 && <div className={EMPTY_STATE}>No active quests</div>}
@@ -338,12 +395,20 @@ export function CombinedPlayerPanel({
               <span className="text-[0.625rem] font-semibold text-cyan-300/70 uppercase tracking-wider flex items-center gap-1">
                 <SlidersHorizontal size="0.5625rem" /> Custom ({customTrackerFields.length})
               </span>
-              <button
-                onClick={addCustomField}
-                className="flex items-center gap-0.5 text-[0.625rem] text-cyan-400 hover:text-cyan-300 transition-colors"
-              >
-                <Plus size="0.625rem" /> Add
-              </button>
+              <span className="flex items-center gap-1">
+                <TrackerSectionRefresh
+                  agentType="custom-tracker"
+                  onRerunSingleTracker={onRerunSingleTracker}
+                  busy={isTrackerRetryBusy}
+                  title="Re-run custom tracker only"
+                />
+                <button
+                  onClick={addCustomField}
+                  className="flex items-center gap-0.5 text-[0.625rem] text-cyan-400 hover:text-cyan-300 transition-colors"
+                >
+                  <Plus size="0.625rem" /> Add
+                </button>
+              </span>
             </div>
             <div className="space-y-1">
               {customTrackerFields.length === 0 && <div className={EMPTY_STATE}>No fields tracked</div>}
@@ -385,13 +450,25 @@ interface PersonaStatsPanelProps {
   onUpdate: (bars: CharacterStat[]) => void;
   status?: string;
   onUpdateStatus?: (status: string) => void;
+  onRerunSingleTracker?: (agentType: string) => void;
+  isTrackerRetryBusy?: boolean;
 }
 
-export function PersonaStatsPanel({ bars, onUpdate, status = "", onUpdateStatus }: PersonaStatsPanelProps) {
+export function PersonaStatsPanel({
+  bars,
+  onUpdate,
+  status = "",
+  onUpdateStatus,
+  onRerunSingleTracker,
+  isTrackerRetryBusy,
+}: PersonaStatsPanelProps) {
   const updateBar = (idx: number, field: "value" | "max" | "name", val: number | string) => {
     const next = [...bars];
     next[idx] = { ...next[idx]!, [field]: val };
     onUpdate(next);
+  };
+  const removeBar = (idx: number) => {
+    onUpdate(bars.filter((_, index) => index !== idx));
   };
 
   return (
@@ -399,10 +476,16 @@ export function PersonaStatsPanel({ bars, onUpdate, status = "", onUpdateStatus 
       <div className="border-b border-[var(--border)] p-2">
         <PersonaStatusField value={status} onSave={onUpdateStatus} />
       </div>
-      <div className="border-b border-[var(--border)] px-3 py-1.5">
+      <div className="flex items-center justify-between border-b border-[var(--border)] px-3 py-1.5">
         <span className="text-[0.625rem] font-semibold text-[var(--muted-foreground)] uppercase tracking-wider">
           Persona Stats
         </span>
+        <TrackerSectionRefresh
+          agentType="persona-stats"
+          onRerunSingleTracker={onRerunSingleTracker}
+          busy={isTrackerRetryBusy}
+          title="Re-run persona tracker (stats + inventory)"
+        />
       </div>
       <div className="p-2 space-y-2">
         {bars.map((bar, idx) => (
@@ -412,6 +495,7 @@ export function PersonaStatsPanel({ bars, onUpdate, status = "", onUpdateStatus 
             onUpdateName={(name) => updateBar(idx, "name", name)}
             onUpdateValue={(value) => updateBar(idx, "value", value)}
             onUpdateMax={(value) => updateBar(idx, "max", value)}
+            onRemove={() => removeBar(idx)}
           />
         ))}
       </div>
@@ -423,9 +507,17 @@ interface CharactersPanelProps {
   characters: PresentCharacter[];
   onUpdate: (chars: PresentCharacter[]) => void;
   chatId?: string;
+  onRerunSingleTracker?: (agentType: string) => void;
+  isTrackerRetryBusy?: boolean;
 }
 
-export function CharactersPanel({ characters, onUpdate, chatId }: CharactersPanelProps) {
+export function CharactersPanel({
+  characters,
+  onUpdate,
+  chatId,
+  onRerunSingleTracker,
+  isTrackerRetryBusy,
+}: CharactersPanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadIdx, setUploadIdx] = useState<number | null>(null);
 
@@ -531,6 +623,12 @@ export function CharactersPanel({ characters, onUpdate, chatId }: CharactersPane
           <Users size="0.625rem" /> Present Characters
         </span>
         <div className="flex items-center gap-2">
+          <TrackerSectionRefresh
+            agentType="character-tracker"
+            onRerunSingleTracker={onRerunSingleTracker}
+            busy={isTrackerRetryBusy}
+            title="Re-run character tracker only"
+          />
           {trackerConfig && (
             <>
               <button
@@ -750,9 +848,11 @@ export function InventoryPanel({ items, onUpdate }: InventoryPanelProps) {
 interface QuestsPanelProps {
   quests: QuestProgress[];
   onUpdate: (quests: QuestProgress[]) => void;
+  onRerunSingleTracker?: (agentType: string) => void;
+  isTrackerRetryBusy?: boolean;
 }
 
-export function QuestsPanel({ quests, onUpdate }: QuestsPanelProps) {
+export function QuestsPanel({ quests, onUpdate, onRerunSingleTracker, isTrackerRetryBusy }: QuestsPanelProps) {
   const addQuest = () => {
     onUpdate([
       ...quests,
@@ -782,12 +882,20 @@ export function QuestsPanel({ quests, onUpdate }: QuestsPanelProps) {
         <span className="text-[0.625rem] font-semibold text-[var(--muted-foreground)] uppercase tracking-wider flex items-center gap-1">
           <Scroll size="0.625rem" /> Quests ({quests.length})
         </span>
-        <button
-          onClick={addQuest}
-          className="flex items-center gap-0.5 text-[0.625rem] text-emerald-400 hover:text-emerald-300 transition-colors"
-        >
-          <Plus size="0.625rem" /> Add
-        </button>
+        <span className="flex items-center gap-1">
+          <TrackerSectionRefresh
+            agentType="quest"
+            onRerunSingleTracker={onRerunSingleTracker}
+            busy={isTrackerRetryBusy}
+            title="Re-run quest tracker only"
+          />
+          <button
+            onClick={addQuest}
+            className="flex items-center gap-0.5 text-[0.625rem] text-emerald-400 hover:text-emerald-300 transition-colors"
+          >
+            <Plus size="0.625rem" /> Add
+          </button>
+        </span>
       </div>
       <div className="p-2 space-y-2">
         {quests.length === 0 && <div className={cn(EMPTY_STATE, "py-2")}>No active quests</div>}
@@ -807,9 +915,16 @@ export function QuestsPanel({ quests, onUpdate }: QuestsPanelProps) {
 interface CustomTrackerPanelProps {
   fields: CustomTrackerField[];
   onUpdate: (fields: CustomTrackerField[]) => void;
+  onRerunSingleTracker?: (agentType: string) => void;
+  isTrackerRetryBusy?: boolean;
 }
 
-export function CustomTrackerPanel({ fields, onUpdate }: CustomTrackerPanelProps) {
+export function CustomTrackerPanel({
+  fields,
+  onUpdate,
+  onRerunSingleTracker,
+  isTrackerRetryBusy,
+}: CustomTrackerPanelProps) {
   const addField = () => {
     onUpdate([...fields, { name: "New Field", value: "" }]);
   };
@@ -830,12 +945,20 @@ export function CustomTrackerPanel({ fields, onUpdate }: CustomTrackerPanelProps
         <span className="text-[0.625rem] font-semibold text-[var(--muted-foreground)] uppercase tracking-wider flex items-center gap-1">
           <SlidersHorizontal size="0.625rem" /> Custom Tracker ({fields.length})
         </span>
-        <button
-          onClick={addField}
-          className="flex items-center gap-0.5 text-[0.625rem] text-cyan-400 hover:text-cyan-300 transition-colors"
-        >
-          <Plus size="0.625rem" /> Add
-        </button>
+        <span className="flex items-center gap-1">
+          <TrackerSectionRefresh
+            agentType="custom-tracker"
+            onRerunSingleTracker={onRerunSingleTracker}
+            busy={isTrackerRetryBusy}
+            title="Re-run custom tracker only"
+          />
+          <button
+            onClick={addField}
+            className="flex items-center gap-0.5 text-[0.625rem] text-cyan-400 hover:text-cyan-300 transition-colors"
+          >
+            <Plus size="0.625rem" /> Add
+          </button>
+        </span>
       </div>
       <div className="p-2 space-y-1">
         {fields.length === 0 && <div className={cn(EMPTY_STATE, "py-2")}>No fields tracked — add one above</div>}
@@ -884,6 +1007,8 @@ interface CombinedWorldPanelProps {
   pinColor: string;
   tempColor: string;
   onClose: () => void;
+  onRerunSingleTracker?: (agentType: string) => void;
+  isTrackerRetryBusy?: boolean;
 }
 
 export function CombinedWorldPanel({
@@ -901,6 +1026,8 @@ export function CombinedWorldPanel({
   pinColor,
   tempColor,
   onClose,
+  onRerunSingleTracker,
+  isTrackerRetryBusy,
 }: CombinedWorldPanelProps) {
   return (
     <>
@@ -908,12 +1035,20 @@ export function CombinedWorldPanel({
         <span className="text-[0.625rem] font-semibold text-[var(--muted-foreground)] uppercase tracking-wider flex items-center gap-1">
           <CloudSun size="0.625rem" /> World State
         </span>
-        <button
-          onClick={onClose}
-          className="text-[var(--muted-foreground)]/50 hover:text-[var(--foreground)] transition-colors"
-        >
-          <X size="0.75rem" />
-        </button>
+        <span className="flex items-center gap-1">
+          <TrackerSectionRefresh
+            agentType="world-state"
+            onRerunSingleTracker={onRerunSingleTracker}
+            busy={isTrackerRetryBusy}
+            title="Re-run world state tracker only"
+          />
+          <button
+            onClick={onClose}
+            className="text-[var(--muted-foreground)]/50 hover:text-[var(--foreground)] transition-colors"
+          >
+            <X size="0.75rem" />
+          </button>
+        </span>
       </div>
       <div className="divide-y divide-[var(--border)]">
         <WorldFieldRow
@@ -1095,16 +1230,18 @@ function StatBarEditable({
   onUpdateName,
   onUpdateValue,
   onUpdateMax,
+  onRemove,
 }: {
   stat: CharacterStat;
   onUpdateName?: (name: string) => void;
   onUpdateValue: (v: number) => void;
   onUpdateMax: (v: number) => void;
+  onRemove?: () => void;
 }) {
   const pct = stat.max > 0 ? Math.min(100, Math.max(0, (stat.value / stat.max) * 100)) : 0;
 
   return (
-    <div>
+    <div className="group/stat relative">
       <div className="flex items-center justify-between mb-0.5">
         {onUpdateName ? (
           <InlineEdit
@@ -1132,6 +1269,17 @@ function StatBarEditable({
           />
         </div>
       </div>
+      {onRemove && (
+        <button
+          type="button"
+          onClick={onRemove}
+          title="Remove stat"
+          aria-label={`Remove ${stat.name || "stat"}`}
+          className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded bg-[var(--popover)]/90 text-[var(--muted-foreground)]/45 opacity-0 shadow-sm ring-1 ring-[var(--border)]/70 transition-all hover:text-[var(--destructive)] hover:opacity-100 focus-visible:opacity-100 group-hover/stat:opacity-80 max-md:opacity-80"
+        >
+          <Trash2 size="0.5625rem" />
+        </button>
+      )}
       <div className="h-1.5 rounded-full bg-[var(--muted)]/30 overflow-hidden">
         <div
           className="h-full rounded-full transition-all duration-500"

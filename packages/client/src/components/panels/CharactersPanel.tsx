@@ -13,7 +13,8 @@ import {
   useUpdateCharacter,
   useDuplicateCharacter,
 } from "../../hooks/use-characters";
-import { useUpdateChat, useCreateMessage, useCreateChat, chatKeys } from "../../hooks/use-chats";
+import { useUpdateChat, useCreateMessage, chatKeys } from "../../hooks/use-chats";
+import { useStartChatFromCharacter } from "../../hooks/use-start-chat-from-character";
 import { api } from "../../lib/api-client";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { useChatStore } from "../../stores/chat.store";
@@ -46,6 +47,7 @@ import {
 import { getCharacterTitle } from "../../lib/character-display";
 import { useUIStore } from "../../stores/ui.store";
 import { cn, getAvatarCropStyle } from "../../lib/utils";
+import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatDialog";
 
 type CharacterRow = {
   id: string;
@@ -100,8 +102,8 @@ export function CharactersPanel() {
   const activeChat = useChatStore((s) => s.activeChat);
   const updateChat = useUpdateChat();
   const createMessage = useCreateMessage(activeChat?.id ?? null);
-  const createChat = useCreateChat();
   const queryClient = useQueryClient();
+  const { startChatFromCharacter, isStartingChat } = useStartChatFromCharacter();
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -110,54 +112,6 @@ export function CharactersPanel() {
     firstMes?: string;
     altGreetings?: string[];
   } | null>(null);
-
-  const quickStartFromCharacter = useCallback(
-    (
-      charId: string,
-      charName: string,
-      mode: "roleplay" | "conversation",
-      firstMes?: string,
-      altGreetings?: string[],
-    ) => {
-      const label = mode === "conversation" ? "Conversation" : "Roleplay";
-      createChat.mutate(
-        { name: charName ? `${charName} — ${label}` : `New ${label}`, mode, characterIds: [charId] },
-        {
-          onSuccess: async (chat) => {
-            useChatStore.getState().setActiveChatId(chat.id);
-            // Mirror the wizard's roleplay first-message behavior — without this,
-            // a quick-started roleplay would open with no greeting from the character.
-            if (mode === "roleplay" && firstMes?.trim()) {
-              try {
-                const msg = await api.post<{ id: string }>(`/chats/${chat.id}/messages`, {
-                  role: "assistant",
-                  content: firstMes,
-                  characterId: charId,
-                });
-                if (msg?.id && altGreetings?.length) {
-                  for (const greeting of altGreetings) {
-                    if (greeting.trim()) {
-                      await api.post(`/chats/${chat.id}/messages/${msg.id}/swipes`, {
-                        content: greeting,
-                        silent: true,
-                      });
-                    }
-                  }
-                }
-                queryClient.invalidateQueries({ queryKey: chatKeys.messages(chat.id) });
-              } catch {
-                /* swallow — don't block the chat from opening if greeting injection fails */
-              }
-            }
-            useChatStore.getState().setShouldOpenSettings(true);
-            useChatStore.getState().setShouldOpenWizard(true);
-            useChatStore.getState().setShouldOpenWizardInShortcutMode(true);
-          },
-        },
-      );
-    },
-    [createChat, queryClient],
-  );
 
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<SortOption>("name-asc");
@@ -419,18 +373,28 @@ export function CharactersPanel() {
     setSelectedCharacterIds(new Set(sortedCharacters.map((char) => char.id)));
   }, [sortedCharacters]);
 
-  const handleExportSelected = useCallback(async () => {
-    if (selectedCharacterIds.size === 0) return;
-    setExportingSelected(true);
-    try {
-      await api.downloadPost("/characters/export-bulk", { ids: [...selectedCharacterIds] }, "marinara-characters.zip");
-      toast.success(`Exported ${selectedCharacterIds.size} character${selectedCharacterIds.size === 1 ? "" : "s"}`);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to export characters");
-    } finally {
-      setExportingSelected(false);
-    }
-  }, [selectedCharacterIds]);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+
+  const handleExportSelected = useCallback(
+    async (format: ExportFormatChoice) => {
+      if (selectedCharacterIds.size === 0) return;
+      setExportingSelected(true);
+      setExportDialogOpen(false);
+      try {
+        await api.downloadPost(
+          "/characters/export-bulk",
+          { ids: [...selectedCharacterIds], format },
+          format === "compatible" ? "compatible-characters.zip" : "marinara-characters.zip",
+        );
+        toast.success(`Exported ${selectedCharacterIds.size} character${selectedCharacterIds.size === 1 ? "" : "s"}`);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to export characters");
+      } finally {
+        setExportingSelected(false);
+      }
+    },
+    [selectedCharacterIds],
+  );
 
   const handleDeleteSelected = useCallback(async () => {
     const ids = [...selectedCharacterIds];
@@ -463,6 +427,19 @@ export function CharactersPanel() {
 
     exitSelectionMode();
   }, [selectedCharacterIds, deleteCharacter, exitSelectionMode]);
+
+  const handleStartNewChat = useCallback(
+    (characterId: string, characterName: string, firstMessage?: string, alternateGreetings?: string[]) => {
+      startChatFromCharacter({
+        characterId,
+        characterName,
+        mode: "roleplay",
+        firstMessage,
+        alternateGreetings,
+      });
+    },
+    [startChatFromCharacter],
+  );
 
   return (
     <div className="flex flex-col gap-2 p-3">
@@ -666,7 +643,7 @@ export function CharactersPanel() {
             Delete
           </button>
           <button
-            onClick={handleExportSelected}
+            onClick={() => setExportDialogOpen(true)}
             disabled={selectedCharacterIds.size === 0 || exportingSelected}
             className="inline-flex items-center gap-1 rounded-lg bg-[var(--primary)] px-2.5 py-1 text-[0.625rem] font-medium text-[var(--primary-foreground)] transition-all hover:opacity-90 disabled:opacity-40"
           >
@@ -681,6 +658,15 @@ export function CharactersPanel() {
           </button>
         </div>
       )}
+
+      <ExportFormatDialog
+        open={exportDialogOpen}
+        title="Export Characters"
+        description="Native keeps Marinara metadata. Compatible exports direct Chara Card V2 JSON for other platforms."
+        compatibleDescription="Exports direct Chara Card V2 JSON files without the Marinara wrapper."
+        onClose={() => setExportDialogOpen(false)}
+        onSelect={handleExportSelected}
+      />
 
       {/* ── Groups Section ── */}
       <div className="mt-1">
@@ -836,7 +822,7 @@ export function CharactersPanel() {
 
                   {/* Expanded: show members */}
                   {isExpanded && (
-                    <div className="ml-5 flex flex-col gap-0.5 border-l-2 border-[var(--border)]/40 pl-3 pb-2">
+                    <div className="ml-5 flex flex-col gap-0.5 border-l border-[var(--border)]/40 pl-3 pb-2">
                       {group.memberIds.length === 0 && (
                         <div className="py-2 text-[0.625rem] text-[var(--muted-foreground)] italic">
                           No members — click <Users size="0.625rem" className="inline" /> to add characters
@@ -884,6 +870,25 @@ export function CharactersPanel() {
                                 </span>
                               )}
                             </div>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const fullMember = parsedCharacters.find((c) => c.id === memberId);
+                                handleStartNewChat(
+                                  memberId,
+                                  member.name,
+                                  fullMember?.parsed?.first_mes as string | undefined,
+                                  (fullMember?.parsed?.alternate_greetings ?? []) as string[],
+                                );
+                              }}
+                              disabled={isStartingChat}
+                              className="rounded p-0.5 text-[var(--muted-foreground)] opacity-0 transition-all hover:bg-[var(--primary)]/10 hover:text-[var(--primary)] group-hover/member:opacity-100 disabled:cursor-not-allowed disabled:opacity-50 max-md:opacity-100"
+                              title="Start New Chat"
+                              aria-label={`Start New Chat with ${member.name}`}
+                            >
+                              <MessageCircle size="0.6875rem" />
+                            </button>
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
@@ -1179,10 +1184,9 @@ export function CharactersPanel() {
               label: "Quick Start Roleplay",
               icon: <Wand2 size="0.75rem" />,
               onSelect: () =>
-                quickStartFromCharacter(
+                handleStartNewChat(
                   contextMenu.charId,
                   contextMenu.charName,
-                  "roleplay",
                   contextMenu.firstMes,
                   contextMenu.altGreetings,
                 ),
@@ -1190,7 +1194,12 @@ export function CharactersPanel() {
             {
               label: "Quick Start Conversation",
               icon: <MessageCircle size="0.75rem" />,
-              onSelect: () => quickStartFromCharacter(contextMenu.charId, contextMenu.charName, "conversation"),
+              onSelect: () =>
+                startChatFromCharacter({
+                  characterId: contextMenu.charId,
+                  characterName: contextMenu.charName,
+                  mode: "conversation",
+                }),
             },
           ];
           return <ContextMenu x={contextMenu.x} y={contextMenu.y} items={items} onClose={() => setContextMenu(null)} />;

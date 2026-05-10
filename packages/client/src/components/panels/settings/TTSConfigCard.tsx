@@ -23,7 +23,7 @@ import { useCharacters } from "../../../hooks/use-characters";
 import { ttsService } from "../../../lib/tts-service";
 import { parseCharacterDisplayData } from "../../../lib/character-display";
 import type { TTSConfig, TTSSource, TTSVoiceAssignment, TTSVoiceMode } from "@marinara-engine/shared";
-import { TTS_API_KEY_MASK } from "@marinara-engine/shared";
+import { ELEVENLABS_TTS_LANGUAGE_OPTIONS, TTS_API_KEY_MASK } from "@marinara-engine/shared";
 import { HelpTooltip } from "../../ui/HelpTooltip";
 
 // ── Sub-components ───────────────────────────────
@@ -61,11 +61,19 @@ const TTS_SOURCE_DEFAULTS: Record<
     voice: "",
     idleText: "ElevenLabs TTS",
   },
+  pockettts: {
+    label: "PocketTTS",
+    baseUrl: "http://localhost:8000",
+    model: "pocket-tts",
+    voice: "alba",
+    idleText: "Local PocketTTS",
+  },
 };
 
 const TTS_SOURCE_OPTIONS: Array<{ value: TTSSource; label: string }> = [
   { value: "openai", label: "OpenAI-compatible" },
   { value: "elevenlabs", label: "ElevenLabs" },
+  { value: "pockettts", label: "PocketTTS" },
 ];
 
 const ELEVENLABS_TTS_MODELS = [
@@ -291,6 +299,7 @@ export function TTSConfigCard() {
   const [npcDefaultFemaleVoices, setNpcDefaultFemaleVoices] = useState<string[]>([]);
   const [speed, setSpeed] = useState(1.0);
   const [elevenLabsStability, setElevenLabsStability] = useState(0.5);
+  const [elevenLabsLanguageCode, setElevenLabsLanguageCode] = useState("");
   const [autoplayRP, setAutoplayRP] = useState(false);
   const [autoplayConvo, setAutoplayConvo] = useState(false);
   const [autoplayGame, setAutoplayGame] = useState(false);
@@ -331,6 +340,7 @@ export function TTSConfigCard() {
     setNpcDefaultFemaleVoices(savedConfig.npcDefaultFemaleVoices ?? []);
     setSpeed(savedConfig.speed);
     setElevenLabsStability(savedConfig.elevenLabsStability ?? 0.5);
+    setElevenLabsLanguageCode(savedConfig.elevenLabsLanguageCode ?? "");
     setAutoplayRP(savedConfig.autoplayRP);
     setAutoplayConvo(savedConfig.autoplayConvo);
     setAutoplayGame(savedConfig.autoplayGame);
@@ -372,6 +382,7 @@ export function TTSConfigCard() {
     npcDefaultFemaleVoices,
     speed,
     elevenLabsStability,
+    elevenLabsLanguageCode,
     autoplayRP,
     autoplayConvo,
     autoplayGame,
@@ -421,6 +432,7 @@ export function TTSConfigCard() {
     setNpcDefaultVoicesEnabled(false);
     setNpcDefaultMaleVoices([]);
     setNpcDefaultFemaleVoices([]);
+    setElevenLabsLanguageCode("");
     mark({
       source: nextSource,
       baseUrl: defaults.baseUrl,
@@ -432,6 +444,7 @@ export function TTSConfigCard() {
       npcDefaultVoicesEnabled: false,
       npcDefaultMaleVoices: [],
       npcDefaultFemaleVoices: [],
+      elevenLabsLanguageCode: "",
     });
   };
 
@@ -533,6 +546,9 @@ export function TTSConfigCard() {
       : voice || (source === "elevenlabs" ? "No voice selected" : selectedSource.voice);
   const previewVoice =
     voiceMode === "per-character" ? (voiceAssignments.find((assignment) => assignment.voice)?.voice ?? voice) : voice;
+  const selectedLanguage =
+    ELEVENLABS_TTS_LANGUAGE_OPTIONS.find((option) => option.code === elevenLabsLanguageCode) ??
+    ELEVENLABS_TTS_LANGUAGE_OPTIONS[0];
   const previewDisabled = !enabled || ttsState === "loading" || (source === "elevenlabs" && !previewVoice);
   const previewTitle =
     source === "elevenlabs" && !previewVoice
@@ -637,7 +653,7 @@ export function TTSConfigCard() {
           <div className="text-sm font-medium">Text to Speech</div>
           <div className="truncate text-[0.6875rem] text-[var(--muted-foreground)]">
             {enabled
-              ? `${selectedSource.label} · ${model || selectedSource.model} · ${selectedVoiceLabel}${voicesFromProvider || source === "elevenlabs" ? "" : " (built-in voices)"}`
+              ? `${selectedSource.label} · ${model || selectedSource.model} · ${selectedVoiceLabel}${voicesFromProvider || source !== "openai" ? "" : " (built-in voices)"}`
               : selectedSource.idleText}
           </div>
         </div>
@@ -695,7 +711,9 @@ export function TTSConfigCard() {
             help={
               source === "elevenlabs"
                 ? "The ElevenLabs API root. Use the default unless you proxy ElevenLabs through another server."
-                : "The OpenAI-compatible TTS API endpoint. Use the default for OpenAI or point to a self-hosted server."
+                : source === "pockettts"
+                  ? "The PocketTTS server root. Start it with pocket-tts serve, then use http://localhost:8000 unless you changed the port."
+                  : "The OpenAI-compatible TTS API endpoint. Use the default for OpenAI or point to a self-hosted server."
             }
           >
             <div className="relative">
@@ -741,7 +759,9 @@ export function TTSConfigCard() {
             help={
               source === "elevenlabs"
                 ? "ElevenLabs model_id to use. Use eleven_v3 for Eleven v3 speech; eleven_ttv_v3 is a voice-design model and cannot generate TTS."
-                : "TTS model to use. e.g. tts-1, tts-1-hd, gpt-4o-mini-tts, or any model your provider supports."
+                : source === "pockettts"
+                  ? "PocketTTS selects its language/model when you start the local server. This field is kept for clarity and future compatible servers."
+                  : "TTS model to use. e.g. tts-1, tts-1-hd, gpt-4o-mini-tts, or any model your provider supports."
             }
           >
             <input
@@ -763,7 +783,8 @@ export function TTSConfigCard() {
                 </datalist>
                 <p className="text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
                   Eleven v3 speech uses <code className="font-mono">eleven_v3</code>. IDs containing{" "}
-                  <code className="font-mono">ttv</code> are Text to Voice / voice design models.
+                  <code className="font-mono">ttv</code> are Text to Voice / voice design models. NanoGPT proxies use{" "}
+                  <code className="font-mono">Elevenlabs-V3</code>.
                 </p>
               </>
             )}
@@ -794,35 +815,57 @@ export function TTSConfigCard() {
               help={
                 source === "elevenlabs"
                   ? "ElevenLabs voices are fetched by name and saved by voice ID."
-                  : "Voice to use for synthesis. Fetched from your configured provider when available."
+                  : source === "pockettts"
+                    ? "PocketTTS built-in voice name or a voice URL/path accepted by your PocketTTS server."
+                    : "Voice to use for synthesis. Fetched from your configured provider when available."
               }
             >
               <div className="flex gap-2">
-                <select
-                  value={voice}
-                  onChange={(e) => {
-                    setVoice(e.target.value);
-                    mark({ voice: e.target.value });
-                  }}
-                  disabled={fetchingVoices || voiceOptions.length === 0}
-                  className={cn(INPUT_CLS, "flex-1 cursor-pointer appearance-none")}
-                >
-                  {source === "elevenlabs" && <option value="">Select an ElevenLabs voice</option>}
-                  {fetchingVoices && <option value="">Loading voices…</option>}
-                  {!fetchingVoices && voiceOptions.length === 0 && !voicesError && (
-                    <option value="">
-                      {source === "elevenlabs"
-                        ? "Enter API key, save, then refresh voices"
-                        : "Save config to load voices"}
-                    </option>
-                  )}
-                  {!fetchingVoices && voicesError && <option value="">Could not load voices</option>}
-                  {voiceOptions.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.name === option.id ? option.id : `${option.name} (${option.id})`}
-                    </option>
-                  ))}
-                </select>
+                {source === "pockettts" ? (
+                  <>
+                    <input
+                      value={voice}
+                      list="pockettts-voices"
+                      onChange={(e) => {
+                        setVoice(e.target.value);
+                        mark({ voice: e.target.value });
+                      }}
+                      className={cn(INPUT_CLS, "flex-1")}
+                      placeholder="alba or a voice URL/path"
+                    />
+                    <datalist id="pockettts-voices">
+                      {voiceOptions.map((option) => (
+                        <option key={option.id} value={option.id} />
+                      ))}
+                    </datalist>
+                  </>
+                ) : (
+                  <select
+                    value={voice}
+                    onChange={(e) => {
+                      setVoice(e.target.value);
+                      mark({ voice: e.target.value });
+                    }}
+                    disabled={fetchingVoices || voiceOptions.length === 0}
+                    className={cn(INPUT_CLS, "flex-1 cursor-pointer appearance-none")}
+                  >
+                    {source === "elevenlabs" && <option value="">Select an ElevenLabs voice</option>}
+                    {fetchingVoices && <option value="">Loading voices…</option>}
+                    {!fetchingVoices && voiceOptions.length === 0 && !voicesError && (
+                      <option value="">
+                        {source === "elevenlabs"
+                          ? "Enter API key, save, then refresh voices"
+                          : "Save config to load voices"}
+                      </option>
+                    )}
+                    {!fetchingVoices && voicesError && <option value="">Could not load voices</option>}
+                    {voiceOptions.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.name === option.id ? option.id : `${option.name} (${option.id})`}
+                      </option>
+                    ))}
+                  </select>
+                )}
                 <button
                   onClick={() => void refetchVoices()}
                   disabled={fetchingVoices || !savedConfig?.enabled}
@@ -840,6 +883,11 @@ export function TTSConfigCard() {
               {!voicesFromProvider && source === "elevenlabs" && !fetchingVoices && (
                 <p className="text-[0.625rem] text-[var(--muted-foreground)]">
                   ElevenLabs voices load after the connection is saved with an API key
+                </p>
+              )}
+              {!voicesFromProvider && source === "pockettts" && voices.length > 0 && (
+                <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                  Showing PocketTTS built-in voices. You can type a custom voice URL or path accepted by your server.
                 </p>
               )}
             </FieldRow>
@@ -981,6 +1029,34 @@ export function TTSConfigCard() {
               <span>4.0×</span>
             </div>
           </FieldRow>
+
+          {source === "elevenlabs" && (
+            <FieldRow
+              label="Language"
+              help="Optional ElevenLabs language_code. Auto lets ElevenLabs detect the language; choose a language to force pronunciation and text normalization. The selected model must support that language."
+            >
+              <select
+                value={elevenLabsLanguageCode}
+                onChange={(e) => {
+                  setElevenLabsLanguageCode(e.target.value);
+                  mark({ elevenLabsLanguageCode: e.target.value });
+                }}
+                className={cn(INPUT_CLS, "cursor-pointer appearance-none")}
+              >
+                {ELEVENLABS_TTS_LANGUAGE_OPTIONS.map((option) => (
+                  <option key={option.code || "auto"} value={option.code}>
+                    {option.code ? `${option.label} (${option.code})` : option.label}
+                  </option>
+                ))}
+              </select>
+              {elevenLabsLanguageCode && (
+                <p className="text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+                  Forcing {selectedLanguage.label}; ElevenLabs may reject this if the selected model does not support
+                  it.
+                </p>
+              )}
+            </FieldRow>
+          )}
 
           {source === "elevenlabs" && (
             <FieldRow

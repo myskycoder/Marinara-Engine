@@ -9,6 +9,7 @@ export const apiConnections = sqliteTable("api_connections", {
   provider: text("provider", {
     enum: [
       "openai",
+      "openai_chatgpt",
       "anthropic",
       "claude_subscription",
       "google",
@@ -16,6 +17,7 @@ export const apiConnections = sqliteTable("api_connections", {
       "cohere",
       "openrouter",
       "nanogpt",
+      "xai",
       "custom",
       "image_generation",
     ],
@@ -30,6 +32,8 @@ export const apiConnections = sqliteTable("api_connections", {
   useForRandom: text("use_for_random").notNull().default("false"),
   /** Whether to enable Anthropic prompt caching */
   enableCaching: text("enable_caching").notNull().default("false"),
+  /** Anthropic prompt caching breakpoint depth from the newest message */
+  cachingAtDepth: integer("caching_at_depth").notNull().default(5),
   /** Whether this connection is the default for all agents (only one allowed) */
   defaultForAgents: text("default_for_agents").notNull().default("false"),
   /** Model to use for embedding generation (e.g. text-embedding-3-small) */
@@ -50,6 +54,16 @@ export const apiConnections = sqliteTable("api_connections", {
   defaultParameters: text("default_parameters"),
   /** Optional hard cap on max_tokens for the API response (for providers like DeepSeek that have lower limits). */
   maxTokensOverride: integer("max_tokens_override"),
+  /** Maximum number of agent LLM jobs Marinara may run at once for this connection. */
+  maxParallelJobs: integer("max_parallel_jobs").notNull().default(1),
+  /**
+   * Claude (Subscription) only. When "true", Marinara passes `settings.fastMode = true`
+   * to the Claude Agent SDK, asking the SDK to use its faster, cheaper routing tier
+   * (response speed up, but lower-quality model behind the scenes). When "false"
+   * (default), Marinara explicitly forces fast mode off for every request so the
+   * exact model chosen on the connection is what runs.
+   */
+  claudeFastMode: text("claude_fast_mode").notNull().default("false"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });

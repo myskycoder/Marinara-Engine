@@ -25,6 +25,17 @@ export const PROVIDERS: Record<APIProvider, ProviderDefinition> = {
     usesAuthHeader: true,
     apiKeyHeader: null,
   },
+  openai_chatgpt: {
+    id: "openai_chatgpt",
+    name: "OpenAI (ChatGPT)",
+    // No user-entered endpoint or API key. Marinara reads the local Codex
+    // ChatGPT login and routes through ChatGPT's Codex backend.
+    defaultBaseUrl: "",
+    modelsEndpoint: "",
+    supportsStreaming: true,
+    usesAuthHeader: false,
+    apiKeyHeader: null,
+  },
   anthropic: {
     id: "anthropic",
     name: "Anthropic",
@@ -67,7 +78,7 @@ export const PROVIDERS: Record<APIProvider, ProviderDefinition> = {
   cohere: {
     id: "cohere",
     name: "Cohere",
-    defaultBaseUrl: "https://api.cohere.com/v2",
+    defaultBaseUrl: "https://api.cohere.ai/compatibility/v1",
     modelsEndpoint: "/models",
     supportsStreaming: true,
     usesAuthHeader: true,
@@ -86,6 +97,15 @@ export const PROVIDERS: Record<APIProvider, ProviderDefinition> = {
     id: "nanogpt",
     name: "NanoGPT",
     defaultBaseUrl: "https://nano-gpt.com/api/v1",
+    modelsEndpoint: "/models",
+    supportsStreaming: true,
+    usesAuthHeader: true,
+    apiKeyHeader: null,
+  },
+  xai: {
+    id: "xai",
+    name: "xAI / Grok",
+    defaultBaseUrl: "https://api.x.ai/v1",
     modelsEndpoint: "/models",
     supportsStreaming: true,
     usesAuthHeader: true,

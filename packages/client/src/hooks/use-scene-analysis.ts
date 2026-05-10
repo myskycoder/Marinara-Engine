@@ -2,7 +2,7 @@
 // Hook: useSceneAnalysis
 //
 // Sends completed narration to the local sidecar
-// model for scene analysis (backgrounds, music,
+// model for scene analysis (backgrounds, audio hints,
 // widgets, expressions, etc.) and returns the
 // structured result. Falls back to a regular
 // connection via /game/scene-wrap when sidecar
@@ -10,7 +10,13 @@
 // ──────────────────────────────────────────────
 
 import { useMutation } from "@tanstack/react-query";
-import type { SceneAnalysis, HudWidget, GameNpc, GameActiveState } from "@marinara-engine/shared";
+import type {
+  SceneAnalysis,
+  HudWidget,
+  GameNpc,
+  GameActiveState,
+  SceneSpotifyTrackCandidate,
+} from "@marinara-engine/shared";
 import { useUIStore } from "../stores/ui.store";
 
 interface AnalyzeSceneInput {
@@ -26,11 +32,14 @@ interface AnalyzeSceneInput {
     currentBackground: string | null;
     currentMusic: string | null;
     recentMusic?: string[];
+    availableSpotifyTracks?: SceneSpotifyTrackCandidate[];
     currentAmbient: string | null;
     currentWeather: string | null;
     currentTimeOfDay: string | null;
+    canGenerateBackgrounds?: boolean;
     canGenerateIllustrations?: boolean;
     artStylePrompt?: string | null;
+    imagePromptInstructions?: string | null;
   };
   /** When provided, uses a regular connection instead of sidecar. */
   chatId?: string;
@@ -76,6 +85,7 @@ async function analyzeScene(input: AnalyzeSceneInput): Promise<SceneAnalysis> {
       narration: input.narration,
       playerAction: input.playerAction,
       context: input.context,
+      debugMode,
     }),
   });
   if (!res.ok) {

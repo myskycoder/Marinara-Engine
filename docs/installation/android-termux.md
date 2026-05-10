@@ -11,18 +11,18 @@ Install **Termux** from [F-Droid](https://f-droid.org/en/packages/com.termux/). 
 Open Termux and run:
 
 ```bash
-pkg update && pkg install -y git nodejs-lts && git clone https://github.com/Pasta-Devs/Marinara-Engine.git && cd Marinara-Engine && chmod +x start-termux.sh && ./start-termux.sh
+pkg update && pkg install -y git nodejs && git clone https://github.com/Pasta-Devs/Marinara-Engine.git && cd Marinara-Engine && chmod +x start-termux.sh && ./start-termux.sh
 ```
 
 This one-liner:
 
 1. Updates Termux packages
-2. Installs Git and Node.js
+2. Installs Git and Node.js. Marinara requires Node.js 24 LTS or newer; after installation, run `node -v` to confirm Termux installed `v24` or newer.
 3. Clones the Marinara Engine repo
 4. Makes the launcher executable
 5. Runs the Termux launcher for the first time
 
-The Termux launcher downloads the prebuilt SQLite native module when available, installs dependencies, builds the app, and starts the server at `http://127.0.0.1:<PORT>` using the `PORT` value from `.env` or the default `7860`.
+The Termux launcher installs dependencies, builds the app, prepares local file-backed storage, and starts the server at `http://127.0.0.1:<PORT>` using the `PORT` value from `.env` or the default `7860`.
 
 > **Note:** The first run takes a few minutes because it builds the app on your device. Subsequent runs are much faster.
 
@@ -59,7 +59,7 @@ Simply run `./start-termux.sh` to get the latest version each time.
 
 ### In-App Update Check
 
-You can also go to **Settings → Advanced → Updates** and click **Check for Updates**, then **Apply Update** to trigger a pull and rebuild from within the app. When it finishes, run `./start-termux.sh` again to relaunch the updated build.
+You can also go to **Settings → Advanced → Updates** and click **Check for Updates** to see whether a new release exists. The in-app **Apply Update** button is disabled by default; to enable it, set `UPDATES_APPLY_ENABLED=true`, set `ADMIN_SECRET`, and save that same secret in **Settings → Advanced → Admin Access**. Otherwise, run `./start-termux.sh` again to let the launcher update and relaunch the app.
 
 ---
 

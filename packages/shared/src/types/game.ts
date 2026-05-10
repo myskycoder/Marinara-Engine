@@ -2,6 +2,7 @@
 // Game Mode Types
 // ──────────────────────────────────────────────
 import type { GenerationParameters } from "./prompt.js";
+import type { CombatItemEffect, CombatMechanic, CombatDialogueCue } from "./combat-encounter.js";
 
 /** The four main states a game can be in during a session. */
 export type GameActiveState = "exploration" | "dialogue" | "combat" | "travel_rest";
@@ -11,6 +12,9 @@ export type GameGmMode = "standalone" | "character";
 
 /** Status of a game session. */
 export type GameSessionStatus = "setup" | "active" | "concluded";
+
+/** Spotify source constraints for Game Mode DJ selection. */
+export type GameSpotifySourceType = "liked" | "playlist" | "artist" | "any";
 
 // ── Maps ──
 
@@ -204,6 +208,18 @@ export interface GameSetupConfig {
   activeLorebookIds?: string[];
   /** Enable custom HUD widgets (model designs them at game start and updates during play) */
   enableCustomWidgets?: boolean;
+  /** Enable Spotify DJ for this game and use Spotify music instead of local game music assets. */
+  enableSpotifyDj?: boolean;
+  /** Music source constraint for Spotify DJ. */
+  spotifySourceType?: GameSpotifySourceType;
+  /** Spotify playlist ID used when spotifySourceType is "playlist". */
+  spotifyPlaylistId?: string | null;
+  /** Human-readable playlist name cached for prompts/display. */
+  spotifyPlaylistName?: string | null;
+  /** Spotify artist name used when spotifySourceType is "artist". */
+  spotifyArtist?: string | null;
+  /** Enable Lorebook Keeper for this game. */
+  enableLorebookKeeper?: boolean;
   /** Language for all narration and dialogue (e.g. "English", "Japanese", "Spanish") */
   language?: string;
   /** Optional generation parameter overrides applied from the moment the game is created. */
@@ -281,6 +297,9 @@ export interface CombatSkill {
   /** Multiplier against base stat */
   power: number;
   description?: string;
+  cooldown?: number;
+  element?: string;
+  statusEffect?: string;
 }
 
 /** Element presets for the elemental reaction system */
@@ -337,9 +356,31 @@ export interface CombatRoundResult {
 export type CombatPlayerAction =
   | { type: "attack"; targetId: string }
   | { type: "skill"; skillId: string; targetId: string }
-  | { type: "item"; itemId: string; targetId?: string }
+  | {
+      type: "item";
+      itemId: string;
+      targetId?: string;
+      itemEffect?: CombatItemEffect;
+    }
   | { type: "defend" }
   | { type: "flee" };
+
+/**
+ * Snapshot of an in-progress combat encounter, persisted to chat metadata so a
+ * page refresh during a fight restores the live party/enemy state instead of
+ * dropping back into prose narration. Internal GameCombatUI state (round
+ * number, action queue, animation phase) is intentionally NOT persisted —
+ * those resume from the start of the round on restore.
+ */
+export interface GameCombatStateSnapshot {
+  party: Combatant[];
+  enemies: Combatant[];
+  itemEffects: CombatItemEffect[];
+  mechanics: CombatMechanic[];
+  dialogueCues: CombatDialogueCue[];
+  /** ID of the assistant message whose `[combat:]` tag opened this encounter. */
+  startMessageId: string | null;
+}
 
 /** Post-combat summary handed to the GM for narration. */
 export interface CombatSummary {
@@ -478,11 +519,35 @@ export interface BlueprintVisualTheme {
   moodDefault: string;
 }
 
+export interface CampaignPressureClock {
+  name: string;
+  steps: number;
+  current: number;
+  failure: string;
+}
+
+export interface CampaignFaction {
+  name: string;
+  goal: string;
+  method?: string;
+  secret?: string;
+}
+
+/** Optional compact GM-only structure for campaigns that need stronger pacing. */
+export interface GameCampaignPlan {
+  openingSituation?: string;
+  pressureClocks?: CampaignPressureClock[];
+  factions?: CampaignFaction[];
+  questSeeds?: string[];
+  encounterPrinciples?: string[];
+}
+
 /** The GM-designed blueprint created during game setup. */
 export interface GameBlueprint {
   hudWidgets: HudWidget[];
   introSequence: DirectionCommand[];
   visualTheme: BlueprintVisualTheme;
+  campaignPlan?: GameCampaignPlan;
 }
 
 // ── Party Dialogue ──

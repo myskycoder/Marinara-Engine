@@ -8,12 +8,14 @@ import { AppShell } from "./components/layout/AppShell";
 import { CustomThemeInjector } from "./components/layout/CustomThemeInjector";
 import { ModelDownloadModal } from "./components/modals/ModelDownloadModal";
 import { AppDialogRenderer } from "./components/ui/AppDialogRenderer";
+import { ChibiProfessorMariEasterEgg } from "./components/ui/ChibiProfessorMariEasterEgg";
 import { Toaster } from "sonner";
 import { useUIStore } from "./stores/ui.store";
 import { useSidecarStore } from "./stores/sidecar.store";
 import { api } from "./lib/api-client";
 import { forceRefreshSpa } from "./lib/browser-runtime";
 import { useLegacyThemeMigration } from "./hooks/use-themes";
+import { useLegacyExtensionMigration } from "./hooks/use-extensions";
 import { useSettingsSync } from "./hooks/use-settings-sync";
 
 const VERSION_RECOVERY_KEY = "marinara:pwa-version-recovery";
@@ -27,6 +29,32 @@ type HealthResponse = {
   timestamp: string;
   version: string;
 };
+
+function stripFontFamilyQuotes(family: string): string {
+  const trimmed = family.trim();
+  if (trimmed.length < 2) return trimmed;
+
+  const quote = trimmed[0];
+  if ((quote !== `"` && quote !== `'`) || trimmed[trimmed.length - 1] !== quote) {
+    return trimmed;
+  }
+
+  return trimmed.slice(1, -1).trim();
+}
+
+function toCssFontFamilyValue(family: string): string {
+  const cleanFamily = stripFontFamilyQuotes(family);
+  return `"${cleanFamily.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function syncRangeSliderProgress(input: HTMLInputElement) {
+  const min = Number(input.min || 0);
+  const max = Number(input.max || 100);
+  const value = Number(input.value || 0);
+  const span = max - min;
+  const percent = Number.isFinite(span) && span > 0 ? ((value - min) / span) * 100 : 0;
+  input.style.setProperty("--range-progress", `${Math.max(0, Math.min(100, percent))}%`);
+}
 
 async function recoverFromVersionSkew(serverVersion: string) {
   if (sessionStorage.getItem(VERSION_RECOVERY_KEY) === serverVersion) {
@@ -49,10 +77,51 @@ export function App() {
   const fontFamily = useUIStore((s) => s.fontFamily);
   const hasModalOpen = useUIStore((s) => s.modal !== null);
   useLegacyThemeMigration();
+  useLegacyExtensionMigration();
   useSettingsSync();
   const showDownloadModal = useSidecarStore((s) => s.showDownloadModal);
   const setShowDownloadModal = useSidecarStore((s) => s.setShowDownloadModal);
   const fetchSidecarStatus = useSidecarStore((s) => s.fetchStatus);
+
+  useEffect(() => {
+    const syncAll = () => {
+      document.querySelectorAll<HTMLInputElement>('input[type="range"]').forEach(syncRangeSliderProgress);
+    };
+    const syncNode = (node: Node) => {
+      if (node instanceof HTMLInputElement && node.type === "range") {
+        syncRangeSliderProgress(node);
+        return;
+      }
+      if (node instanceof Element) {
+        node.querySelectorAll<HTMLInputElement>('input[type="range"]').forEach(syncRangeSliderProgress);
+      }
+    };
+    const syncEventTarget = (event: Event) => {
+      if (event.target instanceof HTMLInputElement && event.target.type === "range") {
+        syncRangeSliderProgress(event.target);
+      }
+    };
+
+    syncAll();
+    const observer = new MutationObserver((mutations) => {
+      mutations.forEach((mutation) => {
+        mutation.addedNodes.forEach(syncNode);
+      });
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    document.addEventListener("input", syncEventTarget, true);
+    document.addEventListener("change", syncEventTarget, true);
+    document.addEventListener("focusin", syncEventTarget, true);
+    document.addEventListener("pointerover", syncEventTarget, true);
+
+    return () => {
+      observer.disconnect();
+      document.removeEventListener("input", syncEventTarget, true);
+      document.removeEventListener("change", syncEventTarget, true);
+      document.removeEventListener("focusin", syncEventTarget, true);
+      document.removeEventListener("pointerover", syncEventTarget, true);
+    };
+  }, []);
 
   // Fetch sidecar status on mount so the Local AI card is populated when opened later.
   useEffect(() => {
@@ -138,8 +207,9 @@ export function App() {
 
   // Apply custom font family via CSS variable
   useEffect(() => {
-    if (fontFamily) {
-      document.documentElement.style.setProperty("--font-user", `"${fontFamily}"`);
+    const family = fontFamily ? stripFontFamilyQuotes(fontFamily) : "";
+    if (family) {
+      document.documentElement.style.setProperty("--font-user", toCssFontFamilyValue(family));
     } else {
       document.documentElement.style.removeProperty("--font-user");
     }
@@ -166,8 +236,14 @@ export function App() {
       }
 
       try {
-        const fontFace = new FontFace(f.family, `url("${f.url}")`, {
+        const family = stripFontFamilyQuotes(f.family);
+        if (!family) {
+          return;
+        }
+
+        const fontFace = new FontFace(family, `url("${f.url}")`, {
           display: "swap",
+          weight: "400",
         });
 
         fontFace
@@ -187,6 +263,7 @@ export function App() {
   return (
     <>
       <CustomThemeInjector />
+      <ChibiProfessorMariEasterEgg />
       <AppShell />
       {!isLite && <ModelDownloadModal open={showDownloadModal} onClose={() => setShowDownloadModal(false)} />}
       {hasModalOpen && (

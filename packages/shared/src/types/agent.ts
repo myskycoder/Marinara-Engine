@@ -184,8 +184,6 @@ export const BUILT_IN_AGENT_IDS = {
   HAPTIC: "haptic",
   CYOA: "cyoa",
   SECRET_PLOT_DRIVER: "secret-plot-driver",
-  GAME_MASTER: "game-master",
-  PARTY_PLAYER: "party-player",
 } as const;
 
 export type AgentCategory = "writer" | "tracker" | "misc";
@@ -468,27 +466,6 @@ export const BUILT_IN_AGENTS: BuiltInAgentMeta[] = [
     defaultInjectAsSection: true,
     category: "writer",
   },
-
-  // ── Game Agents ──
-  {
-    id: "game-master",
-    name: "Game Master",
-    description:
-      "Narrates the RPG, handles dice rolls, manages NPCs, combat triggers, state transitions, map updates, story pacing, and session flow. The primary responder in Game mode.",
-    phase: "pre_generation",
-    enabledByDefault: false,
-    defaultInjectAsSection: true,
-    category: "misc",
-  },
-  {
-    id: "party-player",
-    name: "Party Player",
-    description:
-      "Controls non-player party members autonomously — their dialogue, actions, and decisions. Only sees public narration and party chat (no GM secrets like story arcs or plot twists).",
-    phase: "parallel",
-    enabledByDefault: false,
-    category: "misc",
-  },
 ];
 
 export const BUILT_IN_AGENT_RUN_INTERVAL_DEFAULTS: Readonly<Record<string, number>> = {
@@ -509,9 +486,16 @@ export const GAME_MODE_DEFAULT_AGENT_IDS = [
   "persona-stats",
 ] as const;
 
+export const DEFAULT_AGENT_CONTEXT_SIZE = 5;
+export const DEFAULT_AGENT_MAX_TOKENS = 4096;
+export const MIN_AGENT_MAX_TOKENS = 128;
+export const MAX_AGENT_MAX_TOKENS = 32768;
+
 export function getDefaultBuiltInAgentSettings(agentType: string): Record<string, unknown> {
   const builtIn = BUILT_IN_AGENTS.find((agent) => agent.id === agentType);
-  const settings: Record<string, unknown> = {};
+  const settings: Record<string, unknown> = {
+    maxTokens: DEFAULT_AGENT_MAX_TOKENS,
+  };
 
   if (builtIn?.defaultInjectAsSection) {
     settings.injectAsSection = true;
@@ -547,6 +531,7 @@ export const DEFAULT_AGENT_TOOLS: Record<string, string[]> = {
   "chat-summary": [],
   // Also used server-side to identify Spotify tools that require token refresh.
   spotify: [
+    "spotify_get_current_playback",
     "spotify_get_playlists",
     "spotify_get_playlist_tracks",
     "spotify_search",
@@ -563,8 +548,6 @@ export const DEFAULT_AGENT_TOOLS: Record<string, string[]> = {
   haptic: [],
   cyoa: [],
   "secret-plot-driver": [],
-  "game-master": ["roll_dice", "update_game_state"],
-  "party-player": [],
 };
 
 /** Data shape for a lorebook_update agent result. */
@@ -791,6 +774,63 @@ export const BUILT_IN_TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: "read_chat_summary",
+    description: "Read the current persisted chat summary for this chat.",
+    parameters: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "append_chat_summary",
+    description: "Append durable memory text to the persisted chat summary for this chat.",
+    parameters: {
+      type: "object",
+      properties: {
+        text: {
+          type: "string",
+          description:
+            "Concise summary text to append. Include only durable facts, plans, preferences, or story developments.",
+        },
+      },
+      required: ["text"],
+    },
+  },
+  {
+    name: "read_chat_variable",
+    description:
+      "Read a chat-wide string variable by key. Use this for agent-private state or coordination with other agents in the same chat.",
+    parameters: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "Variable key to read" },
+      },
+      required: ["key"],
+    },
+  },
+  {
+    name: "write_chat_variable",
+    description:
+      "Write or replace a chat-wide string variable by key. Any agent in this chat can read the value if it knows the key.",
+    parameters: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "Variable key to write" },
+        value: { type: "string", description: "String value to store for this key" },
+      },
+      required: ["key", "value"],
+    },
+  },
+  {
+    name: "spotify_get_current_playback",
+    description:
+      "Get the user's current Spotify playback state, track, active device, and volume. Use this before changing music so you do not restart or replace a fitting track.",
+    parameters: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
     name: "spotify_get_playlists",
     description:
       "Get the user's Spotify playlists and saved library. Returns playlist names and URIs. Use this FIRST to see what the user already has before searching.",
@@ -804,22 +844,35 @@ export const BUILT_IN_TOOLS: ToolDefinition[] = [
   {
     name: "spotify_get_playlist_tracks",
     description:
-      "Get tracks from a specific playlist or the user's Liked Songs. For Liked Songs (playlistId='liked'), returns the FULL library automatically (up to 500 tracks). For regular playlists, returns a paginated batch.",
+      "Get track candidates from a specific playlist or the user's Liked Songs. By default, the server indexes/caches the full source and returns only a compact scored shortlist for the model. Supplying offset switches to raw page mode.",
     parameters: {
       type: "object",
       properties: {
         playlistId: {
           type: "string",
-          description: "Playlist ID (from spotify_get_playlists), or 'liked' for the user's full Liked Songs library",
+          description: "Playlist ID (from spotify_get_playlists), or 'liked' for the user's Liked Songs library",
+        },
+        query: {
+          type: "string",
+          description:
+            "Scene/mood search terms used to score candidates from the full cached playlist, e.g. 'tense battle orchestral' or 'quiet melancholy'.",
+        },
+        mood: {
+          type: "string",
+          description: "Optional short mood label to combine with query when choosing candidates.",
+        },
+        candidateLimit: {
+          type: "number",
+          description: "How many candidate tracks to return in candidate mode (default: 60, max: 80).",
         },
         limit: {
           type: "number",
-          description:
-            "Number of tracks to return for regular playlists (default: 30, max: 50). Ignored for 'liked' which auto-fetches all.",
+          description: "Candidate count in default mode, or page size when offset is provided (page max: 50).",
         },
         offset: {
           type: "number",
-          description: "Offset for pagination for regular playlists (default: 0). Ignored for 'liked'.",
+          description:
+            "Optional raw-page offset. Only use for manual browsing; default mode is cached candidate selection.",
         },
       },
       required: ["playlistId"],
@@ -845,7 +898,7 @@ export const BUILT_IN_TOOLS: ToolDefinition[] = [
   {
     name: "spotify_play",
     description:
-      "Play one or more tracks, or a playlist, on the user's active Spotify device. Pass multiple URIs to queue a sequence of tracks.",
+      "Play one or more tracks, or a playlist, on the user's active Spotify device. In game mode, pass one best track URI so it can loop until a new scene pick.",
     parameters: {
       type: "object",
       properties: {

@@ -4,7 +4,7 @@
 import type { GenerationParameters } from "../types/prompt.js";
 
 /** App version — single source of truth. */
-export const APP_VERSION = "1.5.6";
+export const APP_VERSION = "1.5.9";
 
 /** Stable synthetic connection id for the built-in local llama sidecar. */
 export const LOCAL_SIDECAR_CONNECTION_ID = "__local_sidecar__";
@@ -27,6 +27,8 @@ export const DEFAULT_GENERATION_PARAMS: GenerationParameters = {
   presencePenalty: 0,
   reasoningEffort: null,
   verbosity: null,
+  assistantPrefill: "",
+  customParameters: {},
   squashSystemMessages: true,
   showThoughts: true,
   useMaxContext: false,
@@ -52,6 +54,8 @@ export const LIMITS = {
   AGENT_CONTEXT_MESSAGES: 20,
   /** Max lorebook entries that can be injected */
   MAX_LOREBOOK_ENTRIES: 100,
+  /** Default global lorebook token budget per generation. 0 means unlimited when explicitly configured per chat. */
+  DEFAULT_LOREBOOK_TOKEN_BUDGET: 8192,
   /** Default summary trigger: every N messages */
   SUMMARY_INTERVAL: 50,
   /** Default vectorization: top-K results */

@@ -20,6 +20,7 @@ export interface SlashCommand {
 
 export interface SlashCommandContext {
   chatId: string;
+  mode?: "conversation" | "roleplay";
   /** Trigger an LLM generation (with optional user message) */
   generate: (params: {
     chatId: string;
@@ -27,6 +28,10 @@ export interface SlashCommandContext {
     userMessage?: string;
     impersonate?: boolean;
     attachments?: { type: string; data: string }[];
+    impersonatePresetId?: string;
+    impersonateConnectionId?: string;
+    impersonateBlockAgents?: boolean;
+    impersonatePromptTemplate?: string;
   }) => Promise<boolean | void>;
   /** Insert a message directly into the chat (no LLM) */
   createMessage: (data: { role: string; content: string; characterId?: string | null }) => void;
@@ -34,6 +39,10 @@ export interface SlashCommandContext {
   invalidate: () => void;
   /** Character names in the current chat */
   characterNames: string[];
+  /** Characters available in the current roleplay scene */
+  characters?: Array<{ id: string; name: string }>;
+  /** Apply a manual sprite expression override */
+  setSpriteExpression?: (characterId: string, expression: string) => void | Promise<void>;
 }
 
 export interface SlashCommandResult {
@@ -105,6 +114,9 @@ function buildMacroHelpText(): string {
     ...Array.from(sections.entries()).flatMap(([category, lines], index) =>
       index === 0 ? ["", `${category}:`, ...lines] : ["", `${category}:`, ...lines],
     ),
+    "",
+    "Input Actions:",
+    "{{prompt}} - Open the prompt preview for the current chat without sending a message",
   ].join("\n");
 }
 
@@ -129,6 +141,121 @@ function parseImpersonatePromptArg(args: string): string {
   }
 
   return prompt.trim();
+}
+
+function parseNamedArgs(input: string): Record<string, string> {
+  const values: Record<string, string> = {};
+  const argPattern = /([A-Za-z][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s]+))/g;
+  let match: RegExpExecArray | null;
+  while ((match = argPattern.exec(input))) {
+    values[match[1]!.toLowerCase()] = (match[2] ?? match[3] ?? match[4] ?? "").trim();
+  }
+  return values;
+}
+
+function normalizeLookup(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function findSceneCharacter(
+  characters: Array<{ id: string; name: string }>,
+  name: string,
+): { id: string; name: string } | null {
+  const normalized = normalizeLookup(name);
+  if (!normalized) return null;
+  return (
+    characters.find((character) => normalizeLookup(character.name) === normalized) ??
+    characters.find((character) => normalizeLookup(character.name).includes(normalized)) ??
+    null
+  );
+}
+
+async function listSpriteExpressions(characterId: string): Promise<string[]> {
+  try {
+    const sprites = await api.get<Array<{ expression?: string }>>(`/sprites/${encodeURIComponent(characterId)}`);
+    const expressions = sprites
+      .map((sprite) => sprite.expression?.trim())
+      .filter((expression): expression is string => !!expression);
+    return Array.from(new Set(expressions)).sort((a, b) => a.localeCompare(b));
+  } catch {
+    return [];
+  }
+}
+
+async function buildEmoteListFeedback(characters: Array<{ id: string; name: string }>): Promise<string> {
+  const rows = await Promise.all(
+    characters.map(async (character) => {
+      const expressions = await listSpriteExpressions(character.id);
+      return `${character.name}: ${expressions.length > 0 ? expressions.join(", ") : "no uploaded expression sprites"}`;
+    }),
+  );
+
+  return [
+    "Available Emotes:",
+    "",
+    ...rows,
+    "",
+    'Use /emote name="Character" expression="expression" to switch one manually.',
+  ].join("\n");
+}
+
+function matchSpriteExpression(expressions: string[], requested: string): string | null {
+  const normalized = normalizeLookup(requested);
+  if (!normalized) return null;
+  return (
+    expressions.find((expression) => normalizeLookup(expression) === normalized) ??
+    expressions.find((expression) => normalizeLookup(expression).includes(normalized)) ??
+    null
+  );
+}
+
+// ── Message index parser (for /hide and /unhide) ────────────────
+
+/**
+ * Parse a message index expression into a sorted, deduplicated array of
+ * 1-indexed positions. Supports: `5`, `3-8`, `2,5,9`, `2-5,8,12-14`.
+ * Returns null if the expression is empty or contains invalid tokens.
+ */
+function parseMessageIndices(input: string): number[] | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  const indices = new Set<number>();
+  const parts = trimmed.split(",");
+
+  for (const part of parts) {
+    const segment = part.trim();
+    if (!segment) continue;
+
+    // Range: N-M
+    if (segment.includes("-")) {
+      const [left, right] = segment.split("-", 2);
+      const start = Number.parseInt(left!.trim(), 10);
+      const end = Number.parseInt(right!.trim(), 10);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 1 || end < 1) return null;
+      const lo = Math.min(start, end);
+      const hi = Math.max(start, end);
+      for (let i = lo; i <= hi; i++) indices.add(i);
+    } else {
+      // Single number
+      const n = Number.parseInt(segment, 10);
+      if (!Number.isFinite(n) || n < 1) return null;
+      indices.add(n);
+    }
+  }
+
+  return indices.size > 0 ? Array.from(indices).sort((a, b) => a - b) : null;
+}
+
+/** Safely read a boolean from a message's extra field. */
+function isMessageHidden(msg: { extra?: unknown }): boolean {
+  if (!msg.extra) return false;
+  try {
+    const ex = typeof msg.extra === "string" ? JSON.parse(msg.extra) : msg.extra;
+    return (ex as Record<string, unknown>).hiddenFromAI === true;
+  } catch {
+    return false;
+  }
 }
 
 // ── Command definitions ────────────────
@@ -215,17 +342,98 @@ const COMMANDS: SlashCommand[] = [
     },
   },
   {
+    name: "emote",
+    aliases: ["emotion", "sprite"],
+    description: "List or switch roleplay sprite expressions",
+    usage: '/emote name="Character" expression="expression"',
+    local: true,
+    async execute(args, ctx) {
+      const sceneCharacters = ctx.characters ?? [];
+      if (sceneCharacters.length === 0) {
+        return {
+          handled: true,
+          feedback: "No roleplay characters are available for /emote in this chat.",
+        };
+      }
+
+      const namedArgs = parseNamedArgs(args);
+      const requestedName = namedArgs.name ?? namedArgs.character ?? "";
+      const requestedExpression = namedArgs.expression ?? namedArgs.emotion ?? namedArgs.sprite ?? "";
+
+      if (!args.trim() || (!requestedExpression && !requestedName)) {
+        return { handled: true, feedback: await buildEmoteListFeedback(sceneCharacters) };
+      }
+
+      let target = requestedName ? findSceneCharacter(sceneCharacters, requestedName) : null;
+      if (!target && !requestedName && sceneCharacters.length === 1) {
+        target = sceneCharacters[0]!;
+      }
+
+      if (!target) {
+        return {
+          handled: true,
+          feedback: `Character "${requestedName || "(missing)"}" not found. Available: ${sceneCharacters
+            .map((character) => character.name)
+            .join(", ")}`,
+        };
+      }
+
+      const availableExpressions = await listSpriteExpressions(target.id);
+      if (!requestedExpression) {
+        return {
+          handled: true,
+          feedback: [
+            `Available Emotes for ${target.name}:`,
+            "",
+            availableExpressions.length > 0 ? availableExpressions.join(", ") : "No uploaded expression sprites.",
+            "",
+            `Use /emote name="${target.name}" expression="expression" to switch one manually.`,
+          ].join("\n"),
+        };
+      }
+
+      const expression = matchSpriteExpression(availableExpressions, requestedExpression);
+      if (!expression) {
+        return {
+          handled: true,
+          feedback:
+            availableExpressions.length > 0
+              ? `Expression "${requestedExpression}" not found for ${target.name}. Available: ${availableExpressions.join(", ")}`
+              : `No uploaded expression sprites found for ${target.name}.`,
+        };
+      }
+
+      if (!ctx.setSpriteExpression) {
+        return {
+          handled: true,
+          feedback: "Sprite switching is only available in roleplay chats with sprites enabled.",
+        };
+      }
+
+      await ctx.setSpriteExpression(target.id, expression);
+      ctx.invalidate();
+      return { handled: true, feedback: `Emote updated: ${target.name} -> ${expression}` };
+    },
+  },
+  {
     name: "impersonate",
     aliases: ["imp"],
     description: "Generate a response as your character ({{user}}), optionally with a direction",
     usage: "/impersonate [direction]",
     async execute(args, ctx) {
       const direction = args.trim();
+      const { impersonatePresetId, impersonateConnectionId, impersonateBlockAgents, impersonatePromptTemplate } =
+        useUIStore.getState();
+      const trimmedPromptTemplate = impersonatePromptTemplate.trim();
       await ctx.generate({
         chatId: ctx.chatId,
         connectionId: null,
         impersonate: true,
         ...(direction ? { userMessage: direction } : {}),
+        ...(impersonatePresetId ? { impersonatePresetId } : {}),
+        ...(impersonateConnectionId ? { impersonateConnectionId } : {}),
+        ...(impersonateBlockAgents !== undefined ? { impersonateBlockAgents } : {}),
+        ...(trimmedPromptTemplate ? { impersonatePromptTemplate: trimmedPromptTemplate } : {}),
       });
       return { handled: true };
     },
@@ -410,6 +618,88 @@ const COMMANDS: SlashCommand[] = [
     local: true,
     async execute(_args, _ctx) {
       return { handled: true, feedback: buildSlashHelpText() };
+    },
+  },
+  {
+    name: "hide",
+    description: "Hide messages from AI context (won't be sent to the LLM on future turns)",
+    usage: "/hide <indices>  (e.g. /hide 5, /hide 3-8, /hide 2-5,9,12)",
+    local: true,
+    async execute(args, ctx) {
+      const indices = parseMessageIndices(args);
+      if (!indices) {
+        return {
+          handled: true,
+          feedback: "Usage: /hide <indices> — e.g. /hide 5, /hide 3-8, /hide 2-5,9,12",
+        };
+      }
+
+      const messages: Array<{ id: string; extra?: unknown }> = await api.get(`/chats/${ctx.chatId}/messages`);
+      const total = messages.length;
+      const max = indices[indices.length - 1]!;
+      if (max > total) {
+        return {
+          handled: true,
+          feedback: `Message ${max} doesn't exist. This chat has ${total} messages.`,
+        };
+      }
+
+      // Only send IDs for messages that aren't already hidden
+      const targetIds = indices
+        .filter((idx) => !isMessageHidden(messages[idx - 1]!))
+        .map((idx) => messages[idx - 1]!.id);
+
+      if (targetIds.length > 0) {
+        await api.patch(`/chats/${ctx.chatId}/messages/bulk-hidden`, {
+          messageIds: targetIds,
+          hidden: true,
+        });
+      }
+
+      ctx.invalidate();
+      toast.success(`Hidden ${targetIds.length} message${targetIds.length !== 1 ? "s" : ""} from AI context`);
+      return { handled: true };
+    },
+  },
+  {
+    name: "unhide",
+    description: "Restore previously hidden messages back into AI context",
+    usage: "/unhide <indices>  (e.g. /unhide 5, /unhide 3-8, /unhide 2-5,9,12)",
+    local: true,
+    async execute(args, ctx) {
+      const indices = parseMessageIndices(args);
+      if (!indices) {
+        return {
+          handled: true,
+          feedback: "Usage: /unhide <indices> — e.g. /unhide 5, /unhide 3-8, /unhide 2-5,9,12",
+        };
+      }
+
+      const messages: Array<{ id: string; extra?: unknown }> = await api.get(`/chats/${ctx.chatId}/messages`);
+      const total = messages.length;
+      const max = indices[indices.length - 1]!;
+      if (max > total) {
+        return {
+          handled: true,
+          feedback: `Message ${max} doesn't exist. This chat has ${total} messages.`,
+        };
+      }
+
+      // Only send IDs for messages that are currently hidden
+      const targetIds = indices
+        .filter((idx) => isMessageHidden(messages[idx - 1]!))
+        .map((idx) => messages[idx - 1]!.id);
+
+      if (targetIds.length > 0) {
+        await api.patch(`/chats/${ctx.chatId}/messages/bulk-hidden`, {
+          messageIds: targetIds,
+          hidden: false,
+        });
+      }
+
+      ctx.invalidate();
+      toast.success(`Restored ${targetIds.length} message${targetIds.length !== 1 ? "s" : ""} to AI context`);
+      return { handled: true };
     },
   },
   {

@@ -1,18 +1,19 @@
 // ──────────────────────────────────────────────
 // Layout: Top Bar (polished, with hover glow)
 // ──────────────────────────────────────────────
-import { PanelLeft, Home, Settings, Link, BookOpen, Users, Sparkles, FileText, UserCircle, Bot } from "lucide-react";
+import { PanelLeft, Home, Settings, Link, BookOpen, Users, Sparkles, FileText, User, Bot } from "lucide-react";
 import { useUIStore } from "../../stores/ui.store";
 import { useChatStore } from "../../stores/chat.store";
 import { useAgentStore } from "../../stores/agent.store";
 import { cn } from "../../lib/utils";
+import { SpotifyMiniPlayer } from "../spotify/SpotifyMiniPlayer";
 
 const RIGHT_PANEL_BUTTONS = [
   { panel: "lorebooks" as const, icon: BookOpen, label: "Lorebooks", color: "from-amber-400 to-orange-500" },
   { panel: "presets" as const, icon: FileText, label: "Presets", color: "from-purple-400 to-violet-500" },
   { panel: "connections" as const, icon: Link, label: "Connections", color: "from-sky-400 to-blue-500" },
   { panel: "agents" as const, icon: Sparkles, label: "Agents", color: "from-pink-300 to-purple-400" },
-  { panel: "personas" as const, icon: UserCircle, label: "Personas", color: "from-emerald-400 to-teal-500" },
+  { panel: "personas" as const, icon: User, label: "Personas", color: "from-emerald-400 to-teal-500" },
 ] as const;
 
 export function TopBar() {
@@ -36,7 +37,7 @@ export function TopBar() {
       <div className="absolute inset-x-0 bottom-0 h-px bg-[var(--border)]/30" />
 
       {/* Left section: window controls + chat info */}
-      <div className="flex items-center gap-2">
+      <div className="flex min-w-0 flex-1 items-center gap-2">
         <button
           onClick={toggleSidebar}
           data-tour="sidebar-toggle"
@@ -56,6 +57,7 @@ export function TopBar() {
         >
           <Home size="1.125rem" />
         </button>
+        <SpotifyMiniPlayer />
       </div>
 
       {/* Right section - Panel toggles */}

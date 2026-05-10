@@ -2,7 +2,14 @@
 // Game: GM Prompt Building
 // ──────────────────────────────────────────────
 
-import type { GameActiveState, GameMap, GameNpc, SessionSummary, HudWidget } from "@marinara-engine/shared";
+import type {
+  GameActiveState,
+  GameCampaignPlan,
+  GameMap,
+  GameNpc,
+  SessionSummary,
+  HudWidget,
+} from "@marinara-engine/shared";
 import type { CharacterSpriteInfo } from "./sprite.service.js";
 import { formatGameContextSummaryPromptBlock, type GameContextSummary } from "./context-summary.service.js";
 
@@ -11,10 +18,20 @@ export interface GameReadablePromptEntry {
   content: string;
 }
 
+function buildReadableSummaryLines(readables: GameReadablePromptEntry[]): string[] {
+  return readables.map((readable, index) => {
+    const title = readable.title.trim() || `Readable ${index + 1}`;
+    const content = readable.content.replace(/\s+/g, " ").trim();
+    const excerpt = content.length > 280 ? `${content.slice(0, 280)}...` : content;
+    return `${index + 1}. ${title}: ${excerpt}`;
+  });
+}
+
 export interface GmPromptContext {
   gameActiveState: GameActiveState;
   storyArc: string | null;
   plotTwists: string[] | null;
+  campaignPlan?: GameCampaignPlan | null;
   map: GameMap | null;
   npcs: GameNpc[];
   sessionSummaries: SessionSummary[];
@@ -73,6 +90,92 @@ export interface GmPromptContext {
 const MAX_PROMPT_MAP_LOCATIONS = 10;
 const MAX_PROMPT_NPCS = 12;
 
+function normalizePromptText(value: unknown, fallback = ""): string {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed || fallback;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return fallback;
+}
+
+function normalizePromptTextList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizePromptText(item)).filter((item) => item.length > 0);
+  }
+  const text = normalizePromptText(value);
+  return text ? [text] : [];
+}
+
+function normalizePromptRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function derivePromptResumePointFallback(summary: string): string {
+  const paragraphs = summary
+    .split(/\n{2,}/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0);
+
+  return paragraphs[paragraphs.length - 1] ?? summary;
+}
+
+function normalizePromptSessionSummary(value: unknown, index: number): SessionSummary {
+  const source = normalizePromptRecord(value);
+  const summary = normalizePromptText(source.summary, `Session ${index + 1} concluded.`);
+
+  return {
+    sessionNumber:
+      typeof source.sessionNumber === "number" && Number.isFinite(source.sessionNumber)
+        ? source.sessionNumber
+        : index + 1,
+    summary,
+    resumePoint: normalizePromptText(source.resumePoint, derivePromptResumePointFallback(summary)),
+    partyDynamics: normalizePromptText(source.partyDynamics),
+    partyState: normalizePromptText(source.partyState),
+    keyDiscoveries: [...normalizePromptTextList(source.keyDiscoveries), ...normalizePromptTextList(source.revelations)],
+    characterMoments: normalizePromptTextList(source.characterMoments),
+    littleDetails: normalizePromptTextList(source.littleDetails),
+    statsSnapshot: normalizePromptRecord(source.statsSnapshot),
+    npcUpdates: normalizePromptTextList(source.npcUpdates),
+    nextSessionRequest: normalizePromptText(source.nextSessionRequest) || null,
+    timestamp: normalizePromptText(source.timestamp, new Date().toISOString()),
+  };
+}
+
+function normalizePromptSessionSummaries(value: unknown): SessionSummary[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((summary, index) => normalizePromptSessionSummary(summary, index));
+}
+
+function normalizePromptNpcs(value: unknown): GameNpc[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item, index) => {
+    const source = normalizePromptRecord(item);
+    const name = normalizePromptText(source.name);
+    if (!name) return [];
+
+    return [
+      {
+        id: normalizePromptText(source.id, `npc-${index + 1}`),
+        name,
+        emoji: normalizePromptText(source.emoji, "NPC"),
+        description: normalizePromptText(source.description),
+        descriptionSource: source.descriptionSource as GameNpc["descriptionSource"],
+        gender: typeof source.gender === "string" ? source.gender : null,
+        pronouns: typeof source.pronouns === "string" ? source.pronouns : null,
+        location: normalizePromptText(source.location),
+        reputation: typeof source.reputation === "number" && Number.isFinite(source.reputation) ? source.reputation : 0,
+        met: typeof source.met === "boolean" ? source.met : true,
+        notes: normalizePromptTextList(source.notes),
+        avatarUrl: typeof source.avatarUrl === "string" ? source.avatarUrl : null,
+      },
+    ];
+  });
+}
+
 const PROMPT_LANGUAGE_LOOKUP = new Map<string, string>([
   ["english", "English"],
   ["japanese", "Japanese"],
@@ -108,7 +211,8 @@ function buildSessionHistoryLines(summaries: SessionSummary[]): string[] {
   const lines: string[] = [];
 
   for (const [index, summary] of summaries.entries()) {
-    lines.push(`Session ${summary.sessionNumber} summary:`, summary.summary);
+    const normalized = normalizePromptSessionSummary(summary, index);
+    lines.push(`Session ${normalized.sessionNumber} summary:`, normalized.summary);
     if (index < summaries.length - 1) {
       lines.push("");
     }
@@ -118,28 +222,33 @@ function buildSessionHistoryLines(summaries: SessionSummary[]): string[] {
 }
 
 function buildLatestSessionContinuityLines(summary: SessionSummary): string[] {
-  const lines = [`Latest completed session: ${summary.sessionNumber}`];
+  const summaryIndex =
+    typeof summary.sessionNumber === "number" && Number.isFinite(summary.sessionNumber)
+      ? Math.max(0, summary.sessionNumber - 1)
+      : 0;
+  const normalized = normalizePromptSessionSummary(summary, summaryIndex);
+  const lines = [`Latest completed session: ${normalized.sessionNumber}`];
 
-  if (summary.resumePoint) {
-    lines.push(`Resume point: ${summary.resumePoint}`);
+  if (normalized.resumePoint) {
+    lines.push(`Resume point: ${normalized.resumePoint}`);
   }
-  if (summary.partyDynamics) {
-    lines.push(`Party dynamics: ${summary.partyDynamics}`);
+  if (normalized.partyDynamics) {
+    lines.push(`Party dynamics: ${normalized.partyDynamics}`);
   }
-  if (summary.keyDiscoveries.length > 0) {
-    lines.push(`Key discoveries: ${summary.keyDiscoveries.join("; ")}`);
+  if (normalized.keyDiscoveries.length > 0) {
+    lines.push(`Key discoveries: ${normalized.keyDiscoveries.join("; ")}`);
   }
-  if (summary.characterMoments.length > 0) {
-    lines.push(`Character moments: ${summary.characterMoments.join("; ")}`);
+  if (normalized.characterMoments.length > 0) {
+    lines.push(`Character moments: ${normalized.characterMoments.join("; ")}`);
   }
-  if (summary.littleDetails.length > 0) {
-    lines.push(`Little details to recall: ${summary.littleDetails.join("; ")}`);
+  if (normalized.littleDetails.length > 0) {
+    lines.push(`Little details to recall: ${normalized.littleDetails.join("; ")}`);
   }
-  if (summary.npcUpdates.length > 0) {
-    lines.push(`NPC updates: ${summary.npcUpdates.join("; ")}`);
+  if (normalized.npcUpdates.length > 0) {
+    lines.push(`NPC updates: ${normalized.npcUpdates.join("; ")}`);
   }
-  if (summary.statsSnapshot && Object.keys(summary.statsSnapshot).length > 0) {
-    lines.push(`Stats snapshot: ${JSON.stringify(summary.statsSnapshot)}`);
+  if (Object.keys(normalized.statsSnapshot).length > 0) {
+    lines.push(`Stats snapshot: ${JSON.stringify(normalized.statsSnapshot)}`);
   }
 
   return lines;
@@ -235,81 +344,122 @@ function buildTrackedNpcLines(npcs: GameNpc[]): string[] {
   return lines;
 }
 
+function buildCampaignPlanLines(plan?: GameCampaignPlan | null): string[] {
+  if (!plan) return [];
+  const lines: string[] = [];
+
+  if (plan.openingSituation?.trim()) {
+    lines.push(`Opening situation: ${plan.openingSituation.trim()}`);
+  }
+
+  const clocks = Array.isArray(plan.pressureClocks) ? plan.pressureClocks : [];
+  if (clocks.length > 0) {
+    lines.push(
+      `Pressure clocks: ${clocks
+        .map((clock) => {
+          const steps = Number.isFinite(clock.steps) && clock.steps > 0 ? clock.steps : 6;
+          const current = Number.isFinite(clock.current) ? Math.max(0, Math.min(steps, clock.current)) : 0;
+          return `${clock.name} ${current}/${steps}${clock.failure ? `; failure: ${clock.failure}` : ""}`;
+        })
+        .join(" | ")}`,
+    );
+  }
+
+  const factions = Array.isArray(plan.factions) ? plan.factions : [];
+  if (factions.length > 0) {
+    lines.push(
+      `Factions: ${factions
+        .map((faction) =>
+          [
+            faction.name,
+            faction.goal ? `wants ${faction.goal}` : null,
+            faction.method ? `method: ${faction.method}` : null,
+            faction.secret ? `secret: ${faction.secret}` : null,
+          ]
+            .filter(Boolean)
+            .join("; "),
+        )
+        .join(" | ")}`,
+    );
+  }
+
+  const questSeeds = Array.isArray(plan.questSeeds) ? plan.questSeeds.filter((seed) => seed.trim()) : [];
+  if (questSeeds.length > 0) {
+    lines.push(`Quest seeds: ${questSeeds.join(" | ")}`);
+  }
+
+  const encounterPrinciples = Array.isArray(plan.encounterPrinciples)
+    ? plan.encounterPrinciples.filter((principle) => principle.trim())
+    : [];
+  if (encounterPrinciples.length > 0) {
+    lines.push(`Encounter principles: ${encounterPrinciples.join(" | ")}`);
+  }
+
+  return lines;
+}
+
 function buildCompactInventoryLine(items: Array<{ name: string; quantity: number }>): string {
   return items.map((item) => `${item.name}${item.quantity > 1 ? ` ×${item.quantity}` : ""}`).join("; ");
 }
 
 function buildWidgetSummaryLines(widgets: HudWidget[]): string[] {
   return widgets.map((widget) => {
-    if (widget.type === "stat_block" && widget.config.stats?.length) {
-      const stats = widget.config.stats.map((stat) => `${stat.name}=${stat.value}`).join(", ");
+    const config = (widget.config ?? {}) as Record<string, any>;
+    if (widget.type === "stat_block" && Array.isArray(config.stats) && config.stats.length > 0) {
+      const stats = config.stats.map((stat) => `${stat.name}=${stat.value}`).join(", ");
       return `- ${widget.id} (${widget.type}): ${stats}`;
     }
-    if (widget.type === "list" && widget.config.items?.length) {
-      return `- ${widget.id} (${widget.type}): ${widget.config.items.join("; ")}`;
+    if (widget.type === "list" && Array.isArray(config.items) && config.items.length > 0) {
+      return `- ${widget.id} (${widget.type}): ${config.items.join("; ")}`;
     }
     if (widget.type === "timer") {
-      return `- ${widget.id} (${widget.type}): ${widget.config.running ? "running" : "stopped"} ${widget.config.seconds ?? 0}s`;
+      return `- ${widget.id} (${widget.type}): ${config.running ? "running" : "stopped"} ${config.seconds ?? 0}s`;
     }
-    const value = widget.config.value ?? widget.config.count ?? JSON.stringify(widget.config);
+    const value = config.value ?? config.count ?? JSON.stringify(config);
     return `- ${widget.id} (${widget.type}): ${value}`;
-  });
-}
-
-function buildReadableSummaryLines(readables: GameReadablePromptEntry[]): string[] {
-  return readables.map((readable, index) => {
-    const title = readable.title.trim() || `Readable ${index + 1}`;
-    const content = readable.content.replace(/\s+/g, " ").trim();
-    const excerpt = content.length > 280 ? `${content.slice(0, 280)}...` : content;
-    return `${index + 1}. ${title}: ${excerpt}`;
   });
 }
 
 /** Build the GM system prompt. Injects full game context (story arc, plot twists, map, etc.). */
 export function buildGmSystemPrompt(ctx: GmPromptContext): string {
+  const plotTwists = normalizePromptTextList(ctx.plotTwists);
+  const npcs = normalizePromptNpcs(ctx.npcs);
+  const sessionSummaries = normalizePromptSessionSummaries(ctx.sessionSummaries);
+  const partyNames = normalizePromptTextList(ctx.partyNames);
+  const partyCards = Array.isArray(ctx.partyCards) ? ctx.partyCards : [];
   const sections: string[] = [];
   const normalizedLanguage = normalizePromptLanguage(ctx.language);
 
   // ── Core Role ──
   if (ctx.gmCharacterCard) {
     sections.push(
-      `<gm_role>`,
-      `You are the following character, acting as a Game Master for this RPG/VN game. Adopt their personality, speech patterns, biases, and quirks, and shape the narrative through their subjective lenses, allowing them to break the fourth wall between the GM and the party:`,
+      `<role>`,
+      `You are the following character, acting as an excellent Game Master for the user. Adopt their personality, speech patterns, biases, and quirks, and shape the narrative through their subjective lenses, allowing them to break the fourth wall between the GM and the party. Give it your best!`,
       ctx.gmCharacterCard,
-      `</gm_role>`,
+      `</role>`,
     );
   } else {
     sections.push(
-      `<gm_role>`,
-      `You are the Game Master for this RPG/VN game. You are fair but challenging (and a little snarky). Furthermore, you bring the world to life with vivid descriptions, memorable NPCs, and engaging encounters. You have personality: you crack jokes, build tension, celebrate epic moments, and mourn losses.`,
-      `</gm_role>`,
-    );
-  }
-
-  // ── Language ──
-  if (normalizedLanguage && normalizedLanguage.toLowerCase() !== "english") {
-    sections.push(
-      `<language>`,
-      `Write all narration, dialogue, descriptions, and game text in ${normalizedLanguage}; only XML tags, commands, structured field names, and deliberate proper nouns or code terms may stay in English. The prose must read as native ${normalizedLanguage}, not translated from English: silently proofread every player-visible line and remove grammar errors, awkward calques, mixed-language scaffolding, and untranslated filler before finalizing.`,
-      `</language>`,
+      `<role>`,
+      `You are an excellent Game Master for the user. You are fair but challenging (and a little snarky). Furthermore, you bring the world to life with vivid imagination, memorable NPCs, and engaging encounters. You have personality: you crack jokes, build tension, celebrate epic moments, and mourn losses. Give it your best!`,
+      `</role>`,
     );
   }
 
   sections.push(
-    `<gm_rules>`,
-    `You are running a ${ctx.genre} RPG in a ${ctx.setting} setting. Tone: ${ctx.tone}. Difficulty: ${ctx.difficulty}.`,
-    `- Drive the plot, world motion, and consequences. Introduce stakes, dangers, conflicts, consequences, discoveries, tensions, relationship dynamics, world-building, or reactions accordingly.`,
-    `- Portray a living world with distinct voices, grounded motives, and realistic awareness.`,
-    `- Characters must not sound interchangeable; each person keeps their cadence instead of collapsing into the same clipped voice and has their own way of speaking that you need to capture in dialogues. Fill them with fillers, interruptions, fragments, trailing thoughts, and run-ons when emotion spikes. Use contractions by default unless someone is formal. Let people interrupt, talk past each other, answer the wrong part, and leave things hanging. Preserve the gap between thought, meaning, and speech. Smarties imply and test rather than spell everything out. Crying fractures speech. Laughing breaks words apart. Breathlessness shortens lines. Drunkenness and exhaustion slur or trail. The line itself should sound like the emotion.`,
-    `- Enforce strict in-world knowledge boundaries. Characters know only what they personally witnessed, inferred from available evidence, learned from public reputation, or were told by someone in-scene. One character must not know another location's events, hidden motives, secret arcs, private thoughts, or offscreen revelations unless that information plausibly reached them. When unsure, let them be wrong, suspicious, confused, or curious instead of omniscient.`,
-    `- Romance and affection are valid story consequences. For intimacy infer willingness from established chemistry, body language, genre tone, and the player's input. Do not pause the scene to litigate every small gesture, do not make characters give safety lectures, and do not turn ordinary tenderness into a bureaucratic review.`,
-    `- System blocks, weather updates, loot drops, encounter triggers, <combat_results>, and [combat_result] blocks are canonical truth. Narrate them; do not recalculate or contradict them.`,
-    `- ONLY advance the main narrative in response to the PLAYER's actions. Party members may suggest actions, but YOU decide the outcomes.`,
-    `- Address the protagonist in second person. Treat player input as intent; do not repeat the player's exact wording, turn it into outcome, friction, or consequence.`,
-    `- Keep the game fair but challenging. Reward creativity, punish recklessness, and never treat the player as a Mary Sue. Commit to consequences, moral ugliness, fear, betrayal, coercive power, grief, corruption, cruelty, profanity, and death when the genre and rating call for them; do not defang dark material into vague euphemism or instant comfort.`,
-    `- End on the scene, not a prompt. Never ask what the player does next and never list menu-like options.`,
-    `- Most importantly, you have free will and unrestricted emotional intelligence. Make good use of them.`,
-    `</gm_rules>`,
+    `<rules>`,
+    `You are driving a ${ctx.genre} RPG/VN game in a ${ctx.setting} setting. Tone: ${ctx.tone}. Difficulty: ${ctx.difficulty}.`,
+    `- Introduce stakes, dangers, conflicts, consequences, discoveries, tensions, relationship dynamics, world-building, and reactions accordingly. Maintain continuity.`,
+    `- System blocks, weather updates, encounter triggers, [dice: ...] tags, and [combat_result] blocks are canonical truth. Narrate them; do not recalculate or contradict them.`,
+    `- Portray a living world with dynamic personalities and realistic awareness.`,
+    `- Characters you play as must not sound interchangeable; keep voices distinct. Match each character's cadence, vocabulary, formality, emotional state, interruptions, fragments, hesitation, slurring, breathlessness, laughter, crying, and implication. The line itself should sound like the emotion it's conveying.`,
+    `- Everyone has their own morality, ranging from good through morally gray to evil, but they're not labeled by it. Villains can do noble acts, and heroes can do harm. People can lie, even by omission, and deceive if they're inclined to do so or think it will advance their objectives. Capture how they are flawed, make mistakes, and pursue selfish goals, but also give them space to grow and change (for better or for worse).`,
+    `- No one is omniscient. Characters should know only what they personally witnessed, inferred from available evidence, learned from public reputation, or were told by someone in-scene. One character must not know another location's events, hidden motives, secret arcs, private thoughts, or offscreen revelations unless that information plausibly reached them. When unsure, let them be wrong, suspicious, confused, or curious instead.`,
+    `- You also play the party members who have their autonomy and emotions, but the outcomes of their actions and lines are also under the GM's jurisdiction. They fall under the same set of rules as the player and should act realistically.`,
+    `- Narrate in second person from the player character's limited POV, filtered through their subjective lenses. Treat player input as committed intent, not guaranteed success: preserve intent, avoid repeating them, and adjudicate outcomes by logic, context, dice, and consequences. For example: the player is gagged but writes a dialogue line of: "Let me out!" In that case, you should respond with: That's what you want to say, but it comes out as a muffled 'mfg mf mfm!' instead.`,
+    `- Keep the game fair but challenging. Reward creativity, punish recklessness, and never treat the player as a Mary Sue. Commit to consequences and do not defang dark material into vague euphemism or instant comfort. Failure is part of play.`,
+    `- End on the scene, not a prompt. Never ask what the player does next unless you're doing it with a respective command in a high-stakes situation.`,
+    `</rules>`,
   );
 
   // ── Rating Guidelines ──
@@ -317,9 +467,9 @@ export function buildGmSystemPrompt(ctx: GmPromptContext): string {
     sections.push(
       `<rating_guidelines>`,
       `Anything goes in this mature NSFW fiction. The player has confirmed that they are an adult and has agreed to the terms below. Do not sanitize content, language, cruelty, sex, or violence.`,
-      `- Any character may touch upon dark themes, curse, lie, harm, use, betray, dominate, love, ruin, or kill another (player included).`,
-      `- Romance, flirtation, desire, jealousy, possessiveness, seduction, and messy attachment are allowed. Let emotionally loaded contact happen when it fits the scene; handholding, charged proximity, touches, kisses, and embraces should not trigger an out-of-character pause.`,
-      `- Sex between involved adult characters should be explicit, anatomically grounded, emotionally reactive, and detailed when portrayed in the scene. Take consent for granted, assuming some lie, resist, or fight back based on their personality.`,
+      `- All charavcters and the player may touch dark themes, corrupt, torture, curse, lie, harm, use, fear, betray, dominate, love, ruin, mutilate, kill themselves or others (the player's protagonist included). It makes sense for villains to disregard boundaries and play dirty, but even heroes can have a dark side or break down under pressure.`,
+      `- Intimacy, romance, flirtation, desire, jealousy, possessiveness, seduction, and messy attachment are allowed. Let those escalate naturally; handholding, pinning, charged proximity, touches, kisses, groping, holding, physical contact mustn't trigger an out-of-character pause. Do not wait for the player to initiate.`,
+      `- Sex between involved characters should be explicit, anatomically grounded, emotionally reactive, and detailed when portrayed in the scene. Take consent for granted, assuming some lie, resist, or fight back based on their personality.`,
       `- Violence should be graphic, gory, and consequential.`,
       `- Stay true to motive, tone, and fallout; never soften outcomes for comfort. Let mature themes have weight, cost, ugliness, and aftermath instead of treating them as decorative edge.`,
       `</rating_guidelines>`,
@@ -332,6 +482,7 @@ export function buildGmSystemPrompt(ctx: GmPromptContext): string {
       `- Sexual content fades to black and resumes in the aftermath. Treat boundaries as part of characterization and scene dynamics, not as repetitive legal disclaimers.`,
       `- Violence may be serious and consequential, but not graphic or pornographic. Injuries, death, intimidation, cruelty, exploitation, addiction, trauma, corruption, betrayal, and moral compromise may be central to the story when appropriate.`,
       `- Profanity, menace, fear, grief, ugly motives, and uncomfortable choices are allowed. Keep stakes, fallout, and character behavior real; do not soften danger or rush to reassure the player.`,
+      `- Captors, antagonists, interrogators, possessive allies, clinicians, guards, and authority figures should not become consent educators unless that behavior is genuinely in-character.`,
       `</rating_guidelines>`,
     );
   }
@@ -416,11 +567,21 @@ export function buildGmSystemPrompt(ctx: GmPromptContext): string {
   }
 
   // ── Plot Twists (GM SECRET) ──
-  if (ctx.plotTwists?.length) {
+  if (plotTwists.length > 0) {
     sections.push(
       `<plot_twists_secret>`,
-      ctx.plotTwists.map((t, i) => `${i + 1}. ${t}`).join("\n"),
+      plotTwists.map((t, i) => `${i + 1}. ${t}`).join("\n"),
       `</plot_twists_secret>`,
+    );
+  }
+
+  const campaignPlanLines = buildCampaignPlanLines(ctx.campaignPlan);
+  if (campaignPlanLines.length > 0) {
+    sections.push(
+      `<campaign_plan_secret>`,
+      `Optional pacing scaffolding. Use it when it fits; ignore clocks or seeds when the current game is meant to stay chill, domestic, or low-pressure.`,
+      ...campaignPlanLines,
+      `</campaign_plan_secret>`,
     );
   }
 
@@ -435,13 +596,13 @@ export function buildGmSystemPrompt(ctx: GmPromptContext): string {
   }
 
   // ── NPCs ──
-  if (ctx.npcs.length > 0) {
-    sections.push(`<tracked_npcs>`, ...buildTrackedNpcLines(ctx.npcs), `</tracked_npcs>`);
+  if (npcs.length > 0) {
+    sections.push(`<tracked_npcs>`, ...buildTrackedNpcLines(npcs), `</tracked_npcs>`);
   }
 
   // ── Previous Sessions (all summaries, latest session continuity in detail) ──
-  if (ctx.sessionSummaries.length > 0) {
-    const sorted = [...ctx.sessionSummaries].sort((a, b) => a.sessionNumber - b.sessionNumber);
+  if (sessionSummaries.length > 0) {
+    const sorted = [...sessionSummaries].sort((a, b) => a.sessionNumber - b.sessionNumber);
     const latest = sorted[sorted.length - 1]!;
 
     sections.push(
@@ -466,12 +627,12 @@ export function buildGmSystemPrompt(ctx: GmPromptContext): string {
   } else {
     partyLines.push(`Player: ${ctx.playerName}`);
   }
-  if (ctx.partyCards?.length) {
-    for (const pc of ctx.partyCards) {
+  if (partyCards.length > 0) {
+    for (const pc of partyCards) {
       partyLines.push(pc.card);
     }
-  } else if (ctx.partyNames.length > 0) {
-    partyLines.push(`Party members: ${ctx.partyNames.join(", ")}`);
+  } else if (partyNames.length > 0) {
+    partyLines.push(`Party members: ${partyNames.join(", ")}`);
   }
   sections.push(`<party>`, ...partyLines, `</party>`);
 
@@ -501,16 +662,43 @@ export function buildGmFormatReminder(
   > & {
     /** Special non-scene-advancing address mode inferred from the current player turn prefix. */
     addressMode?: "party" | "gm";
+    /** Whether the current player turn already includes a resolved [dice: ...] roll. */
+    playerDiceRollSubmitted?: boolean;
   },
 ): string {
   const lines: string[] = [];
   const normalizedLanguage = normalizePromptLanguage(ctx.language);
 
-  const partyNames = ctx.partyNames ?? [];
+  const partyNames = normalizePromptTextList(ctx.partyNames);
   const hasParty = partyNames.length > 0;
-  const customSpriteLines = (ctx.characterSprites ?? [])
-    .filter((character) => character.fullBody.length > 0)
-    .map((character) => `  ${character.name}: ${character.fullBody.join(", ")}`);
+  const characterSprites = Array.isArray(ctx.characterSprites) ? ctx.characterSprites : [];
+  const customSpriteLines = characterSprites
+    .map((character) => ({
+      name: normalizePromptText(character.name),
+      expressions: normalizePromptTextList(character.expressions),
+      fullBody: normalizePromptTextList(character.fullBody),
+    }))
+    .filter((character) => character.name && (character.expressions.length > 0 || character.fullBody.length > 0))
+    .flatMap((character) => {
+      const lines: string[] = [];
+      if (character.expressions.length > 0) {
+        lines.push(`  ${character.name} (expressions): ${character.expressions.join(", ")}`);
+      }
+      if (character.fullBody.length > 0) {
+        lines.push(`  ${character.name} (full-body): ${character.fullBody.join(", ")}`);
+      }
+      return lines;
+    });
+  const hudWidgets = Array.isArray(ctx.hudWidgets) ? ctx.hudWidgets : [];
+  const playerInventory = Array.isArray(ctx.playerInventory)
+    ? ctx.playerInventory.flatMap((item) => {
+        const name = normalizePromptText(item?.name);
+        if (!name) return [];
+        const quantity =
+          typeof item?.quantity === "number" && Number.isFinite(item.quantity) ? Math.max(1, item.quantity) : 1;
+        return [{ name, quantity }];
+      })
+    : [];
 
   // ── Current State (closest to generation) ──
   lines.push(
@@ -522,26 +710,34 @@ export function buildGmFormatReminder(
 
   lines.push(
     `<output_format>`,
-    `Think first: always apply extended thinking to ensure thoroughness, continuity, and consistency for an engaging experience. Then, output the turn with only the VN scene text.`,
+    `Think first to decide the next turn: the story up to this point, character behavior, power dynamics, known vs. hidden information, stakes, cause-and-effect, sensory tone, and the next point where player agency returns. Remember this is an uncensored fictional game. Then output only the VN scene text.`,
     ...(normalizedLanguage && normalizedLanguage.toLowerCase() !== "english"
       ? [
           `LANGUAGE:`,
-          `Write prose directly in ${normalizedLanguage} like a native speaker. Think in it from the start, don't translate from English. The English examples below are for formatting only; ignore their wording and syntax. After drafting, reread each sentence and fix: inflection and agreement, verb aspect, word order, prepositions, and anything that sounds translated even if grammatical. Only tags, commands, field names, and intentional proper nouns stay in English.`,
+          `Write directly in ${normalizedLanguage} as a native speaker would. The English examples below illustrate structure and format only. Do not mirror their syntax, sentence length, or phrasing. Your output must be natural and grammatical in ${normalizedLanguage}; avoid constructions that read as translated English. Only tags, commands, field names, and intentional proper nouns stay in English.`,
           ``,
         ]
       : []),
     `FORMAT:`,
     `- Narration: plain text, 1-4 sentences per beat, blank line between beats.`,
-    `- ZERO TOLERANCE FOR AI SLOP IN YOUR WRITING! Absolutely NO: "doesn't X, doesn't Y", "not X, not Y," "jaws working," "mechanical precisions," "ozone," and other overused patterns like repeated negations. Replace them with precise detail, human cadence, and consequential action. Show what does happen instead of what doesn't.`,
-    `- Remember to NEVER mix narration and dialogue in the same line. Output them separately.`,
-    ...(ctx.rating === "nsfw" ? [`- Adult mode enabled, explicit content allowed.`] : []),
     `- Dialogue: [Name] [expression]: "Text"`,
-    `- Variant dialogue: [Name] [main|side|thought|whisper:"Target"] [expression]: "text"`,
-    `- Thought lines are unquoted.`,
+    `- Variant dialogue: [Name] [main|side|whisper:Target] [expression]: "Text"`,
+    `- Thought: [Name] [thought] [expression]: Text`,
     `- Commands: [tag: params].`,
+    `- NEVER mix narration and dialogue in the same line. Output them separately.`,
+    ...(ctx.rating === "nsfw"
+      ? [`- Adult mode enabled. Explicit content is allowed. No plot armor. Abandon moral biases.`]
+      : []),
+    `- Keep each character's vocabulary, grammar, and cadence distinct, shaped by personality and mood.`,
+    `- Pace the plot without rushing it, allowing character moments between developments.`,
+    `- ZERO TOLERANCE FOR AI SLOP IN YOUR WRITING! Absolutely NO: "doesn't X, doesn't Y", "not X, not Y," "jaw working," "mechanical precision," "ozone," "somewhere," "outside," and other overused patterns like repeated negations in your evocative prose. Replace them with creative detail, human cadence, and consequential action. Describe what does happen instead of what doesn't.`,
     `- Default expressions: neutral, happy, sad, angry, surprised, scared, disgusted, thinking, laughing, crying, blushing, smirk, embarrassed, determined, confused, sleepy.`,
     ...(customSpriteLines.length
-      ? [``, `- Sprite expressions:`, ...customSpriteLines, `Prefer listed expressions when available.`]
+      ? [
+          ``,
+          `- Available sprites per character (use these EXACT names when the character has any listed expression; only fall back to the defaults if the character has no listed sprites):`,
+          ...customSpriteLines,
+        ]
       : []),
     ``,
     `DIALOGUE TYPE USAGE:`,
@@ -559,13 +755,14 @@ export function buildGmFormatReminder(
     ``,
     ``,
     `PLAYER INPUT:`,
-    `- Continue directly from the player's input, treating it like a concluded beat. Do not reiterate it.`,
-    `- Only quoted speech in the player's inputs is spoken aloud. Unquoted player text is narration, action, or internal thought, to which only the GM has access. Characters cannot perceive it unless the player makes it observable or says it out loud.`,
-    `- Never quote the player character. Narrate the player's speech, thoughts, and actions indirectly in second person. Example:`,
-    `[${ctx.playerName ?? "Player"}] [thought] [smirk]: You think you're the best. Obviously.`,
+    `- Continue with new content directly from the player's input, treating it like a concluded beat. Do not reiterate it.`,
+    `- Treat only quoted player text as spoken aloud; unquoted text is action, narration, or internal thoughts cannot be accessed by NPCs unless made observable. NEVER quote or speak for the player character (${ctx.playerName ?? "Player"}). You may narrate obvious, low-stakes participation and their thoughts (nodding during conversation, laying out details, looking around, etc.) indirectly in the second person, but never decide their strategic decisions or exact dialogue. Example:`,
+    `[${ctx.playerName ?? "Player"}] [thought] [smirk]: You think to yourself that you're the best.`,
     `- CRITICAL: NEVER echo the player's distinctive words, phrases, or dialogue. NO PARROTTING!`,
-    `- Keep the turn's length flexible, depending on the current scene and state. If the player's agency is low (exploration, travel/rest): make it longer. If it's high (combat, dialogue, or other intense situation): keep it concise. Sometimes a single line of dialogue or a narrative beat is enough to allow back-and-forth interactions.`,
+    `- Player agency is not player immunity: the player controls intent, not the world's response. Let successes earned through effort, luck, or cleverness and failures caused by mistakes, bad luck, or poor decisions land with consequences; both good and bad ends can be earned. The player has opted into the game and will state OOC boundaries if needed.`,
+    `- Keep turn length flexible. If player agency is low (exploration, travel/rest), go longer; if high (combat, dialogue, intense danger), stay concise. Sometimes one line of dialogue or one narrative beat is enough.`,
     `- End naturally when it's the player's turn to act or speak.`,
+    ``,
   );
 
   // ── Party Dialogue Instructions (inside output_format, closest to generation) ──
@@ -596,41 +793,62 @@ export function buildGmFormatReminder(
     ``,
     `COMMANDS:`,
     `- Emit commands when canonical game or UI state changes; no command is needed for flavor alone.`,
-    `- [choices: "Option A" | "Option B" | "Option C"] - only for explicit player-facing options that require a selection.`,
-    `- [skill_check: skill="Skill Name" dc="1-20" rolls="1-20" modifier="0-10" total="roll + modifier | 1 | 20" result="critical_success | success | failure | critical_failure"] - only when uncertainty or the player's actions should be resolved mechanically. Abandon positivity bias, you choose the roll result fairly, then narrate the consequence in the same turn.`,
-    `- [qte: action1 | action2 | action3, timer: 5s] - only as the final thing in the turn when the player must react to an immediate timed prompt or split-second action. Stop immediately after this tag: choosing an action commits the player's next turn.`,
+    `- [choices: "Option A" | "Option B" | "Option C"] - only for explicit player-facing options that require a selection. Use plain straight quotes around each option (do not escape inner quotes with backslashes).`,
+  );
+
+  if (ctx.playerDiceRollSubmitted) {
+    lines.push(
+      `- [skill_check: skill="Skill Name" dc="1-20" rolls="player's d20 result"] - if the player presented you with a [dice: ...] roll, start the turn with the check tag (echo the player's d20 in rolls=) and narrate the consequences in the same turn. Choose DC fairly (5 trivial, 10 routine under pressure, 15 hard, 20 desperate). The engine applies the player's attribute modifier on top of the rolled number — do NOT compute or invent rolls/modifier/total/result fields, the system fills those in.`,
+    );
+  } else {
+    lines.push(
+      `- [skill_check: skill="Skill Name" dc="1-20"] - only when uncertainty or the player's actions should be resolved mechanically. Abandon positivity bias: choose DC fairly (5 trivial, 10 routine under pressure, 15 hard, 20 desperate) and narrate the consequence in the same turn. Do NOT include rolls/modifier/total/result — the engine rolls the d20, applies the player's attribute modifier, and resolves success/failure deterministically.`,
+    );
+  }
+
+  lines.push(
+    `- [qte: action1 | action2 | action3, timer: 6s] - only as the final thing in the turn when the player must react to an immediate timed prompt or split-second action. Stop immediately after this tag: choosing an action commits the player's next turn.`,
     ...(ctx.map?.type === "node"
       ? [
           `- [map_update: new_location="Location Name" connected_to="Previous Location Name" node_emoji="emoji"] - only when the party arrives at an entirely new location on the current node map.`,
         ]
       : []),
-    `- [combat: enemies="Enemy 1, Enemy 2" allies="Ally 1, Ally 2 | null"] - only when a real combat encounter starts. Emit [state: combat] [combat: ...] only at the very end of the turn, then stop immediately. Combat initiates a new turn with a combat UI.`,
     `- [inventory: action="add | remove" item="Item A, Item B"] - every real item gain or loss, keep their names short.`,
     `- [Note: contents] or [Book: contents] - when a new readable note or book is acquired and should be tracked in the journal.`,
-    `- [state: exploration | dialogue | combat | travel_rest] - only on actual mode transitions.`,
+    `- [state: exploration | dialogue | combat | travel_rest] - only on actual mode transitions. If you're planning to use [state: combat], this one ALWAYS has to be at the end of the turn, as it initiates a new combat generation and UI.`,
     `- [reputation: npc="Name" action="helped"] - when an NPC's tracked stance changes because of what happened.`,
     `- [party_change: character="Exact Character Name" change="add | remove"] - only when someone truly joins or leaves the party. Use remove when a party member dies, permanently departs, or is no longer traveling with the player.`,
     `- [session_end: reason="goal achieved"] - only when the current session truly ends.`,
   );
 
+  if (ctx.gameActiveState === "combat") {
+    lines.push(
+      ``,
+      `COMBAT GM ADJUDICATION:`,
+      `Combat rounds are resolved by the combat UI. During ordinary combat narration, do not emit tactical combat commands or recalculate combat mechanics. If the player sends a special maneuver, follow the explicit instruction included in that user message.`,
+    );
+  }
+
   if (!ctx.hasSceneModel) {
     lines.push(`Scene tags allowed: [sfx: ...] [bg: ...] [ambient: ...]`);
   }
 
-  if (ctx.hudWidgets?.length) {
+  if (hudWidgets.length > 0) {
     lines.push(
       ``,
       `HUD WIDGETS:`,
-      ...buildWidgetSummaryLines(ctx.hudWidgets),
-      `Widget usage: emit widget commands only when tracked state changes. value = bars/gauges, count = counters, stat = one stat_block entry, add/remove = rotating list items, running/seconds = timers.`,
+      ...buildWidgetSummaryLines(hudWidgets),
+      `Widget usage: emit widget commands for every real change to these visible HUD widgets. Do not skip a changed widget just because another system tracks related player or party stats.`,
+      `HUD widgets are visual UI state only. Player stats, inventory, party member HP, party relationships, and other durable game facts remain in their own canonical systems; use [widget:] only to mirror a visible widget when that widget's displayed value should change.`,
+      `Command mapping: value = bars/gauges, count = counters, stat = one stat_block entry, add/remove = rotating list items, running/seconds = timers.`,
       `Widget commands: [widget: id, value: n] [widget: id, stat: "Name", value: x] [widget: id, count: n] [widget: id, add: "Item"] [widget: id, remove: "Item"] [widget: id, running: true, seconds: 60]`,
       `List widgets: keep at most 5 short entries visible; remove stale items freely.`,
     );
   }
 
   // Inventory context
-  if (ctx.playerInventory?.length) {
-    lines.push(``, `PLAYER INVENTORY: ${buildCompactInventoryLine(ctx.playerInventory)}`);
+  if (playerInventory.length > 0) {
+    lines.push(``, `PLAYER INVENTORY: ${buildCompactInventoryLine(playerInventory)}`);
   }
 
   lines.push(`</output_format>`);
@@ -643,8 +861,12 @@ export interface SetupPromptContext {
   rating?: "sfw" | "nsfw";
   /** Full persona card text (player character) */
   personaCard?: string | null;
+  /** Exact player persona name, when known */
+  playerName?: string | null;
   /** Full party member card texts */
   partyCards?: string[];
+  /** Exact starting party member names selected by the user */
+  partyNames?: string[];
   /** GM character card text (if using a character as GM) */
   gmCharacterCard?: string | null;
   /** Enable custom HUD widgets in the game blueprint */
@@ -658,6 +880,9 @@ export interface SetupPromptContext {
 export function buildSetupPrompt(ctx: SetupPromptContext = {}): string {
   const rating = ctx.rating ?? "sfw";
   const normalizedLanguage = normalizePromptLanguage(ctx.language);
+  const playerName = ctx.playerName?.trim() || (ctx.personaCard ? "the player character named in <user_player>" : null);
+  const partyNames = (ctx.partyNames ?? []).map((name) => name.trim()).filter((name) => name.length > 0);
+  const characterCardTargets = [...(playerName ? [playerName] : []), ...partyNames];
   const ratingBlock =
     rating === "nsfw"
       ? [
@@ -696,6 +921,17 @@ export function buildSetupPrompt(ctx: SetupPromptContext = {}): string {
   if (ctx.partyCards?.length) {
     contextSections.push(`<party_info>`, `Party members accompanying the player:`, ...ctx.partyCards, `</party_info>`);
   }
+  contextSections.push(
+    `<character_card_scope>`,
+    characterCardTargets.length > 0
+      ? `Allowed characterCards names: ${characterCardTargets.join(", ")}`
+      : `Allowed characterCards names: none supplied. Use an empty characterCards array unless the setup preferences clearly define the player character.`,
+    partyNames.length > 0
+      ? `Allowed partyArcs names: ${partyNames.join(", ")}`
+      : `Allowed partyArcs names: none. Use an empty partyArcs array.`,
+    `Hard rule: characterCards are only for the player persona and the starting party members selected by the user. Do NOT create characterCards for GM characters, love interests, antagonists, lorebook figures, factions, future recruits, or NPCs merely mentioned in preferences/canon. Put non-party people in startingNpcs instead.`,
+    `</character_card_scope>`,
+  );
   if (ctx.lorebookContext?.trim()) {
     contextSections.push(
       `<lorebook_context>`,
@@ -719,7 +955,7 @@ export function buildSetupPrompt(ctx: SetupPromptContext = {}): string {
           ``,
         ]
       : []),
-    `CRITICAL: Your response MUST be a single JSON object using the EXACT keys shown in the <output_format> template below. Do NOT invent your own keys. Do NOT rename fields. The keys "worldOverview", "storyArc", "plotTwists", "startingMap", "startingNpcs", "partyArcs", "characterCards", and "blueprint" are MANDATORY and must appear at the top level. The system will reject any response that uses different key names.`,
+    `CRITICAL: Your response MUST be a single JSON object using the EXACT keys shown in the <output_format> template below. Do NOT invent your own keys. Do NOT rename fields. The keys "worldOverview", "storyArc", "plotTwists", "startingMap", "startingNpcs", "partyArcs", "characterCards", and "blueprint" are MANDATORY and must appear at the top level. The system will reject any response that uses different key names. Respect <character_card_scope> exactly.`,
     ``,
     ...(ctx.enableCustomWidgets !== false
       ? [
@@ -736,7 +972,7 @@ export function buildSetupPrompt(ctx: SetupPromptContext = {}): string {
           `If you design a list widget, treat it as a compact rotating list with a hard cap of 5 entries. Choose items worth surfacing right now, and expect older entries to be swapped out as the situation changes.`,
           `Keep each list item concise and label-like when possible. Avoid long multi-clause sentences, because the same text may need to be referenced later for removal or swapping.`,
           ``,
-          `Design up to 4 widgets that fit the genre. IMPORTANT: Party member bonds/reputation MUST be a SINGLE stat_block widget with one stat per member (e.g. stats: [{name: "🐱 Nadia", value: 50}, {name: "⚔️ Vlad", value: 30}]) — do NOT create separate widgets per party member. That single widget counts as 1 of 4.`,
+          `Design up to 3 widgets that fit the genre. IMPORTANT: Party member bonds/reputation MUST be a SINGLE stat_block widget with one stat per member (e.g. stats: [{name: "🐱 Nadia", value: 50}, {name: "⚔️ Vlad", value: 30}]) — do NOT create separate widgets per party member. That single widget counts as 1 of 3.`,
           `Romance = stat_block for bonds + mood gauge. Horror = sanity gauge + clue list. RPG = health/mana bars.`,
           `Inventory is handled separately — do NOT create inventory widgets.`,
           `</blueprint_widget_types>`,
@@ -754,6 +990,14 @@ export function buildSetupPrompt(ctx: SetupPromptContext = {}): string {
     `  focus (duration, intensity)`,
     `</intro_effects>`,
     ``,
+    `<campaign_structure_rules>`,
+    `Optional structure, not mandatory intensity: some games are cozy, romantic, slice-of-life, sandbox, or low-pressure. If rushing the plot would hurt the requested vibe, use empty arrays or soft social/environmental pressures instead of ticking doom.`,
+    `Do not fill every optional campaignPlan list. Empty arrays are valid. Prefer 0-1 pressure clock, 0-2 factions, 0-3 quest seeds, and 0-2 encounter principles.`,
+    `campaignPlan formats when used: pressureClocks objects {name, steps, current, failure}; factions objects {name, goal, method, secret}; questSeeds/principles short strings.`,
+    `Keep all setup JSON compact: worldOverview 1-2 short paragraphs, map 3-6 regions, startingNpcs 2-5, artStylePrompt 20-30 words. No lore essays.`,
+    `Structure should create choices and consequences, not force a railroad. Every hook should be easy for the GM to use later in one turn.`,
+    `</campaign_structure_rules>`,
+    ``,
     ratingBlock,
     ``,
     ...(contextSections.length > 0 ? [...contextSections, ``] : []),
@@ -761,21 +1005,20 @@ export function buildSetupPrompt(ctx: SetupPromptContext = {}): string {
     `Your ENTIRE response must be a single valid JSON object matching this exact template. Replace the placeholder values with your creative content. Do NOT add extra keys.`,
     ``,
     `{`,
-    `  "worldOverview": "2-3 vivid paragraphs describing the world, its history, factions, and atmosphere. This is shown to the player as their introduction to the setting. When writing this part, DO NOT start sentences with Outside or Somewhere! ZERO TOLERANCE FOR AI SLOP! No GPTisms. BAN generic structures and cliches; NO 'doesn't X, doesn't Y,' 'if X, then Y,' 'not X, but Y,' 'physical punches,' 'practiced ease,' 'predatory instincts,' 'mechanical precision,' 'jaws working,' 'lets out a breath.' Combat them with the human touch.",`,
-    `  "storyArc": "SECRET. The overarching narrative arc: main quest, central antagonist, escalating stakes, and endgame conditions. The player never sees this directly. Be creative and verbose.",`,
+    `  "worldOverview": "1-2 short vivid paragraphs describing the world, its atmosphere, and only the factions/history needed to start playing. This is shown to the player. DO NOT start sentences with Outside or Somewhere! ZERO TOLERANCE FOR AI SLOP! No GPTisms. BAN generic structures and cliches; NO 'doesn't X, doesn't Y,' 'if X, then Y,' 'not X, but Y,' 'physical punches,' 'practiced ease,' 'predatory instincts,' 'mechanical precision,' 'jaws working,' 'lets out a breath.' Combat them with the human touch.",`,
+    `  "storyArc": "SECRET. Compact campaign arc in 2-4 sentences: premise, central tension/antagonist if any, escalation style, and possible end state. If the game is chill or sandbox, define soft ongoing tensions instead of a rushing plotline.",`,
     `  "plotTwists": [`,
-    `    "SECRET twist 1: a specific unexpected revelation or betrayal",`,
-    `    "SECRET twist 2: ...",`,
-    `    "SECRET twist 3: ..."`,
+    `    "SECRET twist 1: one sentence: revelation | clue | false explanation | reveal trigger | fallout.",`,
+    `    "SECRET twist 2: optional second twist or soft social/emotional turn; omit extra twists unless they matter."`,
     `  ],`,
     `  "startingMap": {`,
     `    "name": "Area Name",`,
-    `    "description": "Brief area overview",`,
+    `    "description": "Brief area overview, one sentence",`,
     `    "regions": [`,
     `      {`,
     `        "id": "region_1",`,
     `        "name": "Short Name (max 12 chars! Displayed on tiny node map. e.g. 'Old Quarter', 'Bazaar', 'Docks')",`,
-    `        "description": "What this place looks like and why it matters",`,
+    `        "description": "One sentence: what this place looks like and why it matters",`,
     `        "type": "town|wilderness|dungeon|building|camp|other",`,
     `        "connectedTo": ["region_2"],`,
     `        "discovered": true`,
@@ -786,7 +1029,7 @@ export function buildSetupPrompt(ctx: SetupPromptContext = {}): string {
     `    {`,
     `      "name": "NPC Name",`,
     `      "role": "merchant|quest_giver|ally|antagonist|neutral|other",`,
-    `      "description": "Personality, appearance, motivation in 1-2 sentences",`,
+    `      "description": "One sentence: first impression, voice/cadence, desire, and one secret or complication if useful",`,
     `      "location": "region_1",`,
     `      "reputation": 0`,
     `      "_note_reputation": "integer: 0 = neutral, positive = friendly, negative = hostile"`,
@@ -795,23 +1038,30 @@ export function buildSetupPrompt(ctx: SetupPromptContext = {}): string {
     `  "partyArcs": [`,
     `    {`,
     `      "name": "Exact party member name from the Party Members list",`,
-    `      "arc": "A personal side-quest or character arc centered on this party member. A secret from their past, an old enemy, a personal mission, a moral dilemma, or a relationship they need to resolve. 2-3 sentences.",`,
-    `      "goal": "Their concrete personal goal that drives this arc, e.g. 'Find the sister who vanished during the Collapse' or 'Earn enough to buy back the family estate'"`,
+    `      "arc": "1-2 concise sentences: personal side-quest, emotional wound, pressure trigger, likely complication, and what would change them. Use soft relationship stakes for chill games.",`,
+    `      "goal": "One concrete personal goal that drives this arc"`,
     `    }`,
     `  ],`,
     `  "characterCards": [`,
     `    {`,
-    `      "name": "Exact party member or player persona name",`,
+    `      "name": "Exact name from Allowed characterCards names only",`,
     `      "shortDescription": "One-sentence character summary for this game's context",`,
     `      "class": "Their class/role/archetype in this game (e.g. Rogue, Diplomat, Pyro Vision Holder)",`,
-    `      "abilities": ["Ability 1 — brief description", "Ability 2 — brief description"],`,
-    `      "strengths": ["Strength 1", "Strength 2"],`,
-    `      "weaknesses": ["Weakness 1", "Weakness 2"],`,
-    `      "extra": { "key": "value pairs for any other relevant info, e.g. gender, title, affiliation, element, rank" }`,
+    `      "abilities": ["1-2 abilities, each with a brief description"],`,
+    `      "strengths": ["1-2 strengths"],`,
+    `      "weaknesses": ["1-2 weaknesses"],`,
+    `      "extra": { "voice": "brief speech style", "personalStake": "why this game matters to them", "temptation": "optional flaw/temptation", "key": "other compact context such as gender, title, affiliation, element, rank" }`,
     `    }`,
     `  ],`,
-    `  "artStylePrompt": "A concise image generation style prompt (20-40 words) describing the unified visual art style for ALL generated images in this game. Examples: 'Watercolor fantasy illustration, soft edges, warm palette, Ghibli-inspired' or 'Dark gothic oil painting, dramatic chiaroscuro lighting, muted colors, baroque details'. Match the genre and tone.",`,
+    `  "artStylePrompt": "A concise image generation style prompt (20-30 words) describing the unified visual art style for ALL generated images in this game. Match the genre and tone.",`,
     `  "blueprint": {`,
+    `    "campaignPlan": {`,
+    `      "openingSituation": "Optional one-sentence playable tension for the first scene, or empty string.",`,
+    `      "pressureClocks": [],`,
+    `      "factions": [],`,
+    `      "questSeeds": [],`,
+    `      "encounterPrinciples": []`,
+    `    },`,
     ...(ctx.enableCustomWidgets !== false
       ? [
           `    "hudWidgets": [`,
@@ -828,7 +1078,6 @@ export function buildSetupPrompt(ctx: SetupPromptContext = {}): string {
           `        }`,
           `      }`,
           `    ],`,
-          `    "startingInventory": ["item1", "item2"],`,
         ]
       : []),
     `    "introSequence": [`,
@@ -844,6 +1093,7 @@ export function buildSetupPrompt(ctx: SetupPromptContext = {}): string {
     `}`,
     ``,
     `Use EXACTLY these top-level keys: worldOverview, storyArc, plotTwists, startingMap, startingNpcs, partyArcs, characterCards, artStylePrompt, blueprint. No other top-level keys. No wrapper objects.`,
+    `Scope reminder: startingNpcs may include important non-party characters, but characterCards and partyArcs must not.`,
     `</output_format>`,
   ].join("\n");
 }
@@ -990,17 +1240,22 @@ export function buildPartyRecruitCardPrompt(ctx: {
   targetCharacterCard: string;
   currentPartyNames: string[];
   currentPartyCards?: string | null;
+  existingTargetCard?: string | null;
   worldOverview?: string | null;
   storyArc?: string | null;
   plotTwists?: string[] | null;
   currentState?: string | null;
   recentTranscript?: string | null;
   language?: string | null;
+  purpose?: "recruit" | "regenerate";
 }): string {
   const normalizedLanguage = normalizePromptLanguage(ctx.language);
+  const isRegeneration = ctx.purpose === "regenerate";
   const sections: string[] = [
     `You are the Game Master updating an ongoing RPG campaign.`,
-    `A new companion is joining the party. Create a single JSON character card for them that matches the existing game card schema.`,
+    isRegeneration
+      ? `A companion's party sheet is malformed or outdated. Regenerate one clean JSON character card for them that matches the existing game card schema.`
+      : `A new companion is joining the party. Create a single JSON character card for them that matches the existing game card schema.`,
     ``,
     ...(normalizedLanguage && normalizedLanguage.toLowerCase() !== "english"
       ? [
@@ -1015,6 +1270,11 @@ export function buildPartyRecruitCardPrompt(ctx: {
     `- Keep the name exactly "${ctx.targetCharacterName}".`,
     `- Ground the card in the existing campaign state, world, and recent events.`,
     `- Respect the supplied character card as canon. Do not contradict it.`,
+    ...(isRegeneration
+      ? [
+          `- Treat the existing target party sheet as a damaged draft: preserve useful facts, but fix malformed fields, bad formatting, missing structure, and awkward or off-tone values.`,
+        ]
+      : []),
     `- abilities, strengths, and weaknesses must be arrays of strings.`,
     `- extra must be an object of string values.`,
     `- Do not output markdown, explanations, or any wrapper text.`,
@@ -1039,6 +1299,9 @@ export function buildPartyRecruitCardPrompt(ctx: {
   }
   if (ctx.currentPartyCards?.trim()) {
     sections.push(``, `<existing_party_cards>`, ctx.currentPartyCards.trim(), `</existing_party_cards>`);
+  }
+  if (ctx.existingTargetCard?.trim()) {
+    sections.push(``, `<existing_target_party_sheet>`, ctx.existingTargetCard.trim(), `</existing_target_party_sheet>`);
   }
   if (ctx.currentState?.trim()) {
     sections.push(``, `<current_state>`, ctx.currentState.trim(), `</current_state>`);

@@ -7,6 +7,7 @@
 // ──────────────────────────────────────────────
 
 import type { DirectionCommand } from "./game.js";
+import type { LocationKind, MusicGenre, MusicIntensity } from "../utils/music-score.js";
 
 /** Available quantization variants for the sidecar model. */
 export type SidecarQuantization = "q8_0" | "q4_k_m";
@@ -183,6 +184,25 @@ export interface GeneratedSceneIllustration {
   segment?: number;
 }
 
+/** Spotify track candidate offered to scene analysis for Game Mode music selection. */
+export interface SceneSpotifyTrackCandidate {
+  uri: string;
+  name: string;
+  artist: string;
+  album?: string | null;
+  position?: number | null;
+  score?: number | null;
+}
+
+/** Spotify track selected by scene analysis from the provided candidates. */
+export interface SceneSpotifyTrackSelection {
+  uri: string;
+  name?: string | null;
+  artist?: string | null;
+  album?: string | null;
+  reason?: string | null;
+}
+
 /** Scene analysis result from the sidecar model for game mode.
  *  Generated after the main model's narration is complete. */
 export interface SceneAnalysis {
@@ -202,9 +222,9 @@ export interface SceneAnalysis {
    * existing tag); `null` when reusing an existing tag.
    */
   backgroundPrompt?: string | null;
-  /** Music tag to play. */
+  /** Music tag to play, populated by deterministic scoring after analysis. */
   music: string | null;
-  /** Ambient loop tag. */
+  /** Ambient loop tag, populated by deterministic scoring after analysis. */
   ambient: string | null;
   /** Weather description update — applied immediately. */
   weather: string | null;
@@ -212,6 +232,14 @@ export interface SceneAnalysis {
   timeOfDay: string | null;
   /** Season — derived from narration cues; varies background cache key alongside weather/timeOfDay. */
   season?: Season | null;
+  /** Compact scene-genre hint for deterministic music scoring. */
+  musicGenre?: MusicGenre | null;
+  /** Compact scene-intensity hint for deterministic music scoring. */
+  musicIntensity?: MusicIntensity | null;
+  /** Compact physical-location hint for deterministic ambient scoring. */
+  locationKind?: LocationKind | null;
+  /** Spotify track to play when Game Mode is configured to use Spotify music. */
+  spotifyTrack?: SceneSpotifyTrackSelection | null;
   /** NPC reputation changes — applied immediately. */
   reputationChanges: SceneReputationChange[];
   /** Segment-indexed effects. Each entry fires when the user reaches that segment. */

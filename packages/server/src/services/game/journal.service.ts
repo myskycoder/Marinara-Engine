@@ -39,7 +39,12 @@ export interface Journal {
   /** NPC interaction log */
   npcLog: Array<{ npcName: string; interactions: string[] }>;
   /** Inventory changes log */
-  inventoryLog: Array<{ item: string; action: "acquired" | "used" | "lost"; quantity: number; timestamp: string }>;
+  inventoryLog: Array<{
+    item: string;
+    action: "acquired" | "used" | "lost" | "removed";
+    quantity: number;
+    timestamp: string;
+  }>;
 }
 
 function getReadableEntryKey(title: string, content: string): string {
@@ -188,19 +193,38 @@ export function upsertQuest(
 export function addInventoryEntry(
   journal: Journal,
   item: string,
-  action: "acquired" | "used" | "lost",
+  action: "acquired" | "used" | "lost" | "removed",
   quantity: number = 1,
 ): Journal {
+  const normalizedItem = typeof item === "string" ? item.trim() : "";
+  if (!normalizedItem) return journal;
+
+  const now = new Date();
+  const lastEntry = journal.inventoryLog[journal.inventoryLog.length - 1];
+  if (lastEntry) {
+    const lastTime = Date.parse(lastEntry.timestamp);
+    const isRecentDuplicate =
+      lastEntry.item.trim().toLowerCase() === normalizedItem.toLowerCase() &&
+      lastEntry.action === action &&
+      lastEntry.quantity === quantity &&
+      Number.isFinite(lastTime) &&
+      now.getTime() - lastTime <= 10_000;
+    if (isRecentDuplicate) return journal;
+  }
+
+  const actionLabel =
+    action === "acquired" ? "Found" : action === "used" ? "Used" : action === "removed" ? "Removed" : "Lost";
+
   return {
     ...journal,
-    inventoryLog: [...journal.inventoryLog, { item, action, quantity, timestamp: new Date().toISOString() }],
+    inventoryLog: [...journal.inventoryLog, { item: normalizedItem, action, quantity, timestamp: now.toISOString() }],
     entries: [
       ...journal.entries,
       {
-        timestamp: new Date().toISOString(),
+        timestamp: now.toISOString(),
         type: "item",
-        title: `${action === "acquired" ? "Found" : action === "used" ? "Used" : "Lost"}: ${item}`,
-        content: `${quantity}x ${item} ${action}.`,
+        title: `${actionLabel}: ${normalizedItem}`,
+        content: `${quantity}x ${normalizedItem} ${action}.`,
       },
     ],
   };

@@ -13,6 +13,8 @@ import {
 } from "@marinara-engine/shared";
 import { createAppSettingsStorage } from "../services/storage/app-settings.storage.js";
 import { encryptApiKey, decryptApiKey } from "../utils/crypto.js";
+import { isTtsLocalUrlsEnabled } from "../config/runtime-config.js";
+import { safeFetch } from "../utils/security.js";
 
 // OpenAI built-in voices used as fallback when the provider has no /audio/voices endpoint
 const OPENAI_FALLBACK_VOICES = ["alloy", "ash", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer"];
@@ -26,9 +28,75 @@ const TTS_SOURCE_DEFAULTS: Record<TTSSource, { baseUrl: string; model: string }>
     baseUrl: "https://api.elevenlabs.io",
     model: "eleven_multilingual_v2",
   },
+  pockettts: {
+    baseUrl: "http://localhost:8000",
+    model: "pocket-tts",
+  },
 };
 
 const ELEVENLABS_NON_TTS_MODELS = new Set(["eleven_ttv_v3", "eleven_multilingual_ttv_v2"]);
+const ELEVENLABS_TTS_MODEL_ALIASES: Record<string, string> = {
+  tts_v3: "eleven_v3",
+  elevenlabs_v3: "eleven_v3",
+  elevenlabs_tts_v3: "eleven_v3",
+};
+const NANOGPT_TTS_MODEL_ALIASES: Record<string, string> = {
+  eleven_v3: "Elevenlabs-V3",
+  "elevenlabs-v3": "Elevenlabs-V3",
+  elevenlabs_v3: "Elevenlabs-V3",
+  elevenlabs_tts_v3: "Elevenlabs-V3",
+  eleven_turbo_v2_5: "Elevenlabs-Turbo-V2.5",
+  eleven_flash_v2_5: "Elevenlabs-Turbo-V2.5",
+};
+const NANOGPT_ELEVENLABS_VOICES = [
+  "Adam",
+  "Alice",
+  "Antoni",
+  "Aria",
+  "Arnold",
+  "Bella",
+  "Bill",
+  "Brian",
+  "Callum",
+  "Charlie",
+  "Charlotte",
+  "Chris",
+  "Daniel",
+  "Domi",
+  "Dorothy",
+  "Drew",
+  "Elli",
+  "Emily",
+  "Eric",
+  "Ethan",
+  "Fin",
+  "Freya",
+  "George",
+  "Gigi",
+  "Giovanni",
+  "Grace",
+  "James",
+  "Jeremy",
+  "Jessica",
+  "Joseph",
+  "Josh",
+  "Laura",
+  "Liam",
+  "Lily",
+  "Matilda",
+  "Matthew",
+  "Michael",
+  "Nicole",
+  "Rachel",
+  "River",
+  "Roger",
+  "Ryan",
+  "Sam",
+  "Sarah",
+  "Thomas",
+  "Will",
+];
+const MAX_TTS_AUDIO_BYTES = 20 * 1024 * 1024;
 
 const speakSchema = z.object({
   text: z.string().min(1).max(4096),
@@ -79,6 +147,37 @@ function fallbackVoices(source: TTSSource): TTSVoicesResponse {
     return responseFromVoiceOptions(source, [], false);
   }
 
+  if (source === "pockettts") {
+    const voices = [
+      "alba",
+      "anna",
+      "azelma",
+      "bill_boerst",
+      "caro_davy",
+      "charles",
+      "cosette",
+      "eponine",
+      "eve",
+      "fantine",
+      "george",
+      "jane",
+      "jean",
+      "javert",
+      "marius",
+      "mary",
+      "michael",
+      "paul",
+      "peter_yearsley",
+      "stuart_bell",
+      "vera",
+    ];
+    return responseFromVoiceOptions(
+      source,
+      voices.map((voice) => ({ id: voice, name: voice, category: "PocketTTS built-in" })),
+      false,
+    );
+  }
+
   return responseFromVoiceOptions(
     source,
     OPENAI_FALLBACK_VOICES.map((voice) => ({ id: voice, name: voice })),
@@ -91,8 +190,40 @@ function configuredBaseUrl(cfg: TTSConfig) {
   return (cfg.baseUrl || fallbackBase).replace(/\/+$/, "");
 }
 
+function allowLocalTtsUrl(cfg: TTSConfig) {
+  return cfg.source === "pockettts" || isTtsLocalUrlsEnabled();
+}
+
 function elevenLabsApiRoot(baseUrl: string) {
   return baseUrl.replace(/\/v\d+$/, "");
+}
+
+function isNanoGptBaseUrl(baseUrl: string) {
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return hostname === "nano-gpt.com" || hostname.endsWith(".nano-gpt.com");
+  } catch {
+    return baseUrl.toLowerCase().includes("nano-gpt.com");
+  }
+}
+
+function nanoGptApiRoot(baseUrl: string) {
+  return baseUrl.replace(/\/v\d+$/, "");
+}
+
+function nanoGptV1BaseUrl(baseUrl: string) {
+  const root = nanoGptApiRoot(baseUrl);
+  return root.endsWith("/v1") ? root : `${root}/v1`;
+}
+
+function normalizeElevenLabsTtsModelId(model: string) {
+  const trimmed = model.trim();
+  return ELEVENLABS_TTS_MODEL_ALIASES[trimmed.toLowerCase()] ?? trimmed;
+}
+
+function normalizeNanoGptTtsModelId(model: string) {
+  const trimmed = model.trim();
+  return NANOGPT_TTS_MODEL_ALIASES[trimmed.toLowerCase()] ?? trimmed;
 }
 
 function readString(value: unknown) {
@@ -190,8 +321,24 @@ function openAiHeaders(apiKey: string) {
   return headers;
 }
 
+function nanoGptHeaders(apiKey: string) {
+  const headers = openAiHeaders(apiKey);
+  if (apiKey) headers["x-api-key"] = apiKey;
+  return headers;
+}
+
+function optionalBearerHeaders(apiKey: string) {
+  const headers: Record<string, string> = {};
+  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+  return headers;
+}
+
 function openAiModelSupportsSpeechInstructions(model: string) {
   return /^gpt-4o/i.test(model.trim());
+}
+
+function articleForWord(value: string) {
+  return /^[aeiou]/i.test(value.trim()) ? "an" : "a";
 }
 
 function readProviderErrorDetail(body: string): string {
@@ -200,21 +347,36 @@ function readProviderErrorDetail(body: string): string {
   try {
     const data = JSON.parse(body) as Record<string, unknown>;
     const directDetail = readString(data.detail);
+    const error = asObject(data.error);
     const detail = asObject(data.detail);
+    const errorMessage = readString(error?.message) ?? readString(error?.status);
     const detailMessage = readString(detail?.message) ?? readString(detail?.status);
-    return readString(data.message) ?? readString(data.error) ?? directDetail ?? detailMessage ?? body.slice(0, 500);
+    return (
+      readString(data.message) ??
+      readString(data.error) ??
+      errorMessage ??
+      directDetail ??
+      detailMessage ??
+      body.slice(0, 500)
+    );
   } catch {
     return body.slice(0, 500);
   }
 }
 
-function buildSpeechInstructions(input: { speaker?: string; tone?: string }) {
+export function isAllowedTTSAudioContentType(contentType: string | null): boolean {
+  const normalized = contentType?.toLowerCase() ?? "";
+  return normalized.includes("audio/") || normalized.includes("application/octet-stream");
+}
+
+function buildSpeechInstructions(input: { speaker?: string; tone?: string; includeSpeaker?: boolean }) {
   const parts: string[] = [];
-  if (input.speaker?.trim()) {
+  if (input.includeSpeaker !== false && input.speaker?.trim()) {
     parts.push(`Voice the line as ${input.speaker.trim()}.`);
   }
-  if (input.tone?.trim()) {
-    parts.push(`Use a ${input.tone.trim()} tone.`);
+  const tone = input.tone?.trim();
+  if (tone) {
+    parts.push(`Use ${articleForWord(tone)} ${tone} tone.`);
   }
   if (parts.length === 0) return undefined;
   parts.push("Do not read speaker names, brackets, markup, or stage directions aloud.");
@@ -271,9 +433,15 @@ async function fetchElevenLabsVoiceOptions(
       url.searchParams.set("next_page_token", nextPageToken);
     }
 
-    const res = await fetch(url, {
+    const res = await safeFetch(url, {
       headers: elevenLabsHeaders(apiKey),
       signal: AbortSignal.timeout(10_000),
+      policy: {
+        allowLocal: isTtsLocalUrlsEnabled(),
+        allowedProtocols: ["https:", "http:"],
+        flagName: "TTS_LOCAL_URLS_ENABLED",
+      },
+      maxResponseBytes: 2 * 1024 * 1024,
     });
 
     if (!res.ok) throw new Error(`ElevenLabs voices request failed (${res.status})`);
@@ -295,8 +463,20 @@ async function fetchProviderVoices(cfg: TTSConfig): Promise<TTSVoicesResponse> {
 
   const base = configuredBaseUrl(cfg);
 
+  if (cfg.source === "pockettts") {
+    return fallbackVoices(cfg.source);
+  }
+
   if (cfg.source === "elevenlabs") {
     if (!cfg.apiKey) return fallbackVoices(cfg.source);
+
+    if (isNanoGptBaseUrl(base)) {
+      return responseFromVoiceOptions(
+        cfg.source,
+        NANOGPT_ELEVENLABS_VOICES.map((voice) => ({ id: voice, name: voice, category: "NanoGPT ElevenLabs" })),
+        true,
+      );
+    }
 
     const [defaultVoices, accountVoices] = await Promise.all([
       fetchElevenLabsVoiceOptions(base, cfg.apiKey, { voice_type: "default" }).catch(() => []),
@@ -306,9 +486,15 @@ async function fetchProviderVoices(cfg: TTSConfig): Promise<TTSVoicesResponse> {
     return voices.length > 0 ? responseFromVoiceOptions(cfg.source, voices, true) : fallbackVoices(cfg.source);
   }
 
-  const res = await fetch(`${base}/audio/voices`, {
+  const res = await safeFetch(`${base}/audio/voices`, {
     headers: openAiHeaders(cfg.apiKey),
     signal: AbortSignal.timeout(10_000),
+    policy: {
+      allowLocal: allowLocalTtsUrl(cfg),
+      allowedProtocols: ["https:", "http:"],
+      flagName: "TTS_LOCAL_URLS_ENABLED",
+    },
+    maxResponseBytes: 2 * 1024 * 1024,
   });
 
   if (!res.ok) return fallbackVoices(cfg.source);
@@ -392,53 +578,96 @@ export async function ttsRoutes(app: FastifyInstance) {
     }
 
     const base = configuredBaseUrl(cfg);
-    const model = (cfg.model || TTS_SOURCE_DEFAULTS[cfg.source].model).trim();
+    const useNanoGptSpeech = isNanoGptBaseUrl(base);
+    const usePocketTtsSpeech = cfg.source === "pockettts";
+    const configuredModel = (cfg.model || TTS_SOURCE_DEFAULTS[cfg.source].model).trim();
+    const model = useNanoGptSpeech
+      ? normalizeNanoGptTtsModelId(configuredModel)
+      : cfg.source === "elevenlabs"
+        ? normalizeElevenLabsTtsModelId(configuredModel)
+        : configuredModel;
     const normalizedModel = model.toLowerCase();
-    if (cfg.source === "elevenlabs" && ELEVENLABS_NON_TTS_MODELS.has(normalizedModel)) {
+    if (cfg.source === "elevenlabs" && !useNanoGptSpeech && ELEVENLABS_NON_TTS_MODELS.has(normalizedModel)) {
       return reply.status(400).send({
         error: `ElevenLabs model "${model}" cannot generate text-to-speech`,
         detail: `That model is for Text to Voice / voice design. Use "eleven_v3" for Eleven v3 speech, or "eleven_multilingual_v2", "eleven_flash_v2_5", or "eleven_turbo_v2_5" for regular TTS.`,
       });
     }
 
-    const url =
-      cfg.source === "elevenlabs"
-        ? `${elevenLabsApiRoot(base)}/v1/text-to-speech/${encodeURIComponent(requestVoice)}?output_format=mp3_44100_128`
-        : `${base}/audio/speech`;
+    const url = useNanoGptSpeech
+      ? `${nanoGptV1BaseUrl(base)}/audio/speech`
+      : usePocketTtsSpeech
+        ? `${base}/tts`
+        : cfg.source === "elevenlabs"
+          ? `${elevenLabsApiRoot(base)}/v1/text-to-speech/${encodeURIComponent(requestVoice)}?output_format=mp3_44100_128`
+          : `${base}/audio/speech`;
     const providerText = cfg.source === "elevenlabs" ? buildElevenLabsTextInput(text, tone) : text;
-    const speechInstructions =
-      cfg.source === "openai" && openAiModelSupportsSpeechInstructions(cfg.model)
+    const elevenLabsLanguageCode = cfg.elevenLabsLanguageCode?.trim();
+    const includeSpeakerInstructions = cfg.source !== "elevenlabs";
+    const speechInstructions = useNanoGptSpeech
+      ? buildSpeechInstructions({ speaker, tone, includeSpeaker: includeSpeakerInstructions })
+      : cfg.source === "openai" && openAiModelSupportsSpeechInstructions(cfg.model)
         ? buildSpeechInstructions({ speaker, tone })
         : undefined;
 
     let providerRes: Response;
     try {
-      providerRes = await fetch(url, {
+      const pocketTtsForm = usePocketTtsSpeech ? new FormData() : null;
+      if (pocketTtsForm) {
+        pocketTtsForm.set("text", providerText);
+        if (requestVoice.trim()) pocketTtsForm.set("voice_url", requestVoice.trim());
+      }
+
+      providerRes = await safeFetch(url, {
         method: "POST",
-        headers: cfg.source === "elevenlabs" ? elevenLabsHeaders(cfg.apiKey) : openAiHeaders(cfg.apiKey),
-        body:
-          cfg.source === "elevenlabs"
+        headers: useNanoGptSpeech
+          ? nanoGptHeaders(cfg.apiKey)
+          : usePocketTtsSpeech
+            ? optionalBearerHeaders(cfg.apiKey)
+            : cfg.source === "elevenlabs"
+              ? elevenLabsHeaders(cfg.apiKey)
+              : openAiHeaders(cfg.apiKey),
+        body: pocketTtsForm
+          ? pocketTtsForm
+          : useNanoGptSpeech
             ? JSON.stringify({
-                text: providerText,
-                model_id: model,
-                voice_settings: {
-                  stability: cfg.elevenLabsStability,
-                  speed: cfg.speed,
-                },
-              })
-            : JSON.stringify({
                 model,
                 input: providerText,
-                voice: requestVoice,
+                voice: requestVoice || "alloy",
                 speed: cfg.speed,
                 response_format: "mp3",
                 ...(speechInstructions ? { instructions: speechInstructions } : {}),
-              }),
+              })
+            : cfg.source === "elevenlabs"
+              ? JSON.stringify({
+                  text: providerText,
+                  model_id: model,
+                  ...(elevenLabsLanguageCode ? { language_code: elevenLabsLanguageCode } : {}),
+                  voice_settings: {
+                    stability: cfg.elevenLabsStability,
+                    speed: cfg.speed,
+                  },
+                })
+              : JSON.stringify({
+                  model,
+                  input: providerText,
+                  voice: requestVoice,
+                  speed: cfg.speed,
+                  response_format: "mp3",
+                  ...(speechInstructions ? { instructions: speechInstructions } : {}),
+                }),
         signal: AbortSignal.timeout(60_000),
+        policy: {
+          allowLocal: allowLocalTtsUrl(cfg),
+          allowedProtocols: ["https:", "http:"],
+          flagName: "TTS_LOCAL_URLS_ENABLED",
+        },
+        maxResponseBytes: MAX_TTS_AUDIO_BYTES,
       });
     } catch (err: unknown) {
       const msg =
         err instanceof Error && err.name === "TimeoutError" ? "TTS request timed out" : "TTS provider unreachable";
+      req.log.error(err, "TTS provider request failed");
       return reply.status(502).send({ error: msg });
     }
 
@@ -449,8 +678,17 @@ export async function ttsRoutes(app: FastifyInstance) {
         .send({ error: `TTS provider returned ${providerRes.status}`, detail: readProviderErrorDetail(body) });
     }
 
+    const contentType = providerRes.headers.get("content-type");
+    if (!isAllowedTTSAudioContentType(contentType)) {
+      const body = await providerRes.text().catch(() => "");
+      return reply.status(502).send({
+        error: "TTS provider returned a non-audio response",
+        detail: readProviderErrorDetail(body) || `Content-Type: ${contentType || "missing"}`,
+      });
+    }
+
     const audioBuffer = await providerRes.arrayBuffer();
-    reply.header("Content-Type", "audio/mpeg");
+    reply.header("Content-Type", contentType?.startsWith("audio/") ? contentType : "audio/mpeg");
     reply.header("Content-Length", String(audioBuffer.byteLength));
     return reply.send(Buffer.from(audioBuffer));
   });

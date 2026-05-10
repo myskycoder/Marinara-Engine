@@ -49,6 +49,17 @@ const CREATE_TABLES: string[] = [
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS character_card_versions (
+    id TEXT PRIMARY KEY NOT NULL,
+    character_id TEXT NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    data TEXT NOT NULL,
+    comment TEXT NOT NULL DEFAULT '',
+    avatar_path TEXT,
+    version TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'manual',
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS personas (
     id TEXT PRIMARY KEY NOT NULL,
     name TEXT NOT NULL,
@@ -66,6 +77,7 @@ const CREATE_TABLES: string[] = [
     persona_stats TEXT NOT NULL DEFAULT '',
     alt_descriptions TEXT NOT NULL DEFAULT '[]',
     tags TEXT NOT NULL DEFAULT '[]',
+    saved_status_options TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
@@ -94,19 +106,46 @@ const CREATE_TABLES: string[] = [
     scan_depth INTEGER NOT NULL DEFAULT 2,
     token_budget INTEGER NOT NULL DEFAULT 2048,
     recursive_scanning TEXT NOT NULL DEFAULT 'false',
+    max_recursion_depth INTEGER NOT NULL DEFAULT 3,
     character_id TEXT,
     persona_id TEXT,
     chat_id TEXT,
+    is_global TEXT NOT NULL DEFAULT 'false',
     enabled TEXT NOT NULL DEFAULT 'true',
+    tags TEXT NOT NULL DEFAULT '[]',
     generated_by TEXT,
     source_agent_id TEXT,
-    tags TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS lorebook_character_links (
+    id TEXT PRIMARY KEY NOT NULL,
+    lorebook_id TEXT NOT NULL REFERENCES lorebooks(id) ON DELETE CASCADE,
+    character_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(lorebook_id, character_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS lorebook_persona_links (
+    id TEXT PRIMARY KEY NOT NULL,
+    lorebook_id TEXT NOT NULL REFERENCES lorebooks(id) ON DELETE CASCADE,
+    persona_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(lorebook_id, persona_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS lorebook_folders (
+    id TEXT PRIMARY KEY NOT NULL,
+    lorebook_id TEXT NOT NULL REFERENCES lorebooks(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    enabled TEXT NOT NULL DEFAULT 'true',
+    parent_folder_id TEXT,
+    "order" INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS lorebook_entries (
     id TEXT PRIMARY KEY NOT NULL,
     lorebook_id TEXT NOT NULL REFERENCES lorebooks(id) ON DELETE CASCADE,
+    folder_id TEXT,
     name TEXT NOT NULL,
     content TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
@@ -121,6 +160,13 @@ const CREATE_TABLES: string[] = [
     match_whole_words TEXT NOT NULL DEFAULT 'false',
     case_sensitive TEXT NOT NULL DEFAULT 'false',
     use_regex TEXT NOT NULL DEFAULT 'false',
+    character_filter_mode TEXT NOT NULL DEFAULT 'any',
+    character_filter_ids TEXT NOT NULL DEFAULT '[]',
+    character_tag_filter_mode TEXT NOT NULL DEFAULT 'any',
+    character_tag_filters TEXT NOT NULL DEFAULT '[]',
+    generation_trigger_filter_mode TEXT NOT NULL DEFAULT 'any',
+    generation_trigger_filters TEXT NOT NULL DEFAULT '[]',
+    additional_matching_sources TEXT NOT NULL DEFAULT '[]',
     position INTEGER NOT NULL DEFAULT 0,
     depth INTEGER NOT NULL DEFAULT 4,
     "order" INTEGER NOT NULL DEFAULT 100,
@@ -128,13 +174,17 @@ const CREATE_TABLES: string[] = [
     sticky INTEGER,
     cooldown INTEGER,
     delay INTEGER,
+    ephemeral INTEGER,
     "group" TEXT NOT NULL DEFAULT '',
     group_weight INTEGER,
+    locked TEXT NOT NULL DEFAULT 'false',
     tag TEXT NOT NULL DEFAULT '',
     relationships TEXT NOT NULL DEFAULT '{}',
     dynamic_state TEXT NOT NULL DEFAULT '{}',
     activation_conditions TEXT NOT NULL DEFAULT '[]',
     schedule TEXT,
+    prevent_recursion TEXT NOT NULL DEFAULT 'false',
+    embedding TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
@@ -201,9 +251,11 @@ const CREATE_TABLES: string[] = [
     api_key_encrypted TEXT NOT NULL DEFAULT '',
     model TEXT NOT NULL DEFAULT '',
     max_context INTEGER NOT NULL DEFAULT 128000,
+    max_parallel_jobs INTEGER NOT NULL DEFAULT 1,
     is_default TEXT NOT NULL DEFAULT 'false',
     use_for_random TEXT NOT NULL DEFAULT 'false',
     enable_caching TEXT NOT NULL DEFAULT 'false',
+    caching_at_depth INTEGER NOT NULL DEFAULT 5,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
@@ -341,6 +393,14 @@ const CREATE_TABLES: string[] = [
     consumed TEXT NOT NULL DEFAULT 'false',
     created_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS conversation_notes (
+    id TEXT PRIMARY KEY NOT NULL,
+    source_chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    target_chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    anchor_message_id TEXT,
+    created_at TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS memory_chunks (
     id TEXT PRIMARY KEY NOT NULL,
     chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
@@ -375,6 +435,17 @@ const CREATE_TABLES: string[] = [
     value TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS installed_extensions (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    css TEXT,
+    js TEXT,
+    enabled TEXT NOT NULL DEFAULT 'true',
+    installed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS chat_presets (
     id TEXT PRIMARY KEY NOT NULL,
     name TEXT NOT NULL,
@@ -383,6 +454,12 @@ const CREATE_TABLES: string[] = [
     is_active TEXT NOT NULL DEFAULT 'false',
     settings TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS prompt_overrides (
+    key TEXT PRIMARY KEY NOT NULL,
+    template TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
     updated_at TEXT NOT NULL
   )`,
 ];
@@ -399,6 +476,11 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
     table: "api_connections",
     column: "enable_caching",
     definition: "TEXT NOT NULL DEFAULT 'false'",
+  },
+  {
+    table: "api_connections",
+    column: "caching_at_depth",
+    definition: "INTEGER NOT NULL DEFAULT 5",
   },
   {
     table: "game_state_snapshots",
@@ -526,9 +608,19 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
     definition: "TEXT NOT NULL DEFAULT '[]'",
   },
   {
+    table: "personas",
+    column: "saved_status_options",
+    definition: "TEXT NOT NULL DEFAULT '[]'",
+  },
+  {
     table: "lorebooks",
     column: "tags",
     definition: "TEXT NOT NULL DEFAULT '[]'",
+  },
+  {
+    table: "lorebooks",
+    column: "is_global",
+    definition: "TEXT NOT NULL DEFAULT 'false'",
   },
   {
     table: "api_connections",
@@ -541,12 +633,66 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
     definition: "INTEGER",
   },
   {
+    table: "api_connections",
+    column: "max_parallel_jobs",
+    definition: "INTEGER NOT NULL DEFAULT 1",
+  },
+  {
     table: "lorebook_entries",
     column: "description",
     definition: "TEXT NOT NULL DEFAULT ''",
   },
+  {
+    table: "lorebook_entries",
+    column: "folder_id",
+    definition: "TEXT",
+  },
+  {
+    table: "lorebook_entries",
+    column: "character_filter_mode",
+    definition: "TEXT NOT NULL DEFAULT 'any'",
+  },
+  {
+    table: "lorebook_entries",
+    column: "character_filter_ids",
+    definition: "TEXT NOT NULL DEFAULT '[]'",
+  },
+  {
+    table: "lorebook_entries",
+    column: "character_tag_filter_mode",
+    definition: "TEXT NOT NULL DEFAULT 'any'",
+  },
+  {
+    table: "lorebook_entries",
+    column: "character_tag_filters",
+    definition: "TEXT NOT NULL DEFAULT '[]'",
+  },
+  {
+    table: "lorebook_entries",
+    column: "generation_trigger_filter_mode",
+    definition: "TEXT NOT NULL DEFAULT 'any'",
+  },
+  {
+    table: "lorebook_entries",
+    column: "generation_trigger_filters",
+    definition: "TEXT NOT NULL DEFAULT '[]'",
+  },
+  {
+    table: "lorebook_entries",
+    column: "additional_matching_sources",
+    definition: "TEXT NOT NULL DEFAULT '[]'",
+  },
+  {
+    table: "api_connections",
+    column: "claude_fast_mode",
+    definition: "TEXT NOT NULL DEFAULT 'false'",
+  },
 ];
 
+/**
+ * Applies idempotent SQLite schema repairs on startup so upgraded installs can
+ * use the current Drizzle schema before any routes or seeders touch the DB.
+ */
 export async function runMigrations(db: DB) {
   // 1. Create all tables if they don't exist
   for (const stmt of CREATE_TABLES) {
@@ -570,13 +716,96 @@ export async function runMigrations(db: DB) {
     sql.raw(`CREATE INDEX IF NOT EXISTS idx_game_state_message ON game_state_snapshots(message_id, swipe_index)`),
   );
   await db.run(
+    sql.raw(`CREATE INDEX IF NOT EXISTS idx_lorebook_character_links_book ON lorebook_character_links(lorebook_id)`),
+  );
+  await db.run(
+    sql.raw(
+      `CREATE INDEX IF NOT EXISTS idx_lorebook_character_links_character ON lorebook_character_links(character_id)`,
+    ),
+  );
+  await db.run(
+    sql.raw(`
+      DELETE FROM lorebook_character_links
+      WHERE rowid NOT IN (
+        SELECT MIN(rowid)
+        FROM lorebook_character_links
+        GROUP BY lorebook_id, character_id
+      )
+    `),
+  );
+  await db.run(
+    sql.raw(
+      `CREATE UNIQUE INDEX IF NOT EXISTS uniq_lorebook_character_links_pair ON lorebook_character_links(lorebook_id, character_id)`,
+    ),
+  );
+  await db.run(
+    sql.raw(`CREATE INDEX IF NOT EXISTS idx_lorebook_persona_links_book ON lorebook_persona_links(lorebook_id)`),
+  );
+  await db.run(
+    sql.raw(`CREATE INDEX IF NOT EXISTS idx_lorebook_persona_links_persona ON lorebook_persona_links(persona_id)`),
+  );
+  await db.run(
+    sql.raw(`
+      DELETE FROM lorebook_persona_links
+      WHERE rowid NOT IN (
+        SELECT MIN(rowid)
+        FROM lorebook_persona_links
+        GROUP BY lorebook_id, persona_id
+      )
+    `),
+  );
+  await db.run(
+    sql.raw(
+      `CREATE UNIQUE INDEX IF NOT EXISTS uniq_lorebook_persona_links_pair ON lorebook_persona_links(lorebook_id, persona_id)`,
+    ),
+  );
+
+  await db.run(
+    sql.raw(`
+      INSERT INTO lorebook_character_links (id, lorebook_id, character_id, created_at)
+      SELECT 'legacy-char-' || id, id, character_id, created_at
+      FROM lorebooks
+      WHERE character_id IS NOT NULL
+        AND character_id <> ''
+        AND NOT EXISTS (
+          SELECT 1 FROM lorebook_character_links
+          WHERE lorebook_character_links.lorebook_id = lorebooks.id
+            AND lorebook_character_links.character_id = lorebooks.character_id
+        )
+    `),
+  );
+  await db.run(
+    sql.raw(`
+      INSERT INTO lorebook_persona_links (id, lorebook_id, persona_id, created_at)
+      SELECT 'legacy-persona-' || id, id, persona_id, created_at
+      FROM lorebooks
+      WHERE persona_id IS NOT NULL
+        AND persona_id <> ''
+        AND NOT EXISTS (
+          SELECT 1 FROM lorebook_persona_links
+          WHERE lorebook_persona_links.lorebook_id = lorebooks.id
+            AND lorebook_persona_links.persona_id = lorebooks.persona_id
+        )
+    `),
+  );
+  await db.run(
     sql.raw(`CREATE INDEX IF NOT EXISTS idx_game_checkpoints_chat ON game_checkpoints(chat_id, created_at DESC)`),
   );
   await db.run(
     sql.raw(`CREATE INDEX IF NOT EXISTS idx_ooc_influences_target ON ooc_influences(target_chat_id, consumed)`),
   );
   await db.run(
+    sql.raw(
+      `CREATE INDEX IF NOT EXISTS idx_conversation_notes_target ON conversation_notes(target_chat_id, created_at)`,
+    ),
+  );
+  await db.run(
     sql.raw(`CREATE INDEX IF NOT EXISTS idx_memory_chunks_chat ON memory_chunks(chat_id, last_message_at DESC)`),
+  );
+  await db.run(
+    sql.raw(
+      `CREATE INDEX IF NOT EXISTS idx_character_card_versions ON character_card_versions(character_id, created_at DESC)`,
+    ),
   );
   await db.run(sql.raw(`CREATE INDEX IF NOT EXISTS idx_custom_themes_active ON custom_themes(is_active)`));
   await db.run(sql.raw(`CREATE INDEX IF NOT EXISTS idx_chat_presets_mode_active ON chat_presets(mode, is_active)`));

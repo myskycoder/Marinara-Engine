@@ -14,7 +14,7 @@ The installer creates a git-based checkout, so it auto-updates the same way as a
 
 You need **Node.js** and **Git** installed.
 
-**Install Node.js v20+:**
+**Install Node.js v24 LTS+:**
 
 Download the installer from [nodejs.org](https://nodejs.org/en/download) and run it.
 
@@ -25,7 +25,7 @@ Download from [git-scm.com](https://git-scm.com/download/win) and run the instal
 Verify both are installed:
 
 ```bat
-node -v        :: should show v20 or higher
+node -v        :: should show v24 or higher
 git --version  :: should show git version 2.x+
 ```
 
@@ -37,7 +37,7 @@ cd Marinara-Engine
 start.bat
 ```
 
-`start.bat` handles the rest: it aligns pnpm to the repo-pinned version, installs dependencies, builds the app, ensures the database schema is up to date, and opens the app in your browser.
+`start.bat` handles the rest: it aligns pnpm to the repo-pinned version, installs dependencies, builds the app, prepares local file-backed storage, and opens the app in your browser.
 
 ### Manual Setup
 
@@ -48,13 +48,28 @@ git clone https://github.com/Pasta-Devs/Marinara-Engine.git
 cd Marinara-Engine
 pnpm install
 pnpm build
-pnpm db:push
 pnpm start
 ```
 
 Then open **<http://127.0.0.1:7860>**. Everything runs locally.
 
 > `pnpm start` binds to `127.0.0.1` by default. To allow LAN access, set `HOST=0.0.0.0` in `.env` first.
+
+## Optional AI Sprite Background Removal
+
+Marinara can use the open-source [`backgroundremover`](https://github.com/nadermx/backgroundremover) Python tool for stronger transparent sprite cleanup. This is optional because it installs PyTorch and downloads U2Net models.
+
+Install Python 3.11 from [python.org](https://www.python.org/downloads/windows/) first, then run this from the Marinara folder:
+
+```bat
+pnpm backgroundremover:install
+```
+
+The installer creates a local Python venv under `DATA_DIR\background-remover` and Marinara will use it automatically for sprite cleanup. To let `start.bat` install it automatically on first launch, set this in `.env`:
+
+```env
+BACKGROUNDREMOVER_AUTO_INSTALL=true
+```
 
 ## Accessing from Another Device
 
@@ -76,7 +91,7 @@ This applies to both manual clones and installs created by the Windows installer
 
 ### In-App Update Check
 
-Go to **Settings → Advanced → Updates** and click **Check for Updates**. If a new version is available, click **Apply Update** to pull and rebuild from within the app. When it finishes, relaunch Marinara Engine from the shortcut or `start.bat` to start the updated build.
+Go to **Settings → Advanced → Updates** and click **Check for Updates** to see whether a new release exists. The in-app **Apply Update** button is disabled by default; to enable it, set `UPDATES_APPLY_ENABLED=true`, set `ADMIN_SECRET`, and save that same secret in **Settings → Advanced → Admin Access**. Otherwise, relaunch Marinara Engine from the shortcut or `start.bat` to let the launcher update the app.
 
 ### Manual Update
 
@@ -87,7 +102,6 @@ git fetch origin main
 git merge --ff-only origin/main
 pnpm install
 pnpm build
-pnpm db:push
 ```
 
 Then restart the server.

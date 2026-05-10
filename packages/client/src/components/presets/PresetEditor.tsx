@@ -2,10 +2,13 @@
 // Full-Page Preset Editor
 // Tabs: Overview · Sections · Parameters · Review
 // ──────────────────────────────────────────────
-import { useState, useCallback, useEffect, useMemo, useRef, type FC } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef, type FC, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useUIStore } from "../../stores/ui.store";
 import { toast } from "sonner";
 import { showConfirmDialog } from "../../lib/app-dialogs";
+import { useChatStore } from "../../stores/chat.store";
+import { useChat } from "../../hooks/use-chats";
 import {
   usePresetFull,
   useUpdatePreset,
@@ -23,7 +26,9 @@ import {
   useReorderVariables,
 } from "../../hooks/use-presets";
 import {
+  ArrowDown,
   ArrowLeft,
+  ArrowUp,
   Save,
   Trash2,
   FileText,
@@ -44,10 +49,13 @@ import {
   User,
   Bot,
   X,
+  AlertTriangle,
   Maximize2,
   BookOpen,
   ListChecks,
   Shuffle,
+  ToggleLeft,
+  Copy,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { HelpTooltip } from "../ui/HelpTooltip";
@@ -94,15 +102,43 @@ const ROLE_ICONS: Record<string, FC<{ size: string | number; className?: string 
 
 const MARKER_LABELS: Record<MarkerType, string> = {
   character: "Character Info",
-  lorebook: "Lorebook (All)",
+  lorebook: "Lorebook Marker (All)",
   persona: "Persona",
   chat_history: "Chat History",
   chat_summary: "Chat Summary",
-  world_info_before: "World Info (Before)",
-  world_info_after: "World Info (After)",
+  world_info_before: "Lorebook Marker (Before)",
+  world_info_after: "Lorebook Marker (After)",
   dialogue_examples: "Dialogue Examples",
   agent_data: "Agent Data",
 };
+
+function lorebookWarningDismissalKey(presetId: string) {
+  return `preset:loreWarning:dismissed:${presetId}`;
+}
+
+function reorderIdsByOffset(items: Array<{ id: string }>, index: number, offset: number): string[] | null {
+  const targetIndex = index + offset;
+  if (targetIndex < 0 || targetIndex >= items.length) return null;
+  const ids = items.map((item) => item.id);
+  const [moved] = ids.splice(index, 1);
+  if (!moved) return null;
+  ids.splice(targetIndex, 0, moved);
+  return ids;
+}
+
+function readBoolFlag(value: unknown): boolean {
+  return value === true || value === "true";
+}
+
+function readMarkerConfig(value: unknown) {
+  if (!value) return null;
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
 
 // ═══════════════════════════════════════════════
 //  Main Editor
@@ -111,8 +147,10 @@ const MARKER_LABELS: Record<MarkerType, string> = {
 export function PresetEditor() {
   const presetDetailId = useUIStore((s) => s.presetDetailId);
   const closePresetDetail = useUIStore((s) => s.closePresetDetail);
+  const activeChatId = useChatStore((s) => s.activeChatId);
 
   const { data, isLoading } = usePresetFull(presetDetailId);
+  const { data: activeChat } = useChat(activeChatId);
   const updatePreset = useUpdatePreset();
   const deletePreset = useDeletePreset();
   const createSection = useCreateSection();
@@ -220,6 +258,33 @@ export function PresetEditor() {
     const map = new Map((data.sections as any[]).map((s) => [s.id, s]));
     return sectionOrder.map((id: string) => map.get(id)).filter(Boolean) as any[];
   }, [data?.sections, sectionOrder]);
+
+  const sectionHasLorebookMarker = useMemo(() => {
+    return orderedSections.some((section: any) => {
+      if (section.enabled !== "true" && section.enabled !== true) return false;
+      if (section.isMarker !== "true" && section.isMarker !== true) return false;
+      try {
+        const config =
+          typeof section.markerConfig === "string" ? JSON.parse(section.markerConfig) : section.markerConfig;
+        return (
+          config?.type === "lorebook" || config?.type === "world_info_before" || config?.type === "world_info_after"
+        );
+      } catch {
+        return false;
+      }
+    });
+  }, [orderedSections]);
+  const parentChatHasLorebook = useMemo(() => {
+    try {
+      const metadata =
+        typeof activeChat?.metadata === "string"
+          ? JSON.parse(activeChat.metadata)
+          : ((activeChat?.metadata ?? {}) as any);
+      return Array.isArray(metadata.activeLorebookIds) && metadata.activeLorebookIds.length > 0;
+    } catch {
+      return false;
+    }
+  }, [activeChat?.metadata]);
 
   const groupMap = useMemo(() => {
     if (!data?.groups) return new Map<string, any>();
@@ -425,6 +490,8 @@ export function PresetEditor() {
                 onUpdateVariable={updateVariable}
                 onDeleteVariable={deleteVariable}
                 onReorderVariables={reorderVariables}
+                hasLorebookMarker={sectionHasLorebookMarker}
+                parentChatHasLorebook={parentChatHasLorebook}
               />
             )}
 
@@ -563,6 +630,8 @@ function SectionsTab({
   onUpdateVariable,
   onDeleteVariable,
   onReorderVariables,
+  hasLorebookMarker,
+  parentChatHasLorebook,
 }: {
   presetId: string;
   sections: any[];
@@ -580,6 +649,8 @@ function SectionsTab({
   onUpdateVariable: any;
   onDeleteVariable: any;
   onReorderVariables: any;
+  hasLorebookMarker: boolean;
+  parentChatHasLorebook: boolean;
 }) {
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const [showAddMenu, setShowAddMenu] = useState(false);
@@ -588,6 +659,30 @@ function SectionsTab({
   const [dragReady, setDragReady] = useState<number | null>(null); // index of section ready to drag (grip held)
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [editingGroupName, setEditingGroupName] = useState("");
+  const [lorebookWarningDismissed, setLorebookWarningDismissed] = useState(() => {
+    try {
+      return localStorage.getItem(lorebookWarningDismissalKey(presetId)) === "true";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      setLorebookWarningDismissed(localStorage.getItem(lorebookWarningDismissalKey(presetId)) === "true");
+    } catch {
+      setLorebookWarningDismissed(false);
+    }
+  }, [presetId]);
+
+  const dismissLorebookWarning = useCallback(() => {
+    try {
+      localStorage.setItem(lorebookWarningDismissalKey(presetId), "true");
+    } catch {
+      /* Ignore storage failures; the in-memory dismissal still helps this session. */
+    }
+    setLorebookWarningDismissed(true);
+  }, [presetId]);
 
   // Fetch agent configs and filter to those with injectAsSection enabled
   const { data: agentConfigs } = useAgentConfigs();
@@ -720,6 +815,41 @@ function SectionsTab({
     setDropIdx(null);
   };
 
+  const moveSectionByOffset = (idx: number, offset: number) => {
+    const sectionIds = reorderIdsByOffset(sections, idx, offset);
+    if (!sectionIds) return;
+    onReorderSections.mutate({ presetId, sectionIds });
+  };
+
+  const duplicateSection = async (section: any, idx: number) => {
+    try {
+      const created = await onCreateSection.mutateAsync({
+        presetId,
+        identifier: `${section.identifier ?? "section"}_copy_${Date.now()}`,
+        name: `${section.name ?? "Prompt Block"} Copy`,
+        content: section.content ?? "",
+        role: section.role ?? "system",
+        enabled: readBoolFlag(section.enabled),
+        isMarker: readBoolFlag(section.isMarker),
+        groupId: section.groupId ?? null,
+        markerConfig: readMarkerConfig(section.markerConfig),
+        injectionPosition: section.injectionPosition ?? "ordered",
+        injectionDepth: section.injectionDepth ?? 0,
+        injectionOrder: section.injectionOrder ?? idx * 100,
+        forbidOverrides: readBoolFlag(section.forbidOverrides),
+      });
+      if (created?.id) {
+        const sectionIds = sections.map((s: any) => s.id);
+        sectionIds.splice(idx + 1, 0, created.id);
+        await onReorderSections.mutateAsync({ presetId, sectionIds });
+        setExpandedSections((prev) => new Set(prev).add(created.id));
+      }
+      toast.success(`Duplicated "${section.name}"`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to duplicate prompt block");
+    }
+  };
+
   return (
     <>
       {/* ── Toolbar ── */}
@@ -791,6 +921,21 @@ function SectionsTab({
         >
           <FolderOpen size="0.8125rem" /> Groups ({groupMap.size})
         </button>
+        {!hasLorebookMarker && parentChatHasLorebook && !lorebookWarningDismissed && (
+          <div className="flex items-center gap-1.5 rounded-lg bg-amber-400/10 px-2.5 py-1.5 text-[0.6875rem] text-amber-200 ring-1 ring-amber-400/25">
+            <AlertTriangle size="0.75rem" className="shrink-0" />
+            <span>Add a lorebook marker when this preset should receive active lorebook entries.</span>
+            <button
+              type="button"
+              onClick={dismissLorebookWarning}
+              className="ml-0.5 rounded-md p-0.5 text-amber-200/75 transition-colors hover:bg-amber-400/15 hover:text-amber-100"
+              title="Dismiss warning"
+              aria-label="Dismiss warning"
+            >
+              <X size="0.6875rem" />
+            </button>
+          </div>
+        )}
       </div>
 
       {/* ── Groups Management Panel ── */}
@@ -921,14 +1066,36 @@ function SectionsTab({
                   )}
                 >
                   {/* Section header */}
-                  <div className="flex items-center gap-2 px-3 py-2.5">
-                    <div
-                      className="cursor-grab shrink-0 rounded p-0.5 hover:bg-[var(--accent)] active:cursor-grabbing"
-                      title="Drag to reorder"
-                      onMouseDown={() => setDragReady(idx)}
-                      onMouseUp={() => setDragReady(null)}
-                    >
-                      <GripVertical size="0.875rem" className="text-[var(--muted-foreground)]" />
+                  <div className="flex min-w-0 items-center gap-2 px-3 py-2.5">
+                    <div className="flex shrink-0 items-center gap-0.5">
+                      <div
+                        className="cursor-grab rounded p-0.5 hover:bg-[var(--accent)] active:cursor-grabbing"
+                        title="Drag to reorder"
+                        onMouseDown={() => setDragReady(idx)}
+                        onMouseUp={() => setDragReady(null)}
+                      >
+                        <GripVertical size="0.875rem" className="text-[var(--muted-foreground)]" />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => moveSectionByOffset(idx, -1)}
+                        disabled={idx === 0 || onReorderSections.isPending}
+                        className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
+                        title="Move up"
+                        aria-label={`Move ${section.name} up`}
+                      >
+                        <ArrowUp size="0.75rem" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => moveSectionByOffset(idx, 1)}
+                        disabled={idx === sections.length - 1 || onReorderSections.isPending}
+                        className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
+                        title="Move down"
+                        aria-label={`Move ${section.name} down`}
+                      >
+                        <ArrowDown size="0.75rem" />
+                      </button>
                     </div>
                     <button
                       onClick={() => toggleExpanded(section.id)}
@@ -958,9 +1125,21 @@ function SectionsTab({
                         {group.name}
                       </span>
                     )}
-                    <span className="shrink-0 text-[0.625rem] text-[var(--muted-foreground)]">{role}</span>
+                    <span className="hidden shrink-0 text-[0.625rem] text-[var(--muted-foreground)] sm:inline">
+                      {role}
+                    </span>
 
                     <div className="flex shrink-0 items-center gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() => void duplicateSection(section, idx)}
+                        disabled={onCreateSection.isPending || onReorderSections.isPending}
+                        className="rounded-lg p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
+                        title="Duplicate"
+                        aria-label={`Duplicate ${section.name}`}
+                      >
+                        <Copy size="0.75rem" />
+                      </button>
                       <button
                         onClick={() =>
                           onUpdateSection.mutate({
@@ -1073,8 +1252,13 @@ function SectionsTab({
                             <div className="rounded-lg bg-violet-400/5 p-3 text-xs text-violet-300">
                               Marker type: <strong>{MARKER_LABELS[mc.type as MarkerType] ?? "Unknown"}</strong>
                               <p className="mt-1 text-[var(--muted-foreground)]">
-                                Content is auto-generated at assembly time from your characters, lorebook, etc.
+                                Content is auto-generated at assembly time from your characters, lorebooks, etc.
                               </p>
+                              {["lorebook", "world_info_before", "world_info_after"].includes(mc.type) && (
+                                <p className="mt-1 text-amber-200">
+                                  This is where active lorebook entries are inserted.
+                                </p>
+                              )}
                             </div>
                           );
                         })()}
@@ -1156,7 +1340,7 @@ function SectionsTab({
 
       {sections.length > 0 && (
         <p className="text-center text-[0.625rem] text-[var(--muted-foreground)]">
-          Drag sections to reorder · Click to expand · Sections are assembled top-to-bottom
+          Click to expand · Sections are assembled top-to-bottom
         </p>
       )}
 
@@ -1240,6 +1424,12 @@ function PresetVariablesEditor({
     setDropIdx(null);
   };
 
+  const moveVariableByOffset = (idx: number, offset: number) => {
+    const variableIds = reorderIdsByOffset(variables, idx, offset);
+    if (!variableIds) return;
+    onReorderVariables.mutate({ presetId, variableIds });
+  };
+
   return (
     <div className="mt-6 space-y-3">
       <div className="flex items-center justify-between">
@@ -1320,6 +1510,11 @@ function PresetVariablesEditor({
                     onDeleteVariable={onDeleteVariable}
                     onGripDown={() => setDragReady(idx)}
                     onGripUp={() => setDragReady(null)}
+                    onMoveUp={() => moveVariableByOffset(idx, -1)}
+                    onMoveDown={() => moveVariableByOffset(idx, 1)}
+                    canMoveUp={idx > 0}
+                    canMoveDown={idx < variables.length - 1}
+                    isReordering={onReorderVariables.isPending}
                   />
                 </div>
                 {showDropAfter && <div className="mx-2 mt-1 h-0.5 rounded-full bg-amber-400" />}
@@ -1343,6 +1538,11 @@ function VariableCard({
   onDeleteVariable,
   onGripDown,
   onGripUp,
+  onMoveUp,
+  onMoveDown,
+  canMoveUp,
+  canMoveDown,
+  isReordering,
 }: {
   presetId: string;
   variable: any;
@@ -1352,6 +1552,11 @@ function VariableCard({
   onDeleteVariable: any;
   onGripDown: () => void;
   onGripUp: () => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+  isReordering: boolean;
 }) {
   // Parse options
   let opts: Array<{ id: string; label: string; value: string }> = [];
@@ -1381,14 +1586,36 @@ function VariableCard({
   return (
     <div className="rounded-xl border border-amber-400/20 bg-amber-400/5 transition-all">
       {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-2.5">
-        <div
-          className="cursor-grab shrink-0 rounded p-0.5 hover:bg-[var(--accent)] active:cursor-grabbing"
-          title="Drag to reorder"
-          onMouseDown={onGripDown}
-          onMouseUp={onGripUp}
-        >
-          <GripVertical size="0.875rem" className="text-[var(--muted-foreground)]" />
+      <div className="flex min-w-0 items-center gap-2 px-3 py-2.5">
+        <div className="flex shrink-0 items-center gap-0.5">
+          <div
+            className="cursor-grab rounded p-0.5 hover:bg-[var(--accent)] active:cursor-grabbing"
+            title="Drag to reorder"
+            onMouseDown={onGripDown}
+            onMouseUp={onGripUp}
+          >
+            <GripVertical size="0.875rem" className="text-[var(--muted-foreground)]" />
+          </div>
+          <button
+            type="button"
+            onClick={onMoveUp}
+            disabled={!canMoveUp || isReordering}
+            className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
+            title="Move up"
+            aria-label={`Move ${varName || "variable"} up`}
+          >
+            <ArrowUp size="0.75rem" />
+          </button>
+          <button
+            type="button"
+            onClick={onMoveDown}
+            disabled={!canMoveDown || isReordering}
+            className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
+            title="Move down"
+            aria-label={`Move ${varName || "variable"} down`}
+          >
+            <ArrowDown size="0.75rem" />
+          </button>
         </div>
         <button onClick={onToggle} className="shrink-0 rounded p-0.5 hover:bg-[var(--accent)]">
           {isExpanded ? (
@@ -1404,12 +1631,17 @@ function VariableCard({
         <span className="shrink-0 rounded bg-amber-400/15 px-1.5 py-0.5 text-[0.5625rem] font-medium text-amber-400">
           {opts.length} options
         </span>
+        {opts.length === 1 && !isMultiSelect && (
+          <span className="shrink-0 rounded bg-purple-400/15 px-1.5 py-0.5 text-[0.5625rem] font-medium text-purple-400">
+            boolean
+          </span>
+        )}
         {isMultiSelect && (
           <span className="shrink-0 rounded bg-purple-400/15 px-1.5 py-0.5 text-[0.5625rem] font-medium text-purple-400">
             {isRandomPick ? "random" : "multi"}
           </span>
         )}
-        <code className="shrink-0 text-[0.625rem] text-[var(--muted-foreground)]">{`{{${varName}}}`}</code>
+        <code className="hidden shrink-0 text-[0.625rem] text-[var(--muted-foreground)] sm:inline">{`{{${varName}}}`}</code>
         <button
           onClick={async () => {
             if (
@@ -1451,131 +1683,161 @@ function VariableCard({
             <VariableQuestionInput value={question} onCommit={(v) => update({ question: v })} />
           </div>
 
-          {/* Multi-Select & Random Pick */}
-          <div className="space-y-2 rounded-lg bg-[var(--secondary)] p-2.5 ring-1 ring-[var(--border)]">
-            <div className="flex items-center justify-between">
+          {/* Multi-Select & Random Pick (not shown for single-option/boolean variables) */}
+          {opts.length === 1 && !isMultiSelect ? (
+            <div className="space-y-1.5 rounded-lg bg-[var(--secondary)] p-2.5 ring-1 ring-[var(--border)]">
               <div className="flex items-center gap-1.5">
-                <ListChecks size="0.75rem" className="text-purple-400" />
-                <span className="text-[0.625rem] font-medium text-[var(--foreground)]">Multi-Select</span>
+                <ToggleLeft size="0.75rem" className="text-purple-400" />
+                <span className="text-[0.625rem] font-medium text-purple-400">Boolean Toggle</span>
               </div>
-              <button
-                onClick={() => update({ multiSelect: !isMultiSelect })}
-                className={cn(
-                  "relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full transition-colors",
-                  isMultiSelect ? "bg-purple-400" : "bg-[var(--border)]",
-                )}
-              >
-                <span
-                  className={cn(
-                    "pointer-events-none inline-block h-3 w-3 translate-y-0.5 rounded-full bg-white shadow transition-transform",
-                    isMultiSelect ? "translate-x-3.5" : "translate-x-0.5",
-                  )}
-                />
-              </button>
+              <p className="text-[0.5625rem] text-[var(--muted-foreground)]">
+                This variable has only one option, so it behaves as a Boolean toggle. Users can switch it on or off in
+                the Configure Preset Variables wizard.
+              </p>
             </div>
-            <p className="text-[0.5625rem] text-[var(--muted-foreground)]">
-              Allow users to select multiple options instead of just one.
-            </p>
-
-            {isMultiSelect && (
-              <div className="space-y-2 border-t border-[var(--border)] pt-2">
-                {/* Random Pick Toggle */}
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1.5">
-                    <Shuffle size="0.75rem" className="text-amber-400" />
-                    <span className="text-[0.625rem] font-medium text-[var(--foreground)]">Random Pick</span>
-                  </div>
-                  <button
-                    onClick={() => update({ randomPick: !isRandomPick })}
-                    className={cn(
-                      "relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full transition-colors",
-                      isRandomPick ? "bg-amber-400" : "bg-[var(--border)]",
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        "pointer-events-none inline-block h-3 w-3 translate-y-0.5 rounded-full bg-white shadow transition-transform",
-                        isRandomPick ? "translate-x-3.5" : "translate-x-0.5",
-                      )}
-                    />
-                  </button>
+          ) : (
+            <div className="space-y-2 rounded-lg bg-[var(--secondary)] p-2.5 ring-1 ring-[var(--border)]">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <ListChecks size="0.75rem" className="text-purple-400" />
+                  <span className="text-[0.625rem] font-medium text-[var(--foreground)]">Multi-Select</span>
                 </div>
-                <p className="text-[0.5625rem] text-[var(--muted-foreground)]">
-                  {isRandomPick
-                    ? "One of the user's selected options will be randomly picked each generation."
-                    : "All selected options will be joined together with the separator below."}
-                </p>
-
-                {/* Separator (only shown when not random pick) */}
-                {!isRandomPick && (
-                  <div className="flex items-center gap-2">
-                    <label className="shrink-0 text-[0.625rem] font-medium text-[var(--muted-foreground)]">
-                      Separator
-                    </label>
-                    <input
-                      value={separatorValue}
-                      onFocus={(e) => e.target.select()}
-                      onChange={(e) => update({ separator: e.target.value })}
-                      className="w-20 rounded bg-[var(--background)] px-1.5 py-0.5 text-center font-mono text-xs ring-1 ring-[var(--border)] focus:outline-none focus:ring-1 focus:ring-purple-400/50"
-                      placeholder=", "
-                    />
-                    <span className="text-[0.5625rem] text-[var(--muted-foreground)]">
-                      e.g. ", " → Romance, Fantasy, Action
-                    </span>
-                  </div>
-                )}
+                <button
+                  onClick={() => update({ multiSelect: !isMultiSelect })}
+                  className={cn(
+                    "relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full transition-colors",
+                    isMultiSelect ? "bg-purple-400" : "bg-[var(--border)]",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "pointer-events-none inline-block h-3 w-3 translate-y-0.5 rounded-full bg-white shadow transition-transform",
+                      isMultiSelect ? "translate-x-3.5" : "translate-x-0.5",
+                    )}
+                  />
+                </button>
               </div>
-            )}
-          </div>
+              <p className="text-[0.5625rem] text-[var(--muted-foreground)]">
+                Allow users to select multiple options instead of just one.
+              </p>
+
+              {isMultiSelect && (
+                <div className="space-y-2 border-t border-[var(--border)] pt-2">
+                  {/* Random Pick Toggle */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5">
+                      <Shuffle size="0.75rem" className="text-amber-400" />
+                      <span className="text-[0.625rem] font-medium text-[var(--foreground)]">Random Pick</span>
+                    </div>
+                    <button
+                      onClick={() => update({ randomPick: !isRandomPick })}
+                      className={cn(
+                        "relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full transition-colors",
+                        isRandomPick ? "bg-amber-400" : "bg-[var(--border)]",
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "pointer-events-none inline-block h-3 w-3 translate-y-0.5 rounded-full bg-white shadow transition-transform",
+                          isRandomPick ? "translate-x-3.5" : "translate-x-0.5",
+                        )}
+                      />
+                    </button>
+                  </div>
+                  <p className="text-[0.5625rem] text-[var(--muted-foreground)]">
+                    {isRandomPick
+                      ? "One of the user's selected options will be randomly picked each generation."
+                      : "All selected options will be joined together with the separator below."}
+                  </p>
+
+                  {/* Separator (only shown when not random pick) */}
+                  {!isRandomPick && (
+                    <div className="flex items-center gap-2">
+                      <label className="shrink-0 text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                        Separator
+                      </label>
+                      <input
+                        value={separatorValue}
+                        onFocus={(e) => e.target.select()}
+                        onChange={(e) => update({ separator: e.target.value })}
+                        className="w-20 rounded bg-[var(--background)] px-1.5 py-0.5 text-center font-mono text-xs ring-1 ring-[var(--border)] focus:outline-none focus:ring-1 focus:ring-purple-400/50"
+                        placeholder=", "
+                      />
+                      <span className="text-[0.5625rem] text-[var(--muted-foreground)]">
+                        e.g. ", " becomes Romance, Fantasy, Action
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Options */}
           <div className="space-y-1.5">
             <label className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Options</label>
-            {opts.map((opt, oi) => (
-              <div
-                key={opt.id}
-                className="flex items-center gap-2 rounded-lg bg-[var(--secondary)] px-2.5 py-1.5 ring-1 ring-[var(--border)]"
-              >
-                <span className="shrink-0 text-[0.625rem] font-medium text-amber-400">{oi + 1}.</span>
-                <OptionFieldInput
-                  value={opt.label}
-                  onCommit={(v) => {
-                    const next = [...opts];
-                    next[oi] = { ...next[oi], label: v };
-                    updateOpts(next);
-                  }}
-                  className="flex-1 rounded bg-[var(--background)] px-1.5 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-amber-400/50"
-                  placeholder="Label…"
-                />
-                <OptionFieldInput
-                  value={opt.value}
-                  onCommit={(v) => {
-                    const next = [...opts];
-                    next[oi] = { ...next[oi], value: v };
-                    updateOpts(next);
-                  }}
-                  className="flex-1 rounded bg-[var(--background)] px-1.5 py-0.5 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-amber-400/50"
-                  placeholder="Value…"
-                />
-                <button
-                  onClick={() => setExpandedOptIdx(oi)}
-                  className="shrink-0 rounded p-0.5 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-                  title="Expand value editor"
-                >
-                  <Maximize2 size="0.625rem" />
-                </button>
-                <button
-                  onClick={() => {
-                    if (opts.length <= 2) return toast.error("A variable needs at least 2 options.");
-                    updateOpts(opts.filter((_, i) => i !== oi));
-                  }}
-                  className="shrink-0 rounded p-0.5 hover:bg-[var(--destructive)]/15"
-                  title="Remove option"
-                >
-                  <X size="0.625rem" className="text-[var(--destructive)]" />
-                </button>
-              </div>
-            ))}
+            {opts.map((opt, oi) => {
+              const valueBlank = !opt.value || !opt.value.trim();
+              return (
+                <div key={opt.id}>
+                  <div
+                    className={cn(
+                      "flex items-center gap-2 rounded-lg px-2.5 py-1.5 ring-1",
+                      valueBlank
+                        ? "bg-[var(--destructive)]/5 ring-[var(--destructive)]/30"
+                        : "bg-[var(--secondary)] ring-[var(--border)]",
+                    )}
+                  >
+                    <span className="shrink-0 text-[0.625rem] font-medium text-amber-400">{oi + 1}.</span>
+                    <OptionFieldInput
+                      value={opt.label}
+                      onCommit={(v) => {
+                        const next = [...opts];
+                        next[oi] = { ...next[oi], label: v };
+                        updateOpts(next);
+                      }}
+                      className="flex-1 rounded bg-[var(--background)] px-1.5 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-amber-400/50"
+                      placeholder="Label…"
+                    />
+                    <OptionFieldInput
+                      value={opt.value}
+                      onCommit={(v) => {
+                        const next = [...opts];
+                        next[oi] = { ...next[oi], value: v };
+                        updateOpts(next);
+                      }}
+                      className={cn(
+                        "flex-1 rounded px-1.5 py-0.5 font-mono text-xs focus:outline-none focus:ring-1",
+                        valueBlank
+                          ? "bg-[var(--destructive)]/10 ring-1 ring-[var(--destructive)]/30 placeholder:text-[var(--destructive)]/40"
+                          : "bg-[var(--background)] focus:ring-amber-400/50",
+                      )}
+                      placeholder="Value…"
+                    />
+                    <button
+                      onClick={() => setExpandedOptIdx(oi)}
+                      className="shrink-0 rounded p-0.5 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+                      title="Expand value editor"
+                    >
+                      <Maximize2 size="0.625rem" />
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (opts.length <= 1) return toast.error("A variable needs at least 1 option.");
+                        updateOpts(opts.filter((_, i) => i !== oi));
+                      }}
+                      className="shrink-0 rounded p-0.5 hover:bg-[var(--destructive)]/15"
+                      title="Remove option"
+                    >
+                      <X size="0.625rem" className="text-[var(--destructive)]" />
+                    </button>
+                  </div>
+                  {valueBlank && (
+                    <p className="mt-1 pl-6 text-[0.5625rem] text-[var(--destructive)]">Value cannot be empty.</p>
+                  )}
+                </div>
+              );
+            })}
             <button
               onClick={() => {
                 const newOpt = {
@@ -1838,6 +2100,11 @@ function SectionContentTextarea({
 }
 
 // ── Expanded prompt editor modal ──
+function PresetModalPortal({ children }: { children: ReactNode }) {
+  if (typeof document === "undefined") return null;
+  return createPortal(children, document.body);
+}
+
 function ExpandedEditorModal({
   title,
   value,
@@ -1903,47 +2170,49 @@ function ExpandedEditorModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-6 max-md:pt-[max(1.5rem,env(safe-area-inset-top))]">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={handleClose} />
-      <div className="relative flex h-[80vh] w-full max-w-3xl flex-col rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl shadow-black/50">
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
-          <h3 className="text-sm font-semibold">{title}</h3>
-          <button onClick={handleClose} className="rounded-lg p-1.5 hover:bg-[var(--accent)]">
-            <X size="1rem" />
-          </button>
-        </div>
-        {/* Editor */}
-        <div className="flex-1 overflow-hidden p-4">
-          <textarea
-            ref={textareaRef}
-            value={local}
-            onChange={handleChange}
-            onKeyDown={(e) =>
-              handleTextareaTab(e, local, (v) => {
-                setLocal(v);
-                if (timeoutRef.current) clearTimeout(timeoutRef.current);
-                timeoutRef.current = setTimeout(() => {
-                  onChange(v);
-                }, 600);
-              })
-            }
-            className="h-full w-full resize-none rounded-lg bg-[var(--secondary)] p-4 font-mono text-sm text-[var(--foreground)] ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
-            placeholder="Prompt content… (supports macros like {{user}}, {{char}}, etc.)"
-          />
-        </div>
-        {/* Footer */}
-        <div className="flex items-center justify-between border-t border-[var(--border)] px-4 py-2.5">
-          <p className="text-[0.625rem] text-[var(--muted-foreground)]">Changes auto-save. Press Escape to close.</p>
-          <button
-            onClick={handleClose}
-            className="rounded-xl bg-gradient-to-r from-purple-400 to-violet-500 px-4 py-1.5 text-xs font-medium text-white shadow-md hover:shadow-lg active:scale-[0.98]"
-          >
-            Done
-          </button>
+    <PresetModalPortal>
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-6 max-md:pt-[max(1.5rem,env(safe-area-inset-top))]">
+        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={handleClose} />
+        <div className="relative flex h-[80vh] w-full max-w-3xl flex-col rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl shadow-black/50">
+          {/* Header */}
+          <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
+            <h3 className="text-sm font-semibold">{title}</h3>
+            <button onClick={handleClose} className="rounded-lg p-1.5 hover:bg-[var(--accent)]">
+              <X size="1rem" />
+            </button>
+          </div>
+          {/* Editor */}
+          <div className="flex-1 overflow-hidden p-4">
+            <textarea
+              ref={textareaRef}
+              value={local}
+              onChange={handleChange}
+              onKeyDown={(e) =>
+                handleTextareaTab(e, local, (v) => {
+                  setLocal(v);
+                  if (timeoutRef.current) clearTimeout(timeoutRef.current);
+                  timeoutRef.current = setTimeout(() => {
+                    onChange(v);
+                  }, 600);
+                })
+              }
+              className="h-full w-full resize-none rounded-lg bg-[var(--secondary)] p-4 font-mono text-sm text-[var(--foreground)] ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+              placeholder="Prompt content… (supports macros like {{user}}, {{char}}, etc.)"
+            />
+          </div>
+          {/* Footer */}
+          <div className="flex items-center justify-between border-t border-[var(--border)] px-4 py-2.5">
+            <p className="text-[0.625rem] text-[var(--muted-foreground)]">Changes auto-save. Press Escape to close.</p>
+            <button
+              onClick={handleClose}
+              className="rounded-xl bg-gradient-to-r from-purple-400 to-violet-500 px-4 py-1.5 text-xs font-medium text-white shadow-md hover:shadow-lg active:scale-[0.98]"
+            >
+              Done
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </PresetModalPortal>
   );
 }
 
@@ -1969,55 +2238,60 @@ function MacrosReferenceModal({ onClose }: { onClose: () => void }) {
   }, [onClose]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-6 max-md:pt-[max(1.5rem,env(safe-area-inset-top))]">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative flex max-h-[80vh] w-full max-w-lg flex-col rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl shadow-black/50">
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
-          <div className="flex items-center gap-2">
-            <BookOpen size="1rem" className="text-purple-400" />
-            <h3 className="text-sm font-semibold">Macros Reference</h3>
-          </div>
-          <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-[var(--accent)]">
-            <X size="1rem" />
-          </button>
-        </div>
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
-            Use these macros in your prompt sections. They will be replaced with actual values at generation time.
-          </p>
-          <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
-            In group chats, a bracketed block containing character macros like <code>{"{{char}}"}</code> and{" "}
-            <code>{"{{description}}"}</code> repeats once per character.
-          </p>
-          {MACRO_REFERENCE.map((cat) => (
-            <div key={cat.category}>
-              <h4 className="mb-1.5 text-[0.6875rem] font-semibold text-purple-400">{cat.category}</h4>
-              <div className="space-y-1">
-                {cat.macros.map((m) => (
-                  <div key={m.macro} className="flex items-start gap-2 rounded-lg px-2 py-1.5 hover:bg-[var(--accent)]">
-                    <code className="shrink-0 rounded bg-[var(--secondary)] px-1.5 py-0.5 text-[0.625rem] font-medium text-amber-400">
-                      {m.macro}
-                    </code>
-                    <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{m.desc}</span>
-                  </div>
-                ))}
-              </div>
+    <PresetModalPortal>
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-6 max-md:pt-[max(1.5rem,env(safe-area-inset-top))]">
+        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+        <div className="relative flex max-h-[80vh] w-full max-w-lg flex-col rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl shadow-black/50">
+          {/* Header */}
+          <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
+            <div className="flex items-center gap-2">
+              <BookOpen size="1rem" className="text-purple-400" />
+              <h3 className="text-sm font-semibold">Macros Reference</h3>
             </div>
-          ))}
-        </div>
-        {/* Footer */}
-        <div className="border-t border-[var(--border)] px-4 py-2.5 text-center">
-          <button
-            onClick={onClose}
-            className="rounded-xl px-4 py-1.5 text-xs font-medium text-[var(--muted-foreground)] hover:bg-[var(--accent)]"
-          >
-            Close
-          </button>
+            <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-[var(--accent)]">
+              <X size="1rem" />
+            </button>
+          </div>
+          {/* Content */}
+          <div className="flex-1 space-y-4 overflow-y-auto p-4">
+            <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
+              Use these macros in your prompt sections. They will be replaced with actual values at generation time.
+            </p>
+            <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
+              In group chats, a bracketed block containing character macros like <code>{"{{char}}"}</code> and{" "}
+              <code>{"{{description}}"}</code> repeats once per character.
+            </p>
+            {MACRO_REFERENCE.map((cat) => (
+              <div key={cat.category}>
+                <h4 className="mb-1.5 text-[0.6875rem] font-semibold text-purple-400">{cat.category}</h4>
+                <div className="space-y-1">
+                  {cat.macros.map((m) => (
+                    <div
+                      key={m.macro}
+                      className="flex items-start gap-2 rounded-lg px-2 py-1.5 hover:bg-[var(--accent)]"
+                    >
+                      <code className="shrink-0 rounded bg-[var(--secondary)] px-1.5 py-0.5 text-[0.625rem] font-medium text-amber-400">
+                        {m.macro}
+                      </code>
+                      <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{m.desc}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          {/* Footer */}
+          <div className="border-t border-[var(--border)] px-4 py-2.5 text-center">
+            <button
+              onClick={onClose}
+              className="rounded-xl px-4 py-1.5 text-xs font-medium text-[var(--muted-foreground)] hover:bg-[var(--accent)]"
+            >
+              Close
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </PresetModalPortal>
   );
 }
 

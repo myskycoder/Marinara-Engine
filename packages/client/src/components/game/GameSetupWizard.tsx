@@ -2,6 +2,7 @@
 // Game: Setup Wizard (initial game setup modal)
 // ──────────────────────────────────────────────
 import { useState, useMemo, useCallback, useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   Wand2,
   ArrowRight,
@@ -15,11 +16,13 @@ import {
   Plug,
   Image,
   BookOpen,
+  Music2,
   Volume2,
   VolumeX,
 } from "lucide-react";
 import type { GameSetupConfig, GameGmMode } from "@marinara-engine/shared";
 import { getCharacterTitle } from "../../lib/character-display";
+import { api } from "../../lib/api-client";
 import { cn, getAvatarCropStyle } from "../../lib/utils";
 import { Modal } from "../ui/Modal";
 import {
@@ -33,6 +36,7 @@ import { usePersonas } from "../../hooks/use-characters";
 import { useSidecarStore } from "../../stores/sidecar.store";
 import { useLorebooks } from "../../hooks/use-lorebooks";
 import { useGameAssetStore } from "../../stores/game-asset.store";
+import { useUIStore } from "../../stores/ui.store";
 
 interface GameSetupWizardProps {
   onComplete: (
@@ -96,6 +100,7 @@ function getPersonaTitle(persona: PersonaDisplayInfo): string | null {
 const GENRES = ["Fantasy", "Sci-Fi", "Horror", "Modern", "Post-Apocalyptic", "Cyberpunk", "Steampunk", "Historical"];
 const TONES = ["Heroic", "Dark", "Comedic", "Gritty", "Whimsical", "Serious", "Campy"];
 const DIFFICULTIES = ["Casual", "Normal", "Hard", "Brutal"];
+const LEARNED_OPTION_PREVIEW_LIMIT = 8;
 
 const SETTING_SUGGESTIONS = [
   "Surprise me!",
@@ -110,6 +115,100 @@ const GOAL_SUGGESTIONS = [
   "Survive and uncover the truth",
   "Become the ruler of the land",
 ];
+
+const PREFERENCE_SUGGESTIONS = [
+  "Include romance subplot",
+  "Focus on exploration",
+  "Make NPCs memorable",
+  "Keep it short",
+];
+
+type GameSpotifySourceType = "liked" | "playlist" | "artist" | "any";
+
+const GAME_SPOTIFY_SOURCE_OPTIONS: Array<{ id: GameSpotifySourceType; label: string; description: string }> = [
+  { id: "liked", label: "Liked Songs", description: "Pick from saved tracks first." },
+  { id: "playlist", label: "Playlist", description: "Keep choices inside one Spotify playlist." },
+  { id: "artist", label: "Artist", description: "Search only around a named artist, like HOYO-MiX." },
+  { id: "any", label: "Any Spotify", description: "Let the DJ use Spotify search when it fits." },
+];
+
+function normalizeGameSpotifySourceType(value: unknown): GameSpotifySourceType {
+  return value === "playlist" || value === "artist" || value === "any" ? value : "liked";
+}
+
+type LearnedOptionGroup = "genres" | "tones" | "settings" | "goals" | "preferences";
+
+function optionKey(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function filterLearnedOptions(options: string[] | undefined, excluded: string[]) {
+  const excludedKeys = new Set(excluded.map(optionKey));
+  const seen = new Set<string>();
+  return (options ?? []).filter((option) => {
+    const trimmed = option.trim();
+    const key = optionKey(trimmed);
+    if (!trimmed || excludedKeys.has(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function filterCustomLearnedValues(values: string[], builtIns: string[]) {
+  const excluded = new Set([...builtIns, "Surprise me, go wild!"].map(optionKey));
+  return values.map((value) => value.trim()).filter((value) => value && !excluded.has(optionKey(value)));
+}
+
+function LearnedOptionChips({
+  options,
+  expanded,
+  onToggleExpanded,
+  onSelect,
+  selected,
+}: {
+  options: string[];
+  expanded: boolean;
+  onToggleExpanded: () => void;
+  onSelect: (value: string) => void;
+  selected?: (value: string) => boolean;
+}) {
+  if (options.length === 0) return null;
+
+  const visible = expanded ? options : options.slice(0, LEARNED_OPTION_PREVIEW_LIMIT);
+  const hiddenCount = Math.max(0, options.length - visible.length);
+
+  return (
+    <div className="mt-1.5 flex flex-wrap gap-1">
+      {visible.map((option) => {
+        const isSelected = selected?.(option) ?? false;
+        return (
+          <button
+            key={option}
+            type="button"
+            onClick={() => onSelect(option)}
+            className={cn(
+              "rounded-full px-2 py-0.5 text-[0.625rem] transition-colors",
+              isSelected
+                ? "bg-[var(--primary)]/20 text-[var(--primary)] ring-1 ring-[var(--primary)]/35"
+                : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:bg-[var(--primary)]/10 hover:text-[var(--primary)]",
+            )}
+          >
+            {option}
+          </button>
+        );
+      })}
+      {(hiddenCount > 0 || expanded) && (
+        <button
+          type="button"
+          onClick={onToggleExpanded}
+          className="rounded-full border border-[var(--border)] bg-[var(--card)] px-2 py-0.5 text-[0.625rem] text-[var(--muted-foreground)] transition-colors hover:border-[var(--primary)]/40 hover:text-[var(--primary)]"
+        >
+          {expanded ? "Show less" : `+${hiddenCount} more`}
+        </button>
+      )}
+    </div>
+  );
+}
 
 type GameLanguageOption = {
   label: string;
@@ -161,8 +260,12 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
   const [gmMode, setGmMode] = useState<GameGmMode>("standalone");
   const [gmCharacterId, setGmCharacterId] = useState<string | null>(null);
   const [partyCharacterIds, setPartyCharacterIds] = useState<string[]>([]);
-  const [playerGoals, setPlayerGoals] = useState("");
-  const [preferences, setPreferences] = useState("");
+  const [playerGoals, setPlayerGoals] = useState(
+    () => useUIStore.getState().rememberedGameSetupText?.playerGoals ?? "",
+  );
+  const [preferences, setPreferences] = useState(
+    () => useUIStore.getState().rememberedGameSetupText?.preferences ?? "",
+  );
   const [gmSearch, setGmSearch] = useState("");
   const [partySearch, setPartySearch] = useState("");
   const [personaId, setPersonaId] = useState<string | null>(null);
@@ -174,6 +277,12 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
   const [rating, setRating] = useState<"sfw" | "nsfw">("sfw");
   const [useLocalScene, setUseLocalScene] = useState(true);
   const [enableSpriteGeneration, setEnableSpriteGeneration] = useState(false);
+  const [enableSpotifyDj, setEnableSpotifyDj] = useState(false);
+  const [gameSpotifySourceType, setGameSpotifySourceType] = useState<GameSpotifySourceType>("liked");
+  const [gameSpotifyPlaylistId, setGameSpotifyPlaylistId] = useState("");
+  const [gameSpotifyPlaylistName, setGameSpotifyPlaylistName] = useState("");
+  const [gameSpotifyArtist, setGameSpotifyArtist] = useState("");
+  const [enableLorebookKeeper, setEnableLorebookKeeper] = useState(false);
   const [imageConnectionId, setImageConnectionId] = useState<string | null>(null);
   const [sceneConnectionId, setSceneConnectionId] = useState<string | null>(null);
   const [activeLorebookIds, setActiveLorebookIds] = useState<string[]>([]);
@@ -181,9 +290,18 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
   const [enableCustomWidgets, setEnableCustomWidgets] = useState(true);
   const [language, setLanguage] = useState("English");
   const [startMuted, setStartMuted] = useState(false);
+  const [expandedLearnedOptions, setExpandedLearnedOptions] = useState<Record<LearnedOptionGroup, boolean>>({
+    genres: false,
+    tones: false,
+    settings: false,
+    goals: false,
+    preferences: false,
+  });
 
   const sidecarStatus = useSidecarStore((s) => s.status);
   const sidecarConfig = useSidecarStore((s) => s.config);
+  const learnedGameSetupOptions = useUIStore((s) => s.learnedGameSetupOptions);
+  const rememberGameSetupOptions = useUIStore((s) => s.rememberGameSetupOptions);
   const sidecarAvailable = !!sidecarConfig.modelPath && sidecarStatus !== "not_downloaded";
 
   // Fetch sidecar status on mount so the dropdown is populated without visiting Connections first
@@ -204,6 +322,16 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
   const { data: connectionsList } = useConnections();
   const { data: personasList } = usePersonas();
   const { data: lorebooksList } = useLorebooks();
+  const spotifyPlaylistsQuery = useQuery({
+    queryKey: ["spotify", "playlists", 50],
+    queryFn: () =>
+      api.get<{ playlists: Array<{ id: string; name: string; uri: string; trackCount: number }> }>(
+        "/spotify/playlists?limit=50",
+      ),
+    enabled: enableSpotifyDj && gameSpotifySourceType === "playlist",
+    staleTime: 60_000,
+    retry: false,
+  });
 
   const connections = useMemo(
     () =>
@@ -258,6 +386,30 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
   );
 
   const steps = ["Genre & Setting", "Party & GM", "You & Model", "Goals"];
+  const learnedGenres = useMemo(
+    () => filterLearnedOptions(learnedGameSetupOptions?.genres, [...GENRES, ...genres]),
+    [genres, learnedGameSetupOptions?.genres],
+  );
+  const learnedTones = useMemo(
+    () => filterLearnedOptions(learnedGameSetupOptions?.tones, [...TONES, ...tones]),
+    [learnedGameSetupOptions?.tones, tones],
+  );
+  const learnedSettings = useMemo(
+    () => filterLearnedOptions(learnedGameSetupOptions?.settings, [...SETTING_SUGGESTIONS, setting]),
+    [learnedGameSetupOptions?.settings, setting],
+  );
+  const learnedGoals = useMemo(
+    () => filterLearnedOptions(learnedGameSetupOptions?.goals, [...GOAL_SUGGESTIONS, playerGoals]),
+    [learnedGameSetupOptions?.goals, playerGoals],
+  );
+  const learnedPreferences = useMemo(
+    () => filterLearnedOptions(learnedGameSetupOptions?.preferences, [...PREFERENCE_SUGGESTIONS, preferences]),
+    [learnedGameSetupOptions?.preferences, preferences],
+  );
+
+  const toggleLearnedOptions = (group: LearnedOptionGroup) => {
+    setExpandedLearnedOptions((prev) => ({ ...prev, [group]: !prev[group] }));
+  };
 
   const toggleGenre = (g: string) => {
     setGenres((prev) => (prev.includes(g) ? prev.filter((x) => x !== g) : [...prev, g]));
@@ -332,6 +484,19 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
     if (sidecarAvailable) {
       useSidecarStore.getState().updateConfig({ useForGameScene: sceneModelValue === "local" });
     }
+    rememberGameSetupOptions(
+      {
+        genres: filterCustomLearnedValues(genres, GENRES),
+        tones: filterCustomLearnedValues(tones, TONES),
+        settings: filterCustomLearnedValues(setting ? [setting] : [], SETTING_SUGGESTIONS),
+        goals: filterCustomLearnedValues(playerGoals ? [playerGoals] : [], GOAL_SUGGESTIONS),
+        preferences: filterCustomLearnedValues(preferences ? [preferences] : [], PREFERENCE_SUGGESTIONS),
+      },
+      {
+        playerGoals,
+        preferences,
+      },
+    );
     onComplete(
       {
         genre: genres.join(", ") || "Fantasy",
@@ -349,6 +514,19 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
         imageConnectionId: enableSpriteGeneration && imageConnectionId ? imageConnectionId : undefined,
         activeLorebookIds: activeLorebookIds.length > 0 ? activeLorebookIds : undefined,
         enableCustomWidgets,
+        enableSpotifyDj: enableSpotifyDj || undefined,
+        spotifySourceType: enableSpotifyDj ? gameSpotifySourceType : undefined,
+        spotifyPlaylistId:
+          enableSpotifyDj && gameSpotifySourceType === "playlist"
+            ? gameSpotifyPlaylistId.trim() || undefined
+            : undefined,
+        spotifyPlaylistName:
+          enableSpotifyDj && gameSpotifySourceType === "playlist"
+            ? gameSpotifyPlaylistName.trim() || undefined
+            : undefined,
+        spotifyArtist:
+          enableSpotifyDj && gameSpotifySourceType === "artist" ? gameSpotifyArtist.trim() || undefined : undefined,
+        enableLorebookKeeper: enableLorebookKeeper || undefined,
         language: normalizedLanguage || undefined,
         generationParameters: customizeParameters ? generationParameters : undefined,
       },
@@ -434,6 +612,13 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                     </button>
                   ))}
               </div>
+              <LearnedOptionChips
+                options={learnedGenres}
+                expanded={expandedLearnedOptions.genres}
+                onToggleExpanded={() => toggleLearnedOptions("genres")}
+                onSelect={toggleGenre}
+                selected={(value) => genres.includes(value)}
+              />
               <div className="mt-2 flex items-center gap-1.5">
                 <input
                   type="text"
@@ -475,6 +660,12 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                   </button>
                 ))}
               </div>
+              <LearnedOptionChips
+                options={learnedSettings}
+                expanded={expandedLearnedOptions.settings}
+                onToggleExpanded={() => toggleLearnedOptions("settings")}
+                onSelect={setSetting}
+              />
             </div>
 
             {/* Tone — multi-select */}
@@ -511,6 +702,13 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                     </button>
                   ))}
               </div>
+              <LearnedOptionChips
+                options={learnedTones}
+                expanded={expandedLearnedOptions.tones}
+                onToggleExpanded={() => toggleLearnedOptions("tones")}
+                onSelect={toggleTone}
+                selected={(value) => tones.includes(value)}
+              />
               <div className="mt-2 flex items-center gap-1.5">
                 <input
                   type="text"
@@ -1006,72 +1204,241 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
               </p>
             </div>
 
-            {/* Sprite Generation */}
+            {/* Game Features */}
             <div>
-              <button
-                onClick={() => setEnableSpriteGeneration(!enableSpriteGeneration)}
-                className={cn(
-                  "flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left transition-all",
-                  enableSpriteGeneration
-                    ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
-                    : "bg-[var(--secondary)] ring-1 ring-transparent hover:ring-[var(--border)]",
-                )}
-              >
-                <Image
-                  size={14}
-                  className={enableSpriteGeneration ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}
-                />
-                <div className="flex-1">
-                  <span className="block text-xs font-medium text-[var(--foreground)]">Image Generation</span>
-                  <span className="block text-[0.575rem] text-[var(--muted-foreground)]">
-                    Auto-generate NPC portraits and location backgrounds during gameplay
-                  </span>
+              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">Game Features</label>
+              <div className="space-y-2">
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setEnableSpotifyDj((prev) => !prev)}
+                    className={cn(
+                      "flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-left transition-all",
+                      enableSpotifyDj
+                        ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
+                        : "bg-[var(--secondary)] ring-1 ring-transparent hover:ring-[var(--border)]",
+                    )}
+                  >
+                    <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                      <Music2
+                        size={14}
+                        className={enableSpotifyDj ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}
+                      />
+                      <div className="min-w-0">
+                        <span className="block text-xs font-medium text-[var(--foreground)]">Spotify DJ Music</span>
+                        <span className="block text-[0.575rem] text-[var(--muted-foreground)]">
+                          Use Spotify music for this game instead of local music assets
+                        </span>
+                      </div>
+                    </div>
+                    <div
+                      className={cn(
+                        "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
+                        enableSpotifyDj ? "bg-[var(--primary)]" : "bg-[var(--muted-foreground)]/50",
+                      )}
+                    >
+                      <div
+                        className={cn(
+                          "h-4 w-4 rounded-full bg-white transition-transform",
+                          enableSpotifyDj && "translate-x-3.5",
+                        )}
+                      />
+                    </div>
+                  </button>
+
+                  {enableSpotifyDj && (
+                    <div className="mt-2 space-y-2 rounded-lg bg-[var(--background)]/55 p-3 ring-1 ring-[var(--border)]">
+                      <label className="flex flex-col gap-1">
+                        <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Music source</span>
+                        <select
+                          value={gameSpotifySourceType}
+                          onChange={(event) => {
+                            const next = normalizeGameSpotifySourceType(event.target.value);
+                            setGameSpotifySourceType(next);
+                            if (next !== "playlist") {
+                              setGameSpotifyPlaylistId("");
+                              setGameSpotifyPlaylistName("");
+                            }
+                            if (next !== "artist") {
+                              setGameSpotifyArtist("");
+                            }
+                          }}
+                          className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)]"
+                        >
+                          {GAME_SPOTIFY_SOURCE_OPTIONS.map((option) => (
+                            <option key={option.id} value={option.id}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                        <span className="text-[0.5625rem] text-[var(--muted-foreground)]">
+                          {GAME_SPOTIFY_SOURCE_OPTIONS.find((option) => option.id === gameSpotifySourceType)
+                            ?.description ?? ""}
+                        </span>
+                      </label>
+
+                      {gameSpotifySourceType === "playlist" && (
+                        <label className="flex flex-col gap-1">
+                          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Playlist</span>
+                          {spotifyPlaylistsQuery.data?.playlists.length ? (
+                            <select
+                              value={gameSpotifyPlaylistId}
+                              onChange={(event) => {
+                                const playlist = spotifyPlaylistsQuery.data?.playlists.find(
+                                  (entry) => entry.id === event.target.value,
+                                );
+                                setGameSpotifyPlaylistId(event.target.value);
+                                setGameSpotifyPlaylistName(playlist?.name ?? "");
+                              }}
+                              className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)]"
+                            >
+                              <option value="">Choose playlist...</option>
+                              {spotifyPlaylistsQuery.data.playlists.map((playlist) => (
+                                <option key={playlist.id} value={playlist.id}>
+                                  {playlist.name} ({playlist.trackCount})
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              value={gameSpotifyPlaylistId}
+                              onChange={(event) => {
+                                setGameSpotifyPlaylistId(event.target.value);
+                                setGameSpotifyPlaylistName("");
+                              }}
+                              placeholder={
+                                spotifyPlaylistsQuery.isFetching ? "Loading playlists..." : "Paste playlist ID"
+                              }
+                              className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]/50"
+                            />
+                          )}
+                          {spotifyPlaylistsQuery.isError && (
+                            <span className="text-[0.5625rem] text-amber-400/90">
+                              Connect Spotify in the Spotify DJ agent to load playlist names.
+                            </span>
+                          )}
+                        </label>
+                      )}
+
+                      {gameSpotifySourceType === "artist" && (
+                        <label className="flex flex-col gap-1">
+                          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Artist</span>
+                          <input
+                            value={gameSpotifyArtist}
+                            onChange={(event) => setGameSpotifyArtist(event.target.value)}
+                            placeholder="HOYO-MiX"
+                            className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]/50"
+                          />
+                        </label>
+                      )}
+                    </div>
+                  )}
                 </div>
-                <div
+
+                <button
+                  type="button"
+                  onClick={() => setEnableLorebookKeeper((prev) => !prev)}
                   className={cn(
-                    "h-5 w-9 rounded-full p-0.5 transition-colors",
-                    enableSpriteGeneration ? "bg-[var(--primary)]" : "bg-[var(--muted-foreground)]/50",
+                    "flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-left transition-all",
+                    enableLorebookKeeper
+                      ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
+                      : "bg-[var(--secondary)] ring-1 ring-transparent hover:ring-[var(--border)]",
                   )}
                 >
+                  <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                    <BookOpen
+                      size={14}
+                      className={enableLorebookKeeper ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}
+                    />
+                    <div className="min-w-0">
+                      <span className="block text-xs font-medium text-[var(--foreground)]">Lorebook Keeper</span>
+                      <span className="block text-[0.575rem] text-[var(--muted-foreground)]">
+                        Keep a game lorebook updated as the adventure develops
+                      </span>
+                    </div>
+                  </div>
                   <div
                     className={cn(
-                      "h-4 w-4 rounded-full bg-white transition-transform",
-                      enableSpriteGeneration && "translate-x-3.5",
+                      "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
+                      enableLorebookKeeper ? "bg-[var(--primary)]" : "bg-[var(--muted-foreground)]/50",
                     )}
-                  />
-                </div>
-              </button>
-
-              {/* Image Connection Picker — shown when sprite gen is enabled */}
-              {enableSpriteGeneration && (
-                <div className="mt-2">
-                  <label className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">
-                    Image Generation Connection
-                  </label>
-                  <select
-                    value={imageConnectionId ?? ""}
-                    onChange={(e) => setImageConnectionId(e.target.value || null)}
-                    className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)]"
                   >
-                    <option value="">Select image connection…</option>
-                    {imageConnections.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                        {c.model ? ` — ${c.model}` : ""}
-                      </option>
-                    ))}
-                  </select>
-                  {imageConnections.length === 0 && (
-                    <p className="mt-1 text-[0.55rem] text-amber-700 dark:text-amber-400/80">
-                      No image generation connections found. Add one in Settings → Connections.
-                    </p>
+                    <div
+                      className={cn(
+                        "h-4 w-4 rounded-full bg-white transition-transform",
+                        enableLorebookKeeper && "translate-x-3.5",
+                      )}
+                    />
+                  </div>
+                </button>
+
+                <div>
+                  <button
+                    onClick={() => setEnableSpriteGeneration(!enableSpriteGeneration)}
+                    className={cn(
+                      "flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left transition-all",
+                      enableSpriteGeneration
+                        ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
+                        : "bg-[var(--secondary)] ring-1 ring-transparent hover:ring-[var(--border)]",
+                    )}
+                  >
+                    <Image
+                      size={14}
+                      className={enableSpriteGeneration ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}
+                    />
+                    <div className="flex-1">
+                      <span className="block text-xs font-medium text-[var(--foreground)]">Image Generation</span>
+                      <span className="block text-[0.575rem] text-[var(--muted-foreground)]">
+                        Auto-generate NPC portraits and location backgrounds during gameplay
+                      </span>
+                    </div>
+                    <div
+                      className={cn(
+                        "h-5 w-9 rounded-full p-0.5 transition-colors",
+                        enableSpriteGeneration ? "bg-[var(--primary)]" : "bg-[var(--muted-foreground)]/50",
+                      )}
+                    >
+                      <div
+                        className={cn(
+                          "h-4 w-4 rounded-full bg-white transition-transform",
+                          enableSpriteGeneration && "translate-x-3.5",
+                        )}
+                      />
+                    </div>
+                  </button>
+
+                  {/* Image Connection Picker — shown when sprite gen is enabled */}
+                  {enableSpriteGeneration && (
+                    <div className="mt-2">
+                      <label className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                        Image Generation Connection
+                      </label>
+                      <select
+                        value={imageConnectionId ?? ""}
+                        onChange={(e) => setImageConnectionId(e.target.value || null)}
+                        className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)]"
+                      >
+                        <option value="">Select image connection…</option>
+                        {imageConnections.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name}
+                            {c.model ? ` — ${c.model}` : ""}
+                          </option>
+                        ))}
+                      </select>
+                      {imageConnections.length === 0 && (
+                        <p className="mt-1 text-[0.55rem] text-amber-700 dark:text-amber-400/80">
+                          No image generation connections found. Add one in Settings → Connections.
+                        </p>
+                      )}
+                      <p className="mt-1 text-[0.55rem] text-[var(--muted-foreground)]">
+                        Generates portraits for new NPCs and backgrounds for new locations using the scene analysis
+                        pipeline.
+                      </p>
+                    </div>
                   )}
-                  <p className="mt-1 text-[0.55rem] text-[var(--muted-foreground)]">
-                    Generates portraits for new NPCs and backgrounds for new locations using the scene analysis
-                    pipeline.
-                  </p>
                 </div>
-              )}
+              </div>
             </div>
 
             {/* Custom Widgets Toggle */}
@@ -1134,6 +1501,12 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                   </button>
                 ))}
               </div>
+              <LearnedOptionChips
+                options={learnedGoals}
+                expanded={expandedLearnedOptions.goals}
+                onToggleExpanded={() => toggleLearnedOptions("goals")}
+                onSelect={setPlayerGoals}
+              />
             </div>
 
             {/* Preferences */}
@@ -1149,18 +1522,22 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                 className="w-full resize-none rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--foreground)] outline-none ring-1 ring-transparent transition-all placeholder:text-[var(--muted-foreground)] focus:ring-[var(--primary)]/40"
               />
               <div className="mt-1.5 flex flex-wrap gap-1">
-                {["Include romance subplot", "Focus on exploration", "Make NPCs memorable", "Keep it short"].map(
-                  (s) => (
-                    <button
-                      key={s}
-                      onClick={() => setPreferences((prev) => (prev ? `${prev}, ${s.toLowerCase()}` : s))}
-                      className="rounded-full bg-[var(--secondary)] px-2 py-0.5 text-[0.625rem] text-[var(--muted-foreground)] transition-colors hover:text-[var(--primary)] hover:bg-[var(--primary)]/10"
-                    >
-                      {s}
-                    </button>
-                  ),
-                )}
+                {PREFERENCE_SUGGESTIONS.map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => setPreferences((prev) => (prev ? `${prev}, ${s.toLowerCase()}` : s))}
+                    className="rounded-full bg-[var(--secondary)] px-2 py-0.5 text-[0.625rem] text-[var(--muted-foreground)] transition-colors hover:text-[var(--primary)] hover:bg-[var(--primary)]/10"
+                  >
+                    {s}
+                  </button>
+                ))}
               </div>
+              <LearnedOptionChips
+                options={learnedPreferences}
+                expanded={expandedLearnedOptions.preferences}
+                onToggleExpanded={() => toggleLearnedOptions("preferences")}
+                onSelect={setPreferences}
+              />
             </div>
 
             {/* Lorebooks */}

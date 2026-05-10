@@ -298,6 +298,7 @@ export function MobileWidgetPanel({ widgets, position, chatId }: MobileWidgetPan
                 key={w.id}
                 className="w-40 overflow-hidden rounded-lg border bg-black/70 backdrop-blur-md transition-all"
                 style={{ borderColor: `${accent}30` }}
+                data-game-skip-bg-nav="true"
               >
                 <div className="flex items-center gap-1.5 px-2.5 py-1.5 text-left">
                   {w.icon && <span className="text-xs">{w.icon}</span>}
@@ -377,6 +378,7 @@ function WidgetCard({
       dragConstraints={constraintsRef as RefObject<Element>}
       onDragEnd={handleDragEnd}
       style={{ x, y, borderColor: `${accent}30` }}
+      data-game-skip-bg-nav="true"
       className={cn(
         "w-full overflow-hidden rounded-lg border bg-black/60 backdrop-blur-md transition-colors",
         !locked && "cursor-grab ring-1 ring-white/20 active:cursor-grabbing",
@@ -701,6 +703,7 @@ interface GameWidgetSessionPrepModalProps {
   open: boolean;
   widgets: HudWidget[];
   chatId: string;
+  mode?: "initial" | "next";
   onClose: () => void;
   onStartSession: () => void;
   isStartingSession: boolean;
@@ -710,6 +713,7 @@ export function GameWidgetSessionPrepModal({
   open,
   widgets,
   chatId,
+  mode = "next",
   onClose,
   onStartSession,
   isStartingSession,
@@ -736,15 +740,47 @@ export function GameWidgetSessionPrepModal({
     }
   }, [editingWidget, editingWidgetId]);
 
+  const copy = useMemo(
+    () =>
+      mode === "initial"
+        ? {
+            title: "Review Starting Widgets",
+            description:
+              "Review the custom HUD widgets generated for this game before the first turn. You can rename stat-block fields, add or remove them, and drop widgets that do not fit the intended gameplay loop.",
+            empty: "No custom widgets will be used for the starting session.",
+            removeConfirm: "Remove {label} from the starting session?",
+            savingError: "Failed to save starting widget changes.",
+            cancelLabel: "Back",
+            startLabel: "Start Game",
+            startingLabel: "Starting Game...",
+            editorDescription:
+              "Adjust the starting values, or reshape stat blocks before the first game turn uses them.",
+          }
+        : {
+            title: "Prepare Next Session Widgets",
+            description:
+              "Review which custom widgets should carry into the next session. You can rename stat-block fields, add or remove them, and drop widgets you no longer want before the next session starts.",
+            empty: "No custom widgets will be carried into the next session.",
+            removeConfirm: "Remove {label} from the next session?",
+            savingError: "Failed to save widget carry-over changes.",
+            cancelLabel: "Cancel",
+            startLabel: "Start Next Session",
+            startingLabel: "Starting Session...",
+            editorDescription:
+              "Adjust the values that should carry forward, or reshape stat blocks for the next session.",
+          },
+    [mode],
+  );
+
   const handleRemoveWidget = useCallback(
     (widgetId: string) => {
       const target = draftWidgets.find((widget) => widget.id === widgetId);
       if (!target) return;
-      if (!window.confirm(`Remove ${target.label} from the next session?`)) return;
+      if (!window.confirm(copy.removeConfirm.replace("{label}", target.label))) return;
 
       setDraftWidgets((current) => current.filter((widget) => widget.id !== widgetId));
     },
-    [draftWidgets],
+    [copy.removeConfirm, draftWidgets],
   );
 
   const handleSaveWidget = useCallback(
@@ -763,29 +799,21 @@ export function GameWidgetSessionPrepModal({
       await updateGameWidgets.mutateAsync({ chatId, widgets: draftWidgets });
       onStartSession();
     } catch {
-      toast.error("Failed to save widget carry-over changes.");
+      toast.error(copy.savingError);
     }
-  }, [chatId, draftWidgets, onStartSession, updateGameWidgets]);
+  }, [chatId, copy.savingError, draftWidgets, onStartSession, updateGameWidgets]);
 
   const interactionsLocked = updateGameWidgets.isPending || isStartingSession;
 
   return (
     <>
-      <Modal
-        open={open}
-        onClose={interactionsLocked ? () => {} : onClose}
-        title="Prepare Next Session Widgets"
-        width="max-w-2xl"
-      >
+      <Modal open={open} onClose={interactionsLocked ? () => {} : onClose} title={copy.title} width="max-w-2xl">
         <div className="space-y-4">
-          <p className="text-sm text-[var(--muted-foreground)]">
-            Review which custom widgets should carry into the next session. You can rename stat-block fields, add or
-            remove them, and drop widgets you no longer want before the next session starts.
-          </p>
+          <p className="text-sm text-[var(--muted-foreground)]">{copy.description}</p>
 
           {draftWidgets.length === 0 ? (
             <div className="rounded-xl border border-[var(--border)] bg-[var(--accent)]/30 px-4 py-3 text-sm text-[var(--muted-foreground)]">
-              No custom widgets will be carried into the next session.
+              {copy.empty}
             </div>
           ) : (
             <div className="max-h-[52vh] space-y-2 overflow-y-auto pr-1">
@@ -837,7 +865,7 @@ export function GameWidgetSessionPrepModal({
               disabled={interactionsLocked}
               className="rounded-lg border border-[var(--border)] px-3 py-2 text-sm text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-50"
             >
-              Cancel
+              {copy.cancelLabel}
             </button>
             <button
               type="button"
@@ -847,7 +875,7 @@ export function GameWidgetSessionPrepModal({
               disabled={interactionsLocked}
               className="rounded-lg bg-[var(--primary)] px-3 py-2 text-sm font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90 disabled:opacity-50"
             >
-              {interactionsLocked ? "Starting Session..." : "Start Next Session"}
+              {interactionsLocked ? copy.startingLabel : copy.startLabel}
             </button>
           </div>
         </div>
@@ -860,7 +888,7 @@ export function GameWidgetSessionPrepModal({
         onSave={handleSaveWidget}
         isSaving={interactionsLocked}
         allowStructureEdit
-        description="Adjust the values that should carry forward, or reshape stat blocks for the next session."
+        description={copy.editorDescription}
         saveLabel="Update Widget"
       />
     </>
@@ -1075,7 +1103,9 @@ function InventoryGridWidget({ widget }: { widget: HudWidget }) {
             >
               {item ? (
                 <div className="flex w-full flex-col items-center overflow-hidden px-0.5 text-center">
-                  <span className="w-full truncate text-white/70">{item.name}</span>
+                  <span className="w-full whitespace-normal break-words text-white/70 [overflow-wrap:anywhere]">
+                    {item.name}
+                  </span>
                   {item.quantity && item.quantity > 1 && (
                     <span className="text-[0.4375rem]" style={{ color: accent }}>
                       x{item.quantity}

@@ -10,6 +10,18 @@ import {
   type LLMUsage,
 } from "../base-provider.js";
 
+const DEFAULT_CACHING_AT_DEPTH = 5;
+
+function normalizeCachingAtDepth(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return DEFAULT_CACHING_AT_DEPTH;
+  return Math.floor(value);
+}
+
+function resolveCacheControlMessageIndex(messages: ChatMessage[], cachingAtDepth: number): number {
+  if (messages.length === 0) return -1;
+  return Math.max(0, messages.length - 1 - cachingAtDepth);
+}
+
 /**
  * Handles Anthropic Claude API (Messages API).
  */
@@ -31,6 +43,7 @@ export class AnthropicProvider extends BaseLLMProvider {
     const mergedMessages = this.mergeConsecutiveMessages(chatMessages);
 
     const enableCaching = options.enableCaching ?? false;
+    const cachingAtDepth = normalizeCachingAtDepth(options.cachingAtDepth);
 
     // Build system field — use content blocks with cache_control when caching is on
     let systemField: string | Array<{ type: string; text: string; cache_control?: { type: string } }> | undefined;
@@ -48,8 +61,9 @@ export class AnthropicProvider extends BaseLLMProvider {
       }
     }
 
-    // When caching, find the last user message index for the cache breakpoint
-    const lastUserIdx = enableCaching ? mergedMessages.reduce((acc, m, i) => (m.role === "user" ? i : acc), -1) : -1;
+    const cacheControlMessageIndex = enableCaching
+      ? resolveCacheControlMessageIndex(mergedMessages, cachingAtDepth)
+      : -1;
 
     const body: Record<string, unknown> = {
       model: options.model,
@@ -68,11 +82,11 @@ export class AnthropicProvider extends BaseLLMProvider {
         }
         if (m.content) {
           const textBlock: Record<string, unknown> = { type: "text", text: m.content };
-          if (i === lastUserIdx) textBlock.cache_control = { type: "ephemeral" };
+          if (i === cacheControlMessageIndex) textBlock.cache_control = { type: "ephemeral" };
           parts.push(textBlock);
         }
         // Use content array if we have images or cache control, otherwise string
-        if (m.images?.length || i === lastUserIdx) {
+        if (m.images?.length || i === cacheControlMessageIndex) {
           return { role: m.role, content: parts };
         }
         return { role: m.role, content: m.content };
@@ -122,6 +136,8 @@ export class AnthropicProvider extends BaseLLMProvider {
         }
       }
     }
+
+    this.applyCustomParameters(body, options);
 
     const response = await llmFetch(url, {
       method: "POST",

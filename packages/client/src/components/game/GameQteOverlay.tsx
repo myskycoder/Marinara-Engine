@@ -3,9 +3,10 @@
 //
 // Timed choice overlay for combat/chase scenes.
 // GM emits [qte: action1 | action2, timer: 5s]
-// Picking fast gives a bonus modifier.
+// Picking fast gives a bonus modifier; timing out sends a penalty.
 // ──────────────────────────────────────────────
 import { useState, useEffect, useRef, useCallback } from "react";
+import { X } from "lucide-react";
 import { cn } from "../../lib/utils";
 
 interface QteAction {
@@ -17,9 +18,10 @@ interface GameQteOverlayProps {
   timerSeconds: number;
   onSelect: (action: string, timeRemaining: number) => void;
   onTimeout: () => void;
+  onDismiss?: () => void;
 }
 
-export function GameQteOverlay({ actions, timerSeconds, onSelect, onTimeout }: GameQteOverlayProps) {
+export function GameQteOverlay({ actions, timerSeconds, onSelect, onTimeout, onDismiss }: GameQteOverlayProps) {
   const [timeLeft, setTimeLeft] = useState(timerSeconds);
   const [selected, setSelected] = useState<number | null>(null);
   const [flash, setFlash] = useState(false);
@@ -58,6 +60,12 @@ export function GameQteOverlay({ actions, timerSeconds, onSelect, onTimeout }: G
     [timerSeconds, onSelect],
   );
 
+  const handleDismiss = useCallback(() => {
+    if (resolved.current) return;
+    resolved.current = true;
+    onDismiss?.();
+  }, [onDismiss]);
+
   const progress = (timeLeft / timerSeconds) * 100;
   const isUrgent = timeLeft < timerSeconds * 0.3;
 
@@ -81,6 +89,18 @@ export function GameQteOverlay({ actions, timerSeconds, onSelect, onTimeout }: G
       />
 
       <div className="relative z-10 w-full max-w-lg rounded-lg border border-white/20 bg-black/80 px-5 py-5 shadow-2xl shadow-black/60 ring-1 ring-amber-300/30 backdrop-blur-md">
+        {onDismiss && (
+          <button
+            type="button"
+            onClick={handleDismiss}
+            className="absolute right-3 top-3 rounded-lg p-1.5 text-white/55 transition-colors hover:bg-white/10 hover:text-white"
+            title="Close quick-time event"
+            aria-label="Close quick-time event"
+          >
+            <X size="1rem" />
+          </button>
+        )}
+
         {/* Timer bar */}
         <div className="mb-4 overflow-hidden rounded-full bg-white/20 ring-1 ring-white/15">
           <div

@@ -44,6 +44,7 @@ export type PeekPromptData = {
     showThoughts?: boolean | null;
     reasoningEffort?: string | null;
     verbosity?: string | null;
+    assistantPrefill?: string | null;
     tokensPrompt?: number | null;
     tokensCompletion?: number | null;
     tokensCachedPrompt?: number | null;

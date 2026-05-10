@@ -22,9 +22,23 @@ export interface PendingCardUpdate {
   timestamp: number;
 }
 
+export interface AgentDebugEntry {
+  phase: string;
+  agents?: Array<{
+    type: string;
+    name: string;
+    model: string;
+    maxTokens: number;
+  }>;
+  results?: AgentResult[];
+  batchMaxTokens?: number;
+  timestamp: number;
+}
+
 interface AgentState {
   activeAgents: string[];
   lastResults: Map<string, AgentResult>;
+  debugLog: AgentDebugEntry[];
   isProcessing: boolean;
   /** Agent types that failed even after auto-retry — manual retry available */
   failedAgentTypes: string[];
@@ -55,6 +69,8 @@ interface AgentState {
   setActiveAgents: (agents: string[]) => void;
   setProcessing: (processing: boolean) => void;
   addResult: (agentId: string, result: AgentResult) => void;
+  addDebugEntry: (entry: Omit<AgentDebugEntry, "timestamp"> & { timestamp?: number }) => void;
+  clearDebugLog: () => void;
   setFailedAgentTypes: (types: string[]) => void;
   clearFailedAgentTypes: () => void;
   addThoughtBubble: (agentId: string, agentName: string, content: string) => void;
@@ -77,6 +93,7 @@ interface AgentState {
 export const useAgentStore = create<AgentState>((set) => ({
   activeAgents: [],
   lastResults: new Map(),
+  debugLog: [],
   isProcessing: false,
   failedAgentTypes: [],
   thoughtBubbles: [],
@@ -101,6 +118,13 @@ export const useAgentStore = create<AgentState>((set) => ({
       }
       return { lastResults: results };
     }),
+
+  addDebugEntry: (entry) =>
+    set((s) => ({
+      debugLog: [...s.debugLog, { ...entry, timestamp: entry.timestamp ?? Date.now() }].slice(-100),
+    })),
+
+  clearDebugLog: () => set({ debugLog: [] }),
 
   setFailedAgentTypes: (types) => set({ failedAgentTypes: types }),
   clearFailedAgentTypes: () => set({ failedAgentTypes: [] }),
@@ -143,6 +167,7 @@ export const useAgentStore = create<AgentState>((set) => ({
     set({
       activeAgents: [],
       lastResults: new Map(),
+      debugLog: [],
       isProcessing: false,
       failedAgentTypes: [],
       thoughtBubbles: [],

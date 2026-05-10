@@ -15,6 +15,24 @@ export const characters = sqliteTable("characters", {
   updatedAt: text("updated_at").notNull(),
 });
 
+export const characterCardVersions = sqliteTable("character_card_versions", {
+  id: text("id").primaryKey(),
+  characterId: text("character_id")
+    .notNull()
+    .references(() => characters.id, { onDelete: "cascade" }),
+  /** Full CharacterData V2 snapshot as JSON */
+  data: text("data").notNull(),
+  /** Snapshot of the user-only comment/title at the time of the version */
+  comment: text("comment").notNull().default(""),
+  avatarPath: text("avatar_path"),
+  /** Human-visible card version string from data.character_version */
+  version: text("version").notNull().default(""),
+  /** What created this snapshot: manual, agent, command, restore, etc. */
+  source: text("source").notNull().default("manual"),
+  reason: text("reason").notNull().default(""),
+  createdAt: text("created_at").notNull(),
+});
+
 export const personas = sqliteTable("personas", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
@@ -39,6 +57,8 @@ export const personas = sqliteTable("personas", {
   altDescriptions: text("alt_descriptions").notNull().default("[]"),
   /** Tags for organizing personas (JSON array of strings) */
   tags: text("tags").notNull().default("[]"),
+  /** Saved Conversation mode activity/status text options (JSON array of strings) */
+  savedStatusOptions: text("saved_status_options").notNull().default("[]"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });

@@ -61,6 +61,7 @@ export function usePresetFull(id: string | null) {
       }>(`/prompts/${id}/full`),
     enabled: !!id,
     staleTime: 5 * 60_000,
+    refetchOnMount: "always",
   });
 }
 

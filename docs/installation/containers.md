@@ -10,11 +10,15 @@ docker compose up -d
 
 Then open **<http://127.0.0.1:7860>**.
 
-Data (SQLite database, uploads, fonts, default backgrounds) is stored in the named volume `marinara-data`. To inspect it:
+Compose binds to `127.0.0.1` by default. To expose the container to your LAN, change the port mapping to `${PORT:-7860}:7860`, set `BASIC_AUTH_USER`, `BASIC_AUTH_PASS`, and `ADMIN_SECRET`, then restart. See [Access Control](../CONFIGURATION.md#access-control).
+
+Data (file-backed storage, uploads, fonts, default backgrounds) is stored in the named volume `marinara-data`. To inspect it:
 
 ```bash
 docker volume inspect marinara-data
 ```
+
+On startup, the official image repairs ownership of `/app/data` for named volumes, then drops back to the non-root runtime user. This lets older Docker installs migrate to file-backed storage without manual `chown` steps.
 
 To pull the latest image and restart:
 
@@ -30,7 +34,7 @@ If you prefer to build the image yourself:
 git clone https://github.com/Pasta-Devs/Marinara-Engine.git
 cd Marinara-Engine
 docker build -t marinara-engine .
-docker run -d -p 7860:7860 -v marinara-data:/app/data marinara-engine
+docker run -d -p 127.0.0.1:7860:7860 -v marinara-data:/app/data marinara-engine
 ```
 
 ## Podman
@@ -46,7 +50,7 @@ podman compose up -d
 Or:
 
 ```bash
-podman run -d -p 7860:7860 -v marinara-data:/app/data ghcr.io/pasta-devs/marinara-engine:latest
+podman run -d -p 127.0.0.1:7860:7860 -v marinara-data:/app/data ghcr.io/pasta-devs/marinara-engine:latest
 ```
 
 > **Note:** `podman compose` requires the [`podman-compose`](https://github.com/containers/podman-compose/) plugin. On most distributions you can install it with `sudo dnf install podman-compose` (Fedora), `sudo apt install podman-compose` (Debian/Ubuntu), or `pip install podman-compose`.
@@ -54,6 +58,14 @@ podman run -d -p 7860:7860 -v marinara-data:/app/data ghcr.io/pasta-devs/marinar
 ## Lite Image (Optional)
 
 A **lite** image variant is available that trades some offline features for a significantly smaller footprint (~60 % smaller than the full image). It is built on [Wolfi](https://wolfi.dev/) — a minimal, CVE-focused Linux (un)distribution designed for containers.
+
+> **Raspberry Pi 4 / Cortex-A72 note:** Known affected lite images include `1.5.7-lite`, `1.5.8-lite`, and the `:lite` tag published for v1.5.8 on 2026-05-05. They can crash with `SIGILL` on Pi 4-class ARM CPUs during outgoing LLM API calls because of an upstream Wolfi `nodejs-24` aarch64 regression. Until Wolfi publishes a fixed Node package, use the regular `:latest` image on those devices, or pin the last known-good lite image by digest:
+>
+> ```yaml
+> image: ghcr.io/pasta-devs/marinara-engine@sha256:726b3c82468a1e1b0ed84579c754202d700e8cf27861465d1c41fd2dc99adab8
+> ```
+>
+> See [Lite container crashes on Raspberry Pi 4 / Cortex-A72](../TROUBLESHOOTING.md#lite-container-crashes-on-raspberry-pi-4--cortex-a72) for details.
 
 ### What is removed
 
@@ -69,13 +81,13 @@ All core features — chat, roleplay, game mode, agents, lorebooks, characters, 
 
 ```bash
 docker pull ghcr.io/pasta-devs/marinara-engine:lite
-docker run -d -p 7860:7860 -v marinara-data:/app/data ghcr.io/pasta-devs/marinara-engine:lite
+docker run -d -p 127.0.0.1:7860:7860 -v marinara-data:/app/data ghcr.io/pasta-devs/marinara-engine:lite
 ```
 
 Or with Podman:
 
 ```bash
-podman run -d -p 7860:7860 -v marinara-data:/app/data ghcr.io/pasta-devs/marinara-engine:lite
+podman run -d -p 127.0.0.1:7860:7860 -v marinara-data:/app/data ghcr.io/pasta-devs/marinara-engine:lite
 ```
 
 ### Build from source
@@ -84,7 +96,7 @@ podman run -d -p 7860:7860 -v marinara-data:/app/data ghcr.io/pasta-devs/marinar
 git clone https://github.com/Pasta-Devs/Marinara-Engine.git
 cd Marinara-Engine
 docker build -f Dockerfile.lite -t marinara-engine:lite .
-docker run -d -p 7860:7860 -v marinara-data:/app/data marinara-engine:lite
+docker run -d -p 127.0.0.1:7860:7860 -v marinara-data:/app/data marinara-engine:lite
 ```
 
 > **Note:** The lite image is published alongside each versioned release (e.g. `ghcr.io/pasta-devs/marinara-engine:1.5.4-lite`). It is **not** published on every push to `main`.

@@ -27,6 +27,7 @@ import { resolveMessageMacros } from "../../lib/chat-macros";
 import { useTranslate } from "../../hooks/use-translate";
 import { api } from "../../lib/api-client";
 import type { CharacterMap, MessageSelectionToggle, PersonaInfo } from "./chat-area.types";
+import { ImagePromptPanel } from "./ImagePromptPanel";
 
 /** Build style object for name color (supports gradients). */
 function nameColorStyle(color?: string): CSSProperties | undefined {
@@ -228,7 +229,7 @@ interface MessageData {
     } | null;
     isConversationStart?: boolean;
     thinking?: string | null;
-    attachments?: Array<{ type: string; url: string; filename?: string }>;
+    attachments?: Array<{ type: string; url: string; filename?: string; prompt?: string; galleryId?: string }>;
   };
   createdAt: string;
 }
@@ -288,7 +289,7 @@ export const ConversationMessage = memo(function ConversationMessage({
   const [showActions, setShowActions] = useState(false);
   const [copied, setCopied] = useState(false);
   const [showThinking, setShowThinking] = useState(false);
-  const [imageLightbox, setImageLightbox] = useState<string | null>(null);
+  const [imageLightbox, setImageLightbox] = useState<{ url: string; prompt?: string | null } | null>(null);
   const editRef = useRef<HTMLTextAreaElement>(null);
   const hasInput = useChatStore((s) => s.currentInput.trim().length > 0);
   const guideGenerations = useUIStore((s) => s.guideGenerations);
@@ -529,6 +530,18 @@ export const ConversationMessage = memo(function ConversationMessage({
     });
   }, [message.content]);
 
+  useEffect(() => {
+    if (message.role !== "user" || !onEdit) return;
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ messageId?: string }>).detail;
+      if (detail?.messageId !== message.id) return;
+      if (onEditClick) onEditClick();
+      else startEditing();
+    };
+    window.addEventListener("marinara:start-edit-message", handler);
+    return () => window.removeEventListener("marinara:start-edit-message", handler);
+  }, [message.id, message.role, onEdit, onEditClick, startEditing]);
+
   const editValueRef = useRef(editValue);
   editValueRef.current = editValue;
 
@@ -744,6 +757,41 @@ export const ConversationMessage = memo(function ConversationMessage({
         {/* Streaming cursor */}
         {isStreaming && (
           <span className="ml-14 inline-block h-4 w-[0.125rem] animate-pulse rounded-full bg-[var(--foreground)]/50" />
+        )}
+
+        {/* Image attachments (selfies, illustrations) */}
+        {extra.attachments && extra.attachments.length > 0 && !IMAGE_URL_RE.test(renderedContent.trim()) && (
+          <div className="ml-14 mt-1.5 flex flex-col items-start gap-2">
+            {extra.attachments.map((att: any, i: number) =>
+              att.type === "image" || att.type?.startsWith("image/") ? (
+                <div key={i} className="group/att relative inline-block">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setImageLightbox({ url: att.url || att.data, prompt: att.prompt });
+                    }}
+                    className="block cursor-zoom-in rounded-lg text-left"
+                    title="Open image"
+                  >
+                    <img
+                      src={att.url || att.data}
+                      alt={att.filename || att.name || "image"}
+                      className="max-h-80 max-w-full rounded-lg"
+                      loading="lazy"
+                    />
+                  </button>
+                  <button
+                    onClick={() => handleRemoveAttachment(i)}
+                    title="Remove from message"
+                    className="absolute top-1.5 right-1.5 rounded-full bg-black/60 p-1 text-white/80 transition-opacity hover:bg-black/80 hover:text-white sm:opacity-0 sm:group-hover/att:opacity-100"
+                  >
+                    <X size="0.875rem" />
+                  </button>
+                </div>
+              ) : null,
+            )}
+          </div>
         )}
 
         {!hideActions && hasSwipes && (
@@ -980,7 +1028,11 @@ export const ConversationMessage = memo(function ConversationMessage({
               </div>
             ) : (
               <>
-                <MessageContent content={renderedContent} mentionNames={mentionNames} onImageOpen={setImageLightbox} />
+                <MessageContent
+                  content={renderedContent}
+                  mentionNames={mentionNames}
+                  onImageOpen={(url) => setImageLightbox({ url })}
+                />
                 {isStreaming && (
                   <span className="ml-0.5 inline-block h-4 w-[0.125rem] animate-pulse rounded-full bg-[var(--foreground)]/50" />
                 )}
@@ -1012,7 +1064,7 @@ export const ConversationMessage = memo(function ConversationMessage({
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setImageLightbox(att.url || att.data);
+                      setImageLightbox({ url: att.url || att.data, prompt: att.prompt });
                     }}
                     className="block cursor-zoom-in rounded-lg text-left"
                     title="Open image"
@@ -1142,12 +1194,21 @@ export const ConversationMessage = memo(function ConversationMessage({
             className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm max-md:pt-[env(safe-area-inset-top)]"
             onClick={() => setImageLightbox(null)}
           >
-            <img
-              src={imageLightbox}
-              alt="Expanded image"
-              className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain shadow-2xl"
+            <div
+              className="flex max-h-[90vh] w-[min(90vw,64rem)] max-w-[90vw] flex-col items-center gap-2"
               onClick={(e) => e.stopPropagation()}
-            />
+            >
+              <img
+                src={imageLightbox.url}
+                alt="Expanded image"
+                className={
+                  imageLightbox.prompt?.trim()
+                    ? "max-h-[calc(90vh-9rem)] max-w-full rounded-lg object-contain shadow-2xl"
+                    : "max-h-[90vh] max-w-full rounded-lg object-contain shadow-2xl"
+                }
+              />
+              <ImagePromptPanel prompt={imageLightbox.prompt} className="w-full max-w-3xl" />
+            </div>
             <button
               onClick={() => setImageLightbox(null)}
               className="absolute right-4 top-4 rounded-full bg-black/50 p-2 text-white/80 transition-colors hover:bg-black/70 hover:text-white"

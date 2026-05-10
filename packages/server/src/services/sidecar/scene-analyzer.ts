@@ -7,7 +7,15 @@
 // widgets, expressions, weather, etc.).
 // ──────────────────────────────────────────────
 
-import type { HudWidget, GameNpc, GameActiveState } from "@marinara-engine/shared";
+import {
+  LOCATION_KINDS,
+  MUSIC_GENRES,
+  MUSIC_INTENSITIES,
+  type HudWidget,
+  type GameNpc,
+  type GameActiveState,
+  type SceneSpotifyTrackCandidate,
+} from "@marinara-engine/shared";
 
 export interface SceneAnalyzerContext {
   /** Current game state before this turn. */
@@ -30,6 +38,8 @@ export interface SceneAnalyzerContext {
   currentMusic: string | null;
   /** Recently played music tags, most recent first. */
   recentMusic?: string[];
+  /** Spotify tracks preselected mechanically for the scene analyzer to choose from. */
+  availableSpotifyTracks?: SceneSpotifyTrackCandidate[];
   /** Current ambient tag. */
   currentAmbient?: string | null;
   /** Current weather. */
@@ -48,14 +58,48 @@ export interface SceneAnalyzerContext {
   knownLocationIds?: string[];
   /** Whether image generation is configured and this turn is allowed to request a rare CG illustration. */
   canGenerateIllustrations?: boolean;
+  /** Whether image generation is configured for missing location/background assets. */
+  canGenerateBackgrounds?: boolean;
   /** Unified image style for generated game art. */
   artStylePrompt?: string | null;
+  /** Extra user instructions for rare generated scene illustration prompts. */
+  imagePromptInstructions?: string | null;
 }
 
 /** Build the system prompt for scene analysis — kept minimal so all token
  *  budget goes to the user message where the actual choices live. */
 export function buildSceneAnalyzerSystemPrompt(_ctx: SceneAnalyzerContext): string {
-  return `You are a game state analyzer. Read the narration, then fill in the JSON template using ONLY the exact tags provided as options. Output valid JSON only.`;
+  return `You are a game state analyzer. Read the narration, then fill in the JSON template using ONLY the exact tags and enum values provided as options. Output valid JSON only.`;
+}
+
+function backgroundOptionKey(tag: string): string {
+  let slug = tag
+    .trim()
+    .toLowerCase()
+    .replace(/:/g, "-")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const prefixPattern = /^(?:backgrounds|fantasy|modern|scifi|user|generated|illustrations|q-[a-z0-9]{6,})-+/;
+  while (prefixPattern.test(slug)) {
+    slug = slug.replace(prefixPattern, "");
+  }
+  return slug || tag.trim().toLowerCase();
+}
+
+function buildBackgroundOptions(ctx?: SceneAnalyzerContext): string[] {
+  const seen = new Set<string>();
+  const options: string[] = [];
+  for (const tag of ctx?.availableBackgrounds ?? []) {
+    if (!tag || tag.startsWith("backgrounds:illustrations:")) continue;
+    const key = backgroundOptionKey(tag);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    options.push(tag);
+  }
+  if (ctx?.canGenerateBackgrounds) {
+    options.push("backgrounds:generated:<short-location-slug>");
+  }
+  return options;
 }
 
 /** Map a widget to its update syntax hint for the JSON template. */
@@ -116,6 +160,18 @@ function widgetStateSummary(w: HudWidget): string {
   }
 }
 
+function compactImagePromptInstructions(value: string | null | undefined): string {
+  return (value ?? "").trim().replace(/\s+/g, " ").slice(0, 1200);
+}
+
+function compactPromptLabel(value: string | null | undefined): string {
+  return (value ?? "")
+    .replace(/["\r\n<>]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 180);
+}
+
 /** Build the user prompt with all choices inline in a JSON template. */
 export function buildSceneAnalyzerUserPrompt(
   narration: string,
@@ -124,6 +180,12 @@ export function buildSceneAnalyzerUserPrompt(
 ): string {
   const parts: string[] = [];
   const canGenerateIllustrations = !!ctx?.canGenerateIllustrations;
+  const canGenerateBackgrounds = !!ctx?.canGenerateBackgrounds;
+  const imagePromptInstructions = compactImagePromptInstructions(ctx?.imagePromptInstructions);
+  const musicGenreOptions = [...MUSIC_GENRES, "null"].join(" | ");
+  const musicIntensityOptions = [...MUSIC_INTENSITIES, "null"].join(" | ");
+  const locationKindOptions = [...LOCATION_KINDS, "null"].join(" | ");
+  const spotifyOptions = (ctx?.availableSpotifyTracks ?? []).slice(0, 50);
 
   // ── 1. Narration (longest — furthest from generation) ──
 
@@ -152,6 +214,17 @@ export function buildSceneAnalyzerUserPrompt(
     }
   }
 
+  if (spotifyOptions.length > 0) {
+    parts.push(
+      ``,
+      `SPOTIFY TRACK OPTIONS:`,
+      ...spotifyOptions.map((track, index) => {
+        const album = track.album ? `, album="${compactPromptLabel(track.album)}"` : "";
+        return `${index + 1}. uri="${track.uri}", title="${compactPromptLabel(track.name)}", artist="${compactPromptLabel(track.artist)}"${album}`;
+      }),
+    );
+  }
+
   // ── 3. Task description + JSON template ──
 
   parts.push(
@@ -161,20 +234,31 @@ export function buildSceneAnalyzerUserPrompt(
     `1. SCENE SETTING — Pick the BEST overall background, weather, time of day, and season that fit the narration. The top-level "background" is what the player sees first when this message appears — it MUST match where the narration ENDS (the room/area the party occupies after the turn). If characters move house → office (or any room change), top-level "background" MUST be the office (tag or backgrounds:generated:...) and top-level "locationId" MUST match — do NOT leave "background": null just because the move happens mid-text; null is ONLY when the party stays in the exact same place with no plate change.`,
     `2. LOCATION ID — Output a stable kebab-case "locationId" for the place currently in frame (e.g. "chernorechye-village-edge", "aunt-zoya-izba-kitchen", "abandoned-bell-tower"). REUSE the same id whenever the narration returns to a previously-visited place — even if phrasing differs. Inventing a new id for an already-visited location creates a duplicate cadre and wastes generation.`,
     `3. BACKGROUND PROMPT — When you cannot find a STRONG match in the listed availableBackgrounds (locale, era, geography, language/cultural context — e.g. nothing matches a snowy Russian village or a 1990s post-Soviet bus stop), set "background" to "backgrounds:generated:<short-slug>" AND fill "backgroundPrompt" with a rich 1–2 sentence visual description: location type, materials, lighting, atmosphere, and key visual details from the narration. For generated backgrounds, describe a composition that works behind full-body character sprites: keep the lower foreground and bottom-center relatively clear; put focal interest, important props, doors, and readable text-like signage in mid-ground or upper frame or off-center so sprites are not parked on top of the scene's key beats. When you DO pick a tag from availableBackgrounds, set "backgroundPrompt": null.`,
-    `4. REPUTATION — If an NPC relationship shifted, note it. Otherwise empty array.`,
-    `5. PER-BEAT EFFECTS — Scan each narration beat [0]-[${lines.length - 1}]. For each beat you can optionally add:`,
+    `4. AUDIO DIRECTION — Choose compact musicGenre/musicIntensity/locationKind hints. Do NOT choose music or ambient file tags; Marinara maps these hints to assets deterministically.`,
+    ...(spotifyOptions.length > 0
+      ? [
+          `   Also pick ONE Spotify track URI from SPOTIFY TRACK OPTIONS that best fits the just-finished turn. Use null only if none fit at all.`,
+        ]
+      : []),
+    `5. REPUTATION — If an NPC relationship shifted, note it. Otherwise empty array.`,
+    `6. PER-BEAT EFFECTS — Scan each narration beat [0]-[${lines.length - 1}]. For each beat you can optionally add:`,
     `   - "sfx": sound effects (door slam, explosion, footsteps, impact)`,
     `   - "directions": rare cinematic effects at the exact beat they should happen, usually paired with a meaningful sound or reveal. Available per-beat: fade_from_black, fade_to_black, flash, screen_shake, blur, vignette, letterbox, color_grade (presets: warm, cold_blue, horror, noir, vintage, neon, dreamy), focus, pulse, slow_zoom, impact_zoom, tilt, desaturate, chromatic_aberration, film_grain, rain_streaks, spotlight.`,
     `   - "background"+"locationId"+"backgroundPrompt": when the characters PHYSICALLY MOVE to a new location at that beat. Same rules as the top-level fields: use a stable locationId, set backgroundPrompt only when no listed tag fits. The background stays the same until the NEXT segment that changes it, so only set these on the beat where characters actually arrive at a new place. Do NOT repeat the current background.`,
     `   Only include segments that HAVE at least one effect — omit empty segments.`,
+    ...(canGenerateBackgrounds
+      ? [
+          `7. GENERATED LOCATION BACKGROUNDS — If the narration enters a new location and none of the listed background tags fit, use backgrounds:generated:<short-location-slug>. This requests a normal reusable location background image.`,
+        ]
+      : []),
     ...((ctx?.turnNumber ?? 1) > 1
       ? [
-          `6. CINEMATIC DIRECTIONS — If the narration warrants an opening/establishing or turn-wide visual effect, include it. Otherwise empty array. Available: fade_from_black, fade_to_black, flash, screen_shake, blur, vignette, letterbox, color_grade (presets: warm, cold_blue, horror, noir, vintage, neon, dreamy), focus, pulse, slow_zoom, impact_zoom, tilt, desaturate, chromatic_aberration, film_grain, rain_streaks, spotlight.`,
+          `${canGenerateBackgrounds ? "8" : "7"}. CINEMATIC DIRECTIONS — If the narration warrants an opening/establishing or turn-wide visual effect, include it. Otherwise empty array. Available: fade_from_black, fade_to_black, flash, screen_shake, blur, vignette, letterbox, color_grade (presets: warm, cold_blue, horror, noir, vintage, neon, dreamy), focus, pulse, slow_zoom, impact_zoom, tilt, desaturate, chromatic_aberration, film_grain, rain_streaks, spotlight.`,
         ]
       : []),
     ...(canGenerateIllustrations
       ? [
-          `${(ctx?.turnNumber ?? 1) > 1 ? "7" : "6"}. RARE ILLUSTRATION — You may request ONE generated VN CG background only for a major, story-defining moment: first kiss, duel climax, major revelation, sacrifice, council confrontation, boss entrance, or emotional peak. Do not request one for routine travel, normal dialogue, regular combat blows, room changes, shopping, exposition, or scenery.`,
+          `${(ctx?.turnNumber ?? 1) > 1 ? (canGenerateBackgrounds ? "9" : "8") : canGenerateBackgrounds ? "8" : "7"}. RARE SPECIAL-SCENE CG ILLUSTRATION — You may request ONE generated VN CG illustration only for a major, story-defining moment: first kiss, duel climax, major revelation, sacrifice, council confrontation, boss entrance, or emotional peak. Do not request one for routine travel, normal dialogue, regular combat blows, room changes, shopping, exposition, or scenery.`,
           `   The image must be from the player protagonist's POV, in the game's established art style${ctx?.artStylePrompt ? ` (${ctx.artStylePrompt})` : ""}. The protagonist should not be visible except hands/arms when the narration explicitly requires it.`,
         ]
       : []),
@@ -184,8 +268,14 @@ export function buildSceneAnalyzerUserPrompt(
     `- Prefer "backgrounds:generated:..." when the listed tags don't capture the locale, era, or cultural setting of the scene. A bad fit from the list is worse than a fresh generation.`,
     `- "backgroundPrompt" MUST be set whenever "background" is "backgrounds:generated:..." and MUST be null otherwise. Cyrillic and other non-Latin descriptions are fine — image models read them.`,
     `- "locationId" should be ASCII kebab-case (a-z, 0-9, hyphens, max ~60 chars). Stable across turns for the same place.`,
-    `- Use ONLY the exact tags listed in the template below for music, ambient, sfx, and other enumerated fields.`,
+    `- Use ONLY the exact tags listed in the template below for music, ambient, sfx, and other enumerated fields. If backgrounds:generated:<short-location-slug> is listed, replace <short-location-slug> with a short concrete location slug.`,
     `- Expressions and widget updates are handled by the GM model. Do NOT include them in your output.`,
+    `- musicGenre describes scene genre/vibe (fantasy, horror, romance, etc.), not weather. musicIntensity is calm for safe/rest/romance, tense for uncertainty/suspense, intense for combat/chase/climax.`,
+    ...(spotifyOptions.length > 0
+      ? [`- spotifyTrack.uri must be copied exactly from SPOTIFY TRACK OPTIONS. Never invent a Spotify URI.`]
+      : [`- spotifyTrack must be null.`]),
+    `- locationKind describes the physical space for ambience: interior, exterior, underground, urban, or nature. Use null if unclear.`,
+    `- timeOfDay is calendar time, not lighting mood. Do NOT change it for indoor shadows, lamps, dark rooms, or atmosphere; keep null unless the story clearly moved to a new time of day.`,
     `- segmentEffects can be an EMPTY array [] when nothing changed.`,
     `- Cinematic directions are spice, not punctuation. Use at most 2 total directions per turn, and never more than 1 direction in any 3-beat span. Prefer none for routine dialogue.`,
     `- Use directions for real visual beats: a door slamming, a blade impact, thunder, a memory fracture, a kiss/reveal close-up, a panic spike, a scene transition, or a major emotional turn. Do not attach directions to every line.`,
@@ -196,8 +286,15 @@ export function buildSceneAnalyzerUserPrompt(
           `- Set "illustration.segment" to the narration line index [N] where the CG beat STARTS (same numbering as segmentEffects). Keep top-level "background" as the room/area plate for the turn; the engine shows CG only when the player reaches that segment, then restores the room on the next segment.`,
           `- "illustration.characters" MUST name every visible on-screen character who appears in the CG (same names as in narration), so reference portraits attach correctly — never invent a different cast.`,
           `- The illustration prompt MUST stay in the SAME location as the current scene: reuse props, architecture, and weather/lighting from the narration and from top-level "background" / "backgroundPrompt" / "locationId" — do not relocate to a generic stock setting.`,
+          ...(imagePromptInstructions
+            ? [`- When writing "illustration.prompt", obey these user image instructions: ${imagePromptInstructions}`]
+            : []),
         ]
-      : [`- Do not include image-generation or illustration requests.`]),
+      : canGenerateBackgrounds
+        ? [
+            `- Do not include the rare "illustration" object this turn. Generated reusable location backgrounds are still allowed via backgrounds:generated:<short-location-slug>.`,
+          ]
+        : [`- Do not include image-generation or illustration requests.`]),
     ...(ctx?.currentBackground
       ? [
           `- Current background is "${ctx.currentBackground}" (locationId="${ctx.currentLocationId ?? "unknown"}"). If narration ends in a different place, change top-level "background" + "locationId" accordingly — do not rely only on segmentEffects for the final location; segmentEffects are for mid-line beats (sfx, flashes, earlier sub-locations), not for skipping the end-of-turn plate.`,
@@ -209,12 +306,13 @@ export function buildSceneAnalyzerUserPrompt(
     ``,
   );
 
-  // Build background options
-  const bgOptions = ctx?.availableBackgrounds?.length
-    ? ctx.availableBackgrounds.join(" | ") + ` | backgrounds:generated:<slug>`
-    : `backgrounds:generated:<slug>`;
+  // Build background options once. The JSON template refers back to this list
+  // instead of duplicating it for top-level and per-segment background fields.
+  const backgroundOptions = buildBackgroundOptions(ctx);
+  const bgOptions = backgroundOptions.length ? backgroundOptions.join(" | ") : "null";
 
-  // Ambient — handled automatically by scoreAmbient(), excluded from prompt
+  // Music/ambient file tags are handled automatically by scoreMusic()/scoreAmbient().
+  // The prompt only asks for compact audio direction fields.
 
   // NPC names for reputation
   const npcNames = ctx?.trackedNpcs?.length ? ctx.trackedNpcs.map((n) => n.name) : [];
@@ -225,7 +323,7 @@ export function buildSceneAnalyzerUserPrompt(
   const sfxLine = ctx?.availableSfx?.length ? `      "sfx": ["<${ctx.availableSfx.join(" | ")}>"]` : null;
 
   // Background options for segment effects (optional per-segment override)
-  const bgLine = `      "background": "<${bgOptions}>"`;
+  const bgLine = `      "background": "<one BACKGROUND OPTIONS value>"`;
   const locIdLine = `      "locationId": "<kebab-case stable id, or null>"`;
   const bgPromptLine = `      "backgroundPrompt": "<1-2 sentence visual brief when background is generated:..., else null>"`;
 
@@ -242,13 +340,19 @@ export function buildSceneAnalyzerUserPrompt(
   const segmentBody = segmentFields.join(",\n");
 
   parts.push(
+    `BACKGROUND OPTIONS: <${bgOptions}>`,
+    ``,
     `{`,
-    `  "background": "<${bgOptions}>",`,
+    `  "background": "<one BACKGROUND OPTIONS value | null>",`,
     `  "locationId": "<kebab-case stable id, or null>",`,
     `  "backgroundPrompt": "<1-2 sentence visual brief when background is generated:..., else null>",`,
     `  "weather": "<clear | cloudy | foggy | rainy | stormy | snowy | windy | frost | null>",`,
     `  "timeOfDay": "<dawn | morning | noon | afternoon | evening | night | midnight | null>",`,
     `  "season": "<spring | summer | autumn | winter | null>",`,
+    `  "musicGenre": "<${musicGenreOptions}>",`,
+    `  "musicIntensity": "<${musicIntensityOptions}>",`,
+    `  "locationKind": "<${locationKindOptions}>",`,
+    `  "spotifyTrack": ${spotifyOptions.length > 0 ? `null OR {"uri":"<one Spotify URI from SPOTIFY TRACK OPTIONS>","reason":"<brief fit reason>"}` : "null"},`,
     `  "reputationChanges": ${reputationHint},`,
     `  "segmentEffects": [`,
     `    {`,

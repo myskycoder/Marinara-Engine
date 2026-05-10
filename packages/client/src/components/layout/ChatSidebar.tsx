@@ -27,6 +27,7 @@ import {
   Pencil,
 } from "lucide-react";
 import { useChats, useCreateChat, useDeleteChat, useDeleteChatGroup } from "../../hooks/use-chats";
+import { useChatPresets, useApplyChatPreset } from "../../hooks/use-chat-presets";
 import { useConnections } from "../../hooks/use-connections";
 import {
   useChatFolders,
@@ -109,9 +110,11 @@ const MODE_CONFIG: Record<
 };
 
 export function ChatSidebar() {
-  const { data: chats, isLoading } = useChats();
+  const { data: chats, isError: chatsError, isLoading, isFetching, refetch: refetchChats } = useChats();
   const { data: connections } = useConnections();
   const createChat = useCreateChat();
+  const { data: chatPresetsData } = useChatPresets();
+  const applyChatPreset = useApplyChatPreset();
   const deleteChat = useDeleteChat();
   const deleteChatGroup = useDeleteChatGroup();
   const activeChatId = useChatStore((s) => s.activeChatId);
@@ -420,18 +423,40 @@ export function ChatSidebar() {
       if (hasAnyDetailOpen()) {
         closeAllDetails();
       }
+      // Resolve the user's starred default preset for this mode (only modes with presets).
+      const presets = chatPresetsData ?? [];
+      const presetMode: ChatMode | null = mode === "conversation" || mode === "roleplay" ? mode : null;
+      const starred = presetMode
+        ? (presets.find((p) => p.mode === presetMode && p.isActive && !p.isDefault) ?? null)
+        : null;
       createChat.mutate(
         { name: `New ${MODE_CONFIG[mode]?.label ?? mode}`, mode, characterIds: [] },
         {
-          onSuccess: (chat) => {
+          onSuccess: async (chat) => {
             setActiveChatId(chat.id);
+            if (starred) {
+              try {
+                await applyChatPreset.mutateAsync({ presetId: starred.id, chatId: chat.id });
+              } catch {
+                /* non-fatal — chat still opens with system defaults */
+              }
+            }
             useChatStore.getState().setShouldOpenSettings(true);
             useChatStore.getState().setShouldOpenWizard(true);
           },
         },
       );
     },
-    [connections, createChat, setActiveChatId, setPendingNewChatMode, hasAnyDetailOpen, closeAllDetails],
+    [
+      connections,
+      createChat,
+      setActiveChatId,
+      setPendingNewChatMode,
+      hasAnyDetailOpen,
+      closeAllDetails,
+      chatPresetsData,
+      applyChatPreset,
+    ],
   );
 
   const handleNewChatFromTab = useCallback(() => {
@@ -934,7 +959,25 @@ export function ChatSidebar() {
           </div>
         )}
 
-        {displayChats.length === 0 && !isLoading && (
+        {chatsError && !isLoading && (
+          <div className="flex flex-col items-center gap-2 px-3 py-12 text-center">
+            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[var(--destructive)]/10">
+              <AlertTriangle size="1.25rem" className="text-[var(--destructive)]" />
+            </div>
+            <p className="text-xs text-[var(--muted-foreground)]">
+              Marinara is still waking up. Chats should appear in a moment.
+            </p>
+            <button
+              onClick={() => void refetchChats()}
+              disabled={isFetching}
+              className="mt-1 rounded-lg bg-[var(--primary)]/15 px-3 py-1.5 text-[0.6875rem] font-medium text-[var(--primary)] transition-all hover:bg-[var(--primary)]/25 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isFetching ? "Checking..." : "Try Again"}
+            </button>
+          </div>
+        )}
+
+        {displayChats.length === 0 && !isLoading && !chatsError && (
           <div className="flex flex-col items-center gap-2 px-3 py-12 text-center">
             <div className="animate-float flex h-12 w-12 items-center justify-center rounded-2xl bg-[var(--secondary)]">
               {activeTab === "conversation" ? (
@@ -1318,7 +1361,9 @@ const STATUS_OPTIONS: Array<{
 
 function UserStatusFooter() {
   const userStatus = useUIStore((s) => s.userStatus);
+  const userActivity = useUIStore((s) => s.userActivity);
   const setUserStatusManual = useUIStore((s) => s.setUserStatusManual);
+  const setUserActivity = useUIStore((s) => s.setUserActivity);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -1361,17 +1406,25 @@ function UserStatusFooter() {
         </div>
       )}
 
-      {/* Status button */}
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 transition-all hover:bg-[var(--sidebar-accent)]/60"
-      >
-        <span className={`h-2 w-2 rounded-full ${current.color}`} />
-        <span className="text-xs text-[var(--sidebar-foreground)]">{current.label}</span>
-        <span className="ml-auto text-[0.625rem] text-[var(--muted-foreground)]">
-          {userStatus === "idle" ? "Away" : ""}
-        </span>
-      </button>
+      <div className="flex min-w-0 items-center gap-1.5">
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="flex min-w-0 shrink-0 items-center gap-2 rounded-lg px-2 py-1.5 transition-all hover:bg-[var(--sidebar-accent)]/60"
+          title="Change activity status"
+          aria-label="Change activity status"
+        >
+          <span className={`h-2 w-2 shrink-0 rounded-full ${current.color}`} />
+          <span className="max-w-20 truncate text-xs text-[var(--sidebar-foreground)]">{current.label}</span>
+        </button>
+        <input
+          value={userActivity}
+          onChange={(event) => setUserActivity(event.target.value)}
+          maxLength={120}
+          placeholder="What are you doing?"
+          aria-label="Custom activity"
+          className="min-w-0 flex-1 rounded-lg border border-[var(--border)]/40 bg-[var(--sidebar-accent)]/35 px-2 py-1.5 text-xs text-[var(--sidebar-foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)]/70 focus:border-[var(--primary)]/40 focus:bg-[var(--sidebar-accent)]/60"
+        />
+      </div>
     </div>
   );
 }

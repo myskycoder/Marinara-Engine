@@ -2,8 +2,21 @@
 // Game: Session History Panel (view past sessions)
 // ──────────────────────────────────────────────
 import { useEffect, useMemo, useState } from "react";
-import { GitBranch, History, ChevronDown, ChevronRight, ScrollText, Users, Sparkles, X, RefreshCw } from "lucide-react";
-import type { GameNpc, PartyArc, SessionSummary } from "@marinara-engine/shared";
+import {
+  AlertTriangle,
+  BookOpen,
+  CheckCircle2,
+  GitBranch,
+  History,
+  ChevronDown,
+  ChevronRight,
+  ScrollText,
+  Users,
+  Sparkles,
+  X,
+  RefreshCw,
+} from "lucide-react";
+import type { GameMap, GameNpc, PartyArc, SessionSummary } from "@marinara-engine/shared";
 import { toast } from "sonner";
 import { AnimatedText } from "./AnimatedText";
 
@@ -70,6 +83,7 @@ export interface CurrentSessionSecrets {
   storyArc: string;
   plotTwists: string[];
   partyArcs: PartyArc[];
+  maps: GameMap[];
   npcs: GameNpc[];
   characterCards: Array<Record<string, unknown>>;
 }
@@ -79,8 +93,19 @@ interface CurrentSessionSecretDraft {
   storyArc: string;
   plotTwists: string;
   partyArcs: string;
+  maps: string;
   npcs: string;
   characterCards: string;
+}
+
+type LorebookKeeperRunStatus = "running" | "success" | "failed";
+
+interface LorebookKeeperLastRun {
+  sessionNumber: number;
+  status: LorebookKeeperRunStatus;
+  updatedAt: string;
+  entryCount?: number;
+  error?: string;
 }
 
 function formatJsonDraft(value: unknown): string {
@@ -93,6 +118,7 @@ function buildCurrentSecretsDraft(secrets: CurrentSessionSecrets): CurrentSessio
     storyArc: secrets.storyArc,
     plotTwists: formatListDraft(secrets.plotTwists),
     partyArcs: formatJsonDraft(secrets.partyArcs),
+    maps: formatJsonDraft(secrets.maps),
     npcs: formatJsonDraft(secrets.npcs),
     characterCards: formatJsonDraft(secrets.characterCards),
   };
@@ -160,10 +186,14 @@ interface GameSessionHistoryProps {
   savingSessionNumber?: number | null;
   savingCurrentSecrets?: boolean;
   regeneratingSessionNumber?: number | null;
+  lorebookKeeperEnabled?: boolean;
+  lorebookKeeperLastRun?: LorebookKeeperLastRun | null;
+  regeneratingLorebookSessionNumber?: number | null;
   updatingPlotArcsSessionNumber?: number | null;
   onSaveCurrentSecrets?: (secrets: CurrentSessionSecrets) => Promise<void> | void;
   onSaveSession?: (sessionNumber: number, session: SessionSummary) => Promise<void> | void;
   onRegenerateSession?: (sessionNumber: number) => Promise<void> | void;
+  onRegenerateLorebook?: (sessionNumber: number) => Promise<void> | void;
   onUpdatePlotArcs?: (sessionNumber: number) => Promise<void> | void;
   onClose: () => void;
 }
@@ -176,10 +206,14 @@ export function GameSessionHistory({
   savingSessionNumber = null,
   savingCurrentSecrets = false,
   regeneratingSessionNumber = null,
+  lorebookKeeperEnabled = false,
+  lorebookKeeperLastRun = null,
+  regeneratingLorebookSessionNumber = null,
   updatingPlotArcsSessionNumber = null,
   onSaveCurrentSecrets,
   onSaveSession,
   onRegenerateSession,
+  onRegenerateLorebook,
   onUpdatePlotArcs,
   onClose,
 }: GameSessionHistoryProps) {
@@ -214,6 +248,7 @@ export function GameSessionHistory({
 
     return normalized.sort((a, b) => b.sessionNumber - a.sessionNumber);
   }, [summaries]);
+  const latestCompletedSessionNumber = sorted[0]?.sessionNumber ?? 0;
 
   useEffect(() => {
     if (!editingSecrets) {
@@ -301,6 +336,7 @@ export function GameSessionHistory({
         storyArc: secretDraft.storyArc.trim(),
         plotTwists: parseListDraft(secretDraft.plotTwists),
         partyArcs: parseJsonArrayDraft<PartyArc>("Party arcs", secretDraft.partyArcs),
+        maps: parseJsonArrayDraft<GameMap>("Maps", secretDraft.maps),
         npcs: parseJsonArrayDraft<GameNpc>("NPCs", secretDraft.npcs),
         characterCards: parseJsonArrayDraft<Record<string, unknown>>("Character cards", secretDraft.characterCards),
       });
@@ -427,6 +463,20 @@ export function GameSessionHistory({
                     </label>
                     <label className="flex flex-col gap-1">
                       <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                        Maps JSON
+                      </span>
+                      <textarea
+                        value={secretDraft?.maps ?? ""}
+                        onChange={(event) =>
+                          setSecretDraft((prev) => (prev ? { ...prev, maps: event.target.value } : prev))
+                        }
+                        rows={10}
+                        disabled={savingCurrentSecrets}
+                        className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 font-mono text-xs leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
                         NPCs JSON
                       </span>
                       <textarea
@@ -489,6 +539,7 @@ export function GameSessionHistory({
                     <SpoilerTextSection label="Story Arc" value={currentSecrets.storyArc} />
                     <SpoilerListSection label="Plot Twists" values={currentSecrets.plotTwists} />
                     <SpoilerJsonSection label="Party Arcs" value={currentSecrets.partyArcs} />
+                    <SpoilerJsonSection label="Maps" value={currentSecrets.maps} />
                     <SpoilerJsonSection label="NPCs" value={currentSecrets.npcs} />
                     <SpoilerJsonSection label="Character Cards" value={currentSecrets.characterCards} />
                   </div>
@@ -510,6 +561,12 @@ export function GameSessionHistory({
               const isSaving = savingSessionNumber === session.sessionNumber;
               const isRegenerating = regeneratingSessionNumber === session.sessionNumber;
               const isUpdatingPlotArcs = updatingPlotArcsSessionNumber === session.sessionNumber;
+              const isLatestCompletedSession = session.sessionNumber === latestCompletedSessionNumber;
+              const isRegeneratingLorebook = regeneratingLorebookSessionNumber === session.sessionNumber;
+              const canRegenerateLorebook =
+                lorebookKeeperEnabled && isLatestCompletedSession && typeof onRegenerateLorebook === "function";
+              const lorebookRun =
+                lorebookKeeperLastRun?.sessionNumber === session.sessionNumber ? lorebookKeeperLastRun : null;
               const date = new Date(session.timestamp);
               const dateStr = date.toLocaleDateString(undefined, {
                 month: "short",
@@ -546,7 +603,40 @@ export function GameSessionHistory({
                             Summary
                           </div>
                           {!isEditing && (
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center justify-end gap-2">
+                              {canRegenerateLorebook && lorebookRun && (
+                                <span
+                                  title={lorebookRun.error}
+                                  className="inline-flex items-center gap-1 rounded-md bg-[var(--secondary)] px-2 py-1 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)]"
+                                >
+                                  {lorebookRun.status === "failed" ? (
+                                    <AlertTriangle size={11} className="text-[var(--destructive)]" />
+                                  ) : lorebookRun.status === "success" ? (
+                                    <CheckCircle2 size={11} className="text-emerald-500" />
+                                  ) : (
+                                    <RefreshCw size={11} className="animate-spin" />
+                                  )}
+                                  {lorebookRun.status === "failed"
+                                    ? "Lorebook failed"
+                                    : lorebookRun.status === "success"
+                                      ? `Lorebook ${lorebookRun.entryCount ?? 0}`
+                                      : "Lorebook running"}
+                                </span>
+                              )}
+                              {canRegenerateLorebook && (
+                                <button
+                                  onClick={() => void onRegenerateLorebook?.(session.sessionNumber)}
+                                  disabled={isRegeneratingLorebook}
+                                  title="Regenerate the Game Lorebook Keeper entries for this latest session"
+                                  className="inline-flex items-center gap-1 rounded-md bg-[var(--secondary)] px-2 py-1 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  <BookOpen
+                                    size={11}
+                                    className={isRegeneratingLorebook ? "animate-pulse" : undefined}
+                                  />
+                                  {isRegeneratingLorebook ? "Regenerating Lorebook..." : "Regenerate Lorebook"}
+                                </button>
+                              )}
                               {onUpdatePlotArcs && (
                                 <button
                                   onClick={() => void onUpdatePlotArcs(session.sessionNumber)}

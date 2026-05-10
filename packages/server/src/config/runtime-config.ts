@@ -1,6 +1,6 @@
 import dotenv from "dotenv";
 import { logger as sharedLogger } from "../lib/logger.js";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -18,13 +18,59 @@ const DEFAULT_DATABASE_PATH = resolve(DEFAULT_DATA_DIR, DEFAULT_DATABASE_FILE);
 const REGRESSION_DATABASE_PATH = resolve(REGRESSION_DATA_DIR, DEFAULT_DATABASE_FILE);
 
 let envLoaded = false;
+// Keys that the .env file currently contributes to process.env. Tracked so a
+// reload can remove keys that were deleted from the file.
+let envFileKeys = new Set<string>();
+
+export function getEnvFilePath() {
+  return resolve(MONOREPO_ROOT, ".env");
+}
+
+const EMPTY_ENV_HEADER = `# Marinara Engine - runtime configuration.
+# This file is empty by design. Copy any setting you want to change from
+# .env.example (same folder) and edit the value here. Most changes take
+# effect within ~2 seconds without a restart.
+`;
+
+/**
+ * Create an empty .env at the repo root if one doesn't exist yet so users
+ * can find the file without having to copy .env.example first. The write
+ * is best-effort: read-only filesystems (some Docker images, locked-down
+ * installs) silently fall back to "no .env" mode, which dotenv handles
+ * the same as today.
+ */
+function ensureEnvFileExists(envPath: string) {
+  if (existsSync(envPath)) return;
+  try {
+    // 'wx' = exclusive create. Race-safe across concurrent startups: a second
+    // process that loses the race gets EEXIST, which we ignore.
+    writeFileSync(envPath, EMPTY_ENV_HEADER, { flag: "wx" });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | null)?.code;
+    if (code === "EEXIST") return;
+    // Defer the warn one tick. ensureEnvFileExists runs from top-level
+    // loadRuntimeEnv(), which fires while the runtime-config ↔ logger import
+    // cycle is still resolving — when index.ts imports logger.ts first, the
+    // logger module hasn't finished evaluating yet and sharedLogger is in
+    // TDZ. Synchronous access throws ReferenceError and crashes startup,
+    // masking the real "couldn't write .env" error. setImmediate runs after
+    // both modules finish evaluating so the diagnostic survives intact.
+    setImmediate(() => {
+      sharedLogger.warn({ err, envPath }, "[runtime-config] Could not auto-create .env file; continuing without it");
+    });
+  }
+}
 
 export function loadRuntimeEnv() {
   if (envLoaded) return;
 
-  const envPath = resolve(MONOREPO_ROOT, ".env");
+  const envPath = getEnvFilePath();
+  ensureEnvFileExists(envPath);
   if (existsSync(envPath)) {
-    dotenv.config({ path: envPath });
+    const result = dotenv.config({ path: envPath });
+    if (result.parsed) {
+      envFileKeys = new Set(Object.keys(result.parsed));
+    }
   } else {
     dotenv.config();
   }
@@ -33,6 +79,67 @@ export function loadRuntimeEnv() {
 }
 
 loadRuntimeEnv();
+
+export interface EnvReloadResult {
+  added: string[];
+  updated: string[];
+  removed: string[];
+  unchanged: string[];
+}
+
+/**
+ * Re-read the .env file and propagate changes to process.env with override
+ * semantics. Keys removed from the file are deleted from process.env so that
+ * unsetting a value (e.g. clearing BASIC_AUTH_PASS) takes effect immediately.
+ *
+ * Returns a diff so callers can log or react to specific changes. Throws when
+ * the .env file is missing or unreadable so the caller can decide how to
+ * surface the failure.
+ */
+export function reloadRuntimeEnv(): EnvReloadResult {
+  const envPath = getEnvFilePath();
+  if (!existsSync(envPath)) {
+    // No .env to read — clear any keys we previously set from a now-missing file.
+    const removed = [...envFileKeys];
+    for (const key of removed) {
+      delete process.env[key];
+    }
+    envFileKeys = new Set();
+    return { added: [], updated: [], removed, unchanged: [] };
+  }
+
+  const fileContent = readFileSync(envPath);
+  const parsed = dotenv.parse(fileContent);
+  const newKeys = new Set(Object.keys(parsed));
+
+  const added: string[] = [];
+  const updated: string[] = [];
+  const unchanged: string[] = [];
+  const removed: string[] = [];
+
+  for (const [key, value] of Object.entries(parsed)) {
+    const previous = process.env[key];
+    if (!envFileKeys.has(key)) {
+      added.push(key);
+      process.env[key] = value;
+    } else if (previous !== value) {
+      updated.push(key);
+      process.env[key] = value;
+    } else {
+      unchanged.push(key);
+    }
+  }
+
+  for (const key of envFileKeys) {
+    if (!newKeys.has(key)) {
+      removed.push(key);
+      delete process.env[key];
+    }
+  }
+
+  envFileKeys = newKeys;
+  return { added, updated, removed, unchanged };
+}
 
 function normalizeEnvValue(value: string | undefined | null) {
   const trimmed = value?.trim();
@@ -51,6 +158,17 @@ function resolveFromServerRoot(targetPath: string) {
 
 function isDisabledFlag(value: string | undefined | null) {
   return ["0", "false", "no", "off"].includes((value ?? "").trim().toLowerCase());
+}
+
+function isEnabledFlag(value: string | undefined | null) {
+  return ["1", "true", "yes", "on"].includes((value ?? "").trim().toLowerCase());
+}
+
+function parseCsv(value: string | undefined | null): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 }
 
 export function getMonorepoRoot() {
@@ -92,6 +210,26 @@ export function getDatabaseDriver() {
   return normalizeEnvValue(process.env.DATABASE_DRIVER);
 }
 
+export function getStorageBackend() {
+  const raw = normalizeEnvValue(process.env.STORAGE_BACKEND ?? process.env.MARINARA_STORAGE_BACKEND);
+  if (raw) return raw.toLowerCase();
+
+  // New default for v1.5.7+: user data is persisted as files. Advanced users
+  // can opt back into the legacy persistent SQLite database with
+  // STORAGE_BACKEND=sqlite.
+  return "files";
+}
+
+export function isFileStorageBackend() {
+  return getStorageBackend() !== "sqlite";
+}
+
+export function getFileStorageDir() {
+  const raw = normalizeEnvValue(process.env.FILE_STORAGE_DIR ?? process.env.MARINARA_FILE_STORAGE_DIR);
+  if (raw) return resolveFromServerRoot(raw);
+  return resolve(getDataDir(), "storage");
+}
+
 export function getDatabaseUrl() {
   const raw = normalizeEnvValue(process.env.DATABASE_URL);
   if (!raw) {
@@ -119,8 +257,90 @@ export function getDatabaseFilePath() {
   return filePath;
 }
 
+export function getLegacyDatabaseImportPaths() {
+  const candidates = [getDatabaseFilePath(), DEFAULT_DATABASE_PATH, REGRESSION_DATABASE_PATH].filter(
+    (path): path is string => Boolean(path),
+  );
+  return [...new Set(candidates)];
+}
+
 export function getIpAllowlist() {
+  // Explicit off-switch lets users keep their list configured but
+  // temporarily disable enforcement without deleting the entries.
+  if (isDisabledFlag(process.env.IP_ALLOWLIST_ENABLED)) return null;
   return normalizeEnvValue(process.env.IP_ALLOWLIST);
+}
+
+export function getBasicAuthConfig() {
+  return {
+    user: normalizeEnvValue(process.env.BASIC_AUTH_USER),
+    pass: normalizeEnvValue(process.env.BASIC_AUTH_PASS),
+    realm: normalizeEnvValue(process.env.BASIC_AUTH_REALM) ?? "Marinara Engine",
+  };
+}
+
+/**
+ * Opt-in switch that lets the server accept unauthenticated remote
+ * connections (i.e. neither loopback nor IP_ALLOWLIST nor Basic Auth).
+ * Default false — protects users who accidentally expose the port.
+ */
+export function isUnauthenticatedRemoteAllowed() {
+  return isEnabledFlag(process.env.ALLOW_UNAUTHENTICATED_REMOTE);
+}
+
+/**
+ * Explicit compatibility switch for old LAN/Tailscale/Docker convenience.
+ * Default false: loopback stays passwordless; every other client needs auth.
+ */
+export function isUnauthenticatedPrivateNetworkAllowed() {
+  return isEnabledFlag(process.env.ALLOW_UNAUTHENTICATED_PRIVATE_NETWORK);
+}
+
+/**
+ * Optional override for the no-auth-lockdown private-network exemption list.
+ * Comma-separated IPs / CIDRs. When set, REPLACES the built-in defaults
+ * (RFC 1918, CGNAT, link-local, IPv6 ULA). When unset, defaults are used.
+ */
+export function getTrustedPrivateNetworksOverride() {
+  return normalizeEnvValue(process.env.TRUSTED_PRIVATE_NETWORKS);
+}
+
+/**
+ * Trust traffic from the Tailscale CGNAT range (100.64.0.0/10) unconditionally.
+ * When enabled, those clients skip both the IP allowlist and Basic Auth, the
+ * same way loopback does.
+ *
+ * Default: ON. Joining a tailnet already requires authentication via the
+ * operator's Tailscale account, which is a stronger trust signal than "any
+ * LAN." Set BYPASS_AUTH_TAILSCALE=false to require Basic Auth from your
+ * Tailnet too.
+ *
+ * Caveat: if your server's public connection is itself behind a CGNAT'd ISP
+ * that uses 100.64.0.0/10, an internet client can appear with a source IP in
+ * this range. Bind HOST to your tailscale0 IP (or use a host firewall) for
+ * hard isolation when that risk applies, or set the flag to false.
+ */
+export function isTailscaleBypassEnabled() {
+  // Default-on: only an explicit disable flag turns it off.
+  return !isDisabledFlag(process.env.BYPASS_AUTH_TAILSCALE);
+}
+
+/**
+ * Trust traffic from the Docker bridge range (172.16.0.0/12) unconditionally.
+ * When enabled, those clients skip both the IP allowlist and Basic Auth.
+ *
+ * Default: ON. Docker bridge IPs are unreachable from outside the host —
+ * external traffic is NAT'd through the bridge gateway, so a request that
+ * actually arrives with a 172.16.0.0/12 source IP genuinely came from a
+ * container on this host. Set BYPASS_AUTH_DOCKER=false to require auth from
+ * containers as well.
+ *
+ * Caveat: 172.16.0.0/12 also covers some private LAN deployments. If your
+ * non-Docker LAN uses 172.16.x.x or 172.20.x.x addresses, set the flag to
+ * false.
+ */
+export function isDockerBypassEnabled() {
+  return !isDisabledFlag(process.env.BYPASS_AUTH_DOCKER);
 }
 
 export function isDebugAgentsEnabled() {
@@ -136,12 +356,111 @@ export function getAdminSecret() {
   return normalizeEnvValue(process.env.ADMIN_SECRET);
 }
 
+export function isAdminSecretRequiredOnLoopback() {
+  return isEnabledFlag(process.env.MARINARA_REQUIRE_ADMIN_SECRET_ON_LOOPBACK);
+}
+
+export function getCsrfTrustedOrigins() {
+  return parseCsv(process.env.CSRF_TRUSTED_ORIGINS);
+}
+
+export function isUpdatesApplyEnabled() {
+  return isEnabledFlag(process.env.UPDATES_APPLY_ENABLED);
+}
+
+export function isUpdatesRemoteApplyAllowed() {
+  return isEnabledFlag(process.env.UPDATES_ALLOW_REMOTE_APPLY);
+}
+
+export function isProviderLocalUrlsEnabled() {
+  return isEnabledFlag(process.env.PROVIDER_LOCAL_URLS_ENABLED);
+}
+
+export function isImageLocalUrlsEnabled() {
+  return isEnabledFlag(process.env.IMAGE_LOCAL_URLS_ENABLED);
+}
+
+export function isTtsLocalUrlsEnabled() {
+  return isEnabledFlag(process.env.TTS_LOCAL_URLS_ENABLED);
+}
+
+export function isDeeplxLocalUrlsEnabled() {
+  return isEnabledFlag(process.env.DEEPLX_LOCAL_URLS_ENABLED);
+}
+
+export function isWebhookLocalUrlsEnabled() {
+  return isEnabledFlag(process.env.WEBHOOK_LOCAL_URLS_ENABLED);
+}
+
+export function isCustomToolScriptEnabled() {
+  return isEnabledFlag(process.env.CUSTOM_TOOL_SCRIPT_ENABLED);
+}
+
+export function isSidecarRuntimeInstallEnabled() {
+  return isEnabledFlag(process.env.SIDECAR_RUNTIME_INSTALL_ENABLED);
+}
+
+export function isHapticsRemoteAllowed() {
+  return isEnabledFlag(process.env.HAPTICS_ALLOW_REMOTE);
+}
+
+export function getImportAllowedRoots() {
+  return parseCsv(process.env.IMPORT_ALLOWED_ROOTS).map(resolveFromRepoRoot);
+}
+
 export function getEncryptionKeyOverride() {
   return normalizeEnvValue(process.env.ENCRYPTION_KEY);
 }
 
+export function getSpotifyRedirectUriOverride() {
+  return normalizeEnvValue(process.env.SPOTIFY_REDIRECT_URI);
+}
+
+function getLoopbackFallbackRedirectUri() {
+  return `http://127.0.0.1:${getPort()}/api/spotify/callback`;
+}
+
+function stripPort(host: string) {
+  return host.replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
+}
+
+function isLoopbackHost(host: string) {
+  const hostname = stripPort(host);
+  return hostname === "127.0.0.1" || hostname === "::1";
+}
+
+function firstHeaderValue(value: string | string[] | undefined): string | null {
+  if (!value) return null;
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (!raw) return null;
+  const first = raw.split(",")[0]?.trim();
+  return first ? first : null;
+}
+
+type RedirectUriRequest = {
+  protocol?: string;
+  hostname?: string;
+  headers: Record<string, string | string[] | undefined>;
+};
+
+export function buildSpotifyRedirectUri(req: RedirectUriRequest): string {
+  const override = getSpotifyRedirectUriOverride();
+  if (override) return override;
+
+  const protocol = (req.protocol ?? "http").toLowerCase();
+  const hostHeader = firstHeaderValue(req.headers["host"]);
+  const hostname = req.hostname ?? (hostHeader ? stripPort(hostHeader) : null);
+
+  if (!hostname) return getLoopbackFallbackRedirectUri();
+  const host = hostHeader ?? hostname;
+
+  if (protocol === "https") return `https://${host}/api/spotify/callback`;
+  if (protocol === "http" && isLoopbackHost(host)) return `http://${host}/api/spotify/callback`;
+  return getLoopbackFallbackRedirectUri();
+}
+
 export function getSpotifyRedirectUri() {
-  return `${getServerProtocol()}://127.0.0.1:${getPort()}/api/spotify/callback`;
+  return getSpotifyRedirectUriOverride() ?? getLoopbackFallbackRedirectUri();
 }
 
 export function getCorsConfig() {
@@ -222,9 +541,17 @@ export function logStorageDiagnostics(
 ) {
   const dataDir = getDataDir();
   const dbPath = getDatabaseFilePath();
+  const backend = getStorageBackend();
+  const legacyImportPaths = getLegacyDatabaseImportPaths();
 
   logger.info(`[storage] DATA_DIR=${dataDir}`);
-  if (dbPath) {
+  logger.info(`[storage] STORAGE_BACKEND=${backend}`);
+  if (backend !== "sqlite") {
+    logger.info(`[storage] FILE_STORAGE_DIR=${getFileStorageDir()}`);
+    if (legacyImportPaths.length > 0) {
+      logger.info(`[storage] LEGACY_DATABASE_IMPORT_SOURCES=${legacyImportPaths.join(", ")}`);
+    }
+  } else if (dbPath) {
     logger.info(`[storage] DATABASE_FILE=${dbPath}`);
   } else {
     logger.info(`[storage] DATABASE_URL=${getDatabaseUrl()}`);

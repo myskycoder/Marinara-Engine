@@ -1,9 +1,9 @@
 // ──────────────────────────────────────────────
 // Storage: Characters, Personas & Groups
 // ──────────────────────────────────────────────
-import { eq, desc } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { DB } from "../../db/connection.js";
-import { characters, personas, characterGroups, personaGroups } from "../../db/schema/index.js";
+import { characters, characterCardVersions, personas, characterGroups, personaGroups } from "../../db/schema/index.js";
 import { newId, now } from "../../utils/id-generator.js";
 import type { CharacterData } from "@marinara-engine/shared";
 import { normalizeTimestampOverrides, type TimestampOverrides } from "../import/import-timestamps.js";
@@ -17,6 +17,14 @@ function resolveTimestamps(overrides?: TimestampOverrides | null) {
   };
 }
 
+function parseCharacterData(data: string): CharacterData {
+  return JSON.parse(data) as CharacterData;
+}
+
+function characterDataChanged(current: CharacterData, next: CharacterData) {
+  return JSON.stringify(current) !== JSON.stringify(next);
+}
+
 export function createCharactersStorage(db: DB) {
   return {
     // ── Characters ──
@@ -28,6 +36,55 @@ export function createCharactersStorage(db: DB) {
     async getById(id: string) {
       const rows = await db.select().from(characters).where(eq(characters.id, id));
       return rows[0] ?? null;
+    },
+
+    async listVersions(characterId: string) {
+      const rows = await db
+        .select()
+        .from(characterCardVersions)
+        .where(eq(characterCardVersions.characterId, characterId))
+        .orderBy(desc(characterCardVersions.createdAt));
+
+      return rows.map((row) => ({
+        ...row,
+        data: parseCharacterData(row.data),
+      }));
+    },
+
+    async getVersionById(characterId: string, versionId: string) {
+      const rows = await db
+        .select()
+        .from(characterCardVersions)
+        .where(and(eq(characterCardVersions.characterId, characterId), eq(characterCardVersions.id, versionId)));
+      const row = rows[0];
+      if (!row) return null;
+      return {
+        ...row,
+        data: parseCharacterData(row.data),
+      };
+    },
+
+    async createVersionSnapshot(
+      characterId: string,
+      options?: { source?: string; reason?: string; createdAt?: string | null },
+    ) {
+      const existing = await this.getById(characterId);
+      if (!existing) return null;
+      const currentData = parseCharacterData(existing.data);
+      const timestamp = options?.createdAt ?? now();
+      const id = newId();
+      await db.insert(characterCardVersions).values({
+        id,
+        characterId,
+        data: JSON.stringify(currentData),
+        comment: existing.comment ?? "",
+        avatarPath: existing.avatarPath ?? null,
+        version: currentData.character_version ?? "",
+        source: options?.source ?? "manual",
+        reason: options?.reason ?? "",
+        createdAt: timestamp,
+      });
+      return this.getVersionById(characterId, id);
     },
 
     async create(
@@ -54,12 +111,32 @@ export function createCharactersStorage(db: DB) {
       id: string,
       data: Partial<CharacterData>,
       avatarPath?: string,
-      options?: { updatedAt?: string | null; comment?: string | null },
+      options?: {
+        updatedAt?: string | null;
+        comment?: string | null;
+        versionSource?: string | null;
+        versionReason?: string | null;
+        skipVersionSnapshot?: boolean;
+      },
     ) {
       const existing = await this.getById(id);
       if (!existing) return null;
-      const currentData = JSON.parse(existing.data) as CharacterData;
+      const currentData = parseCharacterData(existing.data);
       const merged = { ...currentData, ...data };
+      const nextComment = options?.comment !== undefined ? (options.comment ?? "") : (existing.comment ?? "");
+      const nextAvatarPath = avatarPath !== undefined ? avatarPath : existing.avatarPath;
+      const shouldSnapshot =
+        !options?.skipVersionSnapshot &&
+        (characterDataChanged(currentData, merged) ||
+          nextComment !== (existing.comment ?? "") ||
+          nextAvatarPath !== existing.avatarPath);
+      if (shouldSnapshot) {
+        await this.createVersionSnapshot(id, {
+          source: options?.versionSource ?? "manual",
+          reason: options?.versionReason ?? "",
+          createdAt: options?.updatedAt ?? null,
+        });
+      }
       const updatedAt = normalizeTimestampOverrides({
         createdAt: options?.updatedAt,
         updatedAt: options?.updatedAt,
@@ -68,7 +145,7 @@ export function createCharactersStorage(db: DB) {
         .update(characters)
         .set({
           data: JSON.stringify(merged),
-          ...(options?.comment !== undefined && { comment: options.comment ?? "" }),
+          ...(options?.comment !== undefined && { comment: nextComment }),
           ...(avatarPath !== undefined && { avatarPath }),
           updatedAt: updatedAt ?? now(),
         })
@@ -77,8 +154,39 @@ export function createCharactersStorage(db: DB) {
     },
 
     async updateAvatar(id: string, avatarPath: string) {
+      const existing = await this.getById(id);
+      if (!existing) return null;
+      if (existing.avatarPath !== avatarPath) {
+        await this.createVersionSnapshot(id, { source: "manual", reason: "Avatar update" });
+      }
       await db.update(characters).set({ avatarPath, updatedAt: now() }).where(eq(characters.id, id));
       return this.getById(id);
+    },
+
+    async restoreVersion(characterId: string, versionId: string) {
+      const version = await this.getVersionById(characterId, versionId);
+      if (!version) return null;
+      const existing = await this.getById(characterId);
+      if (!existing) return null;
+      await db
+        .update(characters)
+        .set({
+          data: JSON.stringify(version.data),
+          comment: version.comment ?? "",
+          avatarPath: version.avatarPath ?? null,
+          updatedAt: now(),
+        })
+        .where(eq(characters.id, characterId));
+      return this.getById(characterId);
+    },
+
+    async deleteVersion(characterId: string, versionId: string) {
+      const version = await this.getVersionById(characterId, versionId);
+      if (!version) return false;
+      await db
+        .delete(characterCardVersions)
+        .where(and(eq(characterCardVersions.characterId, characterId), eq(characterCardVersions.id, versionId)));
+      return true;
     },
 
     async remove(id: string) {
@@ -131,6 +239,7 @@ export function createCharactersStorage(db: DB) {
         personaStats?: string;
         altDescriptions?: string;
         tags?: string;
+        savedStatusOptions?: string;
       },
       timestampOverrides?: TimestampOverrides | null,
     ) {
@@ -153,6 +262,7 @@ export function createCharactersStorage(db: DB) {
         personaStats: extra?.personaStats ?? "",
         altDescriptions: extra?.altDescriptions ?? "[]",
         tags: extra?.tags ?? "[]",
+        savedStatusOptions: extra?.savedStatusOptions ?? "[]",
         createdAt: timestamp.createdAt,
         updatedAt: timestamp.updatedAt,
       });
@@ -192,6 +302,7 @@ export function createCharactersStorage(db: DB) {
         personaStats: source.personaStats ?? "",
         altDescriptions: source.altDescriptions ?? "[]",
         tags: source.tags ?? "[]",
+        savedStatusOptions: source.savedStatusOptions ?? "[]",
         createdAt: timestamp,
         updatedAt: timestamp,
       });
@@ -215,6 +326,7 @@ export function createCharactersStorage(db: DB) {
         personaStats?: string;
         altDescriptions?: string;
         tags?: string;
+        savedStatusOptions?: string;
       },
     ) {
       const sets: Record<string, unknown> = { updatedAt: now() };
@@ -232,6 +344,7 @@ export function createCharactersStorage(db: DB) {
       if (updates.personaStats !== undefined) sets.personaStats = updates.personaStats;
       if (updates.altDescriptions !== undefined) sets.altDescriptions = updates.altDescriptions;
       if (updates.tags !== undefined) sets.tags = updates.tags;
+      if (updates.savedStatusOptions !== undefined) sets.savedStatusOptions = updates.savedStatusOptions;
       await db.update(personas).set(sets).where(eq(personas.id, id));
       return this.getPersona(id);
     },

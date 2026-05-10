@@ -35,6 +35,12 @@ export interface SkillCheckTag {
   advantage?: boolean;
   disadvantage?: boolean;
   resolvedResult?: SkillCheckResult;
+  /**
+   * Player-submitted d20 echoed by the GM when a `[dice:1d20]` was rolled
+   * before the check. Forwarded to the server resolver so the sheet's
+   * attribute modifier is applied on top of the player's number.
+   */
+  preRolledD20?: number;
 }
 
 export interface ElementAttackTag {
@@ -75,7 +81,7 @@ export interface CombatStatusTag {
 export interface ParsedGmTags {
   /** Content with all command tags stripped. */
   cleanContent: string;
-  /** Music tag to play, e.g. "music:combat:epic-battle" */
+  /** Music tag to play, e.g. "music:combat:fantasy:intense:epic-battle" */
   music: string | null;
   /** One-shot SFX tags */
   sfx: string[];
@@ -318,14 +324,17 @@ function parseSkillCheckTagBody(body: string): SkillCheckTag | null {
   const modeValue = values.get("mode")?.trim().toLowerCase();
 
   if (!rollsValue || Number.isNaN(modifier) || Number.isNaN(total) || !resultValue) {
+    // Sparse tag — server resolver will roll + apply modifier. If the GM echoed
+    // a single integer in rolls="...", treat it as a player-submitted d20.
+    if (rollsValue) {
+      const trimmed = rollsValue.trim();
+      if (/^-?\d+$/.test(trimmed)) {
+        const n = Number.parseInt(trimmed, 10);
+        if (Number.isInteger(n) && n >= 1 && n <= 20) tag.preRolledD20 = n;
+      }
+    }
     return tag;
   }
-
-  const rolls = rollsValue
-    .split(/[|,]/)
-    .map((entry) => Number.parseInt(entry.trim(), 10))
-    .filter((entry) => Number.isFinite(entry));
-  if (rolls.length === 0) return tag;
 
   const normalizedMode: SkillCheckResult["rollMode"] =
     modeValue === "advantage" || tag.advantage
@@ -336,6 +345,9 @@ function parseSkillCheckTagBody(body: string): SkillCheckTag | null {
 
   const explicitUsedRoll = Number.parseInt(values.get("used") ?? "", 10);
   const inferredRollFromTotal = total - modifier;
+  const rolls = parseSkillCheckRolls(rollsValue, inferredRollFromTotal);
+  if (rolls.length === 0) return tag;
+
   const usedRoll = Number.isFinite(explicitUsedRoll)
     ? explicitUsedRoll
     : rolls.includes(inferredRollFromTotal)
@@ -365,6 +377,25 @@ function parseSkillCheckTagBody(body: string): SkillCheckTag | null {
   };
 
   return tag;
+}
+
+function parseSkillCheckRolls(rollsValue: string, inferredRollFromTotal: number): number[] {
+  const diceNotationMatch = rollsValue.trim().match(/^(?:(\d+)?d(\d+))(?:[+-]\d+)?$/i);
+  if (diceNotationMatch) {
+    const count = Number.parseInt(diceNotationMatch[1] ?? "1", 10);
+    const sides = Number.parseInt(diceNotationMatch[2] ?? "", 10);
+    if (count === 1 && inferredRollFromTotal >= 1 && inferredRollFromTotal <= sides) {
+      return [inferredRollFromTotal];
+    }
+    return [];
+  }
+
+  return rollsValue
+    .split(/[|,]/)
+    .map((entry) => entry.trim())
+    .filter((entry) => /^-?\d+$/.test(entry))
+    .map((entry) => Number.parseInt(entry, 10))
+    .filter((entry) => Number.isFinite(entry));
 }
 
 function splitQuotedParams(text: string): string[] {
@@ -557,6 +588,7 @@ export function parseSegmentInventoryUpdates(content: string): SegmentInventoryU
     .replace(/\[dialogue:\s*npc="[^"]*"\]/gi, "")
     .replace(/\[session_end:\s*[^\]]*\]/gi, "")
     .replace(/\[skill_check:\s*[^\]]+\]/gi, "")
+    .replace(/\[status:\s*[^\]]+\]/gi, "")
     .replace(/\[element_attack:\s*[^\]]+\]/gi, "")
     .replace(/\[party_change:\s*[^\]]+\]/gi, "")
     .replace(/\[party_add:\s*[^\]]+\]/gi, "")
@@ -1019,6 +1051,7 @@ export function stripGmTags(content: string): string {
     .replace(/\[dialogue:\s*npc="[^"]*"\]/gi, "")
     .replace(/\[session_end:\s*[^\]]*\]/gi, "")
     .replace(/\[skill_check:\s*[^\]]+\]/gi, "")
+    .replace(/\[status:\s*[^\]]+\]/gi, "")
     .replace(/\[element_attack:\s*[^\]]+\]/gi, "")
     .replace(/\[inventory:\s*[^\]]+\]/gi, "")
     .replace(/\[party_change:\s*[^\]]+\]/gi, "")

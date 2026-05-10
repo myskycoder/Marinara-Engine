@@ -1,13 +1,10 @@
-// ──────────────────────────────────────────────
 // Game: Inventory Panel
-// ──────────────────────────────────────────────
 import { useState, useCallback, useEffect } from "react";
-import { Check, Package, Plus, Trash2, Wand2, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Package, Plus, Trash2, Wand2, X } from "lucide-react";
 import { cn } from "../../lib/utils";
 
 export interface InventoryItem {
   name: string;
-  description?: string;
   quantity: number;
 }
 
@@ -27,6 +24,8 @@ interface GameInventoryProps {
   canInteract?: boolean;
 }
 
+const ITEMS_PER_PAGE = 20;
+
 export function GameInventory({
   items,
   open,
@@ -41,6 +40,7 @@ export function GameInventory({
   const [renameDraft, setRenameDraft] = useState("");
   const [renamePending, setRenamePending] = useState(false);
   const [addPending, setAddPending] = useState(false);
+  const [pageIndex, setPageIndex] = useState(0);
 
   const handleItemClick = useCallback(
     (item: InventoryItem) => {
@@ -70,10 +70,25 @@ export function GameInventory({
   }, [items, selectedItem]);
 
   const selectedInventoryItem = selectedItem ? (items.find((item) => item.name === selectedItem) ?? null) : null;
+  const pageCount = Math.max(1, Math.ceil(items.length / ITEMS_PER_PAGE));
+  const pageStart = pageIndex * ITEMS_PER_PAGE;
+  const pageItems = items.slice(pageStart, pageStart + ITEMS_PER_PAGE);
 
   useEffect(() => {
     setRenameDraft(selectedInventoryItem?.name ?? "");
   }, [selectedInventoryItem?.name]);
+
+  useEffect(() => {
+    setPageIndex((current) => Math.min(current, pageCount - 1));
+  }, [pageCount]);
+
+  useEffect(() => {
+    if (!selectedItem) return;
+    const selectedIndex = items.findIndex((item) => item.name === selectedItem);
+    if (selectedIndex >= 0) {
+      setPageIndex(Math.floor(selectedIndex / ITEMS_PER_PAGE));
+    }
+  }, [items, selectedItem]);
 
   const handleRename = useCallback(
     async (itemName: string) => {
@@ -95,40 +110,38 @@ export function GameInventory({
     [onRenameItem, renameDraft],
   );
 
-  const SLOT_COUNT = 20;
-  const inventoryFull = items.length >= SLOT_COUNT;
-
   const handleAdd = useCallback(async () => {
-    if (!onAddItem || inventoryFull) return;
+    if (!onAddItem) return;
 
     setAddPending(true);
     try {
       const addedItemName = await onAddItem();
       if (addedItemName) {
         setSelectedItem(addedItemName);
+        setPageIndex(Math.floor(items.length / ITEMS_PER_PAGE));
       }
     } finally {
       setAddPending(false);
     }
-  }, [inventoryFull, onAddItem]);
+  }, [items.length, onAddItem]);
 
   if (!open) return null;
 
   const slots: Array<InventoryItem | null> = [];
-  for (let i = 0; i < SLOT_COUNT; i++) {
-    slots.push(items[i] ?? null);
+  for (let i = 0; i < ITEMS_PER_PAGE; i++) {
+    slots.push(pageItems[i] ?? null);
   }
 
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 backdrop-blur-sm">
-      <div className="relative mx-4 flex max-h-[85vh] w-full max-w-sm flex-col overflow-hidden rounded-lg border border-white/10 bg-black shadow-[0_0_40px_rgba(0,0,0,0.8)]">
+      <div className="relative mx-4 flex max-h-[85vh] w-full max-w-md flex-col overflow-hidden rounded-lg border border-white/10 bg-black shadow-[0_0_40px_rgba(0,0,0,0.8)]">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-white/8 bg-white/[0.02] px-4 py-3">
           <div className="flex items-center gap-2">
             <Package size={15} className="text-amber-400/80" />
             <h2 className="text-sm font-semibold tracking-wide text-white/90">Inventory</h2>
             <span className="rounded bg-white/8 px-1.5 py-0.5 text-[0.6rem] tabular-nums text-white/40">
-              {items.length}/{SLOT_COUNT}
+              {items.length} {items.length === 1 ? "item" : "items"}
             </span>
           </div>
           <button
@@ -139,53 +152,88 @@ export function GameInventory({
           </button>
         </div>
 
-        {/* Slot grid */}
+        {/* Item list */}
         <div className="flex-1 overflow-y-auto p-3">
-          <div className="grid grid-cols-5 gap-1.5">
-            {slots.map((item, i) => (
-              <button
-                key={`slot-${i}`}
-                onClick={() => item && handleItemClick(item)}
-                disabled={!item}
-                title={item ? (item.quantity > 1 ? `${item.name} ×${item.quantity}` : item.name) : undefined}
-                aria-label={item ? (item.quantity > 1 ? `${item.name} x${item.quantity}` : item.name) : undefined}
-                className={cn(
-                  "group relative flex aspect-square flex-col items-center justify-center rounded border transition-all",
-                  item
-                    ? selectedItem === item.name
-                      ? "border-amber-500/50 bg-amber-500/10 shadow-[inset_0_0_12px_rgba(245,158,11,0.08)]"
-                      : "border-white/8 bg-white/[0.03] hover:border-white/15 hover:bg-white/[0.06]"
-                    : "border-white/[0.04] bg-white/[0.015]",
-                )}
-              >
-                {item ? (
-                  <>
-                    <div className="flex h-7 w-7 items-center justify-center rounded bg-gradient-to-b from-white/8 to-white/[0.02] text-sm font-bold text-amber-400/80">
-                      {item.name.charAt(0).toUpperCase()}
-                    </div>
-                    <span className="mt-0.5 line-clamp-1 max-w-full px-0.5 text-[0.55rem] leading-tight text-white/70">
-                      {item.name}
-                    </span>
-                    {item.quantity > 1 && (
-                      <span className="absolute right-0.5 top-0.5 min-w-[14px] rounded bg-white/15 px-0.5 text-center text-[0.5rem] font-semibold tabular-nums text-white/80">
-                        {item.quantity}
-                      </span>
+          {items.length > 0 ? (
+            <>
+              {pageCount > 1 && (
+                <div className="mb-2 flex items-center justify-between gap-2 text-[0.625rem] text-white/45">
+                  <button
+                    onClick={() => setPageIndex((page) => Math.max(0, page - 1))}
+                    disabled={pageIndex === 0}
+                    className="flex h-6 w-6 items-center justify-center rounded border border-white/8 bg-white/[0.03] transition-colors hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-35"
+                    title="Previous inventory page"
+                  >
+                    <ChevronLeft size={12} />
+                  </button>
+                  <span className="tabular-nums">
+                    Page {pageIndex + 1} / {pageCount}
+                  </span>
+                  <button
+                    onClick={() => setPageIndex((page) => Math.min(pageCount - 1, page + 1))}
+                    disabled={pageIndex >= pageCount - 1}
+                    className="flex h-6 w-6 items-center justify-center rounded border border-white/8 bg-white/[0.03] transition-colors hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-35"
+                    title="Next inventory page"
+                  >
+                    <ChevronRight size={12} />
+                  </button>
+                </div>
+              )}
+              <div className="grid grid-cols-5 gap-1.5">
+                {slots.map((item, i) => (
+                  <button
+                    key={`slot-${pageStart + i}`}
+                    onClick={() => item && handleItemClick(item)}
+                    disabled={!item}
+                    title={item ? (item.quantity > 1 ? `${item.name} ×${item.quantity}` : item.name) : undefined}
+                    aria-label={item ? (item.quantity > 1 ? `${item.name} x${item.quantity}` : item.name) : undefined}
+                    className={cn(
+                      "group relative flex aspect-square flex-col items-center justify-center overflow-hidden rounded border transition-all",
+                      item
+                        ? selectedItem === item.name
+                          ? "border-amber-500/50 bg-amber-500/10 shadow-[inset_0_0_12px_rgba(245,158,11,0.08)]"
+                          : "border-white/8 bg-white/[0.03] hover:border-white/15 hover:bg-white/[0.06]"
+                        : "cursor-default border-white/5 bg-white/[0.015]",
                     )}
-                  </>
-                ) : (
-                  <div className="h-7 w-7 rounded bg-white/[0.02]" />
-                )}
-              </button>
-            ))}
-          </div>
+                  >
+                    {item && (
+                      <>
+                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded bg-gradient-to-b from-white/8 to-white/[0.02] text-sm font-bold text-amber-400/80 ring-1 ring-white/8">
+                          {item.name.charAt(0).toUpperCase()}
+                        </div>
+                        <div className="mt-1 flex w-full min-w-0 flex-1 flex-col items-center justify-center px-1">
+                          <div className="flex min-w-0 flex-col items-center gap-0.5">
+                            <span className="w-full whitespace-normal break-words text-center text-[0.58rem] font-medium leading-tight text-white/80 [overflow-wrap:anywhere]">
+                              {item.name}
+                            </span>
+                            {item.quantity > 1 && (
+                              <span className="shrink-0 rounded bg-white/15 px-1.5 py-0.5 text-[0.55rem] font-semibold tabular-nums text-white/80">
+                                x{item.quantity}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : (
+            <div className="flex min-h-40 flex-col items-center justify-center rounded border border-dashed border-white/10 bg-white/[0.02] px-4 text-center">
+              <Package size={18} className="mb-2 text-white/25" />
+              <div className="text-[0.75rem] font-medium text-white/55">Inventory empty</div>
+              <div className="mt-1 text-[0.65rem] text-white/35">Add an item to start tracking supplies.</div>
+            </div>
+          )}
         </div>
 
         {/* Action bar */}
         {(selectedItem || onAddItem) && (
           <div className="border-t border-white/8 bg-white/[0.02] px-4 py-2.5">
             {selectedItem ? (
-              <div className="mb-2 text-[0.7rem] font-medium text-white/60">
-                {selectedInventoryItem?.description || selectedItem}
+              <div className="mb-2 whitespace-normal break-words text-[0.7rem] font-medium text-white/60 [overflow-wrap:anywhere]">
+                {selectedItem}
               </div>
             ) : (
               <div className="mb-2 text-[0.7rem] font-medium text-white/45">Add a new item, then rename it.</div>
@@ -224,7 +272,7 @@ export function GameInventory({
               {onAddItem && (
                 <button
                   onClick={() => void handleAdd()}
-                  disabled={addPending || inventoryFull}
+                  disabled={addPending}
                   className="flex flex-1 items-center justify-center gap-1 rounded border border-white/8 bg-white/[0.03] py-1.5 text-[0.7rem] text-white/70 transition-colors hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <Plus size={12} />

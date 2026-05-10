@@ -12,7 +12,12 @@
 // so you can never lock yourself out of local access.
 
 import type { FastifyRequest, FastifyReply } from "fastify";
-import { getIpAllowlist } from "../config/runtime-config.js";
+import {
+  getIpAllowlist,
+  getTrustedPrivateNetworksOverride,
+  isDockerBypassEnabled,
+  isTailscaleBypassEnabled,
+} from "../config/runtime-config.js";
 import { logger } from "../lib/logger.js";
 
 // ── CIDR helpers ──
@@ -127,6 +132,64 @@ function matchesCIDR(ipBytes: number[], cidr: CIDREntry): boolean {
 // ── Loopback CIDRs (always allowed) ──
 const LOOPBACK_CIDRS: CIDREntry[] = [parseCIDR("127.0.0.1")!, parseCIDR("::1")!];
 
+// ── Specific interface CIDRs used by the Tailscale / Docker bypass ──
+// Tailscale assigns Tailnet peer IPs from the CGNAT block 100.64.0.0/10.
+// Docker's default bridge networks live within 172.16.0.0/12.
+const TAILSCALE_CIDR = parseCIDR("100.64.0.0/10")!;
+const DOCKER_CIDR = parseCIDR("172.16.0.0/12")!;
+
+// ── Private / non-routable network CIDRs ──
+// Used by the safe-by-default Basic Auth lockdown to avoid breaking
+// LAN, Docker bridge, Kubernetes pod, and Tailscale traffic when no
+// auth is configured. Public IPs are NOT in this list.
+//
+// These are *defaults* — operators can override the entire list via the
+// TRUSTED_PRIVATE_NETWORKS env var (comma-separated IPs / CIDRs) to
+// strip ranges they consider untrusted (e.g. a publicly-routable
+// corporate /16) or to substitute their own list entirely.
+const DEFAULT_PRIVATE_NETWORK_CIDRS: CIDREntry[] = [
+  parseCIDR("10.0.0.0/8")!, // RFC 1918
+  parseCIDR("172.16.0.0/12")!, // RFC 1918 (covers Docker default bridge 172.17.0.0/16)
+  parseCIDR("192.168.0.0/16")!, // RFC 1918
+  parseCIDR("169.254.0.0/16")!, // RFC 3927 link-local
+  parseCIDR("100.64.0.0/10")!, // RFC 6598 CGNAT (Tailscale, carrier NAT)
+  parseCIDR("fc00::/7")!, // RFC 4193 unique local (IPv6 ULA)
+  parseCIDR("fe80::/10")!, // RFC 4291 IPv6 link-local
+];
+
+let cachedPrivateNetworks: { raw: string | null; entries: CIDREntry[]; announced: boolean } | null = null;
+
+function getPrivateNetworkCidrs(): CIDREntry[] {
+  const raw = getTrustedPrivateNetworksOverride();
+  if (!cachedPrivateNetworks || cachedPrivateNetworks.raw !== raw) {
+    if (!raw) {
+      cachedPrivateNetworks = { raw: null, entries: DEFAULT_PRIVATE_NETWORK_CIDRS, announced: true };
+    } else {
+      const entries: CIDREntry[] = [];
+      for (const part of raw.split(",")) {
+        const trimmed = part.trim();
+        if (!trimmed) continue;
+        const cidr = parseCIDR(trimmed);
+        if (!cidr) {
+          logger.warn(`[trusted-private-networks] Ignoring invalid entry: "${trimmed}"`);
+          continue;
+        }
+        entries.push(cidr);
+      }
+      cachedPrivateNetworks = { raw, entries, announced: false };
+    }
+  }
+
+  if (cachedPrivateNetworks.raw && !cachedPrivateNetworks.announced) {
+    logger.info(
+      `[trusted-private-networks] Overriding default private-network list with: ${cachedPrivateNetworks.raw}`,
+    );
+    cachedPrivateNetworks.announced = true;
+  }
+
+  return cachedPrivateNetworks.entries;
+}
+
 // ── Build allowlist on startup ──
 
 function buildAllowlist(raw: string | null): CIDREntry[] | null {
@@ -172,6 +235,97 @@ function getAllowlist() {
   return cachedAllowlist.entries;
 }
 
+// ── Reusable predicates (shared with basic-auth) ──
+
+/** True if the given IP string is a loopback address. */
+export function isLoopbackIp(ip: string): boolean {
+  const bytes = ipToBytes(ip);
+  if (!bytes) return false;
+  for (const lb of LOOPBACK_CIDRS) {
+    if (matchesCIDR(bytes, lb)) return true;
+  }
+  return false;
+}
+
+/**
+ * True if the given IP belongs to a trusted private / non-routable range.
+ * Defaults to RFC 1918, CGNAT, link-local, and IPv6 ULA — but the operator
+ * can override the entire list via the TRUSTED_PRIVATE_NETWORKS env var.
+ */
+export function isPrivateNetworkIp(ip: string): boolean {
+  const bytes = ipToBytes(ip);
+  if (!bytes) return false;
+  for (const cidr of getPrivateNetworkCidrs()) {
+    if (matchesCIDR(bytes, cidr)) return true;
+  }
+  return false;
+}
+
+/**
+ * True if the given IP is configured in the active IP_ALLOWLIST.
+ * Returns false when no allowlist is configured (so callers can decide
+ * what to do with "no list" vs "list says no").
+ */
+export function isInIpAllowlist(ip: string): boolean {
+  const allowlist = getAllowlist();
+  if (!allowlist) return false;
+  const bytes = ipToBytes(ip);
+  if (!bytes) return false;
+  for (const entry of allowlist) {
+    if (matchesCIDR(bytes, entry)) return true;
+  }
+  return false;
+}
+
+/** True if the given IP is in the Tailscale CGNAT range (100.64.0.0/10). */
+export function isTailscaleIp(ip: string): boolean {
+  const bytes = ipToBytes(ip);
+  if (!bytes) return false;
+  return matchesCIDR(bytes, TAILSCALE_CIDR);
+}
+
+/** True if the given IP is in the Docker bridge range (172.16.0.0/12). */
+export function isDockerIp(ip: string): boolean {
+  const bytes = ipToBytes(ip);
+  if (!bytes) return false;
+  return matchesCIDR(bytes, DOCKER_CIDR);
+}
+
+let bypassAnnounced = { tailscale: false, docker: false };
+
+/**
+ * True if the given IP belongs to a Tailscale or Docker interface AND the
+ * matching BYPASS_AUTH_* flag is enabled. These clients skip both the IP
+ * allowlist and Basic Auth, the same way loopback does.
+ */
+export function isTrustedInterfaceIp(ip: string): boolean {
+  const tailscaleOn = isTailscaleBypassEnabled();
+  const dockerOn = isDockerBypassEnabled();
+  if (!tailscaleOn && !dockerOn) return false;
+
+  if (tailscaleOn && isTailscaleIp(ip)) {
+    if (!bypassAnnounced.tailscale) {
+      logger.warn(
+        "[auth-bypass] BYPASS_AUTH_TAILSCALE=true — clients in 100.64.0.0/10 will skip Basic Auth and IP allowlist",
+      );
+      bypassAnnounced.tailscale = true;
+    }
+    return true;
+  }
+
+  if (dockerOn && isDockerIp(ip)) {
+    if (!bypassAnnounced.docker) {
+      logger.warn(
+        "[auth-bypass] BYPASS_AUTH_DOCKER=true — clients in 172.16.0.0/12 will skip Basic Auth and IP allowlist",
+      );
+      bypassAnnounced.docker = true;
+    }
+    return true;
+  }
+
+  return false;
+}
+
 // ── Fastify onRequest hook ──
 
 export function ipAllowlistHook(request: FastifyRequest, reply: FastifyReply, done: () => void) {
@@ -193,6 +347,10 @@ export function ipAllowlistHook(request: FastifyRequest, reply: FastifyReply, do
   for (const lb of LOOPBACK_CIDRS) {
     if (matchesCIDR(bytes, lb)) return done();
   }
+
+  // Trusted Tailscale / Docker interfaces (when their bypass flag is on)
+  // are treated like loopback — skip the allowlist check entirely.
+  if (isTrustedInterfaceIp(ip)) return done();
 
   // Check the allowlist
   for (const entry of allowlist) {

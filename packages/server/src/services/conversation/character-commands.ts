@@ -8,17 +8,22 @@
 // Supported commands:
 // - [schedule_update: status="online", activity="free time"]
 // - [cross_post: target="group"] or [cross_post: target="CharName"]
-// - [selfie] or [selfie: context="description of the selfie"]
+// - [selfie], [selfie: context="description of the selfie"], [selfie: "description"], or [selfie: description]
 // - [memory: target="CharName", summary="description of the memory"]
 // - [scene: scenario="...", background="...", plan="..."] (initiate a mini-roleplay scene)
+// - [spotify: title="Song title", artist="Artist"] (play a song on the user's active Spotify player)
 // - [haptic: action="vibrate", intensity=0.5, duration=3] (haptic device feedback)
-// - <influence>text</influence> (OOC influence for connected roleplay)
+// - <influence>text</influence> (OOC influence for connected roleplay, one-shot)
+// - <note>text</note> (durable note for connected roleplay, persists until cleared)
+// - [dm: character="CharName", message="text"] (Roleplay-only: open a direct-message conversation)
 //
 // Assistant commands (Professor Mari):
 // - [create_persona: name="...", description="...", personality="...", appearance="..."]
 // - [create_character: name="...", description="...", personality="...", first_message="...", scenario="...", backstory="...", appearance="...", mes_example="...", creator_notes="...", system_prompt="...", post_history_instructions="...", creator="...", character_version="...", tags="tag1, tag2", alternate_greetings="hello || hi", talkativeness=0.5, fav=true, world="...", depth_prompt="...", depth_prompt_depth=4, depth_prompt_role="system"]
 // - [update_character: name="...", description="...", personality="...", first_message="...", scenario="...", backstory="...", appearance="...", mes_example="...", creator_notes="...", system_prompt="...", post_history_instructions="...", creator="...", character_version="...", tags="tag1, tag2", alternate_greetings="hello || hi", talkativeness=0.5, fav=true, world="...", depth_prompt="...", depth_prompt_depth=4, depth_prompt_role="system"]
 // - [update_persona: name="...", description="...", personality="...", appearance="...", scenario="...", backstory="..."]
+// - <create_lorebook>{"name":"...","description":"...","category":"...","tags":["..."],"entries":[{"name":"...","content":"...","keys":["..."],"tag":"..."}]}</create_lorebook>
+// - <update_lorebook>{"name":"Existing","description":"...","entries":[{"name":"Entry","content":"refined content","keys":["..."]}]}</update_lorebook>
 // - [create_chat: character="...", mode="conversation|roleplay"]
 // - [navigate: panel="...", tab="..."]
 // - [fetch: type="character|persona|lorebook|chat|preset", name="..."]
@@ -68,6 +73,20 @@ export interface InfluenceCommand {
   content: string;
 }
 
+export interface NoteCommand {
+  type: "note";
+  /** The durable note text to persist in the connected roleplay's prompt until cleared */
+  content: string;
+}
+
+export interface DirectMessageCommand {
+  type: "dm";
+  /** Target character name or ID */
+  character: string;
+  /** Text the character sends in the generated conversation DM */
+  message: string;
+}
+
 export interface HapticCommand {
   type: "haptic";
   /** Device action */
@@ -76,6 +95,14 @@ export interface HapticCommand {
   intensity?: number;
   /** Duration in seconds */
   duration?: number;
+}
+
+export interface SpotifyCommand {
+  type: "spotify";
+  /** Exact song title to play */
+  title: string;
+  /** Artist name to disambiguate the track */
+  artist: string;
 }
 
 // ── Assistant commands (Professor Mari) ──
@@ -148,6 +175,43 @@ export interface UpdatePersonaCommand {
   backstory?: string;
 }
 
+export interface CreateLorebookEntryCommand {
+  name: string;
+  content?: string;
+  description?: string;
+  keys?: string[];
+  secondaryKeys?: string[];
+  tag?: string;
+  constant?: boolean;
+  selective?: boolean;
+}
+
+export interface UpdateLorebookEntryCommand extends CreateLorebookEntryCommand {
+  /** Existing entry name to match when renaming or disambiguating. Defaults to name. */
+  matchName?: string;
+}
+
+export interface CreateLorebookCommand {
+  type: "create_lorebook";
+  name: string;
+  description?: string;
+  category?: string;
+  tags?: string[];
+  entries?: CreateLorebookEntryCommand[];
+}
+
+export interface UpdateLorebookCommand {
+  type: "update_lorebook";
+  /** Existing lorebook name to update. */
+  name: string;
+  /** Optional new display name for the lorebook. */
+  newName?: string;
+  description?: string;
+  category?: string;
+  tags?: string[];
+  entries?: UpdateLorebookEntryCommand[];
+}
+
 export interface CreateChatCommand {
   type: "create_chat";
   character: string;
@@ -173,6 +237,8 @@ export type AssistantCommand =
   | CreateCharacterCommand
   | UpdateCharacterCommand
   | UpdatePersonaCommand
+  | CreateLorebookCommand
+  | UpdateLorebookCommand
   | CreateChatCommand
   | NavigateCommand
   | FetchCommand;
@@ -184,23 +250,32 @@ export type CharacterCommand =
   | MemoryCommand
   | SceneCommand
   | InfluenceCommand
+  | NoteCommand
+  | DirectMessageCommand
   | HapticCommand
+  | SpotifyCommand
   | AssistantCommand;
 
 /** Regex patterns for each command type */
 const SCHEDULE_UPDATE_RE = /\[schedule_update:\s*([^\]]+)\]/gi;
 const CROSS_POST_RE = /\[cross_post:\s*target="([^"]+)"\]/gi;
-const SELFIE_RE = /\[selfie(?::\s*context="([^"]*)")?\]/gi;
+const SELFIE_RE = /\[selfie(?::\s*(?:context="([^"]*)"|"([^"]*)"|([^\]\r\n"]+)))?\]/gi;
 const MEMORY_RE = /\[memory:\s*target="([^"]+)"\s*,\s*summary="([^"]+)"\]/gi;
 const SCENE_RE = /\[scene:\s*([^\]]+)\]/gi;
 const HAPTIC_RE = /\[haptic:\s*([^\]]+)\]/gi;
+const SPOTIFY_RE = /\[spotify:\s*([^\]]+)\]/gi;
+const DIRECT_MESSAGE_RE = /\[dm:\s*([^\]]+)\]/gi;
 const INFLUENCE_RE = /<influence>([\s\S]*?)<\/influence>/gi;
+const NOTE_RE = /<note>([\s\S]*?)<\/note>/gi;
 
 // Assistant command regexes
 const CREATE_PERSONA_RE = /\[create_persona:\s*([^\]]+)\]/gi;
 const CREATE_CHARACTER_RE = /\[create_character:\s*([^\]]+)\]/gi;
 const UPDATE_CHARACTER_RE = /\[update_character:\s*([^\]]+)\]/gi;
 const UPDATE_PERSONA_RE = /\[update_persona:\s*([^\]]+)\]/gi;
+const CREATE_LOREBOOK_RE = /\[create_lorebook:\s*([^\]]+)\]/gi;
+const CREATE_LOREBOOK_BLOCK_RE = /<create_lorebook>([\s\S]*?)<\/create_lorebook>/gi;
+const UPDATE_LOREBOOK_BLOCK_RE = /<update_lorebook>([\s\S]*?)<\/update_lorebook>/gi;
 const CREATE_CHAT_RE = /\[create_chat:\s*([^\]]+)\]/gi;
 const NAVIGATE_RE = /\[navigate:\s*([^\]]+)\]/gi;
 const FETCH_RE = /\[fetch:\s*([^\]]+)\]/gi;
@@ -227,6 +302,122 @@ function parseBooleanParam(params: string, key: string): boolean | undefined {
   const match = params.match(new RegExp(`${key}=(true|false)`, "i"));
   if (!match) return undefined;
   return match[1]?.toLowerCase() === "true";
+}
+
+function parseUnknownStringList(raw: unknown): string[] | undefined {
+  if (Array.isArray(raw)) {
+    const values = raw.map((value) => String(value).trim()).filter(Boolean);
+    return values.length ? values : undefined;
+  }
+  if (typeof raw !== "string") return undefined;
+  const values = parseStringList(raw);
+  return values && values.length ? values : undefined;
+}
+
+function parseLorebookEntriesParam(raw: string): CreateLorebookEntryCommand[] | undefined {
+  const entries = raw
+    .split(/\s*\|\|\s*/)
+    .map((chunk): CreateLorebookEntryCommand | null => {
+      const [name, keys, content, description] = chunk.split(/\s*\|\s*/);
+      const entryName = name?.trim();
+      if (!entryName) return null;
+      return {
+        name: entryName,
+        keys: parseUnknownStringList(keys),
+        content: content?.trim() || "",
+        description: description?.trim() || undefined,
+      } satisfies CreateLorebookEntryCommand;
+    })
+    .filter((entry): entry is CreateLorebookEntryCommand => entry !== null);
+  return entries.length ? entries : undefined;
+}
+
+function stripJsonFence(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+}
+
+function parseLorebookBlock(raw: string): CreateLorebookCommand | null {
+  try {
+    const parsed = JSON.parse(stripJsonFence(raw)) as Record<string, unknown>;
+    const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
+    if (!name) return null;
+
+    const rawEntries = Array.isArray(parsed.entries) ? parsed.entries : [];
+    const entries = rawEntries
+      .map((entry): CreateLorebookEntryCommand | null => {
+        if (!entry || typeof entry !== "object") return null;
+        const data = entry as Record<string, unknown>;
+        const entryName = typeof data.name === "string" ? data.name.trim() : "";
+        if (!entryName) return null;
+        return {
+          name: entryName,
+          content: typeof data.content === "string" ? data.content : "",
+          description: typeof data.description === "string" ? data.description : undefined,
+          keys: parseUnknownStringList(data.keys),
+          secondaryKeys: parseUnknownStringList(data.secondaryKeys),
+          tag: typeof data.tag === "string" ? data.tag : undefined,
+          constant: typeof data.constant === "boolean" ? data.constant : undefined,
+          selective: typeof data.selective === "boolean" ? data.selective : undefined,
+        } satisfies CreateLorebookEntryCommand;
+      })
+      .filter((entry): entry is CreateLorebookEntryCommand => entry !== null);
+
+    return {
+      type: "create_lorebook",
+      name,
+      description: typeof parsed.description === "string" ? parsed.description : undefined,
+      category: typeof parsed.category === "string" ? parsed.category : undefined,
+      tags: parseUnknownStringList(parsed.tags),
+      entries: entries.length ? entries : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseUpdateLorebookBlock(raw: string): UpdateLorebookCommand | null {
+  try {
+    const parsed = JSON.parse(stripJsonFence(raw)) as Record<string, unknown>;
+    const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
+    if (!name) return null;
+
+    const rawEntries = Array.isArray(parsed.entries) ? parsed.entries : [];
+    const entries = rawEntries
+      .map((entry): UpdateLorebookEntryCommand | null => {
+        if (!entry || typeof entry !== "object") return null;
+        const data = entry as Record<string, unknown>;
+        const entryName = typeof data.name === "string" ? data.name.trim() : "";
+        if (!entryName) return null;
+        return {
+          name: entryName,
+          matchName: typeof data.matchName === "string" ? data.matchName.trim() : undefined,
+          content: typeof data.content === "string" ? data.content : undefined,
+          description: typeof data.description === "string" ? data.description : undefined,
+          keys: parseUnknownStringList(data.keys),
+          secondaryKeys: parseUnknownStringList(data.secondaryKeys),
+          tag: typeof data.tag === "string" ? data.tag : undefined,
+          constant: typeof data.constant === "boolean" ? data.constant : undefined,
+          selective: typeof data.selective === "boolean" ? data.selective : undefined,
+        } satisfies UpdateLorebookEntryCommand;
+      })
+      .filter((entry): entry is UpdateLorebookEntryCommand => entry !== null);
+
+    return {
+      type: "update_lorebook",
+      name,
+      newName: typeof parsed.newName === "string" ? parsed.newName.trim() : undefined,
+      description: typeof parsed.description === "string" ? parsed.description : undefined,
+      category: typeof parsed.category === "string" ? parsed.category : undefined,
+      tags: parseUnknownStringList(parsed.tags),
+      entries: entries.length ? entries : undefined,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function parseNumberParam(params: string, key: string): number | undefined {
@@ -330,7 +521,8 @@ export function parseCharacterCommands(content: string): {
 
   // Parse selfie commands
   for (const match of content.matchAll(SELFIE_RE)) {
-    commands.push({ type: "selfie", context: match[1] || undefined });
+    const context = (match[1] ?? match[2] ?? match[3])?.trim();
+    commands.push({ type: "selfie", context: context || undefined });
   }
 
   // Parse memory commands
@@ -362,6 +554,12 @@ export function parseCharacterCommands(content: string): {
     if (text) commands.push({ type: "influence", content: text });
   }
 
+  // Parse note commands (<note>text</note>)
+  for (const match of content.matchAll(NOTE_RE)) {
+    const text = stripConversationPromptTimestamps(match[1]!.trim());
+    if (text) commands.push({ type: "note", content: text });
+  }
+
   // Parse haptic commands
   for (const match of content.matchAll(HAPTIC_RE)) {
     const params = match[1]!;
@@ -384,6 +582,16 @@ export function parseCharacterCommands(content: string): {
       if (Number.isFinite(v)) cmd.duration = Math.max(0, v);
     }
     commands.push(cmd);
+  }
+
+  // Parse Spotify song commands
+  for (const match of content.matchAll(SPOTIFY_RE)) {
+    const params = match[1]!;
+    const title = parseQuotedParam(params, "title");
+    const artist = parseQuotedParam(params, "artist");
+    if (title && artist) {
+      commands.push({ type: "spotify", title, artist });
+    }
   }
 
   // Parse assistant commands (Professor Mari)
@@ -437,6 +645,31 @@ export function parseCharacterCommands(content: string): {
     if (cmd.name) commands.push(cmd);
   }
 
+  for (const match of content.matchAll(CREATE_LOREBOOK_BLOCK_RE)) {
+    const cmd = parseLorebookBlock(match[1] ?? "");
+    if (cmd) commands.push(cmd);
+  }
+
+  for (const match of content.matchAll(UPDATE_LOREBOOK_BLOCK_RE)) {
+    const cmd = parseUpdateLorebookBlock(match[1] ?? "");
+    if (cmd) commands.push(cmd);
+  }
+
+  for (const match of content.matchAll(CREATE_LOREBOOK_RE)) {
+    const params = match[1]!;
+    const name = parseQuotedParam(params, "name");
+    if (!name) continue;
+    const entriesParam = parseQuotedParam(params, "entries");
+    commands.push({
+      type: "create_lorebook",
+      name,
+      description: parseQuotedParam(params, "description"),
+      category: parseQuotedParam(params, "category"),
+      tags: parseStringList(parseQuotedParam(params, "tags")),
+      entries: entriesParam ? parseLorebookEntriesParam(entriesParam) : undefined,
+    });
+  }
+
   for (const match of content.matchAll(CREATE_CHAT_RE)) {
     const params = match[1]!;
     const cmd: CreateChatCommand = { type: "create_chat", character: "" };
@@ -482,15 +715,45 @@ export function parseCharacterCommands(content: string): {
     .replace(MEMORY_RE, "")
     .replace(SCENE_RE, "")
     .replace(HAPTIC_RE, "")
+    .replace(SPOTIFY_RE, "")
     .replace(INFLUENCE_RE, "")
+    .replace(NOTE_RE, "")
     .replace(CREATE_PERSONA_RE, "")
     .replace(CREATE_CHARACTER_RE, "")
     .replace(UPDATE_CHARACTER_RE, "")
     .replace(UPDATE_PERSONA_RE, "")
+    .replace(CREATE_LOREBOOK_BLOCK_RE, "")
+    .replace(UPDATE_LOREBOOK_BLOCK_RE, "")
+    .replace(CREATE_LOREBOOK_RE, "")
     .replace(CREATE_CHAT_RE, "")
     .replace(NAVIGATE_RE, "")
     .replace(FETCH_RE, "")
     .replace(/\n{3,}/g, "\n\n") // collapse excessive newlines left by removals
+    .trim();
+
+  return { cleanContent, commands };
+}
+
+/** Parse Roleplay-only direct-message commands without enabling the wider Conversation command set. */
+export function parseDirectMessageCommands(content: string): {
+  cleanContent: string;
+  commands: DirectMessageCommand[];
+} {
+  const commands: DirectMessageCommand[] = [];
+
+  for (const match of content.matchAll(DIRECT_MESSAGE_RE)) {
+    const params = match[1]!;
+    const character = parseQuotedParam(params, "character");
+    const message = parseQuotedParam(params, "message");
+    const cleanMessage = message ? stripConversationPromptTimestamps(message.trim()) : "";
+    if (character && cleanMessage) {
+      commands.push({ type: "dm", character, message: cleanMessage });
+    }
+  }
+
+  const cleanContent = content
+    .replace(DIRECT_MESSAGE_RE, "")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 
   return { cleanContent, commands };

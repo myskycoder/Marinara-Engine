@@ -129,6 +129,38 @@ export const ANTHROPIC_MODELS: KnownModel[] = [
   { id: "claude-3-haiku-20240307", name: "claude-3-haiku-20240307", context: 200000, maxOutput: 4096 },
 ];
 
+// ── Claude (Subscription via Claude Agent SDK) ──
+// Models reachable through the local `claude` CLI auth (Pro / Max). Anthropic
+// gates which model IDs are available per plan tier; the SDK surfaces a clear
+// error if the signed-in plan can't run the requested model. We keep this list
+// to the current tool-eligible families to avoid offering retired aliases that
+// the subscription path no longer accepts.
+export const CLAUDE_SUBSCRIPTION_MODELS: KnownModel[] = [
+  { id: "claude-opus-4-7", name: "Claude Opus 4.7", context: 1000000, maxOutput: 128000 },
+  { id: "claude-opus-4-6", name: "Claude Opus 4.6", context: 1000000, maxOutput: 32000 },
+  { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", context: 1000000, maxOutput: 32000 },
+  { id: "claude-opus-4-5", name: "Claude Opus 4.5", context: 1000000, maxOutput: 32000 },
+  { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", context: 1000000, maxOutput: 16000 },
+  { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", context: 200000, maxOutput: 8192 },
+];
+
+// ── OpenAI (ChatGPT login via Codex auth) ──
+// The ChatGPT-backed Codex endpoint can return an account-specific model
+// catalog when authenticated. This curated fallback keeps the selector useful
+// before the user has run `codex login`.
+export const OPENAI_CHATGPT_MODELS: KnownModel[] = [
+  { id: "gpt-5.2", name: "GPT-5.2", context: 1000000, maxOutput: 32768 },
+  { id: "gpt-5.1", name: "GPT-5.1", context: 1000000, maxOutput: 32768 },
+  { id: "gpt-5", name: "GPT-5", context: 1000000, maxOutput: 32768 },
+  { id: "gpt-5.3-codex", name: "GPT-5.3 Codex", context: 400000, maxOutput: 128000 },
+  { id: "gpt-5.2-codex", name: "GPT-5.2 Codex", context: 400000, maxOutput: 128000 },
+  { id: "gpt-5.1-codex", name: "GPT-5.1 Codex", context: 400000, maxOutput: 128000 },
+  { id: "gpt-5-codex", name: "GPT-5 Codex", context: 400000, maxOutput: 128000 },
+  { id: "gpt-4o", name: "GPT-4o", context: 128000, maxOutput: 16384 },
+  { id: "chatgpt-4o-latest", name: "ChatGPT 4o Latest", context: 128000, maxOutput: 16384 },
+];
+
+
 // ── Google AI Studio (from #model_google_select) ──
 
 export const GOOGLE_MODELS: KnownModel[] = [
@@ -262,6 +294,17 @@ export const COHERE_MODELS: KnownModel[] = [
 // ── OpenRouter (loaded dynamically from API in SillyTavern — no static list) ──
 
 export const OPENROUTER_MODELS: KnownModel[] = [];
+
+// ── xAI / Grok (OpenAI-compatible API) ──
+
+export const XAI_MODELS: KnownModel[] = [
+  // Official xAI docs recommend Grok 4.3 for standard chat API usage.
+  { id: "grok-4.3", name: "Grok 4.3", context: 1000000, maxOutput: 0 },
+  // Reasoning docs mention this model as auto-reasoning without configurable effort.
+  { id: "grok-4-1-fast", name: "Grok 4.1 Fast", context: 2000000, maxOutput: 0 },
+  // Multi-agent research model; uses Responses API and reasoning.effort for 4 vs 16 agents.
+  { id: "grok-4.20-multi-agent", name: "Grok 4.20 Multi-Agent", context: 2000000, maxOutput: 0 },
+];
 
 // ── Additional providers with static lists in SillyTavern ──
 
@@ -401,6 +444,13 @@ export const IMAGE_GENERATION_SOURCES: ImageGenSource[] = [
     requiresApiKey: true,
   },
   {
+    id: "openrouter",
+    name: "OpenRouter Images",
+    description: "Image generation models exposed through OpenRouter's chat completions API.",
+    defaultBaseUrl: "https://openrouter.ai/api/v1",
+    requiresApiKey: true,
+  },
+  {
     id: "pollinations",
     name: "Pollinations",
     description: "Free, no-key-needed image generation via Pollinations AI.",
@@ -467,14 +517,36 @@ const IMAGE_GEN_MODELS: KnownModel[] = [
   { id: "dall-e-2", name: "DALL-E 2", context: 0, maxOutput: 0 },
   { id: "gpt-image-1", name: "GPT Image 1", context: 0, maxOutput: 0 },
   // Stability AI
-  { id: "sd3-large", name: "Stable Diffusion 3 Large", context: 0, maxOutput: 0 },
-  { id: "sd3-large-turbo", name: "SD3 Large Turbo", context: 0, maxOutput: 0 },
-  { id: "sd3-medium", name: "Stable Diffusion 3 Medium", context: 0, maxOutput: 0 },
+  { id: "stable-image-core", name: "Stable Image Core", context: 0, maxOutput: 0 },
+  { id: "stable-image-ultra", name: "Stable Image Ultra", context: 0, maxOutput: 0 },
+  { id: "sd3.5-large", name: "Stable Diffusion 3.5 Large", context: 0, maxOutput: 0 },
+  { id: "sd3.5-large-turbo", name: "SD3.5 Large Turbo", context: 0, maxOutput: 0 },
+  { id: "sd3.5-medium", name: "Stable Diffusion 3.5 Medium", context: 0, maxOutput: 0 },
+  { id: "sd3.5-flash", name: "Stable Diffusion 3.5 Flash", context: 0, maxOutput: 0 },
+  { id: "sd3-large", name: "Stable Diffusion 3 Large (legacy alias)", context: 0, maxOutput: 0 },
+  { id: "sd3-large-turbo", name: "SD3 Large Turbo (legacy alias)", context: 0, maxOutput: 0 },
+  { id: "sd3-medium", name: "Stable Diffusion 3 Medium (legacy alias)", context: 0, maxOutput: 0 },
   // Together AI
   { id: "black-forest-labs/FLUX.1-schnell-Free", name: "FLUX.1 Schnell (Free)", context: 0, maxOutput: 0 },
   { id: "black-forest-labs/FLUX.1-schnell", name: "FLUX.1 Schnell", context: 0, maxOutput: 0 },
   { id: "black-forest-labs/FLUX.1.1-pro", name: "FLUX 1.1 Pro", context: 0, maxOutput: 0 },
   { id: "stabilityai/stable-diffusion-xl-base-1.0", name: "SDXL Base 1.0", context: 0, maxOutput: 0 },
+  // OpenRouter image output models
+  { id: "google/gemini-2.5-flash-image", name: "Gemini 2.5 Flash Image (OpenRouter)", context: 0, maxOutput: 0 },
+  {
+    id: "google/gemini-3.1-flash-image-preview",
+    name: "Gemini 3.1 Flash Image Preview (OpenRouter)",
+    context: 0,
+    maxOutput: 0,
+  },
+  { id: "black-forest-labs/flux.2-pro", name: "FLUX 2 Pro (OpenRouter)", context: 0, maxOutput: 0 },
+  { id: "black-forest-labs/flux.2-flex", name: "FLUX 2 Flex (OpenRouter)", context: 0, maxOutput: 0 },
+  {
+    id: "sourceful/riverflow-v2-standard-preview",
+    name: "RiverFlow V2 Standard Preview (OpenRouter)",
+    context: 0,
+    maxOutput: 0,
+  },
   // NovelAI
   { id: "nai-diffusion-4-curated-preview", name: "NAI Diffusion 4 Curated", context: 0, maxOutput: 0 },
   { id: "nai-diffusion-4-5-full", name: "NAI Diffusion 4.5 Full", context: 0, maxOutput: 0 },
@@ -506,6 +578,7 @@ export function inferImageSource(model: string, baseUrl: string): string {
     m === "pollinations" ||
     m === "horde" ||
     m === "blockentropy" ||
+    m === "openrouter" ||
     m === "comfyui" ||
     m === "automatic1111" ||
     m === "gemini_image"
@@ -515,6 +588,7 @@ export function inferImageSource(model: string, baseUrl: string): string {
   if (m === "drawthings") return "automatic1111";
   if (u.includes("openrouter.ai")) return "openrouter";
   if (u.includes("nano-gpt.com")) return "nanogpt";
+  if (u.includes("openrouter.ai")) return "openrouter";
   if (m.startsWith("dall-e") || m.startsWith("gpt-image") || u.includes("openai.com")) return "openai";
   if (m.startsWith("sd3") || u.includes("stability.ai")) return "stability";
   if (m.includes("nai-diffusion") || u.includes("novelai.net")) return "novelai";
@@ -535,6 +609,7 @@ export function inferImageSource(model: string, baseUrl: string): string {
 
 export const MODEL_LISTS: Record<APIProvider, KnownModel[]> = {
   openai: OPENAI_MODELS,
+  openai_chatgpt: OPENAI_CHATGPT_MODELS,
   anthropic: ANTHROPIC_MODELS,
   // Curated list for connections UI; no remote /models on subscription path.
   claude_subscription: ANTHROPIC_MODELS,
@@ -543,6 +618,7 @@ export const MODEL_LISTS: Record<APIProvider, KnownModel[]> = {
   cohere: COHERE_MODELS,
   openrouter: OPENROUTER_MODELS,
   nanogpt: [], // NanoGPT aggregator — models fetched dynamically via API
+  xai: XAI_MODELS,
   // Seed OAI-compatible endpoints with the OpenAI catalog; remote /models still merge on top.
   custom: OPENAI_MODELS,
   image_generation: IMAGE_GEN_MODELS,

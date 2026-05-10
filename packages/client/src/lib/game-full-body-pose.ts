@@ -44,6 +44,9 @@ export function resolveDialogueFullBodyPose(
   if (availablePoses.size === 0) return undefined;
 
   const normalizedExpression = normalizePoseToken(expression);
+  if (normalizedExpression && availablePoses.has(normalizedExpression)) {
+    return normalizedExpression;
+  }
   if (normalizedExpression === "thinking") {
     return pickFirstAvailable(availablePoses, "thinking", "idle");
   }

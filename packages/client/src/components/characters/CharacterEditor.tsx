@@ -21,15 +21,23 @@ import {
   useDeleteCharacterGalleryImage,
   useUploadSprite,
   useDeleteSprite,
+  useCleanupSavedSprites,
+  useRestoreSpriteCleanupBackup,
   useSpriteCapabilities,
+  useCharacterVersions,
+  useRestoreCharacterVersion,
+  useDeleteCharacterVersion,
   spriteKeys,
   type CharacterGalleryImage,
   type SpriteInfo,
 } from "../../hooks/use-characters";
 import { useUIStore } from "../../stores/ui.store";
-import { lorebookKeys } from "../../hooks/use-lorebooks";
+import { lorebookKeys, useLorebook } from "../../hooks/use-lorebooks";
+import { useStartChatFromCharacter } from "../../hooks/use-start-chat-from-character";
+import { useConnections } from "../../hooks/use-connections";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { SpriteGenerationModal } from "../ui/SpriteGenerationModal";
+import { AvatarGenerationModal } from "../ui/AvatarGenerationModal";
 import {
   ArrowLeft,
   Save,
@@ -61,16 +69,23 @@ import {
   Maximize2,
   ImageDown,
   Download,
+  Eraser,
   Wand2,
   UserPlus,
+  History,
+  RotateCcw,
 } from "lucide-react";
-import { cn, getAvatarCropStyle } from "../../lib/utils";
+import { cn, generateClientId, getAvatarCropStyle } from "../../lib/utils";
 import { extractColorsFromImage } from "../../lib/avatar-color-extraction";
 import { HelpTooltip } from "../ui/HelpTooltip";
 import { api } from "../../lib/api-client";
 import { ColorPicker } from "../ui/ColorPicker";
 import { ExpandedTextarea } from "../ui/ExpandedTextarea";
-import type { CharacterData, RPGStatsConfig } from "@marinara-engine/shared";
+import { Modal } from "../ui/Modal";
+import { SpriteFrameEditor } from "../ui/SpriteFrameEditor";
+import { SpriteWandCleanupEditor } from "../ui/SpriteWandCleanupEditor";
+import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatDialog";
+import type { CharacterCardVersion, CharacterData, RPGStatsConfig } from "@marinara-engine/shared";
 
 // ── Tabs ──
 const TABS = [
@@ -91,12 +106,41 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]["id"];
 
+interface AltDescriptionEntry {
+  id: string;
+  label: string;
+  content: string;
+  active: boolean;
+}
+
 interface ParsedCharacter {
   id: string;
   data: string;
   comment: string;
   avatarPath: string | null;
   spriteFolderPath: string | null;
+}
+
+function normalizeAltDescriptions(value: unknown): AltDescriptionEntry[] {
+  const raw = (() => {
+    if (Array.isArray(value)) return value;
+    if (typeof value !== "string" || !value.trim()) return [];
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  })();
+
+  return raw
+    .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object")
+    .map((entry, index) => ({
+      id: typeof entry.id === "string" && entry.id.trim() ? entry.id : `extension-${index}`,
+      label: typeof entry.label === "string" ? entry.label : "Extension",
+      content: typeof entry.content === "string" ? entry.content : "",
+      active: entry.active !== false,
+    }));
 }
 
 export function CharacterEditor() {
@@ -109,6 +153,8 @@ export function CharacterEditor() {
   const duplicateCharacter = useDuplicateCharacter();
   const createPersona = useCreatePersona();
   const uploadPersonaAvatar = useUploadPersonaAvatar();
+  const { startChatFromCharacter, isStartingChat } = useStartChatFromCharacter();
+  const { data: connectionsList } = useConnections();
 
   const [activeTab, setActiveTab] = useState<TabId>("metadata");
   const [formData, setFormData] = useState<CharacterData | null>(null);
@@ -120,9 +166,14 @@ export function CharacterEditor() {
     setEditorDirty(dirty);
   }, [dirty, setEditorDirty]);
   const [saving, setSaving] = useState(false);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [avatarGeneratorOpen, setAvatarGeneratorOpen] = useState(false);
   const [newTag, setNewTag] = useState("");
   const [showUnsavedWarning, setShowUnsavedWarning] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageGenerationAvailable =
+    Array.isArray(connectionsList) &&
+    (connectionsList as Array<{ provider?: string }>).some((connection) => connection.provider === "image_generation");
 
   // Parse the character when it loads
   useEffect(() => {
@@ -147,7 +198,7 @@ export function CharacterEditor() {
   const updateExtension = useCallback((key: string, value: unknown) => {
     setFormData((prev) => {
       if (!prev) return prev;
-      return { ...prev, extensions: { ...prev.extensions, [key]: value } };
+      return { ...prev, extensions: { ...(prev.extensions ?? {}), [key]: value } };
     });
     setDirty(true);
   }, []);
@@ -186,6 +237,16 @@ export function CharacterEditor() {
     };
     reader.readAsDataURL(file);
   };
+
+  const handleGeneratedAvatar = useCallback(
+    async (avatarDataUrl: string) => {
+      if (!characterId) return;
+      setAvatarPreview(avatarDataUrl);
+      await uploadAvatar.mutateAsync({ id: characterId, avatar: avatarDataUrl });
+      toast.success("Character avatar generated.");
+    },
+    [characterId, uploadAvatar],
+  );
 
   const handleDelete = async () => {
     if (!characterId) return;
@@ -342,6 +403,26 @@ export function CharacterEditor() {
   const headerActions = (
     <>
       <button
+        type="button"
+        onClick={() => {
+          if (!characterId) return;
+          startChatFromCharacter({
+            characterId,
+            characterName: formData.name,
+            mode: "roleplay",
+            firstMessage: formData.first_mes,
+            alternateGreetings: formData.alternate_greetings,
+          });
+        }}
+        disabled={!characterId || isStartingChat}
+        className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--primary)] px-3 py-2 text-xs font-medium text-[var(--primary-foreground)] transition-all hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60 max-md:rounded-lg max-md:px-2.5 max-md:py-1.5"
+        title="Start new chat"
+      >
+        <MessageCircle size="1rem" />
+        <span className="max-sm:hidden">Start Chat</span>
+      </button>
+
+      <button
         onClick={() => updateExtension("fav", !formData.extensions.fav)}
         className={cn(
           "rounded-xl p-2 transition-all max-md:rounded-lg max-md:p-1.5",
@@ -352,11 +433,7 @@ export function CharacterEditor() {
         {formData.extensions.fav ? <Star size="1rem" fill="currentColor" /> : <StarOff size="1rem" />}
       </button>
 
-      <button
-        onClick={() => api.download(`/characters/${characterId}/export`)}
-        className={headerActionButtonClass}
-        title="Export character"
-      >
+      <button onClick={() => setExportDialogOpen(true)} className={headerActionButtonClass} title="Export character">
         <svg width="1rem" height="1rem" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path
             d="M10 13V3m0 0l-4 4m4-4l4 4"
@@ -417,6 +494,30 @@ export function CharacterEditor() {
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden bg-[var(--background)]">
+      <ExportFormatDialog
+        open={exportDialogOpen}
+        title="Export Character"
+        description="Native keeps Marinara metadata. Compatible exports direct Chara Card V2 JSON for other platforms."
+        compatibleDescription="Exports direct Chara Card V2 JSON without the Marinara wrapper."
+        onClose={() => setExportDialogOpen(false)}
+        onSelect={(format: ExportFormatChoice) => {
+          if (!characterId) return;
+          setExportDialogOpen(false);
+          void api.download(`/characters/${characterId}/export?format=${format}`);
+        }}
+      />
+      <AvatarGenerationModal
+        open={avatarGeneratorOpen}
+        title="Generate Character Avatar"
+        entityName={formData.name}
+        defaultAppearance={
+          ((formData.extensions.appearance as string | undefined) || formData.description || formData.personality) ?? ""
+        }
+        defaultAvatarUrl={avatarPreview}
+        onClose={() => setAvatarGeneratorOpen(false)}
+        onUseAvatar={handleGeneratedAvatar}
+      />
+
       {/* ── Header ── */}
       <div className="flex flex-wrap items-start gap-3 border-b border-[var(--border)] bg-[var(--card)] px-4 py-3 max-md:gap-2 max-md:px-3">
         <div className="flex min-w-0 flex-1 items-center gap-3 max-md:min-w-full">
@@ -448,6 +549,19 @@ export function CharacterEditor() {
             <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
               <Camera size="1rem" className="text-white" />
             </div>
+            {imageGenerationAvailable && (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setAvatarGeneratorOpen(true);
+                }}
+                className="absolute right-0.5 top-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-[var(--card)]/95 text-[var(--primary)] opacity-0 shadow-md ring-1 ring-[var(--border)] transition-opacity hover:bg-[var(--card)] group-hover:opacity-100 max-md:opacity-100"
+                title="Generate avatar"
+              >
+                <Wand2 size="0.75rem" />
+              </button>
+            )}
             <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleAvatarUpload} />
           </div>
 
@@ -551,7 +665,9 @@ export function CharacterEditor() {
           <div className="mx-auto max-w-2xl">
             {activeTab === "metadata" && (
               <MetadataTab
+                characterId={characterId}
                 formData={formData}
+                characterComment={characterComment}
                 updateField={updateField}
                 updateExtension={updateExtension}
                 newTag={newTag}
@@ -562,13 +678,10 @@ export function CharacterEditor() {
               />
             )}
             {activeTab === "description" && (
-              <TextareaTab
-                title="Description"
-                subtitle="The character's general description. This is sent in every prompt as part of the character's identity."
-                value={formData.description}
-                onChange={(v) => updateField("description", v)}
-                placeholder="Describe who this character is, their role, and their key traits…"
-                rows={12}
+              <CharacterDescriptionTab
+                formData={formData}
+                updateField={updateField}
+                updateExtension={updateExtension}
               />
             )}
             {activeTab === "personality" && (
@@ -650,6 +763,181 @@ function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }
   );
 }
 
+function CharacterDescriptionTab({
+  formData,
+  updateField,
+  updateExtension,
+}: {
+  formData: CharacterData;
+  updateField: <K extends keyof CharacterData>(key: K, value: CharacterData[K]) => void;
+  updateExtension: (key: string, value: unknown) => void;
+}) {
+  const altDescs = normalizeAltDescriptions(formData.extensions?.altDescriptions);
+  const [expandedField, setExpandedField] = useState<"description" | string | null>(null);
+
+  const updateAltDescs = (next: AltDescriptionEntry[]) => {
+    updateExtension("altDescriptions", next);
+  };
+
+  const addAltDesc = () => {
+    updateAltDescs([...altDescs, { id: generateClientId(), label: "Extension", content: "", active: true }]);
+  };
+
+  const toggleAltDesc = (id: string) => {
+    updateAltDescs(altDescs.map((desc) => (desc.id === id ? { ...desc, active: !desc.active } : desc)));
+  };
+
+  const updateAltDescField = (id: string, field: "label" | "content", value: string) => {
+    updateAltDescs(altDescs.map((desc) => (desc.id === id ? { ...desc, [field]: value } : desc)));
+  };
+
+  const removeAltDesc = (id: string) => {
+    updateAltDescs(altDescs.filter((desc) => desc.id !== id));
+  };
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <div className="flex items-start justify-between gap-2 mb-4">
+          <SectionHeader
+            title="Description"
+            subtitle="The character's general description. This is sent in every prompt as part of the character's identity."
+          />
+          <button
+            type="button"
+            onClick={() => setExpandedField("description")}
+            className="mt-0.5 shrink-0 rounded-lg p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+            title="Expand editor"
+          >
+            <Maximize2 size="0.875rem" />
+          </button>
+        </div>
+        <textarea
+          value={formData.description}
+          onChange={(event) => updateField("description", event.target.value)}
+          placeholder="Describe who this character is, their role, and their key traits…"
+          rows={12}
+          className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm leading-relaxed outline-none transition-colors placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
+        />
+        <p className="mt-1.5 text-right text-[0.625rem] text-[var(--muted-foreground)]">
+          {formData.description.length} characters
+        </p>
+      </div>
+
+      <div>
+        <div className="mb-4 flex items-start justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold">Description Extensions</h3>
+            <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">
+              Toggleable additions appended to this character's main description. Use these for situational states,
+              relationships, combat details, or story-phase context.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={addAltDesc}
+            className="flex shrink-0 items-center gap-1 rounded-lg bg-[var(--primary)]/15 px-2.5 py-1 text-[0.6875rem] font-medium text-[var(--primary)] transition-colors hover:bg-[var(--primary)]/25"
+          >
+            <Plus size="0.75rem" />
+            Add
+          </button>
+        </div>
+
+        {altDescs.length === 0 ? (
+          <p className="text-[0.6875rem] italic text-[var(--muted-foreground)]">
+            No description extensions yet. Add one to toggle extra character context on and off.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {altDescs.map((desc) => (
+              <div
+                key={desc.id}
+                className={cn(
+                  "rounded-xl border bg-[var(--card)] p-4 transition-all",
+                  desc.active
+                    ? "border-[var(--primary)]/30 ring-1 ring-[var(--primary)]/10"
+                    : "border-[var(--border)] opacity-60",
+                )}
+              >
+                <div className="mb-3 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => toggleAltDesc(desc.id)}
+                    className={cn(
+                      "flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors",
+                      desc.active ? "bg-[var(--primary)]" : "bg-[var(--muted-foreground)]/30",
+                    )}
+                    title={desc.active ? "Disable extension" : "Enable extension"}
+                  >
+                    <div
+                      className={cn(
+                        "h-4 w-4 rounded-full bg-[var(--primary-foreground)] shadow-sm transition-transform",
+                        desc.active && "translate-x-4",
+                      )}
+                    />
+                  </button>
+                  <input
+                    value={desc.label}
+                    onChange={(event) => updateAltDescField(desc.id, "label", event.target.value)}
+                    className="flex-1 rounded-lg border border-[var(--border)] bg-[var(--input)] px-2.5 py-1 text-xs font-medium outline-none focus:border-[var(--primary)]/40"
+                    placeholder="Label (e.g. Combat Skills)"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeAltDesc(desc.id)}
+                    className="rounded-lg p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
+                    title="Remove extension"
+                  >
+                    <X size="0.75rem" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExpandedField(desc.id)}
+                    className="rounded-lg p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+                    title="Expand editor"
+                  >
+                    <Maximize2 size="0.75rem" />
+                  </button>
+                </div>
+                <textarea
+                  value={desc.content}
+                  onChange={(event) => updateAltDescField(desc.id, "content", event.target.value)}
+                  placeholder="Additional description content…"
+                  rows={4}
+                  className="w-full resize-y rounded-lg border border-[var(--border)] bg-[var(--secondary)] p-3 text-sm leading-relaxed outline-none transition-colors placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
+                />
+                <p className="mt-1 text-right text-[0.625rem] text-[var(--muted-foreground)]">
+                  {desc.content.length} characters
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <ExpandedTextarea
+        open={expandedField === "description"}
+        onClose={() => setExpandedField(null)}
+        title="Description"
+        value={formData.description}
+        onChange={(value) => updateField("description", value)}
+        placeholder="Describe who this character is, their role, and their key traits…"
+      />
+      {altDescs.map((desc) => (
+        <ExpandedTextarea
+          key={desc.id}
+          open={expandedField === desc.id}
+          onClose={() => setExpandedField(null)}
+          title={desc.label || "Description Extension"}
+          value={desc.content}
+          onChange={(value) => updateAltDescField(desc.id, "content", value)}
+          placeholder="Additional description content…"
+        />
+      ))}
+    </div>
+  );
+}
+
 function TextareaTab({
   title,
   subtitle,
@@ -699,7 +987,9 @@ function TextareaTab({
 }
 
 function MetadataTab({
+  characterId,
   formData,
+  characterComment,
   updateField,
   updateExtension,
   newTag,
@@ -708,7 +998,9 @@ function MetadataTab({
   removeTag,
   avatarPreview,
 }: {
+  characterId: string | null;
   formData: CharacterData;
+  characterComment: string;
   updateField: <K extends keyof CharacterData>(key: K, value: CharacterData[K]) => void;
   updateExtension: (key: string, value: unknown) => void;
   newTag: string;
@@ -873,7 +1165,7 @@ function MetadataTab({
             placeholder="Your name"
           />
         </label>
-        <label className="space-y-1.5">
+        <div className="space-y-1.5">
           <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
             Version <HelpTooltip text="Version number for tracking changes to this character definition over time." />
           </span>
@@ -883,7 +1175,13 @@ function MetadataTab({
             className="w-full rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm outline-none focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
             placeholder="1.0"
           />
-        </label>
+          <CharacterVersionHistoryPanel
+            characterId={characterId}
+            currentData={formData}
+            currentComment={characterComment}
+            currentAvatarPath={avatarPreview}
+          />
+        </div>
         <label className="space-y-1.5">
           <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
             Talkativeness{" "}
@@ -958,6 +1256,244 @@ function MetadataTab({
           placeholder="Notes about this character, intended use, tips for best results…"
         />
       </label>
+    </div>
+  );
+}
+
+const VERSION_COMPARE_FIELDS: Array<{ key: string; label: string }> = [
+  { key: "name", label: "Name" },
+  { key: "description", label: "Description" },
+  { key: "personality", label: "Personality" },
+  { key: "scenario", label: "Scenario" },
+  { key: "first_mes", label: "First Message" },
+  { key: "mes_example", label: "Example Dialogue" },
+  { key: "extensions.backstory", label: "Backstory" },
+  { key: "extensions.appearance", label: "Appearance" },
+  { key: "creator_notes", label: "Creator Notes" },
+  { key: "system_prompt", label: "System Prompt" },
+  { key: "post_history_instructions", label: "Post-History Instructions" },
+];
+
+function getVersionFieldValue(data: CharacterData, key: string): string {
+  if (key === "extensions.backstory" || key === "extensions.appearance") {
+    const extensionKey = key.split(".")[1] ?? "";
+    const value = data.extensions?.[extensionKey];
+    return typeof value === "string" ? value : "";
+  }
+  const value = data[key as keyof CharacterData];
+  if (Array.isArray(value)) return value.join(", ");
+  return typeof value === "string" ? value : "";
+}
+
+function formatVersionTimestamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function getVersionTitle(version: CharacterCardVersion): string {
+  return version.version?.trim() ? `v${version.version}` : "Untitled version";
+}
+
+function CharacterVersionHistoryPanel({
+  characterId,
+  currentData,
+  currentComment,
+  currentAvatarPath,
+}: {
+  characterId: string | null;
+  currentData: CharacterData;
+  currentComment: string;
+  currentAvatarPath: string | null;
+}) {
+  const { data: versions = [], isLoading } = useCharacterVersions(characterId);
+  const restoreVersion = useRestoreCharacterVersion();
+  const deleteVersion = useDeleteCharacterVersion();
+  const [selectedVersion, setSelectedVersion] = useState<CharacterCardVersion | null>(null);
+
+  if (!characterId) return null;
+
+  const handleRestore = async (version: CharacterCardVersion) => {
+    const confirmed = await showConfirmDialog({
+      title: "Restore Character Version",
+      message: `Restore ${currentData.name || "this character"} to ${getVersionTitle(version)}? The current card will become exactly that saved version without creating another history entry.`,
+      confirmLabel: "Restore",
+    });
+    if (!confirmed) return;
+    try {
+      await restoreVersion.mutateAsync({ id: characterId, versionId: version.id });
+      toast.success(`Restored ${getVersionTitle(version)}.`);
+      setSelectedVersion(null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to restore character version.");
+    }
+  };
+
+  const handleDeleteVersion = async (version: CharacterCardVersion) => {
+    const confirmed = await showConfirmDialog({
+      title: "Delete Saved Version",
+      message: `Delete ${getVersionTitle(version)} from version history? This does not change the current character card.`,
+      confirmLabel: "Delete",
+      tone: "destructive",
+    });
+    if (!confirmed) return;
+    try {
+      await deleteVersion.mutateAsync({ id: characterId, versionId: version.id });
+      toast.success(`Deleted ${getVersionTitle(version)}.`);
+      setSelectedVersion((current) => (current?.id === version.id ? null : current));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to delete character version.");
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--secondary)]/70 p-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="inline-flex items-center gap-1.5 text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+          <History size="0.75rem" />
+          Version history
+        </span>
+        <span className="rounded-full bg-[var(--accent)] px-2 py-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
+          {isLoading ? "Loading" : `${versions.length} saved`}
+        </span>
+      </div>
+
+      {versions.length === 0 ? (
+        <p className="mt-2 text-[0.6875rem] leading-relaxed text-[var(--muted-foreground)]">
+          Previous card states will appear here after the next edit.
+        </p>
+      ) : (
+        <div className="mt-2 flex max-h-36 flex-col gap-1.5 overflow-y-auto pr-1">
+          {versions.map((version) => (
+            <div
+              key={version.id}
+              className="flex items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--card)] px-2 py-1.5"
+            >
+              <button
+                type="button"
+                onClick={() => setSelectedVersion(version)}
+                className="min-w-0 flex-1 text-left"
+                title="Compare with current card"
+              >
+                <span className="block truncate text-[0.6875rem] font-medium text-[var(--foreground)]">
+                  {getVersionTitle(version)}
+                </span>
+                <span className="block truncate text-[0.625rem] text-[var(--muted-foreground)]">
+                  {formatVersionTimestamp(version.createdAt)}
+                  {version.source ? ` · ${version.source}` : ""}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleRestore(version)}
+                disabled={restoreVersion.isPending || deleteVersion.isPending}
+                className="rounded-lg p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-50"
+                title="Restore this version"
+              >
+                {restoreVersion.isPending ? (
+                  <Loader2 size="0.75rem" className="animate-spin" />
+                ) : (
+                  <RotateCcw size="0.75rem" />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDeleteVersion(version)}
+                disabled={restoreVersion.isPending || deleteVersion.isPending}
+                className="rounded-lg p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)] disabled:opacity-50"
+                title="Delete this saved version"
+              >
+                {deleteVersion.isPending && deleteVersion.variables?.versionId === version.id ? (
+                  <Loader2 size="0.75rem" className="animate-spin" />
+                ) : (
+                  <Trash2 size="0.75rem" />
+                )}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <Modal
+        open={!!selectedVersion}
+        onClose={() => setSelectedVersion(null)}
+        title={selectedVersion ? `Compare ${getVersionTitle(selectedVersion)}` : "Compare Version"}
+        width="max-w-5xl"
+      >
+        {selectedVersion && (
+          <div className="flex max-h-[75vh] flex-col gap-4 overflow-y-auto">
+            <div className="grid gap-3 rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-3 text-xs md:grid-cols-2">
+              <div>
+                <p className="font-semibold text-[var(--foreground)]">Current card</p>
+                <p className="mt-1 text-[var(--muted-foreground)]">
+                  v{currentData.character_version || "1.0"}
+                  {currentComment ? ` · ${currentComment}` : ""}
+                  {currentAvatarPath ? " · has avatar" : ""}
+                </p>
+              </div>
+              <div>
+                <p className="font-semibold text-[var(--foreground)]">{getVersionTitle(selectedVersion)}</p>
+                <p className="mt-1 text-[var(--muted-foreground)]">
+                  {formatVersionTimestamp(selectedVersion.createdAt)}
+                  {selectedVersion.reason ? ` · ${selectedVersion.reason}` : ""}
+                  {selectedVersion.avatarPath ? " · has avatar" : ""}
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              {VERSION_COMPARE_FIELDS.map((field) => {
+                const currentValue = getVersionFieldValue(currentData, field.key);
+                const savedValue = getVersionFieldValue(selectedVersion.data, field.key);
+                const changed = currentValue !== savedValue;
+                if (!changed && !currentValue && !savedValue) return null;
+                return (
+                  <div key={field.key} className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <span className="text-xs font-semibold text-[var(--foreground)]">{field.label}</span>
+                      {changed && (
+                        <span className="rounded-full bg-[var(--primary)]/10 px-2 py-0.5 text-[0.625rem] font-medium text-[var(--primary)]">
+                          changed
+                        </span>
+                      )}
+                    </div>
+                    <div className="grid gap-2 md:grid-cols-2">
+                      <div className="min-h-20 whitespace-pre-wrap rounded-lg bg-[var(--secondary)] p-2 text-xs leading-relaxed text-[var(--foreground)]">
+                        {currentValue || <span className="text-[var(--muted-foreground)]">Empty</span>}
+                      </div>
+                      <div className="min-h-20 whitespace-pre-wrap rounded-lg bg-[var(--secondary)] p-2 text-xs leading-relaxed text-[var(--foreground)]">
+                        {savedValue || <span className="text-[var(--muted-foreground)]">Empty</span>}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex justify-end border-t border-[var(--border)] pt-3">
+              <button
+                type="button"
+                onClick={() => handleRestore(selectedVersion)}
+                disabled={restoreVersion.isPending}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-4 py-2 text-xs font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90 disabled:opacity-50"
+              >
+                {restoreVersion.isPending ? (
+                  <Loader2 size="0.75rem" className="animate-spin" />
+                ) : (
+                  <RotateCcw size="0.75rem" />
+                )}
+                Restore this version
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
@@ -1458,11 +1994,24 @@ function SpritesTab({
   const { data: spriteCapabilities } = useSpriteCapabilities();
   const uploadSprite = useUploadSprite();
   const deleteSprite = useDeleteSprite();
+  const cleanupSavedSprites = useCleanupSavedSprites();
+  const restoreSpriteCleanupBackup = useRestoreSpriteCleanupBackup();
   const queryClient = useQueryClient();
   const [category, setCategory] = useState<SpriteCategory>("expressions");
   const [newExpression, setNewExpression] = useState("");
   const [uploading, setUploading] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [cleaningSprites, setCleaningSprites] = useState(false);
+  const [savedCleanupStrength, setSavedCleanupStrength] = useState(35);
+  const [restoringCleanup, setRestoringCleanup] = useState(false);
+  const [lastCleanupBackupId, setLastCleanupBackupId] = useState<string | null>(null);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [framingSprite, setFramingSprite] = useState<SpriteInfo | null>(null);
+  const [savingFrame, setSavingFrame] = useState(false);
+  const [wandCleanupSprite, setWandCleanupSprite] = useState<SpriteInfo | null>(null);
+  const [savingWandCleanup, setSavingWandCleanup] = useState(false);
+  const [deleteSpriteRequest, setDeleteSpriteRequest] = useState<SpriteInfo | null>(null);
+  const [deletingSprites, setDeletingSprites] = useState<"single" | "all" | null>(null);
   const [folderProgress, setFolderProgress] = useState<{ done: number; total: number } | null>(null);
   const [spriteGenOpen, setSpriteGenOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1470,6 +2019,9 @@ function SpritesTab({
   const pendingExpressionRef = useRef("");
 
   const allSprites = (sprites as SpriteInfo[] | undefined) ?? [];
+  const portraitExpressionNames = allSprites
+    .filter((s) => !s.expression.toLowerCase().startsWith("full_"))
+    .map((s) => s.expression);
   const visibleSprites = allSprites.filter((s) =>
     category === "full-body" ? s.expression.startsWith("full_") : !s.expression.startsWith("full_"),
   );
@@ -1479,6 +2031,11 @@ function SpritesTab({
   const suggestedExpressions = DEFAULT_EXPRESSIONS.filter((e) => !existingExpressions.has(e));
   const spriteGenerationUnavailable = spriteCapabilities?.spriteGenerationAvailable === false;
   const spriteGenerationReason = spriteCapabilities?.reason ?? "Sprite generation is unavailable on this platform.";
+  const backgroundCleanupUnavailable = spriteCapabilities?.backgroundRemovalAvailable === false;
+  const backgroundCleanupReason = spriteCapabilities?.reason ?? "Background cleanup is unavailable on this platform.";
+  const backgroundRemoverUnavailable = spriteCapabilities?.backgroundRemover?.installed === false;
+  const backgroundRemoverReason =
+    spriteCapabilities?.backgroundRemover?.reason ?? "Local backgroundremover is not installed.";
 
   const normalizeExpressionForCategory = (raw: string) => {
     const cleaned = raw
@@ -1492,7 +2049,10 @@ function SpritesTab({
     return cleaned.replace(/^full_/, "");
   };
 
-  const displayExpression = (stored: string) => (category === "full-body" ? stored.replace(/^full_/, "") : stored);
+  const displayExpression = useCallback(
+    (stored: string) => (category === "full-body" ? stored.replace(/^full_/, "") : stored),
+    [category],
+  );
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1562,19 +2122,29 @@ function SpritesTab({
     e.target.value = "";
   };
 
-  const handleDelete = async (expression: string) => {
-    if (
-      !(await showConfirmDialog({
-        title: "Delete Sprite",
-        message: `Delete sprite for "${expression}"?`,
-        confirmLabel: "Delete",
-        tone: "destructive",
-      }))
-    ) {
-      return;
+  const handleDeleteSingleSprite = useCallback(async () => {
+    if (!deleteSpriteRequest) return;
+    setDeletingSprites("single");
+    try {
+      await deleteSprite.mutateAsync({ characterId, expression: deleteSpriteRequest.expression });
+      setDeleteSpriteRequest(null);
+    } finally {
+      setDeletingSprites(null);
     }
-    await deleteSprite.mutateAsync({ characterId, expression });
-  };
+  }, [characterId, deleteSprite, deleteSpriteRequest]);
+
+  const handleDeleteVisibleSprites = useCallback(async () => {
+    if (visibleSprites.length === 0) return;
+    setDeletingSprites("all");
+    try {
+      for (const sprite of visibleSprites) {
+        await deleteSprite.mutateAsync({ characterId, expression: sprite.expression });
+      }
+      setDeleteSpriteRequest(null);
+    } finally {
+      setDeletingSprites(null);
+    }
+  }, [characterId, deleteSprite, visibleSprites]);
 
   const downloadSpriteFile = useCallback(async (sprite: SpriteInfo) => {
     const response = await fetch(sprite.url);
@@ -1624,6 +2194,108 @@ function SpritesTab({
       }
     },
     [category, downloadSpriteFile],
+  );
+
+  const handleCleanVisibleSprites = useCallback(async () => {
+    if (visibleSprites.length === 0) return;
+
+    const modeLabel = category === "full-body" ? "full-body" : "expression";
+    if (
+      !(await showConfirmDialog({
+        title: "Clean Sprite Backgrounds",
+        message: `Run the local backgroundremover model on ${visibleSprites.length} saved ${modeLabel} sprite${visibleSprites.length === 1 ? "" : "s"} at strength ${savedCleanupStrength}? Marinara will keep a restore point in case the cleanup looks wrong.`,
+        confirmLabel: "Clean",
+      }))
+    ) {
+      return;
+    }
+
+    setCleaningSprites(true);
+    try {
+      const result = await cleanupSavedSprites.mutateAsync({
+        characterId,
+        expressions: visibleSprites.map((sprite) => sprite.expression),
+        cleanupStrength: savedCleanupStrength,
+        engine: "backgroundremover",
+      });
+
+      if (result.processed > 0) {
+        setLastCleanupBackupId(result.backupId ?? null);
+        toast.success(
+          `Cleaned ${result.processed} saved sprite${result.processed === 1 ? "" : "s"} with backgroundremover.`,
+        );
+      }
+      if (result.failed.length > 0) {
+        toast.warning(`${result.failed.length} sprite${result.failed.length === 1 ? "" : "s"} could not be cleaned.`);
+      }
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to clean saved sprites.");
+    } finally {
+      setCleaningSprites(false);
+    }
+  }, [category, characterId, cleanupSavedSprites, savedCleanupStrength, visibleSprites]);
+
+  const handleRestoreLastCleanup = useCallback(async () => {
+    if (!lastCleanupBackupId) return;
+    setRestoringCleanup(true);
+    try {
+      const result = await restoreSpriteCleanupBackup.mutateAsync({
+        characterId,
+        backupId: lastCleanupBackupId,
+      });
+      if (result.restored > 0) {
+        toast.success(`Restored ${result.restored} sprite${result.restored === 1 ? "" : "s"} from the cleanup backup.`);
+      }
+      if (result.failed.length > 0) {
+        toast.warning(`${result.failed.length} sprite${result.failed.length === 1 ? "" : "s"} could not be restored.`);
+      } else {
+        setLastCleanupBackupId(null);
+      }
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to restore sprite cleanup backup.");
+    } finally {
+      setRestoringCleanup(false);
+    }
+  }, [characterId, lastCleanupBackupId, restoreSpriteCleanupBackup]);
+
+  const handleApplySpriteFrame = useCallback(
+    async (croppedDataUrl: string) => {
+      if (!framingSprite) return;
+
+      setSavingFrame(true);
+      try {
+        await uploadSprite.mutateAsync({
+          characterId,
+          expression: framingSprite.expression,
+          image: croppedDataUrl,
+        });
+        toast.success(`Framed ${displayExpression(framingSprite.expression)} sprite.`);
+        setFramingSprite(null);
+      } finally {
+        setSavingFrame(false);
+      }
+    },
+    [characterId, displayExpression, framingSprite, uploadSprite],
+  );
+
+  const handleApplyWandCleanup = useCallback(
+    async (cleanedDataUrl: string) => {
+      if (!wandCleanupSprite) return;
+
+      setSavingWandCleanup(true);
+      try {
+        await uploadSprite.mutateAsync({
+          characterId,
+          expression: wandCleanupSprite.expression,
+          image: cleanedDataUrl,
+        });
+        toast.success(`Cleaned ${displayExpression(wandCleanupSprite.expression)} sprite.`);
+        setWandCleanupSprite(null);
+      } finally {
+        setSavingWandCleanup(false);
+      }
+    },
+    [characterId, displayExpression, uploadSprite, wandCleanupSprite],
   );
 
   return (
@@ -1699,24 +2371,82 @@ function SpritesTab({
               Upload Folder
             </button>
             <button
-              onClick={() => handleExportSprites(visibleSprites, "visible")}
-              disabled={exporting || visibleSprites.length === 0}
+              onClick={() => void handleCleanVisibleSprites()}
+              disabled={
+                cleaningSprites ||
+                backgroundCleanupUnavailable ||
+                backgroundRemoverUnavailable ||
+                visibleSprites.length === 0
+              }
               className="flex min-w-0 items-center justify-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-center text-[0.6875rem] font-medium leading-tight text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-40 max-md:flex-1 max-md:basis-[calc(50%-0.25rem)] max-md:px-2.5"
-              title="Download currently visible sprites for external editing"
+              title={
+                backgroundCleanupUnavailable
+                  ? backgroundCleanupReason
+                  : backgroundRemoverUnavailable
+                    ? backgroundRemoverReason
+                    : "Run the local backgroundremover model on the currently visible saved sprites"
+              }
             >
-              <ImageDown size="0.8125rem" />
-              {exporting ? "Exporting..." : `Export ${category === "full-body" ? "Full-body" : "Expressions"}`}
+              {cleaningSprites ? <Loader2 size="0.8125rem" className="animate-spin" /> : <Eraser size="0.8125rem" />}
+              {cleaningSprites ? "Cleaning..." : "Clean Backgrounds"}
             </button>
-            <button
-              onClick={() => handleExportSprites(allSprites, "all")}
-              disabled={exporting || allSprites.length === 0}
-              className="flex min-w-0 items-center justify-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-center text-[0.6875rem] font-medium leading-tight text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-40 max-md:flex-1 max-md:basis-[calc(50%-0.25rem)] max-md:px-2.5"
-              title="Download all sprites across both categories"
-            >
-              <ImageDown size="0.8125rem" />
-              Export All
-            </button>
+            <div className="relative max-md:flex-1 max-md:basis-[calc(50%-0.25rem)]">
+              <button
+                onClick={() => setExportMenuOpen((open) => !open)}
+                disabled={exporting || allSprites.length === 0}
+                className="flex w-full min-w-0 items-center justify-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-center text-[0.6875rem] font-medium leading-tight text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-40 max-md:px-2.5"
+                title="Choose which saved sprites to export"
+              >
+                <ImageDown size="0.8125rem" />
+                {exporting ? "Exporting..." : "Export"}
+              </button>
+              {exportMenuOpen && !exporting && (
+                <div className="absolute right-0 top-[calc(100%+0.35rem)] z-30 min-w-44 rounded-lg border border-[var(--border)] bg-[var(--card)] p-1 text-xs shadow-xl">
+                  <button
+                    onClick={() => {
+                      setExportMenuOpen(false);
+                      void handleExportSprites(visibleSprites, "visible");
+                    }}
+                    disabled={visibleSprites.length === 0}
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[var(--foreground)] transition-colors hover:bg-[var(--secondary)] disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <ImageDown size="0.75rem" />
+                    {category === "full-body" ? "Full-body only" : "Expressions only"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setExportMenuOpen(false);
+                      void handleExportSprites(allSprites, "all");
+                    }}
+                    disabled={allSprites.length === 0}
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[var(--foreground)] transition-colors hover:bg-[var(--secondary)] disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <ImageDown size="0.75rem" />
+                    All sprites
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 rounded-lg bg-[var(--secondary)]/60 px-3 py-2">
+          <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">Cleanup strength</span>
+          <span className="text-[0.625rem] text-[var(--muted-foreground)]">Soft</span>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={savedCleanupStrength}
+            onChange={(e) => setSavedCleanupStrength(Number(e.target.value))}
+            disabled={cleaningSprites}
+            className="min-w-40 flex-1 accent-[var(--primary)] disabled:opacity-50"
+          />
+          <span className="text-[0.625rem] text-[var(--muted-foreground)]">Aggressive</span>
+          <span className="w-8 text-right text-[0.6875rem] tabular-nums text-[var(--muted-foreground)]">
+            {savedCleanupStrength}
+          </span>
         </div>
 
         {/* Folder upload progress */}
@@ -1726,9 +2456,38 @@ function SpritesTab({
             Uploading {folderProgress.done}/{folderProgress.total} sprites…
           </div>
         )}
+        {cleaningSprites && (
+          <div className="flex items-center gap-2 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--muted-foreground)]">
+            <Loader2 size="0.75rem" className="animate-spin text-[var(--primary)]" />
+            Running local backgroundremover on saved sprites…
+          </div>
+        )}
+        {lastCleanupBackupId && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--muted-foreground)]">
+            <span>Last cleanup has a restore point.</span>
+            <button
+              onClick={() => void handleRestoreLastCleanup()}
+              disabled={restoringCleanup}
+              className="flex items-center gap-1.5 rounded-md bg-[var(--card)] px-2.5 py-1 text-[0.6875rem] font-medium text-[var(--foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] disabled:opacity-40"
+            >
+              {restoringCleanup ? <Loader2 size="0.75rem" className="animate-spin" /> : <RotateCcw size="0.75rem" />}
+              Undo Cleanup
+            </button>
+          </div>
+        )}
         {spriteGenerationUnavailable && (
           <div className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--muted-foreground)]">
             {spriteGenerationReason}
+          </div>
+        )}
+        {backgroundCleanupUnavailable && !spriteGenerationUnavailable && (
+          <div className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--muted-foreground)]">
+            {backgroundCleanupReason}
+          </div>
+        )}
+        {backgroundRemoverUnavailable && !backgroundCleanupUnavailable && (
+          <div className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--muted-foreground)]">
+            {backgroundRemoverReason}
           </div>
         )}
         <div className="flex gap-2">
@@ -1777,6 +2536,26 @@ function SpritesTab({
       </div>
 
       {/* Sprite grid */}
+      {framingSprite && (
+        <SpriteFrameEditor
+          imageUrl={framingSprite.url}
+          label={displayExpression(framingSprite.expression)}
+          applying={savingFrame}
+          onApply={handleApplySpriteFrame}
+          onClose={() => setFramingSprite(null)}
+        />
+      )}
+
+      {wandCleanupSprite && (
+        <SpriteWandCleanupEditor
+          imageUrl={wandCleanupSprite.url}
+          label={displayExpression(wandCleanupSprite.expression)}
+          applying={savingWandCleanup}
+          onApply={handleApplyWandCleanup}
+          onClose={() => setWandCleanupSprite(null)}
+        />
+      )}
+
       {isLoading ? (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
           {Array.from({ length: 4 }).map((_, i) => (
@@ -1790,9 +2569,17 @@ function SpritesTab({
               key={sprite.expression}
               className="group relative overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)] transition-all hover:border-[var(--primary)]/30 hover:shadow-md"
             >
-              <div className="aspect-[3/4] bg-[var(--secondary)]">
+              <button
+                type="button"
+                onClick={() => setWandCleanupSprite(sprite)}
+                className="group/preview relative block aspect-[3/4] w-full bg-[var(--secondary)]"
+                title="Open wand cleanup"
+              >
                 <img src={sprite.url} alt={sprite.expression} loading="lazy" className="h-full w-full object-contain" />
-              </div>
+                <span className="pointer-events-none absolute right-2 top-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-[var(--card)]/90 text-[var(--primary)] opacity-0 shadow-lg ring-1 ring-[var(--border)] transition-opacity group-hover/preview:opacity-100 max-md:opacity-100">
+                  <Wand2 size="0.875rem" />
+                </span>
+              </button>
               <div className="flex items-center justify-between p-2">
                 <span
                   className="max-w-[10rem] truncate text-[0.6875rem] font-medium capitalize"
@@ -1801,6 +2588,13 @@ function SpritesTab({
                   {displayExpression(sprite.expression)}
                 </span>
                 <div className="flex gap-1 opacity-0 group-hover:opacity-100 max-md:opacity-100 transition-opacity">
+                  <button
+                    onClick={() => setFramingSprite(sprite)}
+                    className="rounded-lg p-1 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+                    title="Frame"
+                  >
+                    <Crop size="0.6875rem" />
+                  </button>
                   <button
                     onClick={() => void downloadSpriteFile(sprite)}
                     className="rounded-lg p-1 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
@@ -1816,7 +2610,7 @@ function SpritesTab({
                     <Upload size="0.6875rem" />
                   </button>
                   <button
-                    onClick={() => handleDelete(sprite.expression)}
+                    onClick={() => setDeleteSpriteRequest(sprite)}
                     className="rounded-lg p-1 text-[var(--muted-foreground)] hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
                     title="Delete"
                   >
@@ -1858,12 +2652,66 @@ function SpritesTab({
         </ul>
       </div>
 
+      {deleteSpriteRequest && (
+        <Modal
+          open
+          onClose={() => {
+            if (!deletingSprites) setDeleteSpriteRequest(null);
+          }}
+          title="Delete Sprite"
+          width="max-w-sm"
+        >
+          <div className="space-y-4">
+            <p className="text-sm leading-relaxed text-[var(--foreground)]">
+              Delete sprite for "{displayExpression(deleteSpriteRequest.expression)}"?
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              {visibleSprites.length > 1 ? (
+                <button
+                  type="button"
+                  onClick={() => void handleDeleteVisibleSprites()}
+                  disabled={!!deletingSprites}
+                  className="mr-auto inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-2 text-xs font-medium text-[var(--destructive)] ring-1 ring-[var(--destructive)]/30 transition-colors hover:bg-[var(--destructive)]/10 disabled:opacity-50 sm:px-3 sm:text-sm"
+                >
+                  {deletingSprites === "all" ? (
+                    <Loader2 size="0.875rem" className="animate-spin" />
+                  ) : (
+                    <Trash2 size="0.875rem" />
+                  )}
+                  Delete All {category === "full-body" ? "Full-Body" : "Expressions"}
+                </button>
+              ) : null}
+              <div className="ml-auto flex shrink-0 items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDeleteSpriteRequest(null)}
+                  disabled={!!deletingSprites}
+                  className="rounded-lg px-2.5 py-2 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-50 sm:px-3 sm:text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleDeleteSingleSprite()}
+                  disabled={!!deletingSprites}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--destructive)] px-2.5 py-2 text-xs font-medium text-white transition-colors hover:bg-[var(--destructive)]/85 disabled:opacity-50 sm:px-3 sm:text-sm"
+                >
+                  {deletingSprites === "single" && <Loader2 size="0.875rem" className="animate-spin" />}
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        </Modal>
+      )}
+
       {/* Sprite Generation Modal */}
       <SpriteGenerationModal
         open={spriteGenOpen}
         onClose={() => setSpriteGenOpen(false)}
         entityId={characterId}
         initialSpriteType={category === "full-body" ? "full-body" : "expressions"}
+        existingExpressionNames={portraitExpressionNames}
         defaultAppearance={defaultAppearance}
         defaultAvatarUrl={defaultAvatarUrl}
         onSpritesGenerated={() => {
@@ -2092,9 +2940,9 @@ function ColorsTab({
               className="text-[0.75rem] font-bold tracking-tight"
               style={
                 nameColor
-                  ? nameColor.startsWith("linear-gradient")
+                  ? nameColor.includes("gradient(")
                     ? {
-                        background: nameColor,
+                        backgroundImage: nameColor,
                         backgroundRepeat: "no-repeat",
                         backgroundSize: "100% 100%",
                         WebkitBackgroundClip: "text",
@@ -2186,8 +3034,18 @@ function LorebookTab({ characterId, formData }: { characterId: string | null; fo
     importMetadata.embeddedLorebook && typeof importMetadata.embeddedLorebook === "object"
       ? (importMetadata.embeddedLorebook as Record<string, unknown>)
       : {};
-  const linkedLorebookId =
+  const rawLinkedLorebookId =
     typeof embeddedLorebookMetadata.lorebookId === "string" ? embeddedLorebookMetadata.lorebookId : null;
+  // Verify the pointed-to lorebook actually exists. Cards exported from
+  // another Marinara instance can carry a stale `lorebookId` in their
+  // extensions, and an auto-import that errored silently can leave the
+  // pointer set without a real DB row. If we trust the raw pointer the
+  // "Edit Linked Lorebook" button opens an editor that can never resolve
+  // (its loading state is `isLoading || !lorebook`, and a 404'd query
+  // satisfies the second clause forever), so verify before showing it.
+  const linkedLorebookQuery = useLorebook(rawLinkedLorebookId);
+  const linkedLorebookId =
+    rawLinkedLorebookId && (linkedLorebookQuery.isLoading || linkedLorebookQuery.data) ? rawLinkedLorebookId : null;
   const hasEmbeddedLorebook = entries.length > 0 || embeddedLorebookMetadata.hasEmbeddedLorebook === true;
 
   const handleImportEmbeddedLorebook = async () => {

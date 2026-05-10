@@ -110,6 +110,8 @@ export interface ChatMemoryChunk {
   createdAt: string;
   /** False when chunking succeeded but embedding generation was unavailable. */
   hasEmbedding: boolean;
+  /** Current vectorization state for display. */
+  embeddingStatus?: "vectorized" | "pending" | "unavailable";
 }
 
 /** Rolling summary of current-session game history hidden by contextMessageLimit. */
@@ -141,6 +143,8 @@ export interface ChatMetadata {
   activeToolIds: string[];
   /** Per-chat variable selections for preset variables (variableName → value or values) */
   presetChoices: Record<string, string | string[]>;
+  /** Chat-wide string variables persisted by agent tool calls (key → value). */
+  agentVariables?: Record<string, string>;
   /** Group chat mode: "merged" (narrator) or "individual" (separate characters) */
   groupChatMode?: GroupChatMode;
   /** Group individual mode: color dialogues with speaker tags */
@@ -151,12 +155,20 @@ export interface ChatMetadata {
   spriteCharacterIds?: string[];
   /** Preferred sidebar / default layout side for chat sprites. */
   spritePosition?: SpriteSide;
+  /** Display scale for roleplay Expression Engine sprites. */
+  spriteScale?: number;
+  /** Display opacity for roleplay Expression Engine sprites. */
+  spriteOpacity?: number;
   /** Saved freeform positions for enabled roleplay sprites. */
   spritePlacements?: Record<string, SpritePlacement>;
   /** When true, a shared group scenario replaces individual character card scenarios */
   groupScenarioOverride?: boolean;
   /** The shared scenario text used when groupScenarioOverride is enabled */
   groupScenarioText?: string;
+  /** When true, show the Secret Plot tab in the roleplay Agents menu (edits apply to agent memory, same as generation). */
+  showSecretPlotPanel?: boolean;
+  /** When true, show the Injections tab in the roleplay Agents menu for cached prompt injections. */
+  showInjectionsPanel?: boolean;
   /** When true, tracker agents only run when the user manually triggers them (not after every generation) */
   manualTrackers?: boolean;
   /** Whether to recall memories from this chat during generation. Default: true for conversation/scenes, false for roleplay. */
@@ -166,16 +178,26 @@ export interface ChatMetadata {
   /** Per-chat ephemeral / enabled overrides for lorebook entries (entryId → state).
    *  Tracked per-chat so ephemeral countdown in one chat doesn't affect others. */
   entryStateOverrides?: Record<string, { ephemeral?: number | null; enabled?: boolean }>;
+  /** Per-chat sticky/cooldown/delay runtime state for lorebook entries. */
+  entryTimingStates?: Record<string, import("./lorebook.js").LorebookEntryTimingState>;
+  /** Per-chat global lorebook token budget. Missing uses app default; 0 means unlimited. */
+  lorebookTokenBudget?: number | null;
   /** ID of the chat preset most recently applied to this chat (drives the preset bar dropdown). */
   appliedChatPresetId?: string | null;
   /** Custom prompt prefix used by the /impersonate slash command. */
   impersonatePrompt?: string | null;
   /** Maximum number of recent messages to include in prompt history; null/omitted disables the limit. */
   contextMessageLimit?: number | null;
+  /** Show a manual draft translation button beside the send control. */
+  showInputTranslateButton?: boolean;
+  /** Allow roleplay characters to create direct-message conversation chats with hidden [dm] commands. */
+  roleplayDmCommandsEnabled?: boolean;
 
   // ── Conversation Mode Fields ──
   /** Whether conversation character schedules are enabled for this chat. */
   conversationSchedulesEnabled?: boolean;
+  /** Allow conversation characters to use hidden command tags. Default: true. */
+  characterCommands?: boolean;
   /** Chat-scoped generated schedules for conversation characters. */
   characterSchedules?: Record<string, unknown>;
   /** Week start timestamp for the current generated conversation schedules. */
@@ -225,6 +247,8 @@ export interface ChatMetadata {
   gameDialogueChatId?: string | null;
   /** Active combat sub-scene chat ID */
   gameCombatChatId?: string | null;
+  /** Live combat encounter snapshot — restored on page refresh while a fight is in progress. */
+  gameCombatState?: import("./game.js").GameCombatStateSnapshot | null;
   /** User's initial game setup preferences */
   gameSetupConfig?: import("./game.js").GameSetupConfig | null;
   /** Tracked NPCs with reputation */
@@ -265,12 +289,56 @@ export interface ChatMetadata {
    *   - the "Add Game Mode Agents" migration button in ChatSettingsDrawer
    */
   gameModeAutoSeeded?: boolean;
+  /** Current-session turn number when the last rare generated scene illustration was created. */
+  gameLastIllustrationTurn?: number;
+  /** Session number where the last rare generated scene illustration was created. */
+  gameLastIllustrationSessionNumber?: number | null;
+  /** Background tag for the last rare generated scene illustration. */
+  gameLastIllustrationTag?: string;
+  /** Extra user instructions for game scene illustration prompts. */
+  gameImagePromptInstructions?: string | null;
+  /** When true, Game Mode uses Spotify DJ for music instead of local music assets. */
+  gameUseSpotifyMusic?: boolean;
+  /** Music source constraint for Spotify DJ in Game Mode. */
+  gameSpotifySourceType?: "liked" | "playlist" | "artist" | "any";
+  /** Spotify playlist ID used when gameSpotifySourceType is "playlist". */
+  gameSpotifyPlaylistId?: string | null;
+  /** Human-readable playlist name cached for prompts/display. */
+  gameSpotifyPlaylistName?: string | null;
+  /** Spotify artist name used when gameSpotifySourceType is "artist". */
+  gameSpotifyArtist?: string | null;
+  /** Run Game Lorebook Keeper after a session is concluded. */
+  gameLorebookKeeperEnabled?: boolean;
+  /** Chat-scoped lorebook maintained by Game Lorebook Keeper. */
+  gameLorebookKeeperLorebookId?: string | null;
+  /** Status of the most recent Game Lorebook Keeper session-end run. */
+  gameLorebookKeeperLastRun?: {
+    sessionNumber: number;
+    status: "running" | "success" | "failed";
+    updatedAt: string;
+    lorebookId?: string | null;
+    entryCount?: number;
+    error?: string;
+  } | null;
 
   // ── Conversation-Mode Auto-Summarization ──
   /** Per-day auto-generated conversation summaries (key: "DD.MM.YYYY"). */
   daySummaries?: Record<string, DaySummaryEntry>;
   /** Per-week consolidated conversation summaries (key: Monday "DD.MM.YYYY"). */
   weekSummaries?: Record<string, WeekSummaryEntry>;
+  /**
+   * Hour of day (0-11, local time) at which a conversation "day" rolls over for
+   * summarization. Messages sent before this hour are filed under the previous
+   * day, so a late-night session isn't cut off mid-conversation. Default: 4.
+   */
+  dayRolloverHour?: number;
+  /**
+   * How many of the most recent messages to keep verbatim in the prompt even
+   * after they've been summarized. Bridges the day boundary so characters can
+   * pick up the actual flow of recent conversation, not just the gist. 0 disables.
+   * Valid range: 0-50. Default: 10.
+   */
+  summaryTailMessages?: number;
 
   /** Any extra key-value data */
   [key: string]: unknown;
@@ -288,6 +356,8 @@ export interface Message {
   activeSwipeIndex: number;
   /** Number of swipes for this message (0 or 1 = no alternatives) */
   swipeCount?: number;
+  /** Server-side SQLite row position used only for stable pagination cursors */
+  rowid?: number;
   createdAt: string;
   /** Extra display data */
   extra: MessageExtra;
@@ -322,6 +392,13 @@ export interface MessageExtra {
   } | null;
   /** Stored for generation context but hidden from the visible chat transcript */
   hiddenFromUser?: boolean;
+  /** When true, the visible message is excluded from future AI prompt context */
+  hiddenFromAI?: boolean;
+  /**
+   * Cached pipeline injections (prose-guardian, director, knowledge-retrieval, etc.)
+   * saved with this assistant message — reused when regenerating that swipe unless refreshed.
+   */
+  contextInjections?: Array<{ agentType: string; text: string }> | null;
 }
 
 /** Metadata about how a message was generated. */
@@ -373,5 +450,15 @@ export interface OocInfluence {
   content: string;
   anchorMessageId: string;
   consumed: boolean;
+  createdAt: string;
+}
+
+/** A durable note emitted from a conversation chat that persists in the connected roleplay's prompt until cleared. */
+export interface ConversationNote {
+  id: string;
+  sourceChatId: string;
+  targetChatId: string;
+  content: string;
+  anchorMessageId: string;
   createdAt: string;
 }

@@ -13,7 +13,10 @@ import type {
   SceneAnalysis,
   SceneIllustrationRequest,
   SceneSegmentEffect,
+  SceneSpotifyTrackCandidate,
+  SceneSpotifyTrackSelection,
 } from "@marinara-engine/shared";
+import { normalizeLocationKind, normalizeMusicGenre, normalizeMusicIntensity } from "@marinara-engine/shared";
 import { logger } from "../../lib/logger.js";
 
 // ── Expression normalization ──
@@ -126,6 +129,39 @@ function sanitizeIllustration(raw: unknown): SceneIllustrationRequest | null {
   };
 }
 
+function sanitizeSpotifyTrack(
+  raw: unknown,
+  candidates: SceneSpotifyTrackCandidate[] | undefined,
+): SceneSpotifyTrackSelection | null {
+  if (!candidates?.length) return null;
+  if (!raw || raw === "null") return null;
+
+  const uri =
+    typeof raw === "string"
+      ? sanitizeString(raw)
+      : raw && typeof raw === "object"
+        ? sanitizeString((raw as Record<string, unknown>).uri)
+        : null;
+  if (!uri) return null;
+
+  const candidate = candidates.find((track) => track.uri === uri);
+  if (!candidate) {
+    logger.debug(`[postprocess] spotifyTrack: "${uri}" → null (not in candidate list)`);
+    return null;
+  }
+
+  const reason =
+    raw && typeof raw === "object" ? sanitizeString((raw as Record<string, unknown>).reason)?.slice(0, 240) : null;
+
+  return {
+    uri: candidate.uri,
+    name: candidate.name,
+    artist: candidate.artist,
+    album: candidate.album ?? null,
+    reason: reason ?? null,
+  };
+}
+
 function normalizeDirection(direction: DirectionCommand): DirectionCommand | null {
   if (!VALID_DIRECTION_EFFECTS.has(direction.effect)) return null;
 
@@ -201,8 +237,10 @@ function bestMatch(prose: string, tags: string[]): string | null {
 export interface PostProcessContext {
   availableBackgrounds: string[];
   availableSfx: string[];
+  availableSpotifyTracks?: SceneSpotifyTrackCandidate[];
   validWidgetIds: Set<string>;
   characterNames: string[];
+  canGenerateBackgrounds?: boolean;
 }
 
 /**
@@ -239,14 +277,14 @@ function postProcessSegment(seg: SceneSegmentEffect, ctx: PostProcessContext): S
   // Background — fuzzy-match or synthesise generated tag
   if (out.background && out.background !== "null") {
     if (!ctx.availableBackgrounds.includes(out.background)) {
-      if (out.background.startsWith("backgrounds:generated:")) {
+      if (out.background.startsWith("backgrounds:generated:") && ctx.canGenerateBackgrounds) {
         // Already valid generated format
       } else {
         const matched = bestMatch(out.background, ctx.availableBackgrounds);
         if (matched) {
           logger.debug(`[postprocess] seg[${seg.segment}] bg: "${out.background}" → "${matched}"`);
           out.background = matched;
-        } else {
+        } else if (ctx.canGenerateBackgrounds) {
           const slug = out.background
             .toLowerCase()
             .replace(/[^a-z0-9]+/g, "-")
@@ -255,6 +293,9 @@ function postProcessSegment(seg: SceneSegmentEffect, ctx: PostProcessContext): S
           const gen = `backgrounds:generated:${slug}`;
           logger.debug(`[postprocess] seg[${seg.segment}] bg: "${out.background}" → "${gen}" (no tag match)`);
           out.background = gen;
+        } else {
+          logger.debug(`[postprocess] seg[${seg.segment}] bg: "${out.background}" → dropped (generation unavailable)`);
+          out.background = undefined;
         }
       }
     }
@@ -355,11 +396,10 @@ function capCombinedDirections(result: SceneAnalysis): SceneAnalysis {
  */
 export function postProcessSceneResult(raw: SceneAnalysis, ctx: PostProcessContext): SceneAnalysis {
   const result = { ...raw };
+  const rawRecord = raw as unknown as Record<string, unknown>;
 
   // ── Sanitize string "null" → actual null (grammar sometimes emits the string) ──
   if (result.background === "null") result.background = null;
-  if (result.music === "null") result.music = null;
-  if (result.ambient === "null") result.ambient = null;
   if (result.weather === "null") result.weather = null;
   if (result.timeOfDay === "null") result.timeOfDay = null;
   if ((result.season as unknown) === "null") result.season = null;
@@ -403,17 +443,24 @@ export function postProcessSceneResult(raw: SceneAnalysis, ctx: PostProcessConte
     }
   }
 
+  result.music = null;
+  result.ambient = null;
+  result.musicGenre = normalizeMusicGenre(rawRecord.musicGenre);
+  result.musicIntensity = normalizeMusicIntensity(rawRecord.musicIntensity);
+  result.locationKind = normalizeLocationKind(rawRecord.locationKind);
+  result.spotifyTrack = sanitizeSpotifyTrack(rawRecord.spotifyTrack, ctx.availableSpotifyTracks);
+
   // ── Background ──
   if (result.background && !ctx.availableBackgrounds.includes(result.background)) {
     // If the model already output a backgrounds:generated:* tag, leave it as-is
-    if (result.background.startsWith("backgrounds:generated:")) {
+    if (result.background.startsWith("backgrounds:generated:") && ctx.canGenerateBackgrounds) {
       // Already valid generated format — no change needed
     } else {
       const matched = bestMatch(result.background, ctx.availableBackgrounds);
       if (matched) {
         logger.debug(`[postprocess] bg: "${result.background}" → "${matched}"`);
         result.background = matched;
-      } else {
+      } else if (ctx.canGenerateBackgrounds) {
         // Synthesise a generated-background slug the client can render
         const slug = result.background
           .toLowerCase()
@@ -423,12 +470,15 @@ export function postProcessSceneResult(raw: SceneAnalysis, ctx: PostProcessConte
         const gen = `backgrounds:generated:${slug}`;
         logger.debug(`[postprocess] bg: "${result.background}" → "${gen}" (no tag match)`);
         result.background = gen;
+      } else {
+        logger.debug(`[postprocess] bg: "${result.background}" → null (generation unavailable)`);
+        result.background = null;
       }
     }
   }
 
-  // Music and ambient are scored deterministically by scoreMusic/scoreAmbient on the server.
-  // The LLM is no longer asked to produce these fields, so no postprocessing needed.
+  // Music and ambient file tags are scored deterministically by scoreMusic/scoreAmbient.
+  // Scene analysis only provides compact hints: musicGenre, musicIntensity, locationKind.
 
   // ── Weather — map non-visual values to visual equivalents ──
   if (result.weather) {

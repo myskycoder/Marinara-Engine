@@ -30,10 +30,15 @@ function getRecord(value: unknown): Record<string, unknown> | null {
 }
 
 function appendActiveAltDescriptions(description: string, altDescriptions: unknown): string {
-  if (typeof altDescriptions !== "string" || !altDescriptions.trim()) return description;
-
   try {
-    const parsed = JSON.parse(altDescriptions) as Array<{ active?: boolean; content?: string }>;
+    const parsed =
+      typeof altDescriptions === "string"
+        ? altDescriptions.trim()
+          ? (JSON.parse(altDescriptions) as Array<{ active?: boolean; content?: string }>)
+          : []
+        : Array.isArray(altDescriptions)
+          ? (altDescriptions as Array<{ active?: boolean; content?: string }>)
+          : [];
     const activeDescriptions = parsed
       .filter((item) => item?.active && typeof item.content === "string" && item.content.trim().length > 0)
       .map((item) => item.content!.trim());
@@ -79,7 +84,10 @@ export function parseCharacterMacroData(
     return {
       id: raw.id,
       name: getString(data.name) || "Unknown",
-      description: getString(data.description),
+      description: appendActiveAltDescriptions(
+        getString(data.description),
+        extensions?.altDescriptions ?? extensions?.descriptionExtensions,
+      ),
       personality: getString(data.personality),
       backstory: getString(extensions?.backstory),
       appearance: getString(extensions?.appearance),
@@ -203,6 +211,10 @@ export function resolveMessageMacros(
   context: Parameters<typeof buildMessageMacroContext>[0],
 ): string {
   return resolveMacros(template, buildMessageMacroContext(context), { trimResult: false });
+}
+
+export function isPromptPreviewMacro(input: string): boolean {
+  return /^\{\{\s*(?:prompt|prompt_preview|preview_prompt)\s*\}\}$/i.test(input.trim());
 }
 
 export function resolveInputMacrosForChat(

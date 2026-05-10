@@ -1,37 +1,158 @@
 // ──────────────────────────────────────────────
 // Chat: Conversation Input — Discord-style
 // ──────────────────────────────────────────────
-import { useState, useRef, useCallback, useEffect } from "react";
-import { Send, Smile, StopCircle, X, Plus, ImagePlay, AtSign, Users } from "lucide-react";
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import {
+  Send,
+  Smile,
+  StopCircle,
+  X,
+  Plus,
+  ImagePlay,
+  AtSign,
+  Users,
+  UserCheck,
+  Languages,
+  Loader2,
+  FileText,
+  RefreshCw,
+  Bookmark,
+  Trash2,
+} from "lucide-react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { useChatStore } from "../../stores/chat.store";
 import { useUIStore } from "../../stores/ui.store";
 import { useGenerate } from "../../hooks/use-generate";
 import { useApplyRegex } from "../../hooks/use-apply-regex";
-import { useCreateMessage, useChat, chatKeys } from "../../hooks/use-chats";
-import { characterKeys } from "../../hooks/use-characters";
+import { useCreateMessage, useUpdateMessageExtra, useChat, chatKeys } from "../../hooks/use-chats";
+import { characterKeys, usePersonas, useUpdatePersona } from "../../hooks/use-characters";
 import {
   matchSlashCommand,
   getSlashCompletions,
   type SlashCommand,
   type SlashCommandContext,
 } from "../../lib/slash-commands";
-import { resolveInputMacrosForChat } from "../../lib/chat-macros";
+import { isPromptPreviewMacro, resolveInputMacrosForChat } from "../../lib/chat-macros";
 import { cn, getAvatarCropStyle } from "../../lib/utils";
+import { translateDraftText } from "../../lib/draft-translation";
 import { QuickConnectionSwitcher } from "./QuickConnectionSwitcher";
 import { QuickPersonaSwitcher } from "./QuickPersonaSwitcher";
 import { QuickSwitcherMobile } from "./QuickSwitcherMobile";
 import { EmojiPicker } from "../ui/EmojiPicker";
 import { GifPicker } from "../ui/GifPicker";
+import { SpeechToTextButton } from "../ui/SpeechToTextButton";
 import { MariThinkingIndicator } from "./MariThinkingIndicator";
+import { MariCapabilityNotice } from "./MariCapabilityNotice";
 import { SlashCommandFeedback } from "./SlashCommandFeedback";
+import type { Message } from "@marinara-engine/shared";
 
 interface Attachment {
   type: string;
   data: string;
   name: string;
+}
+
+const TEXT_ATTACHMENT_EXTENSIONS = new Set([
+  "csv",
+  "json",
+  "jsonl",
+  "log",
+  "markdown",
+  "md",
+  "txt",
+  "xml",
+  "yaml",
+  "yml",
+]);
+
+const SAVED_STATUS_LIMIT = 12;
+const SAVED_STATUS_MAX_LENGTH = 120;
+
+interface PersonaStatusRow {
+  id: string;
+  name?: string;
+  isActive?: string | boolean;
+  savedStatusOptions?: string | string[] | null;
+}
+
+function getFileExtension(fileName: string): string {
+  const match = fileName.toLowerCase().match(/\.([a-z0-9]+)$/);
+  return match?.[1] ?? "";
+}
+
+function inferAttachmentType(file: File): string {
+  if (file.type) return file.type;
+  const extension = getFileExtension(file.name);
+  if (extension === "json" || extension === "jsonl") return "application/json";
+  if (extension === "csv") return "text/csv";
+  if (extension === "md" || extension === "markdown") return "text/markdown";
+  if (extension === "xml") return "application/xml";
+  if (extension === "yaml" || extension === "yml") return "application/yaml";
+  if (extension === "txt" || extension === "log") return "text/plain";
+  return "application/octet-stream";
+}
+
+function isSupportedChatAttachment(file: File): boolean {
+  if (file.type.startsWith("image/")) return true;
+  if (file.type.startsWith("text/")) return true;
+  const type = inferAttachmentType(file);
+  if (
+    type === "application/json" ||
+    type === "application/xml" ||
+    type === "application/yaml" ||
+    type === "application/x-yaml"
+  ) {
+    return true;
+  }
+  return TEXT_ATTACHMENT_EXTENSIONS.has(getFileExtension(file.name));
+}
+
+function normalizeSavedStatus(value: string): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, SAVED_STATUS_MAX_LENGTH);
+}
+
+function parseSavedStatusOptions(value: PersonaStatusRow["savedStatusOptions"]): string[] {
+  const raw = (() => {
+    if (Array.isArray(value)) return value;
+    if (typeof value !== "string" || !value.trim()) return [];
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  })();
+
+  const byKey = new Map<string, string>();
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    const normalized = normalizeSavedStatus(item);
+    if (!normalized) continue;
+    byKey.set(normalized.toLowerCase(), normalized);
+  }
+  return [...byKey.values()].slice(0, SAVED_STATUS_LIMIT);
+}
+
+function resolveActivePersona(
+  personas: PersonaStatusRow[] | undefined,
+  chat: { personaId?: string | null; mode?: string } | undefined | null,
+) {
+  if (!personas) return undefined;
+  const chatPersonaId = chat?.personaId ?? null;
+  if (chatPersonaId) return personas.find((p) => p.id === chatPersonaId);
+  if (chat?.mode === "game") return undefined;
+  return personas.find((p) => p.isActive === "true" || p.isActive === true);
+}
+
+function readFileAsDataUrl(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read file"));
+    reader.readAsDataURL(file);
+  });
 }
 
 /** Convert a GIF (or any image) blob to PNG via canvas, returning a new Blob + data URL */
@@ -88,14 +209,22 @@ interface ConversationInputProps {
     conversationStatus?: "online" | "idle" | "dnd" | "offline";
     conversationActivity?: string;
   }>;
+  onPeekPrompt?: () => void;
 }
 
-export function ConversationInput({ characterNames = [], groupResponseOrder, chatCharacters }: ConversationInputProps) {
+export function ConversationInput({
+  characterNames = [],
+  groupResponseOrder,
+  chatCharacters,
+  onPeekPrompt,
+}: ConversationInputProps) {
   const [hasInput, setHasInput] = useState(false);
   const [completions, setCompletions] = useState<SlashCommand[]>([]);
   const [selectedCompletion, setSelectedCompletion] = useState(0);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [pendingAttachmentReads, setPendingAttachmentReads] = useState(0);
+  const [isTranslatingDraft, setIsTranslatingDraft] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [gifOpen, setGifOpen] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -106,10 +235,15 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
   const [mentionStartPos, setMentionStartPos] = useState(0);
   const [charPickerOpen, setCharPickerOpen] = useState(false);
   const [charPickerPos, setCharPickerPos] = useState<{ left: number; top: number } | null>(null);
+  const [statusMenuOpen, setStatusMenuOpen] = useState(false);
+  const [statusMenuPos, setStatusMenuPos] = useState<{ left: number; top: number } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const emojiButtonRef = useRef<HTMLButtonElement>(null);
   const gifButtonRef = useRef<HTMLButtonElement>(null);
+  const statusButtonRef = useRef<HTMLButtonElement>(null);
+  const statusMenuRef = useRef<HTMLDivElement>(null);
   const charPickerBtnRef = useRef<HTMLButtonElement>(null);
   const charPickerMenuRef = useRef<HTMLDivElement>(null);
   const inputBarRef = useRef<HTMLDivElement>(null);
@@ -130,9 +264,40 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
   const { applyToUserInput } = useApplyRegex();
   const enterToSend = useUIStore((s) => s.enterToSendConvo);
   const guideGenerations = useUIStore((s) => s.guideGenerations);
+  const impersonateShowQuickButton = useUIStore((s) => s.impersonateShowQuickButton);
+  const speechToTextEnabled = useUIStore((s) => s.speechToTextEnabled);
+  const userActivity = useUIStore((s) => s.userActivity);
+  const setUserActivity = useUIStore((s) => s.setUserActivity);
   const createMessage = useCreateMessage(activeChatId);
+  const updateMessageExtra = useUpdateMessageExtra(activeChatId);
+  const { data: allPersonas } = usePersonas();
+  const updatePersona = useUpdatePersona();
   const qc = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const isReadingAttachments = pendingAttachmentReads > 0;
+  const hasPendingAttachments = isReadingAttachments || attachments.length > 0;
+
+  // Read from the existing infinite-message cache so an empty Send can retry
+  // after a failed generation without adding a second user message.
+  const [, bumpMessagesTick] = useState(0);
+  useEffect(() => {
+    if (!activeChatId) return;
+    const targetKey = JSON.stringify(chatKeys.messages(activeChatId));
+    return qc.getQueryCache().subscribe((event) => {
+      if (JSON.stringify(event.query.queryKey) === targetKey) {
+        bumpMessagesTick((n) => n + 1);
+      }
+    });
+  }, [activeChatId, qc]);
+  const messagesData = qc.getQueryData<InfiniteData<Message[]>>(chatKeys.messages(activeChatId ?? ""));
+  const lastMessageRole = useMemo(() => {
+    const firstPage = messagesData?.pages?.[0];
+    return firstPage?.[firstPage.length - 1]?.role ?? null;
+  }, [messagesData]);
+  const canRetry = !isStreaming && groupResponseOrder !== "manual" && lastMessageRole === "user";
+  const canSubmit = hasInput || attachments.length > 0 || canRetry;
+  const showRetrySendState = canRetry && !hasInput && attachments.length === 0;
+  const sendButtonTitle = isActuallyGenerating ? "Stop generating" : showRetrySendState ? "Retry generation" : "Send";
 
   const syncInputState = useCallback(
     (value: string) => {
@@ -146,8 +311,13 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
   const prevChatIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (prevChatIdRef.current !== activeChatId) {
-      if (prevChatIdRef.current && textareaRef.current?.value) {
-        setInputDraft(prevChatIdRef.current, textareaRef.current.value);
+      if (prevChatIdRef.current && textareaRef.current) {
+        const prevText = textareaRef.current.value;
+        if (prevText.trim()) {
+          setInputDraft(prevChatIdRef.current, prevText);
+        } else {
+          clearInputDraft(prevChatIdRef.current);
+        }
       }
       prevChatIdRef.current = activeChatId;
       if (textareaRef.current) {
@@ -158,45 +328,89 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
         textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 160)}px`;
       }
     }
-  }, [activeChatId, setInputDraft, syncInputState]);
+  }, [activeChatId, setInputDraft, clearInputDraft, syncInputState]);
 
   // Save draft on unmount
   useEffect(() => {
     const el = textareaRef.current;
     const chatId = activeChatId;
     return () => {
-      if (chatId && el?.value) {
-        useChatStore.getState().setInputDraft(chatId, el.value);
+      if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
+      if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
+      if (chatId && el) {
+        const text = el.value;
+        if (text.trim()) {
+          useChatStore.getState().setInputDraft(chatId, text);
+        } else {
+          useChatStore.getState().clearInputDraft(chatId);
+        }
       }
     };
   }, [activeChatId]);
 
-  const handleFileUpload = useCallback(async (files: FileList | null) => {
+  // Flush immediately when the page is being closed or discarded.
+  useEffect(() => {
+    const flushDraft = () => {
+      if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
+      const chatId = useChatStore.getState().activeChatId;
+      const text = textareaRef.current?.value ?? "";
+      if (!chatId) return;
+      if (text.trim()) {
+        useChatStore.getState().setInputDraft(chatId, text);
+      } else {
+        useChatStore.getState().clearInputDraft(chatId);
+      }
+    };
+    window.addEventListener("pagehide", flushDraft);
+    return () => window.removeEventListener("pagehide", flushDraft);
+  }, []);
+
+  const handleFileUpload = useCallback(async (files: FileList | File[] | null) => {
     if (!files) return;
     const MAX_SIZE = 20 * 1024 * 1024;
-    for (const file of Array.from(files)) {
+    const acceptedFiles = Array.from(files).filter((file) => {
       if (file.size > MAX_SIZE) {
         toast.error(`${file.name} exceeds 20 MB limit`);
-        continue;
+        return false;
       }
+      if (!isSupportedChatAttachment(file)) {
+        toast.error(
+          `${file.name || "That file"} is not supported in chat. Attach images or text files like JSON, TXT, Markdown, or CSV.`,
+        );
+        return false;
+      }
+      return true;
+    });
+
+    if (acceptedFiles.length === 0) return;
+    setPendingAttachmentReads((count) => count + acceptedFiles.length);
+
+    for (const file of acceptedFiles) {
+      const displayName = file.name || "pasted-file";
       // Convert GIFs to PNG (Gemini and some providers don't support image/gif)
       if (file.type === "image/gif") {
         try {
           const { dataUrl } = await convertToPng(file);
           setAttachments((prev) => [
             ...prev,
-            { type: "image/png", data: dataUrl, name: file.name.replace(/\.gif$/i, ".png") },
+            { type: "image/png", data: dataUrl, name: displayName.replace(/\.gif$/i, ".png") },
           ]);
         } catch {
-          toast.error(`Failed to convert ${file.name}`);
+          toast.error(`Failed to convert ${displayName}`);
+        } finally {
+          setPendingAttachmentReads((count) => Math.max(0, count - 1));
         }
         continue;
       }
-      const reader = new FileReader();
-      reader.onload = () => {
-        setAttachments((prev) => [...prev, { type: file.type, data: reader.result as string, name: file.name }]);
-      };
-      reader.readAsDataURL(file);
+
+      try {
+        const data = await readFileAsDataUrl(file);
+        setAttachments((prev) => [...prev, { type: inferAttachmentType(file), data, name: displayName }]);
+      } catch {
+        toast.error(`Failed to read ${displayName}`);
+      } finally {
+        setPendingAttachmentReads((count) => Math.max(0, count - 1));
+      }
     }
   }, []);
 
@@ -204,18 +418,16 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
     (e: React.ClipboardEvent) => {
       const items = e.clipboardData?.items;
       if (!items || !activeChatId) return;
-      const imageFiles: File[] = [];
+      const files: File[] = [];
       for (const item of Array.from(items)) {
-        if (item.kind === "file" && item.type.startsWith("image/")) {
+        if (item.kind === "file") {
           const file = item.getAsFile();
-          if (file) imageFiles.push(file);
+          if (file) files.push(file);
         }
       }
-      if (imageFiles.length > 0) {
+      if (files.length > 0) {
         e.preventDefault();
-        const dt = new DataTransfer();
-        for (const f of imageFiles) dt.items.add(f);
-        handleFileUpload(dt.files);
+        handleFileUpload(files);
       }
     },
     [activeChatId, handleFileUpload],
@@ -226,11 +438,9 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
       e.preventDefault();
       setIsDragging(false);
       if (!activeChatId) return;
-      const imageFiles = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/"));
-      if (imageFiles.length > 0) {
-        const dt = new DataTransfer();
-        for (const f of imageFiles) dt.items.add(f);
-        handleFileUpload(dt.files);
+      const files = Array.from(e.dataTransfer.files);
+      if (files.length > 0) {
+        handleFileUpload(files);
       }
     },
     [activeChatId, handleFileUpload],
@@ -277,19 +487,45 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
       const cursorPos = before.length + name.length + 2; // +2 for @ and space
       el.selectionStart = el.selectionEnd = cursorPos;
       syncInputState(el.value);
+      if (activeChatId) setInputDraft(activeChatId, el.value);
       setMentionQuery(null);
       setMentionCompletions([]);
       el.focus();
     },
-    [mentionStartPos, syncInputState],
+    [activeChatId, mentionStartPos, setInputDraft, syncInputState],
   );
 
   const handleSend = useCallback(async () => {
     if (!activeChatId) return;
-    const raw = textareaRef.current?.value.trim() ?? "";
-    if (!raw && attachments.length === 0) {
+    if (isReadingAttachments) {
+      toast.info("Still reading attached files. Send will be ready in a moment.");
       return;
     }
+    const raw = textareaRef.current?.value.trim() ?? "";
+    if (!raw && attachments.length === 0) {
+      if (canRetry) {
+        try {
+          await generate({ chatId: activeChatId, connectionId: null });
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : "Generation failed";
+          toast.error(msg);
+        }
+      }
+      return;
+    }
+
+    if (isPromptPreviewMacro(raw)) {
+      if (textareaRef.current) {
+        textareaRef.current.value = "";
+        textareaRef.current.style.height = "auto";
+      }
+      clearInputDraft(activeChatId);
+      syncInputState("");
+      setAttachments([]);
+      onPeekPrompt?.();
+      return;
+    }
+
     // If already generating for this chat, just save the message without
     // triggering another generation — the in-progress generation will see
     // it (server re-reads messages after any busy delay).
@@ -320,14 +556,24 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
       }
       clearInputDraft(activeChatId);
       syncInputState("");
-      const currentAttachments = [...attachments];
+      const currentAttachments = attachments.map((a) => ({
+        type: a.type,
+        data: a.data,
+        filename: a.name,
+        name: a.name,
+      }));
       setAttachments([]);
-      createMessage.mutate({
+      const created = await createMessage.mutateAsync({
         role: "user",
         content: message,
         characterId: null,
-        ...(currentAttachments.length > 0 && { attachments: currentAttachments }),
       });
+      if (currentAttachments.length) {
+        await updateMessageExtra.mutateAsync({
+          messageId: created.id,
+          extra: { attachments: currentAttachments },
+        });
+      }
       return;
     }
 
@@ -382,18 +628,24 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
     clearInputDraft(activeChatId);
     syncInputState("");
 
-    const pendingAttachments = attachments.map((a) => ({ type: a.type, data: a.data }));
+    const pendingAttachments = attachments.map((a) => ({ type: a.type, data: a.data, filename: a.name, name: a.name }));
     setAttachments([]);
 
     // Extract @mentions from the raw message (before regex transforms)
     const mentioned = extractMentions(raw);
 
     if (groupResponseOrder === "manual" && mentioned.length === 0) {
-      await createMessage.mutateAsync({
+      const created = await createMessage.mutateAsync({
         role: "user",
         content: message,
         characterId: null,
       });
+      if (pendingAttachments.length) {
+        await updateMessageExtra.mutateAsync({
+          messageId: created.id,
+          extra: { attachments: pendingAttachments },
+        });
+      }
       return;
     }
 
@@ -407,17 +659,57 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
   }, [
     activeChatId,
     attachments,
+    canRetry,
+    isReadingAttachments,
     isStreaming,
     generate,
     applyToUserInput,
     extractMentions,
     clearInputDraft,
     createMessage,
+    updateMessageExtra,
     characterNames,
     groupResponseOrder,
     qc,
     syncInputState,
+    onPeekPrompt,
   ]);
+
+  const handleImpersonateQuickButton = useCallback(async () => {
+    if (!activeChatId || isStreaming) return;
+    if (hasPendingAttachments) {
+      toast.info("Clear or send attachments before using quick impersonate.");
+      return;
+    }
+    const text = textareaRef.current?.value?.trim() ?? "";
+    if (!text) return;
+    const { impersonatePresetId, impersonateConnectionId, impersonateBlockAgents, impersonatePromptTemplate } =
+      useUIStore.getState();
+    const trimmedPromptTemplate = impersonatePromptTemplate.trim();
+    try {
+      const generated = await generate({
+        chatId: activeChatId,
+        connectionId: null,
+        impersonate: true,
+        userMessage: text,
+        ...(impersonatePresetId ? { impersonatePresetId } : {}),
+        ...(impersonateConnectionId ? { impersonateConnectionId } : {}),
+        ...(impersonateBlockAgents ? { impersonateBlockAgents: true } : {}),
+        ...(trimmedPromptTemplate ? { impersonatePromptTemplate: trimmedPromptTemplate } : {}),
+      });
+      if (generated) {
+        if (textareaRef.current) {
+          textareaRef.current.value = "";
+          textareaRef.current.style.height = "auto";
+        }
+        syncInputState("");
+        clearInputDraft(activeChatId);
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "Impersonate failed";
+      toast.error(msg);
+    }
+  }, [activeChatId, isStreaming, hasPendingAttachments, generate, syncInputState, clearInputDraft]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -464,6 +756,7 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
           if (cmd && textareaRef.current) {
             textareaRef.current.value = `/${cmd.name} `;
             syncInputState(textareaRef.current.value);
+            if (activeChatId) setInputDraft(activeChatId, textareaRef.current.value);
             setCompletions([]);
           }
           return;
@@ -482,12 +775,14 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
     },
     [
       completions,
+      activeChatId,
       selectedCompletion,
       mentionCompletions,
       selectedMention,
       insertMention,
       enterToSend,
       handleSend,
+      setInputDraft,
       syncInputState,
     ],
   );
@@ -503,6 +798,19 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
       el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
     }, 150);
     syncInputState(el.value);
+
+    if (activeChatId) {
+      if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
+      const chatId = activeChatId;
+      const draft = el.value;
+      draftTimerRef.current = setTimeout(() => {
+        if (draft.trim()) {
+          setInputDraft(chatId, draft);
+        } else {
+          clearInputDraft(chatId);
+        }
+      }, 300);
+    }
 
     // Slash completions
     if (el.value.startsWith("/")) {
@@ -535,7 +843,7 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
       setMentionQuery(null);
       setMentionCompletions([]);
     }
-  }, [characterNames, syncInputState]);
+  }, [activeChatId, characterNames, clearInputDraft, setInputDraft, syncInputState]);
 
   useEffect(() => {
     if (hasInput && feedback) setFeedback(null);
@@ -551,9 +859,10 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
       el.value = value.slice(0, start) + emoji + value.slice(end);
       el.selectionStart = el.selectionEnd = start + emoji.length;
       syncInputState(el.value);
+      if (activeChatId) setInputDraft(activeChatId, el.value);
       el.focus();
     },
-    [syncInputState],
+    [activeChatId, setInputDraft, syncInputState],
   );
 
   const handleGifSelect = useCallback(
@@ -629,6 +938,23 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
   }, [charPickerOpen]);
 
   useEffect(() => {
+    if (!statusMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        statusMenuRef.current &&
+        !statusMenuRef.current.contains(target) &&
+        statusButtonRef.current &&
+        !statusButtonRef.current.contains(target)
+      ) {
+        setStatusMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [statusMenuOpen]);
+
+  useEffect(() => {
     if (!charPickerOpen || !charPickerBtnRef.current) return;
     const rect = charPickerBtnRef.current.getBoundingClientRect();
     const inputBox = charPickerBtnRef.current.closest(".rounded-2xl") as HTMLElement | null;
@@ -644,6 +970,129 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
   }, [charPickerOpen]);
 
   const showCharPicker = groupResponseOrder === "manual" && !!chatCharacters && chatCharacters.length > 1;
+  const activePersona = resolveActivePersona(
+    allPersonas as PersonaStatusRow[] | undefined,
+    activeChat as { personaId?: string | null; mode?: string } | undefined,
+  );
+  const savedStatusOptions = parseSavedStatusOptions(activePersona?.savedStatusOptions);
+  const normalizedUserActivity = normalizeSavedStatus(userActivity);
+  const canSaveCurrentStatus =
+    !!activePersona &&
+    !!normalizedUserActivity &&
+    !savedStatusOptions.some((option) => option.toLowerCase() === normalizedUserActivity.toLowerCase());
+  const chatMetadata = activeChat?.metadata
+    ? typeof activeChat.metadata === "string"
+      ? (() => {
+          try {
+            return JSON.parse(activeChat.metadata) as Record<string, unknown>;
+          } catch {
+            return {};
+          }
+        })()
+      : (activeChat.metadata as Record<string, unknown>)
+    : {};
+  const showDraftTranslateButton = chatMetadata.showInputTranslateButton === true;
+
+  useEffect(() => {
+    if (!statusMenuOpen || !statusButtonRef.current) return;
+    const rect = statusButtonRef.current.getBoundingClientRect();
+    const inputBox = statusButtonRef.current.closest(".rounded-2xl") as HTMLElement | null;
+    const anchorTop = inputBox ? inputBox.getBoundingClientRect().top : rect.top;
+    requestAnimationFrame(() => {
+      const menuEl = statusMenuRef.current;
+      const menuHeight = menuEl?.offsetHeight || 260;
+      const menuWidth = menuEl?.offsetWidth || 260;
+      let left = rect.right - menuWidth;
+      if (left < 8) left = 8;
+      setStatusMenuPos({ left, top: Math.max(8, anchorTop - menuHeight - 4) });
+    });
+  }, [statusMenuOpen, savedStatusOptions.length, canSaveCurrentStatus]);
+
+  const handleTranslateDraft = useCallback(async () => {
+    if (!activeChatId || isTranslatingDraft) return;
+    const raw = textareaRef.current?.value ?? "";
+    if (!raw.trim()) return;
+
+    setIsTranslatingDraft(true);
+    try {
+      const translated = await translateDraftText(raw);
+      if (!translated || !textareaRef.current) return;
+      textareaRef.current.value = translated;
+      textareaRef.current.style.height = "auto";
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 160)}px`;
+      syncInputState(translated);
+      setInputDraft(activeChatId, translated);
+      textareaRef.current.focus();
+    } finally {
+      setIsTranslatingDraft(false);
+    }
+  }, [activeChatId, isTranslatingDraft, setInputDraft, syncInputState]);
+
+  const persistSavedStatusOptions = useCallback(
+    async (nextOptions: string[]) => {
+      if (!activePersona) {
+        toast.info("Choose a persona before saving status options.");
+        return;
+      }
+      await updatePersona.mutateAsync({
+        id: activePersona.id,
+        savedStatusOptions: JSON.stringify(nextOptions.slice(0, SAVED_STATUS_LIMIT)),
+      });
+    },
+    [activePersona, updatePersona],
+  );
+
+  const handleSaveCurrentStatus = useCallback(async () => {
+    if (!normalizedUserActivity || !activePersona) return;
+    const nextOptions = [
+      normalizedUserActivity,
+      ...savedStatusOptions.filter((option) => option.toLowerCase() !== normalizedUserActivity.toLowerCase()),
+    ];
+    await persistSavedStatusOptions(nextOptions);
+    toast.success("Saved status for this persona");
+  }, [activePersona, normalizedUserActivity, persistSavedStatusOptions, savedStatusOptions]);
+
+  const handleApplySavedStatus = useCallback(
+    (status: string) => {
+      setUserActivity(status);
+      setStatusMenuOpen(false);
+    },
+    [setUserActivity],
+  );
+
+  const handleDeleteSavedStatus = useCallback(
+    async (status: string) => {
+      const nextOptions = savedStatusOptions.filter((option) => option.toLowerCase() !== status.toLowerCase());
+      await persistSavedStatusOptions(nextOptions);
+      toast.success("Removed saved status");
+    },
+    [persistSavedStatusOptions, savedStatusOptions],
+  );
+
+  const handleSpeechTranscript = useCallback(
+    (transcript: string) => {
+      const el = textareaRef.current;
+      if (!el) return;
+      const start = el.selectionStart ?? el.value.length;
+      const end = el.selectionEnd ?? start;
+      const before = el.value.slice(0, start);
+      const after = el.value.slice(end);
+      const prefix = before && !/\s$/.test(before) ? " " : "";
+      const suffix = after && !/^\s/.test(after) ? " " : "";
+      const nextValue = `${before}${prefix}${transcript}${suffix}${after}`;
+      const nextCursor = before.length + prefix.length + transcript.length;
+
+      el.value = nextValue;
+      el.setSelectionRange(nextCursor, nextCursor);
+      el.style.height = "auto";
+      el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+      syncInputState(nextValue);
+      if (activeChatId) setInputDraft(activeChatId, nextValue);
+      el.focus();
+    },
+    [activeChatId, setInputDraft, syncInputState],
+  );
+
   const statusDotClass = (status?: string) =>
     status === "offline"
       ? "bg-gray-400"
@@ -668,6 +1117,7 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
                 if (textareaRef.current) {
                   textareaRef.current.value = `/${cmd.name} `;
                   syncInputState(textareaRef.current.value);
+                  if (activeChatId) setInputDraft(activeChatId, textareaRef.current.value);
                   setCompletions([]);
                   textareaRef.current.focus();
                 }
@@ -718,13 +1168,16 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
       )}
 
       {/* Attachment preview */}
-      {attachments.length > 0 && (
+      {(attachments.length > 0 || isReadingAttachments) && (
         <div className="mb-2 flex flex-wrap gap-2">
           {attachments.map((att, i) => (
             <div
               key={i}
               className="flex items-center gap-1.5 rounded-lg bg-[var(--secondary)] px-2.5 py-1.5 text-xs ring-1 ring-[var(--border)]"
             >
+              {att.type.startsWith("image/") ? null : (
+                <FileText size="0.875rem" className="shrink-0 text-[var(--muted-foreground)]" />
+              )}
               <span className="max-w-[120px] truncate">{att.name}</span>
               <button
                 onClick={() => setAttachments((prev) => prev.filter((_, idx) => idx !== i))}
@@ -734,10 +1187,17 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
               </button>
             </div>
           ))}
+          {isReadingAttachments && (
+            <div className="flex items-center gap-1.5 rounded-lg bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+              <Loader2 size="0.875rem" className="animate-spin" />
+              Reading file...
+            </div>
+          )}
         </div>
       )}
 
-      {/* Mari command-execution indicator */}
+      {/* Mari capability + thinking indicators */}
+      <MariCapabilityNotice />
       <MariThinkingIndicator />
 
       {/* Input bar */}
@@ -755,9 +1215,13 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
         <input
           ref={fileInputRef}
           type="file"
+          accept="image/*,.txt,.md,.markdown,.json,.jsonl,.csv,.log,.xml,.yaml,.yml"
           multiple
           className="hidden"
-          onChange={(e) => handleFileUpload(e.target.files)}
+          onChange={(e) => {
+            void handleFileUpload(e.target.files);
+            e.target.value = "";
+          }}
         />
         <button
           onClick={() => fileInputRef.current?.click()}
@@ -870,22 +1334,147 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
             </button>
           )}
 
+          {impersonateShowQuickButton && (
+            <button
+              onClick={handleImpersonateQuickButton}
+              disabled={!hasInput || isStreaming || !activeChatId || hasPendingAttachments}
+              className={cn(
+                "flex h-8 w-8 items-center justify-center rounded-full transition-colors",
+                hasInput && activeChatId && !isStreaming && !hasPendingAttachments
+                  ? "text-[var(--primary)] hover:bg-[var(--primary)]/15"
+                  : "text-foreground/20",
+              )}
+              title="Generate as {{user}} using this text as direction"
+            >
+              <UserCheck size="1rem" />
+            </button>
+          )}
+
+          {showDraftTranslateButton && (
+            <button
+              type="button"
+              onClick={() => void handleTranslateDraft()}
+              disabled={!activeChatId || !hasInput || isTranslatingDraft}
+              className={cn(
+                "flex h-8 w-8 items-center justify-center rounded-full transition-colors",
+                hasInput && !isTranslatingDraft
+                  ? "text-foreground/70 hover:bg-foreground/10 hover:text-foreground"
+                  : "text-foreground/25",
+              )}
+              title="Translate draft"
+            >
+              {isTranslatingDraft ? <Loader2 size="1rem" className="animate-spin" /> : <Languages size="1rem" />}
+            </button>
+          )}
+
+          {speechToTextEnabled && (
+            <SpeechToTextButton
+              disabled={!activeChatId}
+              onTranscript={handleSpeechTranscript}
+              className="rounded-full"
+              iconSize={16}
+            />
+          )}
+
+          <button
+            ref={statusButtonRef}
+            type="button"
+            onClick={() => setStatusMenuOpen((v) => !v)}
+            disabled={!activePersona}
+            className={cn(
+              "flex h-8 w-8 items-center justify-center rounded-full transition-colors",
+              statusMenuOpen
+                ? "text-foreground bg-foreground/10"
+                : activePersona
+                  ? "text-foreground/70 hover:bg-foreground/10 hover:text-foreground"
+                  : "text-foreground/25",
+            )}
+            title={activePersona ? "Saved persona statuses" : "Choose a persona to save statuses"}
+          >
+            <Bookmark size="1rem" />
+          </button>
+
           <button
             onClick={isActuallyGenerating ? () => useChatStore.getState().stopGeneration() : handleSend}
+            disabled={!isActuallyGenerating && (isReadingAttachments || !activeChatId || !canSubmit)}
+            aria-label={sendButtonTitle}
             className={cn(
               "flex h-8 w-8 items-center justify-center rounded-xl transition-all duration-200",
               isActuallyGenerating
                 ? "text-foreground hover:opacity-80"
-                : hasInput || attachments.length > 0
+                : canSubmit && !isReadingAttachments
                   ? "text-foreground hover:text-foreground/80 active:scale-90"
                   : "text-foreground/20",
             )}
-            title={isActuallyGenerating ? "Stop generating" : "Send"}
+            title={sendButtonTitle}
           >
-            {isActuallyGenerating ? <StopCircle size="1rem" /> : <Send size="0.9375rem" />}
+            {isActuallyGenerating ? (
+              <StopCircle size="1rem" />
+            ) : showRetrySendState ? (
+              <RefreshCw size="0.9375rem" />
+            ) : (
+              <Send size="0.9375rem" />
+            )}
           </button>
         </div>
       </div>
+      {statusMenuOpen &&
+        createPortal(
+          <div
+            ref={statusMenuRef}
+            className="fixed z-[9999] flex max-h-[320px] min-w-[240px] max-w-[300px] flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-2xl"
+            style={
+              statusMenuPos ? { left: statusMenuPos.left, top: statusMenuPos.top } : { visibility: "hidden" as const }
+            }
+          >
+            <div className="border-b border-[var(--border)] px-3 py-2">
+              <div className="truncate text-xs font-semibold">Saved Statuses</div>
+              <div className="truncate text-[0.625rem] text-[var(--muted-foreground)]">
+                {activePersona?.name ?? "No persona selected"}
+              </div>
+            </div>
+            <div className="min-h-0 overflow-y-auto p-1">
+              {canSaveCurrentStatus && (
+                <button
+                  type="button"
+                  onClick={() => void handleSaveCurrentStatus()}
+                  disabled={updatePersona.isPending}
+                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-[var(--primary)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
+                >
+                  <Plus size="0.875rem" className="shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">Save &quot;{normalizedUserActivity}&quot;</span>
+                </button>
+              )}
+              {savedStatusOptions.length > 0 ? (
+                savedStatusOptions.map((status) => (
+                  <div key={status} className="group flex items-center gap-1 rounded-lg hover:bg-[var(--accent)]">
+                    <button
+                      type="button"
+                      onClick={() => handleApplySavedStatus(status)}
+                      className="min-w-0 flex-1 px-3 py-2 text-left text-xs"
+                    >
+                      <span className="block truncate">{status}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleDeleteSavedStatus(status)}
+                      disabled={updatePersona.isPending}
+                      className="mr-1 rounded-md p-1.5 text-[var(--muted-foreground)] opacity-70 transition-colors hover:text-[var(--destructive)] disabled:opacity-40 sm:opacity-0 sm:group-hover:opacity-100"
+                      title="Remove saved status"
+                    >
+                      <Trash2 size="0.75rem" />
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <div className="px-3 py-4 text-center text-[0.6875rem] text-[var(--muted-foreground)]">
+                  No saved statuses yet
+                </div>
+              )}
+            </div>
+          </div>,
+          document.body,
+        )}
       {showCharPicker &&
         charPickerOpen &&
         createPortal(

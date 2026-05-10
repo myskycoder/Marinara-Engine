@@ -2,7 +2,8 @@
 // Import: Marinara Engine native format (.marinara.json)
 // ──────────────────────────────────────────────
 import type { DB } from "../../db/connection.js";
-import type { ExportEnvelope, ExportType } from "@marinara-engine/shared";
+import { lorebookFilterModeSchema } from "@marinara-engine/shared";
+import type { ExportEnvelope, ExportType, LorebookFilterMode, LorebookMatchingSource } from "@marinara-engine/shared";
 import { createCharactersStorage } from "../storage/characters.storage.js";
 import { createLorebooksStorage } from "../storage/lorebooks.storage.js";
 import { createPromptsStorage } from "../storage/prompts.storage.js";
@@ -24,6 +25,28 @@ function readTimestampOverrides(value: unknown): TimestampOverrides | undefined 
     createdAt: timestamps?.createdAt ?? metadata?.createdAt ?? record.createdAt,
     updatedAt: timestamps?.updatedAt ?? metadata?.updatedAt ?? record.updatedAt,
   });
+}
+
+const VALID_MATCHING_SOURCES = new Set<LorebookMatchingSource>([
+  "character_name",
+  "character_description",
+  "character_personality",
+  "character_scenario",
+  "character_tags",
+  "persona_description",
+  "persona_tags",
+]);
+
+function readMatchingSources(value: unknown): LorebookMatchingSource[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((source): source is LorebookMatchingSource =>
+    VALID_MATCHING_SOURCES.has(source as LorebookMatchingSource),
+  );
+}
+
+function readFilterMode(value: unknown): LorebookFilterMode {
+  const parsed = lorebookFilterModeSchema.safeParse(value);
+  return parsed.success ? parsed.data : "any";
 }
 
 /**
@@ -69,8 +92,25 @@ async function importCharacter(data: unknown, db: DB) {
       : {};
   const existingImportMetadata =
     extensions.importMetadata && typeof extensions.importMetadata === "object"
-      ? (extensions.importMetadata as Record<string, unknown>)
+      ? ({ ...(extensions.importMetadata as Record<string, unknown>) } as Record<string, unknown>)
       : {};
+  // Drop any `lorebookId` carried over from the exporter's database. It
+  // refers to a row in their lorebook table, not ours, so keeping it
+  // leaves an orphan that makes the character editor's "Edit Linked
+  // Lorebook" button open a 404 editor stuck on a permanent shimmer
+  // (`isLoading || !lorebook`). The user can click "Import Embedded
+  // Lorebook" post-import to create a real linked lorebook in this DB.
+  const carriedEmbeddedLorebook =
+    typeof existingImportMetadata.embeddedLorebook === "object" && existingImportMetadata.embeddedLorebook
+      ? (existingImportMetadata.embeddedLorebook as Record<string, unknown>)
+      : null;
+  if (carriedEmbeddedLorebook && "lorebookId" in carriedEmbeddedLorebook) {
+    const { lorebookId: _staleLorebookId, ...sanitized } = carriedEmbeddedLorebook;
+    void _staleLorebookId;
+    existingImportMetadata.embeddedLorebook = sanitized;
+    extensions.importMetadata = existingImportMetadata;
+    charData.extensions = extensions;
+  }
   const cardSpecMetadata =
     typeof d?.spec === "string" || typeof d?.spec_version === "string"
       ? {
@@ -136,7 +176,11 @@ async function importPersona(data: unknown, db: DB) {
 
 async function importLorebook(data: unknown, db: DB) {
   const storage = createLorebooksStorage(db);
-  const d = data as { lorebook?: Record<string, unknown>; entries?: Record<string, unknown>[] };
+  const d = data as {
+    lorebook?: Record<string, unknown>;
+    entries?: Record<string, unknown>[];
+    folders?: Record<string, unknown>[];
+  };
   if (!d?.lorebook) {
     return { success: false, type: "marinara_lorebook" as const, error: "Invalid lorebook data" };
   }
@@ -149,42 +193,100 @@ async function importLorebook(data: unknown, db: DB) {
       scanDepth: Number(lb.scanDepth ?? 2),
       tokenBudget: Number(lb.tokenBudget ?? 2048),
       recursiveScanning: Boolean(lb.recursiveScanning),
+      maxRecursionDepth: Number(lb.maxRecursionDepth ?? 3),
+      characterId: typeof lb.characterId === "string" ? lb.characterId : null,
+      characterIds: Array.isArray(lb.characterIds)
+        ? lb.characterIds.filter((value): value is string => typeof value === "string")
+        : typeof lb.characterId === "string"
+          ? [lb.characterId]
+          : [],
+      personaId: typeof lb.personaId === "string" ? lb.personaId : null,
+      personaIds: Array.isArray(lb.personaIds)
+        ? lb.personaIds.filter((value): value is string => typeof value === "string")
+        : typeof lb.personaId === "string"
+          ? [lb.personaId]
+          : [],
+      chatId: typeof lb.chatId === "string" ? lb.chatId : null,
+      isGlobal: lb.isGlobal === true || lb.isGlobal === "true",
       enabled: lb.enabled !== false,
+      tags: Array.isArray(lb.tags) ? lb.tags.map(String) : [],
       generatedBy: "import",
+      sourceAgentId: typeof lb.sourceAgentId === "string" ? lb.sourceAgentId : null,
     },
     readTimestampOverrides(lb),
   )) as Record<string, unknown> | null;
 
+  // Re-create folders first so we can remap old folder IDs → new folder IDs
+  // before mapping entries. Older exports without `folders` simply skip this
+  // step and every entry lands at root.
+  const folderIdRemap = new Map<string, string>();
+  if (newLb && Array.isArray(d.folders) && d.folders.length > 0) {
+    for (const f of d.folders) {
+      const oldId = typeof f.id === "string" ? f.id : null;
+      const created = (await storage.createFolder(newLb.id as string, {
+        name: String(f.name ?? "Folder"),
+        enabled: f.enabled !== false,
+        parentFolderId: null, // v1 ignores nesting on import
+        order: Number(f.order ?? 0),
+      })) as Record<string, unknown> | null;
+      if (oldId && created?.id) folderIdRemap.set(oldId, created.id as string);
+    }
+  }
+
   if (newLb && Array.isArray(d.entries) && d.entries.length > 0) {
-    const entries = d.entries.map((e) => ({
-      name: String(e.name ?? ""),
-      content: String(e.content ?? ""),
-      keys: Array.isArray(e.keys) ? e.keys.map(String) : [],
-      secondaryKeys: Array.isArray(e.secondaryKeys) ? e.secondaryKeys.map(String) : [],
-      enabled: e.enabled !== false,
-      constant: Boolean(e.constant),
-      selective: Boolean(e.selective),
-      selectiveLogic: (e.selectiveLogic as any) ?? "and",
-      probability: e.probability != null ? Number(e.probability) : null,
-      scanDepth: e.scanDepth != null ? Number(e.scanDepth) : null,
-      matchWholeWords: Boolean(e.matchWholeWords),
-      caseSensitive: Boolean(e.caseSensitive),
-      useRegex: Boolean(e.useRegex),
-      position: Number(e.position ?? 0),
-      depth: Number(e.depth ?? 4),
-      order: Number(e.order ?? 100),
-      role: (e.role as any) ?? "system",
-      sticky: e.sticky != null ? Number(e.sticky) : null,
-      cooldown: e.cooldown != null ? Number(e.cooldown) : null,
-      delay: e.delay != null ? Number(e.delay) : null,
-      group: String(e.group ?? ""),
-      groupWeight: e.groupWeight != null ? Number(e.groupWeight) : null,
-      tag: String(e.tag ?? ""),
-      relationships: (e.relationships as any) ?? {},
-      dynamicState: (e.dynamicState as any) ?? {},
-      activationConditions: (e.activationConditions as any) ?? [],
-      schedule: (e.schedule as any) ?? null,
-    }));
+    const entries = d.entries.map((e) => {
+      const oldFolderId = typeof e.folderId === "string" ? e.folderId : null;
+      const newFolderId = oldFolderId ? (folderIdRemap.get(oldFolderId) ?? null) : null;
+      return {
+        name: String(e.name ?? ""),
+        content: String(e.content ?? ""),
+        // CodeRabbit-flagged: description, ephemeral, locked, and preventRecursion
+        // were absent from the previous map, so an exported lorebook would lose
+        // these fields on re-import. Knowledge-router matching uses description,
+        // ephemeral controls auto-disable countdown, locked protects entries
+        // from the Lorebook Keeper agent, and preventRecursion gates recursive
+        // scanning — all behaviors that should round-trip.
+        description: String(e.description ?? ""),
+        keys: Array.isArray(e.keys) ? e.keys.map(String) : [],
+        secondaryKeys: Array.isArray(e.secondaryKeys) ? e.secondaryKeys.map(String) : [],
+        enabled: e.enabled !== false,
+        constant: Boolean(e.constant),
+        selective: Boolean(e.selective),
+        selectiveLogic: (e.selectiveLogic as any) ?? "and",
+        probability: e.probability != null ? Number(e.probability) : null,
+        scanDepth: e.scanDepth != null ? Number(e.scanDepth) : null,
+        matchWholeWords: Boolean(e.matchWholeWords),
+        caseSensitive: Boolean(e.caseSensitive),
+        useRegex: Boolean(e.useRegex),
+        characterFilterMode: readFilterMode(e.characterFilterMode),
+        characterFilterIds: Array.isArray(e.characterFilterIds) ? e.characterFilterIds.map(String) : [],
+        characterTagFilterMode: readFilterMode(e.characterTagFilterMode),
+        characterTagFilters: Array.isArray(e.characterTagFilters) ? e.characterTagFilters.map(String) : [],
+        generationTriggerFilterMode: readFilterMode(e.generationTriggerFilterMode),
+        generationTriggerFilters: Array.isArray(e.generationTriggerFilters)
+          ? e.generationTriggerFilters.map(String)
+          : [],
+        additionalMatchingSources: readMatchingSources(e.additionalMatchingSources),
+        position: Number(e.position ?? 0),
+        depth: Number(e.depth ?? 4),
+        order: Number(e.order ?? 100),
+        role: (e.role as any) ?? "system",
+        sticky: e.sticky != null ? Number(e.sticky) : null,
+        cooldown: e.cooldown != null ? Number(e.cooldown) : null,
+        delay: e.delay != null ? Number(e.delay) : null,
+        ephemeral: e.ephemeral != null ? Number(e.ephemeral) : null,
+        group: String(e.group ?? ""),
+        groupWeight: e.groupWeight != null ? Number(e.groupWeight) : null,
+        folderId: newFolderId,
+        locked: Boolean(e.locked),
+        preventRecursion: Boolean(e.preventRecursion),
+        tag: String(e.tag ?? ""),
+        relationships: (e.relationships as any) ?? {},
+        dynamicState: (e.dynamicState as any) ?? {},
+        activationConditions: (e.activationConditions as any) ?? [],
+        schedule: (e.schedule as any) ?? null,
+      };
+    });
     await storage.bulkCreateEntries(newLb.id as string, entries);
   }
 

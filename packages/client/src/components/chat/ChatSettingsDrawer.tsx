@@ -2,7 +2,7 @@
 // Chat: Settings Drawer — per-chat configuration
 // ──────────────────────────────────────────────
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
-import { useQueryClient, useQueries } from "@tanstack/react-query";
+import { useQuery, useQueryClient, useQueries } from "@tanstack/react-query";
 import {
   X,
   Users,
@@ -12,6 +12,7 @@ import {
   Plug,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Check,
   Plus,
   Trash2,
@@ -21,6 +22,8 @@ import {
   Sparkles,
   Image,
   Pencil,
+  Clock,
+  AlertTriangle,
   GripVertical,
   MessageCircle,
   Bot,
@@ -43,6 +46,11 @@ import {
   FilePlus2,
   Upload,
   Download,
+  Star,
+  StickyNote,
+  Drama,
+  RotateCcw,
+  Music2,
 } from "lucide-react";
 import { cn, getAvatarCropStyle, type AvatarCrop } from "../../lib/utils";
 import { showAlertDialog, showConfirmDialog, showPromptDialog } from "../../lib/app-dialogs";
@@ -73,9 +81,20 @@ import {
   useChatMemories,
   useDeleteChatMemory,
   useClearChatMemories,
+  useRefreshChatMemories,
+  useChatNotes,
+  useDeleteChatNote,
+  useClearChatNotes,
   chatKeys,
 } from "../../hooks/use-chats";
 import { api } from "../../lib/api-client";
+import { getChatDisplayName } from "../../lib/chat-display";
+import {
+  getAgentRunIntervalMeta,
+  getCadenceInputValue,
+  parseCadenceInputValue,
+  stepCadenceValue,
+} from "../../lib/agent-cadence";
 import { getCharacterTitle, parseCharacterDisplayData } from "../../lib/character-display";
 import { useUIStore } from "../../stores/ui.store";
 import {
@@ -86,19 +105,42 @@ import {
   useDeleteChatPreset,
   useApplyChatPreset,
   useImportChatPreset,
+  useSetActiveChatPreset,
 } from "../../hooks/use-chat-presets";
-import type { AgentPhase, ChatMode, ChatMemoryChunk, ChatPreset, ChatPresetSettings } from "@marinara-engine/shared";
+import type {
+  AgentPhase,
+  ChatMode,
+  ChatMemoryChunk,
+  ChatPreset,
+  ChatPresetSettings,
+  ConversationNote,
+} from "@marinara-engine/shared";
 import { useAgentConfigs, useCreateAgent, useUpdateAgent, type AgentConfigRow } from "../../hooks/use-agents";
 import { useAgentStore } from "../../stores/agent.store";
 import {
   BUILT_IN_AGENTS,
   BUILT_IN_TOOLS,
+  DEFAULT_AGENT_CONTEXT_SIZE,
   DEFAULT_AGENT_TOOLS,
   GAME_MODE_DEFAULT_AGENT_IDS,
+  DEFAULT_IMPERSONATE_PROMPT,
+  DEFAULT_AGENT_MAX_TOKENS,
+  DEFAULT_AGENT_PROMPTS,
+  LIMITS,
+  MAX_AGENT_MAX_TOKENS,
+  MIN_AGENT_MAX_TOKENS,
+  estimateAgentLoadCost,
+  AGENT_COST_HIGH_CALLS,
+  AGENT_COST_HIGH_TOKENS,
   getDefaultBuiltInAgentSettings,
 } from "@marinara-engine/shared";
-import type { Chat, CharacterGroup } from "@marinara-engine/shared";
-import { useCustomTools, type CustomToolRow } from "../../hooks/use-custom-tools";
+import type { Chat, CharacterGroup, Lorebook } from "@marinara-engine/shared";
+import {
+  isCustomToolSelectable,
+  useCustomToolCapabilities,
+  useCustomTools,
+  type CustomToolRow,
+} from "../../hooks/use-custom-tools";
 import { useHapticStatus, useHapticConnect, useHapticDisconnect, useHapticStartScan } from "../../hooks/use-haptic";
 import { normalizeSpritePlacements } from "./sprite-placement";
 
@@ -120,6 +162,29 @@ const HIDDEN_ROLEPLAY_AGENTS = new Set([
   "autonomous-messenger",
 ]);
 
+type GameSpotifySourceType = "liked" | "playlist" | "artist" | "any";
+
+const GAME_SPOTIFY_SOURCE_OPTIONS: Array<{ id: GameSpotifySourceType; label: string; description: string }> = [
+  { id: "liked", label: "Liked Songs", description: "Pick from the user's saved tracks first." },
+  { id: "playlist", label: "Playlist", description: "Keep choices inside one Spotify playlist." },
+  { id: "artist", label: "Artist", description: "Search only around a named artist, like HOYO-MiX." },
+  { id: "any", label: "Any Spotify", description: "Let the DJ use Spotify search when it fits." },
+];
+
+function normalizeGameSpotifySourceType(value: unknown): GameSpotifySourceType {
+  return value === "playlist" || value === "artist" || value === "any" ? value : "liked";
+}
+
+const MODE_INTROS: Record<ChatMode, string> = {
+  conversation:
+    "Plain chat — no roleplay or game systems built in; autonomous messaging and other tools are optional below.",
+  roleplay:
+    "Plain roleplay surface — no built-in dice, combat, or GM pipeline; sprites, world-state tracking, and other helpers are available as optional agents below.",
+  visual_novel:
+    "Sprite- and background-driven roleplay — expressions, world state, and CYOA choices are available as optional agents below.",
+  game: "Full Game Master with built-in dice, combat, encounters, world state, and session/map tracking — the Scene Analysis toggle below adds optional cinematic visuals (backgrounds, music, weather).",
+};
+
 type AvailableAgent = {
   id: string;
   name: string;
@@ -129,19 +194,19 @@ type AvailableAgent = {
   builtIn: boolean;
 };
 
+type LorebookActiveReason = "Global" | "Character" | "Persona" | "Chat";
+
+type ActiveLorebookView = Lorebook & {
+  activeReasons: LorebookActiveReason[];
+  isPinned: boolean;
+};
+
 type AgentAddPreview = {
   agent: AvailableAgent;
   config: AgentConfigRow | null;
   contextSize: number;
+  maxTokens: number;
   runInterval: number | null;
-};
-
-type AgentRunIntervalMeta = {
-  label: string;
-  unit: string;
-  help: string;
-  defaultValue: number;
-  max: number;
 };
 
 function parseAgentSettings(raw: unknown): Record<string, unknown> {
@@ -162,6 +227,22 @@ function normalizePositiveInteger(value: unknown, fallback: number, max: number)
   return Math.max(1, Math.min(max, Math.trunc(value)));
 }
 
+function normalizeAgentMaxTokens(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_AGENT_MAX_TOKENS;
+  return Math.max(MIN_AGENT_MAX_TOKENS, Math.min(MAX_AGENT_MAX_TOKENS, Math.trunc(value)));
+}
+
+function normalizeAgentMaxTokensInputValue(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 1;
+  return Math.max(1, Math.min(MAX_AGENT_MAX_TOKENS, Math.trunc(value)));
+}
+
+function normalizeSpriteDisplayValue(value: unknown, fallback: number, min: number, max: number): number {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(min, Math.min(max, numeric));
+}
+
 function isEnabledFlag(value: unknown): boolean {
   return value === true || value === "true" || value === "1";
 }
@@ -171,35 +252,11 @@ function normalizeNonNegativeInteger(value: unknown, fallback: number, max: numb
   return Math.max(0, Math.min(max, Math.trunc(value)));
 }
 
-function getAgentRunIntervalMeta(agentType: string): AgentRunIntervalMeta | null {
-  switch (agentType) {
-    case "director":
-      return {
-        label: "Run Interval",
-        unit: "assistant messages",
-        help: "How many assistant messages should pass before the Narrative Director jumps in again. Higher values make it less aggressive.",
-        defaultValue: 5,
-        max: 100,
-      };
-    case "lorebook-keeper":
-      return {
-        label: "Run Interval",
-        unit: "assistant messages",
-        help: "How many assistant messages should pass between Lorebook Keeper updates.",
-        defaultValue: 8,
-        max: 100,
-      };
-    case "chat-summary":
-      return {
-        label: "Triggers After",
-        unit: "user messages",
-        help: "How many user messages should pass before the Automated Chat Summary updates again.",
-        defaultValue: 5,
-        max: 200,
-      };
-    default:
-      return null;
-  }
+function getChatActiveAgentIds(chat: Chat): string[] {
+  const metadata = typeof chat.metadata === "string" ? JSON.parse(chat.metadata) : (chat.metadata ?? {});
+  const activeIds =
+    metadata && typeof metadata === "object" ? (metadata as { activeAgentIds?: unknown }).activeAgentIds : [];
+  return Array.isArray(activeIds) ? activeIds.filter((id): id is string => typeof id === "string") : [];
 }
 
 export function ChatSettingsDrawer({
@@ -223,6 +280,7 @@ export function ChatSettingsDrawer({
   const agentProcessing = useAgentStore((s) => s.isProcessing);
   const scheduleGenerationPreferences = useUIStore((s) => s.scheduleGenerationPreferences);
   const setScheduleGenerationPreferences = useUIStore((s) => s.setScheduleGenerationPreferences);
+  const roleplaySpriteScale = useUIStore((s) => s.roleplaySpriteScale);
 
   const { data: allCharacters } = useCharacters();
   const { data: characterGroups } = useCharacterGroups();
@@ -231,6 +289,7 @@ export function ChatSettingsDrawer({
   const chatMode = (chat as unknown as { mode?: string }).mode ?? "roleplay";
   const isConversation = chatMode === "conversation";
   const isGame = chatMode === "game";
+  const isRoleplayMode = chatMode === "roleplay" || chatMode === "visual_novel";
   const { data: currentPromptPresetFull } = usePresetFull(isConversation ? null : (chat.promptPresetId ?? null));
   const { data: connections } = useConnections();
   const imageConnectionsList = useMemo(
@@ -240,9 +299,17 @@ export function ChatSettingsDrawer({
       ),
     [connections],
   );
+  const textConnectionsList = useMemo(
+    () =>
+      ((connections as Array<{ id: string; name: string; model?: string; provider?: string }>) ?? []).filter(
+        (c) => c.provider !== "image_generation",
+      ),
+    [connections],
+  );
   const { data: allPersonas } = usePersonas();
   const { data: agentConfigs } = useAgentConfigs();
   const { data: customTools } = useCustomTools();
+  const { data: customToolCapabilities } = useCustomToolCapabilities();
   const { data: allChats } = useChats();
   const personas = (allPersonas ?? []) as Array<{
     id: string;
@@ -260,6 +327,7 @@ export function ChatSettingsDrawer({
     () => (typeof chat.metadata === "string" ? JSON.parse(chat.metadata) : (chat.metadata ?? {})),
     [chat.metadata],
   );
+  const isSceneChat = metadata.sceneStatus === "active" || typeof metadata.sceneOriginChatId === "string";
   const hasGeneratedConversationSchedules =
     !!metadata.characterSchedules &&
     typeof metadata.characterSchedules === "object" &&
@@ -267,12 +335,86 @@ export function ChatSettingsDrawer({
   const conversationSchedulesEnabled =
     metadata.conversationSchedulesEnabled === true ||
     (metadata.conversationSchedulesEnabled == null && hasGeneratedConversationSchedules);
-  const activeLorebookIds: string[] = metadata.activeLorebookIds ?? [];
-  const activeAgentIds: string[] = metadata.activeAgentIds ?? [];
+  const activeLorebookIds = useMemo<string[]>(
+    () => (Array.isArray(metadata.activeLorebookIds) ? metadata.activeLorebookIds : []),
+    [metadata.activeLorebookIds],
+  );
+  const activeLorebooks = useMemo<ActiveLorebookView[]>(() => {
+    const pinnedIds = new Set(activeLorebookIds);
+    const lorebookList = (lorebooks ?? []) as Lorebook[];
+
+    return lorebookList.flatMap((lorebook) => {
+      const reasons: LorebookActiveReason[] = [];
+      const isPinned = pinnedIds.has(lorebook.id);
+
+      if (lorebook.enabled !== false) {
+        if (isPinned) reasons.push("Chat");
+        if (lorebook.isGlobal) reasons.push("Global");
+        if (
+          lorebook.characterIds?.some((id) => chatCharIds.includes(id)) ||
+          (lorebook.characterId && chatCharIds.includes(lorebook.characterId))
+        ) {
+          reasons.push("Character");
+        }
+        if (
+          chat.personaId &&
+          (lorebook.personaIds?.includes(chat.personaId) || lorebook.personaId === chat.personaId)
+        ) {
+          reasons.push("Persona");
+        }
+        if (lorebook.chatId === chat.id && !reasons.includes("Chat")) reasons.push("Chat");
+      }
+
+      return reasons.length > 0 ? [{ ...lorebook, activeReasons: reasons, isPinned }] : [];
+    });
+  }, [activeLorebookIds, chat.id, chat.personaId, chatCharIds, lorebooks]);
+  const activeLorebookIdSet = useMemo(() => new Set(activeLorebooks.map((lorebook) => lorebook.id)), [activeLorebooks]);
+  const lorebookTokenBudget =
+    typeof metadata.lorebookTokenBudget === "number" && Number.isFinite(metadata.lorebookTokenBudget)
+      ? Math.max(0, Math.floor(metadata.lorebookTokenBudget))
+      : LIMITS.DEFAULT_LOREBOOK_TOKEN_BUDGET;
+  const activeAgentIds = useMemo<string[]>(() => metadata.activeAgentIds ?? [], [metadata.activeAgentIds]);
   const activeToolIds: string[] = metadata.activeToolIds ?? [];
+  const gameLorebookKeeperEnabled = metadata.gameLorebookKeeperEnabled === true;
+  const gameLorebookKeeperLorebookId =
+    typeof metadata.gameLorebookKeeperLorebookId === "string" ? metadata.gameLorebookKeeperLorebookId : null;
+  const gameLorebookKeeperLorebook = gameLorebookKeeperLorebookId
+    ? ((lorebooks ?? []) as Array<{ id: string; name: string }>).find(
+        (book) => book.id === gameLorebookKeeperLorebookId,
+      )
+    : null;
+  const gameUseSpotifyMusic = metadata.gameUseSpotifyMusic === true;
+  const gameSpotifySourceType = normalizeGameSpotifySourceType(metadata.gameSpotifySourceType);
+  const gameSpotifyPlaylistId =
+    typeof metadata.gameSpotifyPlaylistId === "string" ? metadata.gameSpotifyPlaylistId : "";
+  const gameSpotifyArtist = typeof metadata.gameSpotifyArtist === "string" ? metadata.gameSpotifyArtist : "";
+  const gameAgentFeatureCount =
+    (metadata.enableAgents ? 1 : 0) + (gameLorebookKeeperEnabled ? 1 : 0) + (gameUseSpotifyMusic ? 1 : 0);
   const spriteCharacterIds: string[] = Array.isArray(metadata.spriteCharacterIds) ? metadata.spriteCharacterIds : [];
   const spritePosition: "left" | "right" = metadata.spritePosition === "right" ? "right" : "left";
+  const spriteScale = normalizeSpriteDisplayValue(metadata.spriteScale, roleplaySpriteScale, 0.5, 1.75);
+  const spriteOpacity = normalizeSpriteDisplayValue(metadata.spriteOpacity, 1, 0.15, 1);
+  const [spriteScalePercent, setSpriteScalePercent] = useState(() => Math.round(spriteScale * 100));
+  const [spriteOpacityPercent, setSpriteOpacityPercent] = useState(() => Math.round(spriteOpacity * 100));
   const hasCustomSpritePlacements = Object.keys(normalizeSpritePlacements(metadata.spritePlacements)).length > 0;
+  const spotifyPlaylistsQuery = useQuery({
+    queryKey: ["spotify", "playlists", 50],
+    queryFn: () =>
+      api.get<{ playlists: Array<{ id: string; name: string; uri: string; trackCount: number }> }>(
+        "/spotify/playlists?limit=50",
+      ),
+    enabled: open && isGame && gameUseSpotifyMusic && gameSpotifySourceType === "playlist",
+    staleTime: 60_000,
+    retry: false,
+  });
+
+  useEffect(() => {
+    setSpriteScalePercent(Math.round(spriteScale * 100));
+  }, [spriteScale]);
+
+  useEffect(() => {
+    setSpriteOpacityPercent(Math.round(spriteOpacity * 100));
+  }, [spriteOpacity]);
 
   const agentConfigsByType = useMemo(() => {
     const map = new Map<string, AgentConfigRow>();
@@ -281,6 +423,7 @@ export function ChatSettingsDrawer({
     }
     return map;
   }, [agentConfigs]);
+  const conversationCommandsEnabled = metadata.characterCommands !== false;
 
   // Build the available agent list: built-in + custom agents from DB
   // In roleplay mode, hide agents that are either automatic or handled internally.
@@ -316,6 +459,33 @@ export function ChatSettingsDrawer({
     return agents;
   }, [agentConfigs, agentConfigsByType]);
 
+  // Estimate the per-turn cost of the active agent loadout — feeds the readout
+  // in the agents picker header and the per-row token badges. Approximate; see
+  // `estimateAgentLoadCost` doc comment for what's counted vs not.
+  const agentLoadCost = useMemo(() => {
+    const inputs = activeAgentIds.flatMap((id) => {
+      const meta = availableAgents.find((a) => a.id === id);
+      if (!meta) return [];
+      const cfg = agentConfigsByType.get(id);
+      // `||` (not `??`) — custom configs often have an empty-string promptTemplate
+      // meaning "no override", and we still want to count the built-in default.
+      const promptTemplate = cfg?.promptTemplate || DEFAULT_AGENT_PROMPTS[id] || "";
+      return [
+        {
+          type: id,
+          phase: meta.phase,
+          connectionId: cfg?.connectionId ?? null,
+          promptTemplate,
+        },
+      ];
+    });
+    const tokensByType = new Map<string, number>(inputs.map((i) => [i.type, Math.ceil(i.promptTemplate.length / 4)]));
+    return {
+      cost: estimateAgentLoadCost(inputs, chat.connectionId ?? null),
+      tokensByType,
+    };
+  }, [activeAgentIds, availableAgents, agentConfigsByType, chat.connectionId]);
+
   const lorebookKeeperConfig = agentConfigsByType.get("lorebook-keeper") ?? null;
   const lorebookKeeperEnabledByDefault = isEnabledFlag(lorebookKeeperConfig?.enabled);
   const lorebookKeeperActive =
@@ -340,13 +510,13 @@ export function ChatSettingsDrawer({
     }
     if (customTools) {
       for (const ct of customTools as CustomToolRow[]) {
-        if (ct.enabled === "true" || ct.enabled === "1") {
+        if (isCustomToolSelectable(ct, customToolCapabilities)) {
           tools.push({ id: ct.name, name: ct.name, description: ct.description });
         }
       }
     }
     return tools;
-  }, [customTools]);
+  }, [customToolCapabilities, customTools]);
 
   // ── Helpers ──
   const characters = useMemo(
@@ -464,12 +634,37 @@ export function ChatSettingsDrawer({
   }, [firstMesConfirm, createMessage, chat.id, qc]);
 
   // ── Mutations ──
+  const syncGamePartyMetadata = (nextCharacterIds: string[]) => {
+    if (!isGame) return;
+    const storedPartyIds: unknown[] = Array.isArray(metadata.gamePartyCharacterIds)
+      ? metadata.gamePartyCharacterIds
+      : Array.isArray((metadata.gameSetupConfig as { partyCharacterIds?: unknown[] } | undefined)?.partyCharacterIds)
+        ? (metadata.gameSetupConfig as { partyCharacterIds: unknown[] }).partyCharacterIds
+        : [];
+    const npcPartyIds = storedPartyIds.filter((id): id is string => typeof id === "string" && id.startsWith("npc:"));
+    const nextPartyIds = Array.from(new Set([...nextCharacterIds, ...npcPartyIds]));
+    const gameSetupConfig =
+      metadata.gameSetupConfig && typeof metadata.gameSetupConfig === "object"
+        ? { ...(metadata.gameSetupConfig as Record<string, unknown>), partyCharacterIds: nextPartyIds }
+        : metadata.gameSetupConfig;
+    updateMeta.mutate({
+      id: chat.id,
+      gamePartyCharacterIds: nextPartyIds,
+      ...(gameSetupConfig ? { gameSetupConfig } : {}),
+    });
+  };
+
   const toggleCharacter = (charId: string) => {
     const current = [...chatCharIds];
     const idx = current.indexOf(charId);
     if (idx >= 0) {
       current.splice(idx, 1);
-      updateChat.mutate({ id: chat.id, characterIds: current });
+      updateChat.mutate(
+        { id: chat.id, characterIds: current },
+        {
+          onSuccess: () => syncGamePartyMetadata(current),
+        },
+      );
       if (spriteCharacterIds.includes(charId)) {
         const nextSpritePlacements = { ...normalizeSpritePlacements(metadata.spritePlacements) };
         delete nextSpritePlacements[charId];
@@ -485,6 +680,7 @@ export function ChatSettingsDrawer({
         { id: chat.id, characterIds: current },
         {
           onSuccess: () => {
+            syncGamePartyMetadata(current);
             // Skip auto-greeting for conversation mode
             if (isConversation) return;
             const char = characters.find((c) => c.id === charId);
@@ -542,6 +738,30 @@ export function ChatSettingsDrawer({
     updateMeta.mutate({ id: chat.id, spritePlacements: {} });
   }, [chat.id, onResetSpritePlacements, updateMeta]);
 
+  const setSpriteScale = useCallback(
+    (nextPercent: number) => {
+      const clampedPercent = Math.max(50, Math.min(175, nextPercent));
+      setSpriteScalePercent(clampedPercent);
+      updateMeta.mutate({
+        id: chat.id,
+        spriteScale: clampedPercent / 100,
+      });
+    },
+    [chat.id, updateMeta],
+  );
+
+  const setSpriteOpacity = useCallback(
+    (nextPercent: number) => {
+      const clampedPercent = Math.max(15, Math.min(100, nextPercent));
+      setSpriteOpacityPercent(clampedPercent);
+      updateMeta.mutate({
+        id: chat.id,
+        spriteOpacity: clampedPercent / 100,
+      });
+    },
+    [chat.id, updateMeta],
+  );
+
   // ── Character drag-and-drop reordering ──
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dropIdx, setDropIdx] = useState<number | null>(null);
@@ -589,17 +809,98 @@ export function ChatSettingsDrawer({
     updateMeta.mutate({ id: chat.id, activeLorebookIds: current });
   };
 
-  const toggleAgent = (agentId: string) => {
-    const current = [...activeAgentIds];
+  const pinLorebookToChat = (lbId: string) => {
+    if (activeLorebookIds.includes(lbId)) return;
+    updateMeta.mutate({ id: chat.id, activeLorebookIds: [...activeLorebookIds, lbId] });
+  };
+
+  const hasSecretPlotMemory = (memory: Record<string, unknown> | null | undefined) => {
+    if (!memory) return false;
+    const arc = memory.overarchingArc;
+    if (typeof arc === "string" && arc.trim()) return true;
+    if (arc && typeof arc === "object") {
+      const arcRecord = arc as Record<string, unknown>;
+      if (
+        String(arcRecord.description ?? "").trim() ||
+        String(arcRecord.protagonistArc ?? "").trim() ||
+        arcRecord.completed === true
+      ) {
+        return true;
+      }
+    }
+
+    const sceneDirections = memory.sceneDirections;
+    if (
+      Array.isArray(sceneDirections) &&
+      sceneDirections.some((entry) =>
+        typeof entry === "string"
+          ? entry.trim()
+          : !!(entry && typeof entry === "object" && String((entry as Record<string, unknown>).direction ?? "").trim()),
+      )
+    ) {
+      return true;
+    }
+
+    const pacing = memory.pacing;
+    if (typeof pacing === "string" ? pacing.trim() : pacing != null) return true;
+    const recentlyFulfilled = memory.recentlyFulfilled;
+    return Array.isArray(recentlyFulfilled) && recentlyFulfilled.some((entry) => String(entry ?? "").trim());
+  };
+
+  const toggleAgent = async (agentId: string) => {
+    const readLatestActiveAgentIds = () => {
+      const latestChat = qc.getQueryData<Chat>(chatKeys.detail(chat.id));
+      return latestChat ? getChatActiveAgentIds(latestChat) : [...activeAgentIds];
+    };
+    const wasRemoving = readLatestActiveAgentIds().includes(agentId);
+    if (wasRemoving && agentId === "secret-plot-driver") {
+      let shouldWarn: boolean;
+      try {
+        const res = await api.get<{ memory: Record<string, unknown> }>(`/agents/memory/${agentId}/${chat.id}`);
+        shouldWarn = hasSecretPlotMemory(res.memory);
+      } catch {
+        shouldWarn = true;
+      }
+      if (shouldWarn) {
+        const ok = await showConfirmDialog({
+          title: "Remove Secret Plot Driver",
+          message:
+            "Remove Secret Plot Driver from this chat? This will wipe its hidden plot memory for this chat, including the current arc and scene directions. This cannot be undone.",
+          confirmLabel: "Remove Agent",
+          tone: "destructive",
+        });
+        if (!ok) return;
+      }
+    }
+
+    const current = readLatestActiveAgentIds();
     const idx = current.indexOf(agentId);
     const isRemoving = idx >= 0;
     if (isRemoving) current.splice(idx, 1);
     else current.push(agentId);
-    updateMeta.mutate({ id: chat.id, activeAgentIds: current });
-
-    // When removing an agent that stores persistent memory, clean it up
-    if (isRemoving && agentId === "secret-plot-driver") {
-      api.delete(`/agents/memory/${agentId}/${chat.id}`).catch(() => {});
+    let metadataSaved = false;
+    try {
+      await updateMeta.mutateAsync(
+        { id: chat.id, activeAgentIds: current },
+        {
+          onSuccess: async () => {
+            metadataSaved = true;
+            // When removing an agent that stores persistent memory, clean it up after metadata is saved.
+            if (isRemoving && agentId === "secret-plot-driver") {
+              await api.delete(`/agents/memory/${agentId}/${chat.id}`);
+            }
+          },
+        },
+      );
+    } catch (error) {
+      if (metadataSaved && isRemoving && agentId === "secret-plot-driver") {
+        const rollbackIds = Array.from(new Set([...readLatestActiveAgentIds(), agentId]));
+        await updateMeta.mutateAsync({ id: chat.id, activeAgentIds: rollbackIds }).catch(() => undefined);
+      }
+      await showAlertDialog({
+        title: isRemoving ? "Couldn't Remove Agent" : "Couldn't Add Agent",
+        message: error instanceof Error ? error.message : "The agent list could not be updated. Please try again.",
+      });
     }
   };
 
@@ -616,6 +917,50 @@ export function ChatSettingsDrawer({
   };
 
   const currentPromptPresetHasVariables = (currentPromptPresetFull?.choiceBlocks?.length ?? 0) > 0;
+  const currentPromptPresetHasLorebookMarker = useMemo(() => {
+    const sections = currentPromptPresetFull?.sections ?? [];
+    return sections.some((section) => {
+      const enabled = (section as { enabled?: boolean | string }).enabled;
+      const isMarker = (section as { isMarker?: boolean | string }).isMarker;
+      if (enabled === false || enabled === "false") return false;
+      if (isMarker !== true && isMarker !== "true") return false;
+      try {
+        const config =
+          typeof section.markerConfig === "string" ? JSON.parse(section.markerConfig) : section.markerConfig;
+        return (
+          config?.type === "lorebook" || config?.type === "world_info_before" || config?.type === "world_info_after"
+        );
+      } catch {
+        return false;
+      }
+    });
+  }, [currentPromptPresetFull?.sections]);
+  const hasScopedOrGlobalLorebooks = useMemo(() => {
+    return (
+      (lorebooks ?? []) as Array<{
+        id: string;
+        enabled?: boolean;
+        isGlobal?: boolean;
+        characterId?: string | null;
+        characterIds?: string[];
+        personaId?: string | null;
+        personaIds?: string[];
+        chatId?: string | null;
+      }>
+    ).some(
+      (lorebook) =>
+        lorebook.enabled !== false &&
+        (lorebook.isGlobal ||
+          activeLorebookIds.includes(lorebook.id) ||
+          lorebook.characterIds?.some((id) => chatCharIds.includes(id)) ||
+          (lorebook.characterId && chatCharIds.includes(lorebook.characterId)) ||
+          (chat.personaId && lorebook.personaIds?.includes(chat.personaId)) ||
+          (lorebook.personaId && lorebook.personaId === chat.personaId) ||
+          (lorebook.chatId && lorebook.chatId === chat.id)),
+    );
+  }, [activeLorebookIds, chat.id, chat.personaId, chatCharIds, lorebooks]);
+  const showLorebookMarkerWarning =
+    !!chat.promptPresetId && hasScopedOrGlobalLorebooks && !currentPromptPresetHasLorebookMarker;
 
   const setPreset = (presetId: string | null) => {
     updateChat.mutate(
@@ -656,6 +1001,14 @@ export function ChatSettingsDrawer({
   const [showConnectionPicker, setShowConnectionPicker] = useState(false);
   const [showSummariesModal, setShowSummariesModal] = useState(false);
   const [showMemoriesModal, setShowMemoriesModal] = useState(false);
+  // Session-ephemeral: did the user change Day Rollover Hour in this drawer mount?
+  // Used to gate the "transitional duplication" warning so it only appears
+  // immediately after a change (when the warning is operationally useful) and
+  // doesn't permanently clutter chats that already have summaries.
+  const [rolloverTouchedThisSession, setRolloverTouchedThisSession] = useState(false);
+  useEffect(() => {
+    setRolloverTouchedThisSession(false);
+  }, [chat.id]);
   const [connectionSearch, setConnectionSearch] = useState("");
   const [personaSearch, setPersonaSearch] = useState("");
   const [pendingToolIds, setPendingToolIds] = useState<string[]>([]);
@@ -664,6 +1017,7 @@ export function ChatSettingsDrawer({
   const [toolSearch, setToolSearch] = useState("");
   const [choiceModalPresetId, setChoiceModalPresetId] = useState<string | null>(null);
   const [agentAddPreview, setAgentAddPreview] = useState<AgentAddPreview | null>(null);
+  const [agentAddCadenceInputFocused, setAgentAddCadenceInputFocused] = useState(false);
   const [addingAgentToChat, setAddingAgentToChat] = useState(false);
   const [isRegeneratingSchedules, setIsRegeneratingSchedules] = useState(false);
   // Synchronous lock to close the re-entry gap: React state commits are async, so two
@@ -700,8 +1054,11 @@ export function ChatSettingsDrawer({
   // toggled-off agents stay visible and re-enableable. We extend it whenever
   // `activeAgentIds` gains new entries (e.g. after seeding defaults via the
   // "Add Game Mode Agents" migration button), so new tracker toggles appear
-  // without a full remount of the drawer.
-  const [gameAgentPool, setGameAgentPool] = useState<string[]>(() => Array.from(new Set(activeAgentIds)));
+  // without a full remount of the drawer. The Spotify agent is intentionally
+  // excluded because it has its own dedicated UI section.
+  const [gameAgentPool, setGameAgentPool] = useState<string[]>(() =>
+    Array.from(new Set(activeAgentIds.filter((id) => id !== "spotify"))),
+  );
   // Stable key avoids re-running the effect every render — `activeAgentIds`
   // is recomputed via `?? []` upstream and would have a fresh reference each pass.
   const activeAgentIdsKey = activeAgentIds.join(",");
@@ -710,6 +1067,7 @@ export function ChatSettingsDrawer({
       const next = new Set(current);
       let changed = false;
       for (const id of activeAgentIds) {
+        if (id === "spotify") continue;
         if (!next.has(id)) {
           next.add(id);
           changed = true;
@@ -721,6 +1079,10 @@ export function ChatSettingsDrawer({
   }, [activeAgentIdsKey]);
   const [extraPromptDraft, setExtraPromptDraft] = useState((metadata.gameExtraPrompt as string) ?? "");
   const [extraPromptExpanded, setExtraPromptExpanded] = useState(false);
+  const [gameImagePromptInstructionsDraft, setGameImagePromptInstructionsDraft] = useState(
+    (metadata.gameImagePromptInstructions as string) ?? "",
+  );
+  const [gameSpotifyArtistDraft, setGameSpotifyArtistDraft] = useState(gameSpotifyArtist);
 
   // ── Chat Settings Presets ──
   const presetMode = (chatMode === "visual_novel" ? "roleplay" : chatMode) as ChatMode;
@@ -731,6 +1093,7 @@ export function ChatSettingsDrawer({
   const deleteChatPreset = useDeleteChatPreset();
   const applyChatPreset = useApplyChatPreset();
   const importChatPreset = useImportChatPreset();
+  const setActiveChatPreset = useSetActiveChatPreset();
   const presetList = useMemo(() => (chatPresets ?? []) as ChatPreset[], [chatPresets]);
   const appliedPresetId = (metadata.appliedChatPresetId as string | undefined) ?? null;
   const selectedChatPreset = useMemo(() => {
@@ -751,17 +1114,27 @@ export function ChatSettingsDrawer({
     }
   }, [open]);
 
+  useEffect(() => {
+    setGameImagePromptInstructionsDraft((metadata.gameImagePromptInstructions as string) ?? "");
+  }, [chat.id, metadata.gameImagePromptInstructions]);
+
+  useEffect(() => {
+    setGameSpotifyArtistDraft(gameSpotifyArtist);
+  }, [chat.id, gameSpotifyArtist]);
+
   const openAgentAddModal = (agent: AvailableAgent) => {
+    setAgentAddCadenceInputFocused(false);
     const config = agentConfigsByType.get(agent.id) ?? null;
     const mergedSettings = {
       ...getDefaultBuiltInAgentSettings(agent.id),
       ...parseAgentSettings(config?.settings),
     };
-    const intervalMeta = getAgentRunIntervalMeta(agent.id);
+    const intervalMeta = getAgentRunIntervalMeta(agent.id, agent.builtIn);
     setAgentAddPreview({
       agent,
       config,
-      contextSize: normalizePositiveInteger(mergedSettings.contextSize, 5, 200),
+      contextSize: normalizePositiveInteger(mergedSettings.contextSize, DEFAULT_AGENT_CONTEXT_SIZE, 200),
+      maxTokens: normalizeAgentMaxTokens(mergedSettings.maxTokens),
       runInterval: intervalMeta
         ? normalizePositiveInteger(mergedSettings.runInterval, intervalMeta.defaultValue, intervalMeta.max)
         : null,
@@ -771,14 +1144,16 @@ export function ChatSettingsDrawer({
   const confirmAddAgent = async () => {
     if (!agentAddPreview) return;
 
-    const { agent, config, contextSize, runInterval } = agentAddPreview;
+    const { agent, config, contextSize, maxTokens, runInterval } = agentAddPreview;
+    const normalizedMaxTokens = normalizeAgentMaxTokens(maxTokens);
     const builtInMeta = BUILT_IN_AGENTS.find((entry) => entry.id === agent.id) ?? null;
     const nextSettings: Record<string, unknown> = {
       ...getDefaultBuiltInAgentSettings(agent.id),
       ...parseAgentSettings(config?.settings),
       contextSize,
+      maxTokens: normalizedMaxTokens,
     };
-    const intervalMeta = getAgentRunIntervalMeta(agent.id);
+    const intervalMeta = getAgentRunIntervalMeta(agent.id, !!builtInMeta);
     if (intervalMeta && runInterval != null) {
       nextSettings.runInterval = runInterval;
     }
@@ -806,6 +1181,11 @@ export function ChatSettingsDrawer({
       await updateMeta.mutateAsync({
         id: chat.id,
         activeAgentIds: Array.from(new Set([...activeAgentIds, agent.id])),
+        ...(agent.id === "secret-plot-driver"
+          ? {
+              showSecretPlotPanel: true,
+            }
+          : {}),
       });
       setAgentAddPreview(null);
     } catch (error) {
@@ -818,7 +1198,66 @@ export function ChatSettingsDrawer({
     }
   };
 
-  const agentAddIntervalMeta = agentAddPreview ? getAgentRunIntervalMeta(agentAddPreview.agent.id) : null;
+  const ensureSpotifyAgent = useCallback(async () => {
+    const builtInMeta = BUILT_IN_AGENTS.find((entry) => entry.id === "spotify");
+    if (!builtInMeta) throw new Error("Spotify DJ agent metadata is missing.");
+    const config = agentConfigsByType.get("spotify") ?? null;
+    const nextSettings: Record<string, unknown> = {
+      ...getDefaultBuiltInAgentSettings("spotify"),
+      ...parseAgentSettings(config?.settings),
+      enabledTools: DEFAULT_AGENT_TOOLS.spotify ?? [],
+    };
+
+    if (config) {
+      await updateAgentConfig.mutateAsync({ id: config.id, enabled: true, settings: nextSettings });
+      return;
+    }
+
+    await createAgent.mutateAsync({
+      type: builtInMeta.id,
+      name: builtInMeta.name,
+      description: builtInMeta.description,
+      phase: builtInMeta.phase,
+      enabled: true,
+      connectionId: null,
+      promptTemplate: "",
+      settings: nextSettings,
+    });
+  }, [agentConfigsByType, createAgent, updateAgentConfig]);
+
+  const toggleGameSpotifyMusic = useCallback(async () => {
+    if (gameUseSpotifyMusic) {
+      await updateMeta.mutateAsync({
+        id: chat.id,
+        gameUseSpotifyMusic: false,
+        activeAgentIds: activeAgentIds.filter((id) => id !== "spotify"),
+      });
+      return;
+    }
+
+    try {
+      await ensureSpotifyAgent();
+      await updateMeta.mutateAsync({
+        id: chat.id,
+        enableAgents: true,
+        gameUseSpotifyMusic: true,
+        gameSpotifySourceType,
+        activeAgentIds: Array.from(new Set([...activeAgentIds, "spotify"])),
+      });
+    } catch (error) {
+      await showAlertDialog({
+        title: "Couldn't Enable Spotify DJ",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Spotify DJ could not be enabled for this game. Check the Spotify agent setup and try again.",
+      });
+    }
+  }, [activeAgentIds, chat.id, ensureSpotifyAgent, gameSpotifySourceType, gameUseSpotifyMusic, updateMeta]);
+
+  const agentAddIntervalMeta = agentAddPreview
+    ? getAgentRunIntervalMeta(agentAddPreview.agent.id, agentAddPreview.agent.builtIn)
+    : null;
 
   const snapshotCurrentPresetSettings = useCallback((): ChatPresetSettings => {
     return {
@@ -831,6 +1270,11 @@ export function ChatSettingsDrawer({
   const handleSelectPreset = (id: string) => {
     if (!id || id === selectedChatPreset?.id) return;
     applyChatPreset.mutate({ presetId: id, chatId: chat.id });
+  };
+
+  const handleToggleDefaultPreset = () => {
+    if (!selectedChatPreset || selectedChatPreset.isActive) return;
+    setActiveChatPreset.mutate(selectedChatPreset.id);
   };
 
   const handleSaveIntoPreset = () => {
@@ -1011,8 +1455,8 @@ export function ChatSettingsDrawer({
           </button>
         </div>
 
-        {/* Chat Settings Preset bar — hidden in Game Mode (not designed for it) */}
-        {!isGame && (
+        {/* Chat Settings Preset bar — hidden in Game Mode and scene chats. */}
+        {!isGame && !isSceneChat && (
           <div className="flex flex-col gap-2 border-b border-[var(--border)] px-4 py-3">
             <input
               ref={presetFileInputRef}
@@ -1051,12 +1495,37 @@ export function ChatSettingsDrawer({
                   ))}
                 </select>
               )}
+              <button
+                onClick={handleToggleDefaultPreset}
+                disabled={!selectedChatPreset || selectedChatPreset.isActive || setActiveChatPreset.isPending}
+                title={
+                  !selectedChatPreset
+                    ? "Select a preset to mark it as default"
+                    : selectedChatPreset.isActive
+                      ? "This preset is the default for new chats in this mode"
+                      : "Mark this preset as default for new chats in this mode"
+                }
+                aria-pressed={!!selectedChatPreset?.isActive}
+                aria-label={selectedChatPreset?.isActive ? "Default preset" : "Mark as default preset"}
+                className={cn(
+                  "shrink-0 flex items-center justify-center rounded-md p-1.5 transition-colors disabled:cursor-not-allowed",
+                  selectedChatPreset?.isActive
+                    ? "text-yellow-400 disabled:opacity-100"
+                    : "text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-yellow-400 disabled:opacity-40",
+                )}
+              >
+                <Star
+                  size="0.875rem"
+                  fill={selectedChatPreset?.isActive ? "currentColor" : "none"}
+                  strokeWidth={selectedChatPreset?.isActive ? 1.5 : 2}
+                />
+              </button>
               <HelpTooltip
                 side="left"
                 text={
                   isConversation
-                    ? "Presets bundle this chat's connection, tools, translation, memory recall, advanced parameters, and other settings. Prompt presets are not applied in conversation mode. Characters, persona, lorebooks, sprites, summary, tags, and scene prompt stay tied to the chat."
-                    : "Presets bundle this chat's connection, prompt preset, agents, tools, translation, memory recall, advanced parameters, and other settings. They never touch your characters, persona, lorebooks, sprites, summary, tags, or scene prompt — those stay tied to the chat."
+                    ? "Presets bundle this chat's connection, tools, translation, memory recall, advanced parameters, and other settings. Prompt presets are not applied in conversation mode. Characters, persona, lorebooks, sprites, summary, tags, and scene prompt stay tied to the chat. Star a preset to use it as the default for new chats in this mode."
+                    : "Presets bundle this chat's connection, prompt preset, agents, tools, translation, memory recall, advanced parameters, and other settings. They never touch your characters, persona, lorebooks, sprites, summary, tags, or scene prompt — those stay tied to the chat. Star a preset to use it as the default for new chats in this mode."
                 }
               />
             </div>
@@ -1119,6 +1588,16 @@ export function ChatSettingsDrawer({
         )}
 
         <div className="flex-1 overflow-y-auto">
+          {/* Hardcoded — CHAT_MODES.defaultAgents looks like the source of truth but is currently
+              unused, and wouldn't cover non-agent built-ins (GM pipeline, autonomous messaging, etc.) anyway. */}
+          {MODE_INTROS[chatMode as ChatMode] && (
+            <div className="border-b border-[var(--border)] px-4 py-2.5">
+              <p className="text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+                {MODE_INTROS[chatMode as ChatMode]}
+              </p>
+            </div>
+          )}
+
           {/* Chat Name */}
           <Section
             label="Chat Name"
@@ -1237,6 +1716,12 @@ export function ChatSettingsDrawer({
                   </button>
                 )}
               </div>
+              {showLorebookMarkerWarning && (
+                <div className="mt-2 flex items-start gap-2 rounded-lg bg-amber-400/10 px-3 py-2 text-[0.6875rem] text-amber-200 ring-1 ring-amber-400/25">
+                  <AlertTriangle size="0.75rem" className="mt-[0.125rem] shrink-0" />
+                  <span>This preset has active lorebooks available, but no lorebook marker.</span>
+                </div>
+              )}
             </Section>
           )}
 
@@ -1356,18 +1841,136 @@ export function ChatSettingsDrawer({
             >
               <div className="space-y-1.5">
                 <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">Persona</label>
-                <select
-                  value={chat.personaId ?? ""}
-                  onChange={(e) => updateChat.mutate({ id: chat.id, personaId: e.target.value || null })}
-                  className="w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
-                >
-                  <option value="">None</option>
-                  {personas.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
+                {chat.personaId ? (
+                  <div className="flex items-center gap-2.5 rounded-lg bg-[var(--primary)]/10 px-2.5 py-2 ring-1 ring-[var(--primary)]/30">
+                    {(() => {
+                      const p = personas.find((persona) => persona.id === chat.personaId);
+                      return p ? (
+                        <>
+                          {p.avatarPath ? (
+                            <img
+                              src={p.avatarPath}
+                              alt={p.name}
+                              loading="lazy"
+                              className="h-7 w-7 shrink-0 rounded-full object-cover"
+                            />
+                          ) : (
+                            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-emerald-400 to-teal-500 text-white">
+                              <User size="0.75rem" />
+                            </div>
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <span className="block truncate text-xs">{p.name}</span>
+                            {p.comment && (
+                              <span className="block truncate text-[0.625rem] italic text-[var(--muted-foreground)]">
+                                {p.comment}
+                              </span>
+                            )}
+                          </div>
+                        </>
+                      ) : (
+                        <span className="flex-1 truncate text-xs text-[var(--muted-foreground)]">Unknown persona</span>
+                      );
+                    })()}
+                    <button
+                      onClick={() => updateChat.mutate({ id: chat.id, personaId: null })}
+                      className="ml-auto shrink-0 rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)]"
+                      title="Remove persona"
+                    >
+                      <X size="0.75rem" />
+                    </button>
+                  </div>
+                ) : (
+                  <p className="text-[0.6875rem] text-[var(--muted-foreground)]">No persona selected.</p>
+                )}
+
+                {!showPersonaPicker ? (
+                  <button
+                    onClick={() => {
+                      setShowPersonaPicker(true);
+                      setPersonaSearch("");
+                    }}
+                    className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--border)] px-3 py-2 text-xs text-[var(--muted-foreground)] transition-colors hover:border-[var(--primary)]/40 hover:text-[var(--primary)]"
+                  >
+                    <Plus size="0.75rem" /> {chat.personaId ? "Change" : "Choose"} Persona
+                  </button>
+                ) : (
+                  <PickerDropdown
+                    search={personaSearch}
+                    onSearchChange={setPersonaSearch}
+                    onClose={() => setShowPersonaPicker(false)}
+                    placeholder="Search personas..."
+                  >
+                    <button
+                      onClick={() => {
+                        updateChat.mutate({ id: chat.id, personaId: null });
+                        setShowPersonaPicker(false);
+                      }}
+                      className={cn(
+                        "flex items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--accent)]",
+                        !chat.personaId && "bg-[var(--primary)]/10",
+                      )}
+                    >
+                      <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--muted-foreground)]">
+                        <X size="0.625rem" />
+                      </div>
+                      <span className="flex-1 truncate text-xs">None</span>
+                      {!chat.personaId && <Check size="0.625rem" className="ml-auto shrink-0 text-[var(--primary)]" />}
+                    </button>
+                    {personas
+                      .filter(
+                        (p) =>
+                          p.name.toLowerCase().includes(personaSearch.toLowerCase()) ||
+                          (p.comment && p.comment.toLowerCase().includes(personaSearch.toLowerCase())),
+                      )
+                      .map((p) => (
+                        <button
+                          key={p.id}
+                          onClick={() => {
+                            updateChat.mutate({ id: chat.id, personaId: p.id });
+                            setShowPersonaPicker(false);
+                          }}
+                          className={cn(
+                            "flex items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--accent)]",
+                            chat.personaId === p.id && "bg-[var(--primary)]/10",
+                          )}
+                        >
+                          {p.avatarPath ? (
+                            <img
+                              src={p.avatarPath}
+                              alt={p.name}
+                              loading="lazy"
+                              className="h-6 w-6 shrink-0 rounded-full object-cover"
+                            />
+                          ) : (
+                            <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-emerald-400 to-teal-500 text-white">
+                              <User size="0.625rem" />
+                            </div>
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <span className="block truncate text-xs">{p.name}</span>
+                            {p.comment && (
+                              <span className="block truncate text-[0.625rem] italic text-[var(--muted-foreground)]">
+                                {p.comment}
+                              </span>
+                            )}
+                          </div>
+                          {chat.personaId === p.id && (
+                            <Check size="0.625rem" className="ml-auto shrink-0 text-[var(--primary)]" />
+                          )}
+                        </button>
+                      ))}
+                    {personas.filter(
+                      (p) =>
+                        p.name.toLowerCase().includes(personaSearch.toLowerCase()) ||
+                        (p.comment && p.comment.toLowerCase().includes(personaSearch.toLowerCase())),
+                    ).length === 0 && (
+                      <p className="px-3 py-2 text-[0.6875rem] text-[var(--muted-foreground)]">
+                        {personas.length === 0 ? "No personas created yet." : "No matches."}
+                      </p>
+                    )}
+                  </PickerDropdown>
+                )}
               </div>
 
               <div className="mt-2 space-y-1.5">
@@ -1386,14 +1989,38 @@ export function ChatSettingsDrawer({
                           key={c.id}
                           className="flex items-center gap-2.5 rounded-lg bg-[var(--primary)]/10 px-3 py-2 ring-1 ring-[var(--primary)]/30"
                         >
-                          <div className="min-w-0 flex-1">
-                            <span className="block truncate text-xs">{name}</span>
-                            {title && (
-                              <span className="block truncate text-[0.625rem] italic text-[var(--muted-foreground)]">
-                                {title}
+                          <button
+                            onClick={() => {
+                              onClose();
+                              useUIStore.getState().openCharacterDetail(c.id);
+                            }}
+                            className="flex min-w-0 flex-1 items-center gap-2.5 text-left transition-colors hover:opacity-80"
+                            title="Open character card"
+                          >
+                            {c.avatarPath ? (
+                              <span className="block h-7 w-7 shrink-0 overflow-hidden rounded-full">
+                                <img
+                                  src={c.avatarPath}
+                                  alt={name}
+                                  loading="lazy"
+                                  className="h-full w-full object-cover"
+                                  style={getAvatarCropStyle(charAvatarCrop(c))}
+                                />
                               </span>
+                            ) : (
+                              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-[0.625rem] font-bold">
+                                {name[0]}
+                              </div>
                             )}
-                          </div>
+                            <div className="min-w-0 flex-1">
+                              <span className="block truncate text-xs">{name}</span>
+                              {title && (
+                                <span className="block truncate text-[0.625rem] italic text-[var(--muted-foreground)]">
+                                  {title}
+                                </span>
+                              )}
+                            </div>
+                          </button>
                           <button
                             onClick={() => toggleCharacter(c.id)}
                             className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
@@ -1465,7 +2092,7 @@ export function ChatSettingsDrawer({
           {!isGame && (
             <Section
               label="Persona"
-              icon={<Users size="0.875rem" />}
+              icon={<User size="0.875rem" />}
               help="Your persona defines who you are in this chat. The AI will address you by this persona's name and use its details for context."
             >
               {/* Currently selected persona */}
@@ -2177,111 +2804,6 @@ export function ChatSettingsDrawer({
                   </div>
                 </button>
 
-                {/* Selfie Connection — connection picker for character selfies */}
-                <div className="space-y-1.5">
-                  <div className="flex items-center gap-2">
-                    <Image size="0.75rem" className="text-[var(--primary)]" />
-                    <span className="text-xs font-medium">Selfie Connection</span>
-                  </div>
-                  <select
-                    value={(metadata.imageGenConnectionId as string) ?? ""}
-                    onChange={(e) => updateMeta.mutate({ id: chat.id, imageGenConnectionId: e.target.value || null })}
-                    className="w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
-                  >
-                    <option value="">None (selfies disabled)</option>
-                    {((connections ?? []) as Array<{ id: string; name: string; provider: string }>).map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name} ({c.provider})
-                      </option>
-                    ))}
-                  </select>
-                  <p className="text-[0.55rem] text-[var(--muted-foreground)]">
-                    Used for character selfies. The Illustrator agent uses its own connection from the Agents tab.
-                  </p>
-
-                  {/* Selfie resolution picker */}
-                  {(metadata.imageGenConnectionId as string) && (
-                    <div className="mt-2 space-y-1">
-                      <span className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">Resolution</span>
-                      <div className="flex flex-wrap gap-1.5">
-                        {[
-                          { label: "512×512", w: 512, h: 512 },
-                          { label: "512×768", w: 512, h: 768 },
-                          { label: "768×768", w: 768, h: 768 },
-                          { label: "768×1024", w: 768, h: 1024 },
-                          { label: "1024×1024", w: 1024, h: 1024 },
-                        ].map((opt) => {
-                          const current = (metadata.selfieResolution as string) ?? "512x768";
-                          const val = `${opt.w}x${opt.h}`;
-                          const active = current === val;
-                          return (
-                            <button
-                              key={val}
-                              type="button"
-                              onClick={() => updateMeta.mutate({ id: chat.id, selfieResolution: val })}
-                              className={`rounded-md px-2 py-1 text-[0.625rem] font-medium transition-colors ${
-                                active
-                                  ? "bg-[var(--primary)] text-[var(--primary-foreground)]"
-                                  : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:bg-[var(--accent)]"
-                              }`}
-                            >
-                              {opt.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Selfie tags */}
-                  {(metadata.imageGenConnectionId as string) && (
-                    <SelfieTagsEditor
-                      tags={(metadata.selfieTags as string[]) ?? []}
-                      onChange={(tags) => updateMeta.mutate({ id: chat.id, selfieTags: tags })}
-                    />
-                  )}
-                </div>
-
-                {/* Schedule generation preferences — free-form authorial guidance */}
-                <label className="flex flex-col gap-1.5">
-                  <span className="inline-flex items-center gap-1.5 text-xs font-medium">
-                    <Sparkles size="0.75rem" className="text-[var(--primary)]" />
-                    Schedule generation preferences
-                    <HelpTooltip text="Free-form guidance that steers how character schedules are generated. Both directives ('no characters past midnight') and factual constraints ('I work 9-5') work. This setting is global — it applies to every conversation chat." />
-                  </span>
-                  <textarea
-                    value={scheduleGenerationPreferences}
-                    onChange={(e) => setScheduleGenerationPreferences(e.target.value)}
-                    placeholder="e.g. Make everyone go to sleep before midnight. Give characters free time 10am-noon. I work 9-5 on weekdays."
-                    className="min-h-[5rem] resize-y rounded-lg border border-[var(--border)] bg-[var(--secondary)] p-2.5 text-[0.6875rem] text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]/50 placeholder:text-[var(--muted-foreground)]/40"
-                  />
-                  <p className="text-[0.59375rem] text-[var(--muted-foreground)]/70">
-                    Global setting. Applies to every conversation chat&apos;s next schedule regeneration — manual or
-                    weekly auto.
-                  </p>
-                </label>
-
-                {/* Active schedule-generation preference indicator */}
-                {scheduleGenerationPreferences.trim() && (
-                  <div
-                    className="flex items-start gap-2 rounded-lg border border-[var(--primary)]/30 bg-[var(--primary)]/10 px-3 py-2.5"
-                    title={scheduleGenerationPreferences.trim()}
-                  >
-                    <Sparkles size="0.875rem" className="mt-0.5 shrink-0 text-[var(--primary)]" />
-                    <div className="flex-1 min-w-0">
-                      <span className="block text-[0.6875rem] font-medium leading-snug text-[var(--foreground)]">
-                        Schedule generation preference active
-                      </span>
-                      <p className="mt-0.5 truncate text-[0.625rem] italic text-[var(--muted-foreground)]">
-                        “{scheduleGenerationPreferences.trim()}”
-                      </p>
-                      <p className="mt-1 text-[0.59375rem] text-[var(--muted-foreground)]/70">
-                        Will be applied the next time schedules are regenerated.
-                      </p>
-                    </div>
-                  </div>
-                )}
-
                 {/* Schedule status */}
                 <div className="flex items-center gap-2 rounded-lg bg-[var(--secondary)] px-3 py-2.5">
                   <CalendarClock size="0.875rem" className="text-[var(--muted-foreground)]" />
@@ -2339,6 +2861,159 @@ export function ChatSettingsDrawer({
             </Section>
           )}
 
+          {/* Commands — conversation mode only */}
+          {isConversation && (
+            <Section
+              label="Commands"
+              icon={<Sparkles size="0.875rem" />}
+              help="Allow characters to use hidden command tags for actions that happen outside the visible message."
+            >
+              <div className="space-y-3">
+                <button
+                  onClick={() => {
+                    updateMeta.mutate({ id: chat.id, characterCommands: !conversationCommandsEnabled });
+                  }}
+                  className={cn(
+                    "flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left transition-all",
+                    conversationCommandsEnabled
+                      ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
+                      : "bg-[var(--secondary)] hover:bg-[var(--accent)]",
+                  )}
+                >
+                  <div className="min-w-0 flex-1">
+                    <span className="flex items-center gap-1.5 text-xs font-medium">
+                      <Sparkles size="0.75rem" className="text-[var(--primary)]" />
+                      Commands
+                    </span>
+                    <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                      Allow models to interact with you via commands. This way, they can send you selfies, play songs
+                      for you, change their schedules, start scenes, and do much more!
+                    </p>
+                  </div>
+                  <div
+                    className={cn(
+                      "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
+                      conversationCommandsEnabled ? "bg-[var(--primary)]" : "bg-[var(--muted-foreground)]/50",
+                    )}
+                  >
+                    <div
+                      className={cn(
+                        "h-4 w-4 rounded-full bg-white shadow-sm transition-transform",
+                        conversationCommandsEnabled && "translate-x-3.5",
+                      )}
+                    />
+                  </div>
+                </button>
+
+                {/* Selfie Connection — connection picker for character selfies */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <Image size="0.75rem" className="text-[var(--primary)]" />
+                    <span className="text-xs font-medium">Selfie Connection</span>
+                  </div>
+                  <select
+                    value={(metadata.imageGenConnectionId as string) ?? ""}
+                    onChange={(e) => updateMeta.mutate({ id: chat.id, imageGenConnectionId: e.target.value || null })}
+                    className="w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+                  >
+                    <option value="">None (selfies disabled)</option>
+                    {imageConnectionsList.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name} ({c.provider})
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[0.55rem] text-[var(--muted-foreground)]">
+                    Used for character selfies when Commands are enabled. The Illustrator agent uses its own connection
+                    from the Agents tab.
+                  </p>
+
+                  {/* Selfie resolution picker */}
+                  {(metadata.imageGenConnectionId as string) && (
+                    <div className="mt-2 space-y-1">
+                      <span className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">Resolution</span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {[
+                          { label: "512x512", w: 512, h: 512 },
+                          { label: "512x768", w: 512, h: 768 },
+                          { label: "768x768", w: 768, h: 768 },
+                          { label: "768x1024", w: 768, h: 1024 },
+                          { label: "1024x1024", w: 1024, h: 1024 },
+                        ].map((opt) => {
+                          const current = (metadata.selfieResolution as string) ?? "512x768";
+                          const val = `${opt.w}x${opt.h}`;
+                          const active = current === val;
+                          return (
+                            <button
+                              key={val}
+                              type="button"
+                              onClick={() => updateMeta.mutate({ id: chat.id, selfieResolution: val })}
+                              className={`rounded-md px-2 py-1 text-[0.625rem] font-medium transition-colors ${
+                                active
+                                  ? "bg-[var(--primary)] text-[var(--primary-foreground)]"
+                                  : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:bg-[var(--accent)]"
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Selfie tags */}
+                  {(metadata.imageGenConnectionId as string) && (
+                    <SelfieTagsEditor
+                      tags={(metadata.selfieTags as string[]) ?? []}
+                      onChange={(tags) => updateMeta.mutate({ id: chat.id, selfieTags: tags })}
+                    />
+                  )}
+                </div>
+
+                {/* Schedule generation preferences — free-form authorial guidance */}
+                <label className="flex flex-col gap-1.5">
+                  <span className="inline-flex items-center gap-1.5 text-xs font-medium">
+                    <Sparkles size="0.75rem" className="text-[var(--primary)]" />
+                    Schedule generation preferences
+                    <HelpTooltip text="Free-form guidance that steers how character schedules are generated. Both directives ('no characters past midnight') and factual constraints ('I work 9-5') work. This setting is global, it applies to every conversation chat." />
+                  </span>
+                  <textarea
+                    value={scheduleGenerationPreferences}
+                    onChange={(e) => setScheduleGenerationPreferences(e.target.value)}
+                    placeholder="e.g. Make everyone go to sleep before midnight. Give characters free time 10am-noon. I work 9-5 on weekdays."
+                    className="min-h-[5rem] resize-y rounded-lg border border-[var(--border)] bg-[var(--secondary)] p-2.5 text-[0.6875rem] text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]/50 placeholder:text-[var(--muted-foreground)]/40"
+                  />
+                  <p className="text-[0.59375rem] text-[var(--muted-foreground)]/70">
+                    Global setting. Applies to every conversation chat&apos;s next schedule regeneration, manual or
+                    weekly auto.
+                  </p>
+                </label>
+
+                {/* Active schedule-generation preference indicator */}
+                {scheduleGenerationPreferences.trim() && (
+                  <div
+                    className="flex items-start gap-2 rounded-lg border border-[var(--primary)]/30 bg-[var(--primary)]/10 px-3 py-2.5"
+                    title={scheduleGenerationPreferences.trim()}
+                  >
+                    <Sparkles size="0.875rem" className="mt-0.5 shrink-0 text-[var(--primary)]" />
+                    <div className="min-w-0 flex-1">
+                      <span className="block text-[0.6875rem] font-medium leading-snug text-[var(--foreground)]">
+                        Schedule generation preference active
+                      </span>
+                      <p className="mt-0.5 truncate text-[0.625rem] italic text-[var(--muted-foreground)]">
+                        "{scheduleGenerationPreferences.trim()}"
+                      </p>
+                      <p className="mt-1 text-[0.59375rem] text-[var(--muted-foreground)]/70">
+                        Will be applied the next time schedules are regenerated.
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </Section>
+          )}
+
           {/* Cross-Chat Awareness — conversation mode only */}
           {isConversation && (
             <Section
@@ -2388,7 +3063,7 @@ export function ChatSettingsDrawer({
             <Section
               label="Connected Chat"
               icon={<ArrowRightLeft size="0.875rem" />}
-              help="Link this conversation to a roleplay or game chat. OOC context flows between them — conversation characters can influence the linked chat, and linked events can flow back into the conversation."
+              help="Link this conversation to a roleplay or game. Recent messages from the linked chat are pulled into context here automatically. To send something the other direction, the character uses `<influence>` (steers the next linked turn, one-shot) or `<note>` (persists on every future linked turn until cleared)."
             >
               {chat.connectedChatId ? (
                 (() => {
@@ -2397,7 +3072,9 @@ export function ChatSettingsDrawer({
                     <div className="flex items-center gap-2.5 rounded-lg bg-[var(--primary)]/10 px-3 py-2 ring-1 ring-[var(--primary)]/30">
                       <ArrowRightLeft size="0.875rem" className="text-[var(--primary)]" />
                       <div className="flex-1 min-w-0">
-                        <span className="truncate text-xs font-medium">{linked?.name ?? "Unknown chat"}</span>
+                        <span className="truncate text-xs font-medium">
+                          {linked ? getChatDisplayName(linked) : "Unknown chat"}
+                        </span>
                         <p className="text-[0.625rem] text-[var(--muted-foreground)]">
                           {linked ? (linked.mode === "roleplay" ? "Roleplay" : linked.mode) : "Deleted"}
                         </p>
@@ -2435,7 +3112,7 @@ export function ChatSettingsDrawer({
                         c.id !== chat.id &&
                         (c.mode === "roleplay" || c.mode === "game") &&
                         !c.connectedChatId &&
-                        c.name.toLowerCase().includes(connectionSearch.toLowerCase()),
+                        getChatDisplayName(c).toLowerCase().includes(connectionSearch.toLowerCase()),
                     )
                     .map((c) => (
                       <button
@@ -2447,7 +3124,7 @@ export function ChatSettingsDrawer({
                         className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--accent)]"
                       >
                         <MessageSquare size="0.75rem" className="shrink-0 text-[var(--muted-foreground)]" />
-                        <span className="truncate">{c.name}</span>
+                        <span className="truncate">{getChatDisplayName(c)}</span>
                       </button>
                     ))}
                 </PickerDropdown>
@@ -2455,12 +3132,92 @@ export function ChatSettingsDrawer({
             </Section>
           )}
 
-          {/* Connected Conversation — roleplay/game mode: show linked OOC chat */}
-          {!isConversation && chat.connectedChatId && (
+          {/* Connected Conversation — roleplay mode: linked OOC chat + optional in-world DM command */}
+          {isRoleplayMode && (
             <Section
               label="Connected Conversation"
               icon={<ArrowRightLeft size="0.875rem" />}
-              help="This chat is linked to a conversation. OOC influences from that chat will be injected into context, and game events or roleplay moments can flow back."
+              help={
+                'Link to an OOC conversation, and optionally let roleplay characters open direct-message conversations with `[dm: character="Name" message="text"]` when it naturally fits the scene.'
+              }
+            >
+              <div className="space-y-2">
+                {chat.connectedChatId ? (
+                  (() => {
+                    const linked = (allChats ?? []).find((c: Chat) => c.id === chat.connectedChatId);
+                    return (
+                      <div className="flex items-center gap-2.5 rounded-lg bg-[var(--primary)]/10 px-3 py-2 ring-1 ring-[var(--primary)]/30">
+                        <MessageCircle size="0.875rem" className="text-[var(--primary)]" />
+                        <div className="flex-1 min-w-0">
+                          <span className="truncate text-xs font-medium">
+                            {linked ? getChatDisplayName(linked) : "Unknown chat"}
+                          </span>
+                          <p className="text-[0.625rem] text-[var(--muted-foreground)]">Conversation</p>
+                        </div>
+                        <button
+                          onClick={() => disconnectChat.mutate(chat.id)}
+                          className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
+                          title="Disconnect"
+                        >
+                          <Unlink size="0.6875rem" />
+                        </button>
+                      </div>
+                    );
+                  })()
+                ) : (
+                  <p className="rounded-lg bg-[var(--secondary)]/50 px-3 py-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+                    No OOC conversation is linked. Direct-message commands can still create new Conversation DMs.
+                  </p>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    updateMeta.mutate({
+                      id: chat.id,
+                      roleplayDmCommandsEnabled: metadata.roleplayDmCommandsEnabled !== true,
+                    })
+                  }
+                  className={cn(
+                    "flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-left transition-all",
+                    metadata.roleplayDmCommandsEnabled === true
+                      ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
+                      : "bg-[var(--secondary)] hover:bg-[var(--accent)]",
+                  )}
+                >
+                  <div className="flex-1 min-w-0">
+                    <span className="text-[0.6875rem] font-medium">Allow character DMs</span>
+                    <p className="text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+                      Adds a short hidden command reminder so characters can open a new DM conversation when they text
+                      the user in-world.
+                    </p>
+                  </div>
+                  <div
+                    className={cn(
+                      "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
+                      metadata.roleplayDmCommandsEnabled === true
+                        ? "bg-[var(--primary)]"
+                        : "bg-[var(--muted-foreground)]/50",
+                    )}
+                  >
+                    <div
+                      className={cn(
+                        "h-4 w-4 rounded-full bg-white shadow-sm transition-transform",
+                        metadata.roleplayDmCommandsEnabled === true && "translate-x-3.5",
+                      )}
+                    />
+                  </div>
+                </button>
+              </div>
+            </Section>
+          )}
+
+          {/* Connected Conversation — game mode: show linked OOC chat */}
+          {isGame && chat.connectedChatId && (
+            <Section
+              label="Connected Conversation"
+              icon={<ArrowRightLeft size="0.875rem" />}
+              help="Linked to a conversation. `<influence>` tags from the conversation steer the next turn here (one-shot, then consumed). `<note>` tags persist on every turn until cleared. Raw conversation messages are not injected — use `<note>` for facts this chat should keep remembering."
             >
               {(() => {
                 const linked = (allChats ?? []).find((c: Chat) => c.id === chat.connectedChatId);
@@ -2468,7 +3225,9 @@ export function ChatSettingsDrawer({
                   <div className="flex items-center gap-2.5 rounded-lg bg-[var(--primary)]/10 px-3 py-2 ring-1 ring-[var(--primary)]/30">
                     <MessageCircle size="0.875rem" className="text-[var(--primary)]" />
                     <div className="flex-1 min-w-0">
-                      <span className="truncate text-xs font-medium">{linked?.name ?? "Unknown chat"}</span>
+                      <span className="truncate text-xs font-medium">
+                        {linked ? getChatDisplayName(linked) : "Unknown chat"}
+                      </span>
                       <p className="text-[0.625rem] text-[var(--muted-foreground)]">Conversation</p>
                     </div>
                     <button
@@ -2484,12 +3243,15 @@ export function ChatSettingsDrawer({
             </Section>
           )}
 
+          {/* Notes from Conversation — durable notes saved by the connected conversation's character */}
+          {!isConversation && chat.connectedChatId && <ConversationNotesSection chatId={chat.id} />}
+
           {/* Connect to Conversation — game mode without existing link */}
           {chatMode === "game" && !chat.connectedChatId && (
             <Section
               label="Connected Conversation"
               icon={<ArrowRightLeft size="0.875rem" />}
-              help="Link this game to an OOC conversation. Game events can flow to the conversation and player discussions can influence the game."
+              help="Link this game to an OOC conversation. The conversation character uses `<influence>` (one-shot) or `<note>` (durable) to bridge content into the game; raw conversation messages are not injected. Game events and roleplay moments flow back into the conversation automatically."
             >
               {!showConnectionPicker ? (
                 <button
@@ -2514,7 +3276,7 @@ export function ChatSettingsDrawer({
                         c.id !== chat.id &&
                         c.mode === "conversation" &&
                         !c.connectedChatId &&
-                        c.name.toLowerCase().includes(connectionSearch.toLowerCase()),
+                        getChatDisplayName(c).toLowerCase().includes(connectionSearch.toLowerCase()),
                     )
                     .map((c) => (
                       <button
@@ -2526,7 +3288,7 @@ export function ChatSettingsDrawer({
                         className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--accent)]"
                       >
                         <MessageSquare size="0.75rem" className="shrink-0 text-[var(--muted-foreground)]" />
-                        <span className="truncate">{c.name}</span>
+                        <span className="truncate">{getChatDisplayName(c)}</span>
                       </button>
                     ))}
                 </PickerDropdown>
@@ -2538,33 +3300,70 @@ export function ChatSettingsDrawer({
           <Section
             label="Lorebooks"
             icon={<BookOpen size="0.875rem" />}
-            count={activeLorebookIds.length}
+            count={activeLorebooks.length}
             help="Lorebooks contain world info, character backstories, and lore that gets injected into the AI's context when relevant keywords appear."
           >
+            <div className="mb-2 rounded-lg bg-[var(--secondary)]/70 p-3 ring-1 ring-[var(--border)]">
+              <label className="mb-1.5 flex items-center gap-1 text-xs font-medium">
+                Lorebook Token Budget{" "}
+                <HelpTooltip
+                  text={`Context cap for activated lorebook retrievals in this chat. Default: ${LIMITS.DEFAULT_LOREBOOK_TOKEN_BUDGET}. Set to 0 for unlimited.`}
+                />
+              </label>
+              <input
+                type="number"
+                min={0}
+                value={lorebookTokenBudget}
+                onChange={(event) => {
+                  const next = Math.max(0, Math.floor(Number(event.target.value) || 0));
+                  updateMeta.mutate({ id: chat.id, lorebookTokenBudget: next });
+                }}
+                className="w-full rounded-lg bg-[var(--background)] px-3 py-2 text-xs ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+              />
+            </div>
+
             {/* Active lorebooks */}
-            {activeLorebookIds.length === 0 ? (
-              <p className="text-[0.6875rem] text-[var(--muted-foreground)]">No lorebooks added to this chat.</p>
+            {activeLorebooks.length === 0 ? (
+              <p className="text-[0.6875rem] text-[var(--muted-foreground)]">No lorebooks active in this chat.</p>
             ) : (
               <div className="flex flex-col gap-1">
-                {activeLorebookIds.map((lbId) => {
-                  const lb = (lorebooks ?? []).find((l: { id: string }) => l.id === lbId) as
-                    | { id: string; name: string }
-                    | undefined;
-                  if (!lb) return null;
+                {activeLorebooks.map((lb) => {
                   return (
                     <div
                       key={lb.id}
                       className="flex items-center gap-2.5 rounded-lg bg-[var(--primary)]/10 px-3 py-2 ring-1 ring-[var(--primary)]/30"
                     >
                       <BookOpen size="0.875rem" className="text-[var(--primary)]" />
-                      <span className="flex-1 truncate text-xs">{lb.name}</span>
-                      <button
-                        onClick={() => toggleLorebook(lb.id)}
-                        className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
-                        title="Remove from chat"
-                      >
-                        <Trash2 size="0.6875rem" />
-                      </button>
+                      <div className="min-w-0 flex-1">
+                        <span className="block truncate text-xs">{lb.name}</span>
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {lb.activeReasons.map((reason) => (
+                            <span
+                              key={reason}
+                              className="rounded-full bg-[var(--background)]/70 px-1.5 py-0.5 text-[0.5625rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)]"
+                            >
+                              {reason}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      {lb.isPinned ? (
+                        <button
+                          onClick={() => toggleLorebook(lb.id)}
+                          className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
+                          title="Remove from chat"
+                        >
+                          <Trash2 size="0.6875rem" />
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => pinLorebookToChat(lb.id)}
+                          className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--primary)]/15 hover:text-[var(--primary)]"
+                          title="Add to chat"
+                        >
+                          <Plus size="0.6875rem" />
+                        </button>
+                      )}
                     </div>
                   );
                 })}
@@ -2590,7 +3389,7 @@ export function ChatSettingsDrawer({
                 placeholder="Search lorebooks…"
               >
                 {((lorebooks ?? []) as Array<{ id: string; name: string }>)
-                  .filter((lb) => !activeLorebookIds.includes(lb.id))
+                  .filter((lb) => !activeLorebookIdSet.has(lb.id))
                   .filter((lb) => lb.name.toLowerCase().includes(lbSearch.toLowerCase()))
                   .map((lb) => (
                     <button
@@ -2607,12 +3406,12 @@ export function ChatSettingsDrawer({
                     </button>
                   ))}
                 {((lorebooks ?? []) as Array<{ id: string; name: string }>)
-                  .filter((lb) => !activeLorebookIds.includes(lb.id))
+                  .filter((lb) => !activeLorebookIdSet.has(lb.id))
                   .filter((lb) => lb.name.toLowerCase().includes(lbSearch.toLowerCase())).length === 0 && (
                   <p className="px-3 py-2 text-[0.6875rem] text-[var(--muted-foreground)]">
-                    {((lorebooks ?? []) as Array<{ id: string }>).filter((lb) => !activeLorebookIds.includes(lb.id))
+                    {((lorebooks ?? []) as Array<{ id: string }>).filter((lb) => !activeLorebookIdSet.has(lb.id))
                       .length === 0
-                      ? "All lorebooks already added."
+                      ? "All available lorebooks are already active here."
                       : "No matches."}
                   </p>
                 )}
@@ -2625,13 +3424,14 @@ export function ChatSettingsDrawer({
             <Section
               label="Agents"
               icon={<Sparkles size="0.875rem" />}
-              count={activeAgentIds.length}
+              count={isGame ? gameAgentFeatureCount : activeAgentIds.length}
               help="When enabled, AI agents run automatically during generation to enrich the chat with world state tracking, expression detection, and more."
             >
               <div className="space-y-2">
                 {isGame && metadata.enableAgents && (
                   <p className="px-1 text-[0.625rem] text-[var(--muted-foreground)]">
-                    Toggle agents for this game session. Only two are allowed to ensure the game's format doesn't break.
+                    Toggle agents for this game session. Only the ones below are allowed to ensure the game's format
+                    doesn't break.
                   </p>
                 )}
                 <button
@@ -2702,6 +3502,192 @@ export function ChatSettingsDrawer({
                           </option>
                         ))}
                     </select>
+                  </div>
+                )}
+
+                {isGame && (
+                  <button
+                    onClick={() => {
+                      updateMeta.mutate({
+                        id: chat.id,
+                        gameLorebookKeeperEnabled: !gameLorebookKeeperEnabled,
+                      });
+                    }}
+                    className={cn(
+                      "flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left transition-all",
+                      gameLorebookKeeperEnabled
+                        ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
+                        : "bg-[var(--secondary)] hover:bg-[var(--accent)]",
+                    )}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5 text-xs font-medium">
+                        <BookOpen size="0.75rem" className="text-[var(--primary)]" />
+                        <span>Game Lorebook Keeper</span>
+                      </div>
+                      <p className="mt-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
+                        Updates a game-scoped lorebook after End Session finishes and attaches it only to this game.
+                      </p>
+                      {gameLorebookKeeperLorebook && (
+                        <p className="mt-0.5 truncate text-[0.55rem] text-[var(--primary)]/70">
+                          Target: {gameLorebookKeeperLorebook.name}
+                        </p>
+                      )}
+                    </div>
+                    <div
+                      className={cn(
+                        "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
+                        gameLorebookKeeperEnabled ? "bg-[var(--primary)]" : "bg-[var(--muted-foreground)]/50",
+                      )}
+                    >
+                      <div
+                        className={cn(
+                          "h-4 w-4 rounded-full bg-white shadow-sm transition-transform",
+                          gameLorebookKeeperEnabled && "translate-x-3.5",
+                        )}
+                      />
+                    </div>
+                  </button>
+                )}
+
+                {isGame && (
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      onClick={() => void toggleGameSpotifyMusic()}
+                      className={cn(
+                        "flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left transition-all",
+                        gameUseSpotifyMusic
+                          ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
+                          : "bg-[var(--secondary)] hover:bg-[var(--accent)]",
+                      )}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 text-xs font-medium">
+                          <Music2 size="0.75rem" className="text-[var(--primary)]" />
+                          <span>Spotify DJ Music</span>
+                        </div>
+                        <p className="mt-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
+                          Use Spotify instead of the built-in Game Mode music library.
+                        </p>
+                      </div>
+                      <div
+                        className={cn(
+                          "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
+                          gameUseSpotifyMusic ? "bg-[var(--primary)]" : "bg-[var(--muted-foreground)]/50",
+                        )}
+                      >
+                        <div
+                          className={cn(
+                            "h-4 w-4 rounded-full bg-white shadow-sm transition-transform",
+                            gameUseSpotifyMusic && "translate-x-3.5",
+                          )}
+                        />
+                      </div>
+                    </button>
+
+                    {gameUseSpotifyMusic && (
+                      <div className="space-y-2 rounded-lg bg-[var(--background)]/55 p-3 ring-1 ring-[var(--border)]">
+                        <label className="flex flex-col gap-1">
+                          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                            Music source
+                          </span>
+                          <select
+                            value={gameSpotifySourceType}
+                            onChange={(event) => {
+                              const next = normalizeGameSpotifySourceType(event.target.value);
+                              updateMeta.mutate({
+                                id: chat.id,
+                                gameSpotifySourceType: next,
+                                gameSpotifyPlaylistId: next === "playlist" ? gameSpotifyPlaylistId || null : null,
+                                gameSpotifyPlaylistName:
+                                  next === "playlist" ? (metadata.gameSpotifyPlaylistName as string) || null : null,
+                                gameSpotifyArtist: next === "artist" ? gameSpotifyArtistDraft.trim() || null : null,
+                              });
+                            }}
+                            className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)]"
+                          >
+                            {GAME_SPOTIFY_SOURCE_OPTIONS.map((option) => (
+                              <option key={option.id} value={option.id}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                          <span className="text-[0.5625rem] text-[var(--muted-foreground)]">
+                            {GAME_SPOTIFY_SOURCE_OPTIONS.find((option) => option.id === gameSpotifySourceType)
+                              ?.description ?? ""}
+                          </span>
+                        </label>
+
+                        {gameSpotifySourceType === "playlist" && (
+                          <label className="flex flex-col gap-1">
+                            <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Playlist</span>
+                            {spotifyPlaylistsQuery.data?.playlists.length ? (
+                              <select
+                                value={gameSpotifyPlaylistId}
+                                onChange={(event) => {
+                                  const playlist = spotifyPlaylistsQuery.data?.playlists.find(
+                                    (entry) => entry.id === event.target.value,
+                                  );
+                                  updateMeta.mutate({
+                                    id: chat.id,
+                                    gameSpotifyPlaylistId: event.target.value || null,
+                                    gameSpotifyPlaylistName: playlist?.name ?? null,
+                                  });
+                                }}
+                                className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)]"
+                              >
+                                <option value="">Choose playlist...</option>
+                                {spotifyPlaylistsQuery.data.playlists.map((playlist) => (
+                                  <option key={playlist.id} value={playlist.id}>
+                                    {playlist.name} ({playlist.trackCount})
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              <input
+                                key={`${chat.id}-${gameSpotifyPlaylistId}`}
+                                defaultValue={gameSpotifyPlaylistId}
+                                onBlur={(event) =>
+                                  updateMeta.mutate({
+                                    id: chat.id,
+                                    gameSpotifyPlaylistId: event.target.value.trim() || null,
+                                    gameSpotifyPlaylistName: null,
+                                  })
+                                }
+                                placeholder={
+                                  spotifyPlaylistsQuery.isFetching ? "Loading playlists..." : "Paste playlist ID"
+                                }
+                                className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]/50"
+                              />
+                            )}
+                            {spotifyPlaylistsQuery.isError && (
+                              <span className="text-[0.5625rem] text-amber-400/90">
+                                Connect Spotify in the Spotify DJ agent to load playlist names.
+                              </span>
+                            )}
+                          </label>
+                        )}
+
+                        {gameSpotifySourceType === "artist" && (
+                          <label className="flex flex-col gap-1">
+                            <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Artist</span>
+                            <input
+                              value={gameSpotifyArtistDraft}
+                              onChange={(event) => setGameSpotifyArtistDraft(event.target.value)}
+                              onBlur={() =>
+                                updateMeta.mutate({
+                                  id: chat.id,
+                                  gameSpotifyArtist: gameSpotifyArtistDraft.trim() || null,
+                                })
+                              }
+                              placeholder="HOYO-MiX"
+                              className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]/50"
+                            />
+                          </label>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -2781,7 +3767,7 @@ export function ChatSettingsDrawer({
                       {lorebookKeeperActive
                         ? "Read-behind uses assistant messages: 0 means the newest eligible reply, 1 waits one reply, and backfill only processes messages Lorebook Keeper has not already saved."
                         : activeAgentIds.length === 0
-                          ? "Lorebook Keeper is not currently enabled in workspace defaults. These chat settings will apply once it is enabled."
+                          ? "Lorebook Keeper is not currently enabled in this chat. These chat settings will apply once it is enabled."
                           : "Lorebook Keeper is not in this chat's active agent list. Add it below to make these settings take effect."}
                     </p>
                   </div>
@@ -2884,7 +3870,7 @@ export function ChatSettingsDrawer({
                       {expressionActive
                         ? "Only added characters with uploaded sprites appear here. You can enable up to 3 at a time."
                         : activeAgentIds.length === 0
-                          ? "Expression Engine is not currently enabled in workspace defaults. These sprite choices will apply once it is enabled."
+                          ? "Expression Engine is not currently enabled in this chat. These sprite choices will apply once it is enabled."
                           : "Expression Engine is not in this chat's active agent list. Add it below to show sprites during roleplay."}
                     </p>
 
@@ -2946,6 +3932,27 @@ export function ChatSettingsDrawer({
                               Right
                             </button>
                           </div>
+                        </div>
+
+                        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                          <SpriteRangeSlider
+                            label="Size"
+                            value={spriteScalePercent}
+                            min={50}
+                            max={175}
+                            step={5}
+                            suffix="%"
+                            onChange={setSpriteScale}
+                          />
+                          <SpriteRangeSlider
+                            label="Opacity"
+                            value={spriteOpacityPercent}
+                            min={15}
+                            max={100}
+                            step={5}
+                            suffix="%"
+                            onChange={setSpriteOpacity}
+                          />
                         </div>
 
                         <p className="mt-2 text-[0.5625rem] leading-relaxed text-[var(--muted-foreground)]">
@@ -3069,7 +4076,7 @@ export function ChatSettingsDrawer({
                       </div>
                     </button>
                     {metadata.enableSpriteGeneration && (
-                      <div className="mt-1.5 px-3">
+                      <div className="mt-1.5 space-y-2 px-3">
                         <select
                           value={(metadata.gameImageConnectionId as string) ?? ""}
                           onChange={(e) =>
@@ -3085,6 +4092,28 @@ export function ChatSettingsDrawer({
                             </option>
                           ))}
                         </select>
+                        <label className="flex flex-col gap-1">
+                          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                            Scene image instructions
+                          </span>
+                          <textarea
+                            value={gameImagePromptInstructionsDraft}
+                            onChange={(e) => setGameImagePromptInstructionsDraft(e.target.value)}
+                            onBlur={() => {
+                              const stored = (metadata.gameImagePromptInstructions as string) ?? "";
+                              if (gameImagePromptInstructionsDraft !== stored) {
+                                updateMeta.mutate({
+                                  id: chat.id,
+                                  gameImagePromptInstructions: gameImagePromptInstructionsDraft.trim() || null,
+                                });
+                              }
+                            }}
+                            placeholder="e.g. Dottore's mask completely covers his eyes; never render visible eyes behind it."
+                            rows={3}
+                            maxLength={1200}
+                            className="min-h-[4.75rem] w-full resize-y rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-2 text-xs leading-relaxed text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/50"
+                          />
+                        </label>
                       </div>
                     )}
                   </div>
@@ -3182,6 +4211,29 @@ export function ChatSettingsDrawer({
                       </div>
                     ) : (
                       <>
+                        {/* Approximate per-turn cost of the active agent loadout. */}
+                        <div
+                          className={cn(
+                            "flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-[0.6875rem] ring-1",
+                            agentLoadCost.cost.level === "high"
+                              ? "bg-amber-400/10 text-amber-400/90 ring-amber-400/30"
+                              : "bg-[var(--secondary)]/60 text-[var(--muted-foreground)] ring-[var(--border)]",
+                          )}
+                          title={`Approximate. Each call also carries chat context (recent messages, characters, persona, lorebook), so real per-turn token use is higher. Smaller models may slow down or fail past ~${AGENT_COST_HIGH_CALLS} calls or ~${AGENT_COST_HIGH_TOKENS.toLocaleString()} instruction tokens.`}
+                        >
+                          <span className="flex min-w-0 items-center gap-1.5">
+                            {agentLoadCost.cost.level === "high" && (
+                              <AlertTriangle size="0.75rem" className="shrink-0" />
+                            )}
+                            <span className="truncate">
+                              ~{agentLoadCost.cost.instructionTokens.toLocaleString()} tokens of agent instructions
+                              {" · "}~{agentLoadCost.cost.extraCalls} extra call
+                              {agentLoadCost.cost.extraCalls === 1 ? "" : "s"}/turn
+                            </span>
+                          </span>
+                          <span className="shrink-0 cursor-help text-[0.625rem] opacity-70">ⓘ</span>
+                        </div>
+
                         {activeAgentIds.length === 0 && (
                           <p className="text-[0.6875rem] text-[var(--muted-foreground)] px-1">
                             No per-chat agent overrides. Workspace default agents will be used for this chat.
@@ -3226,30 +4278,162 @@ export function ChatSettingsDrawer({
                               description={cat.description}
                               count={activeInCat.length}
                             >
+                              {cat.key === "writer" && (
+                                <div className="ml-auto flex w-fit max-w-full flex-wrap justify-end gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      updateMeta.mutate({
+                                        id: chat.id,
+                                        reviewWriterAgentOutputs: metadata.reviewWriterAgentOutputs !== true,
+                                      })
+                                    }
+                                    aria-pressed={metadata.reviewWriterAgentOutputs === true}
+                                    className="flex max-w-full items-center gap-2 rounded-md bg-[var(--background)]/20 px-1.5 py-1 text-left text-[0.5625rem] text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]/35 hover:text-[var(--foreground)]"
+                                    title={
+                                      metadata.reviewWriterAgentOutputs === true
+                                        ? "Stop pausing before the main reply to review writer agent output."
+                                        : "Pause before the main reply so Prose Guardian, Narrative Director, and similar writer outputs can be reviewed and edited."
+                                    }
+                                  >
+                                    <span className="flex min-w-0 items-center gap-1.5">
+                                      <Pencil size="0.625rem" className="shrink-0 text-[var(--primary)]" />
+                                      <span className="truncate font-medium">Review outputs</span>
+                                    </span>
+                                    <span
+                                      className={cn(
+                                        "h-3.5 w-6 shrink-0 rounded-full p-0.5 transition-colors",
+                                        metadata.reviewWriterAgentOutputs === true
+                                          ? "bg-[var(--primary)]"
+                                          : "bg-[var(--muted-foreground)]/50",
+                                      )}
+                                    >
+                                      <span
+                                        className={cn(
+                                          "block h-2.5 w-2.5 rounded-full bg-white shadow-sm transition-transform",
+                                          metadata.reviewWriterAgentOutputs === true && "translate-x-2.5",
+                                        )}
+                                      />
+                                    </span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      updateMeta.mutate({
+                                        id: chat.id,
+                                        showInjectionsPanel: metadata.showInjectionsPanel !== true,
+                                      })
+                                    }
+                                    aria-pressed={metadata.showInjectionsPanel === true}
+                                    className="flex max-w-full items-center gap-2 rounded-md bg-[var(--background)]/20 px-1.5 py-1 text-left text-[0.5625rem] text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]/35 hover:text-[var(--foreground)]"
+                                    title={
+                                      metadata.showInjectionsPanel === true
+                                        ? "Hide the Injections tab in the roleplay Agents menu. This is mainly for troubleshooting Prose Guardian, Narrative Director, or custom injected text before regenerating the current reply."
+                                        : "Show the Injections tab in the roleplay Agents menu. This is mainly for troubleshooting Prose Guardian, Narrative Director, or custom injected text before regenerating the current reply."
+                                    }
+                                  >
+                                    <span className="flex min-w-0 items-center gap-1.5">
+                                      <FilePlus2 size="0.625rem" className="shrink-0 text-[var(--primary)]" />
+                                      <span className="truncate font-medium">Injections tab</span>
+                                    </span>
+                                    <span
+                                      className={cn(
+                                        "h-3.5 w-6 shrink-0 rounded-full p-0.5 transition-colors",
+                                        metadata.showInjectionsPanel === true
+                                          ? "bg-[var(--primary)]"
+                                          : "bg-[var(--muted-foreground)]/50",
+                                      )}
+                                    >
+                                      <span
+                                        className={cn(
+                                          "block h-2.5 w-2.5 rounded-full bg-white shadow-sm transition-transform",
+                                          metadata.showInjectionsPanel === true && "translate-x-2.5",
+                                        )}
+                                      />
+                                    </span>
+                                  </button>
+                                </div>
+                              )}
                               {/* Active agents in this category */}
                               {activeInCat.length > 0 && (
                                 <div className="flex flex-col gap-1 mb-1.5">
-                                  {activeInCat.map((agent) => (
-                                    <div
-                                      key={agent.id}
-                                      className="flex items-center gap-2.5 rounded-lg bg-[var(--primary)]/10 px-3 py-2 ring-1 ring-[var(--primary)]/30"
-                                    >
-                                      <Sparkles size="0.875rem" className="text-[var(--primary)]" />
-                                      <div className="flex-1 min-w-0">
-                                        <span className="block truncate text-xs">{agent.name}</span>
-                                        <span className="mt-0.5 block text-[0.625rem] leading-tight text-[var(--muted-foreground)] line-clamp-2">
-                                          {agent.description}
-                                        </span>
-                                      </div>
-                                      <button
-                                        onClick={() => toggleAgent(agent.id)}
-                                        className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
-                                        title="Remove from chat"
+                                  {activeInCat.map((agent) => {
+                                    const tokenEst = agentLoadCost.tokensByType.get(agent.id);
+                                    const isSecretPlotDriver = agent.id === "secret-plot-driver";
+                                    return (
+                                      <div
+                                        key={agent.id}
+                                        className="rounded-lg bg-[var(--primary)]/10 px-3 py-2 ring-1 ring-[var(--primary)]/30"
                                       >
-                                        <Trash2 size="0.6875rem" />
-                                      </button>
-                                    </div>
-                                  ))}
+                                        <div className="flex items-start gap-2.5">
+                                          <Sparkles size="0.875rem" className="mt-0.5 shrink-0 text-[var(--primary)]" />
+                                          <div className="min-w-0 flex-1">
+                                            <div className="flex min-w-0 items-center gap-1.5">
+                                              <span className="block min-w-0 truncate text-xs">{agent.name}</span>
+                                              {tokenEst != null ? (
+                                                <span
+                                                  className="shrink-0 tabular-nums text-[0.625rem] text-[var(--muted-foreground)]"
+                                                  title={`~${tokenEst.toLocaleString()} tokens of agent instructions (estimated)`}
+                                                >
+                                                  ~{tokenEst.toLocaleString()}
+                                                </span>
+                                              ) : null}
+                                            </div>
+                                            <span className="mt-0.5 block text-[0.625rem] leading-tight text-[var(--muted-foreground)] line-clamp-2">
+                                              {agent.description}
+                                            </span>
+                                          </div>
+                                          <button
+                                            onClick={() => {
+                                              void toggleAgent(agent.id);
+                                            }}
+                                            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
+                                            title="Remove from chat"
+                                          >
+                                            <Trash2 size="0.6875rem" />
+                                          </button>
+                                        </div>
+                                        {isSecretPlotDriver && (
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              updateMeta.mutate({
+                                                id: chat.id,
+                                                showSecretPlotPanel: metadata.showSecretPlotPanel !== true,
+                                              })
+                                            }
+                                            aria-pressed={metadata.showSecretPlotPanel === true}
+                                            className="ml-auto mt-1.5 flex w-fit max-w-full items-center gap-2 rounded-md bg-[var(--background)]/20 px-1.5 py-1 text-left text-[0.5625rem] text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]/35 hover:text-[var(--foreground)]"
+                                            title={
+                                              metadata.showSecretPlotPanel === true
+                                                ? "Hide the Secret Plot tab in the roleplay Agents menu. That tab lets you inspect and edit the Secret Plot Driver's hidden arc memory and scene directions for this chat."
+                                                : "Show the Secret Plot tab in the roleplay Agents menu. Use it to inspect and edit the Secret Plot Driver's hidden arc memory and scene directions for this chat."
+                                            }
+                                          >
+                                            <span className="flex min-w-0 items-center gap-1.5">
+                                              <Brain size="0.625rem" className="shrink-0 text-[var(--primary)]" />
+                                              <span className="truncate font-medium">Secret Plot tab</span>
+                                            </span>
+                                            <span
+                                              className={cn(
+                                                "h-3.5 w-6 shrink-0 rounded-full p-0.5 transition-colors",
+                                                metadata.showSecretPlotPanel === true
+                                                  ? "bg-[var(--primary)]"
+                                                  : "bg-[var(--muted-foreground)]/50",
+                                              )}
+                                            >
+                                              <span
+                                                className={cn(
+                                                  "block h-2.5 w-2.5 rounded-full bg-white shadow-sm transition-transform",
+                                                  metadata.showSecretPlotPanel === true && "translate-x-2.5",
+                                                )}
+                                              />
+                                            </span>
+                                          </button>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
                                 </div>
                               )}
                               {/* Available agents to add */}
@@ -3295,24 +4479,37 @@ export function ChatSettingsDrawer({
                             >
                               {activeCustom.length > 0 && (
                                 <div className="flex flex-col gap-1 mb-1.5">
-                                  {activeCustom.map((agent) => (
-                                    <div
-                                      key={agent.id}
-                                      className="flex items-center gap-2.5 rounded-lg bg-[var(--primary)]/10 px-3 py-2 ring-1 ring-[var(--primary)]/30"
-                                    >
-                                      <Sparkles size="0.875rem" className="text-[var(--primary)]" />
-                                      <div className="flex-1 min-w-0">
-                                        <span className="block truncate text-xs">{agent.name}</span>
-                                      </div>
-                                      <button
-                                        onClick={() => toggleAgent(agent.id)}
-                                        className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
-                                        title="Remove from chat"
+                                  {activeCustom.map((agent) => {
+                                    const tokenEst = agentLoadCost.tokensByType.get(agent.id);
+                                    return (
+                                      <div
+                                        key={agent.id}
+                                        className="flex items-center gap-2.5 rounded-lg bg-[var(--primary)]/10 px-3 py-2 ring-1 ring-[var(--primary)]/30"
                                       >
-                                        <Trash2 size="0.6875rem" />
-                                      </button>
-                                    </div>
-                                  ))}
+                                        <Sparkles size="0.875rem" className="text-[var(--primary)]" />
+                                        <div className="flex-1 min-w-0">
+                                          <span className="block truncate text-xs">{agent.name}</span>
+                                        </div>
+                                        {tokenEst != null ? (
+                                          <span
+                                            className="shrink-0 tabular-nums text-[0.625rem] text-[var(--muted-foreground)]"
+                                            title={`~${tokenEst.toLocaleString()} tokens of agent instructions (estimated)`}
+                                          >
+                                            ~{tokenEst.toLocaleString()}
+                                          </span>
+                                        ) : null}
+                                        <button
+                                          onClick={() => {
+                                            void toggleAgent(agent.id);
+                                          }}
+                                          className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
+                                          title="Remove from chat"
+                                        >
+                                          <Trash2 size="0.6875rem" />
+                                        </button>
+                                      </div>
+                                    );
+                                  })}
                                 </div>
                               )}
                               {inactiveCustom.length > 0 && (
@@ -3350,7 +4547,7 @@ export function ChatSettingsDrawer({
             <Section
               label="Memory Recall"
               icon={<Brain size="0.875rem" />}
-              help="When enabled, relevant fragments from this chat are automatically recalled and injected into the prompt as memories. Uses a local embedding model — no API cost."
+              help="When enabled, relevant fragments from this chat are automatically recalled and injected into the prompt as memories. Uses the local embedding model when available, or the configured embedding connection."
             >
               {renderMemoryRecallControls(true)}
             </Section>
@@ -3363,18 +4560,90 @@ export function ChatSettingsDrawer({
               icon={<CalendarClock size="0.875rem" />}
               help="To help keep the request context low, the conversation is automatically summarized. Each day is wrapped up into a day summary. Likewise, day summaries are combined into week summaries. Chat messages that have been summarized are not added to context. Only the week summaries, the day summaries of the current week and today's messages are added to the context. This feature currently can't be disabled."
             >
-              <button
-                onClick={() => setShowSummariesModal(true)}
-                className="flex w-full items-center justify-between rounded-lg bg-[var(--secondary)] px-3 py-2.5 text-left transition-all hover:bg-[var(--accent)]"
-              >
-                <div className="flex-1 min-w-0">
-                  <span className="text-[0.6875rem] font-medium">Edit Summaries</span>
+              <div className="space-y-2.5">
+                <button
+                  onClick={() => setShowSummariesModal(true)}
+                  className="flex w-full items-center justify-between rounded-lg bg-[var(--secondary)] px-3 py-2.5 text-left transition-all hover:bg-[var(--accent)]"
+                >
+                  <div className="flex-1 min-w-0">
+                    <span className="text-[0.6875rem] font-medium">Edit Summaries</span>
+                    <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                      Review and edit what characters remember from this chat.
+                    </p>
+                  </div>
+                  <Pencil size="0.875rem" className="shrink-0 text-[var(--muted-foreground)]" />
+                </button>
+
+                {/* Day rollover hour */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <Clock size="0.75rem" className="text-[var(--primary)]" />
+                    <span className="text-xs font-medium">Day Rollover Hour</span>
+                  </div>
+                  <select
+                    value={(metadata.dayRolloverHour as number | undefined) ?? 4}
+                    onChange={(e) => {
+                      setRolloverTouchedThisSession(true);
+                      updateMeta.mutate({ id: chat.id, dayRolloverHour: Number(e.target.value) });
+                    }}
+                    className="w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+                  >
+                    {Array.from({ length: 12 }, (_, h) => {
+                      const label = h === 0 ? "12 AM (midnight)" : `${h} AM`;
+                      return (
+                        <option key={h} value={h}>
+                          {label}
+                        </option>
+                      );
+                    })}
+                  </select>
                   <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-                    Review and edit what characters remember from this chat.
+                    Messages sent before this hour count as part of the previous day. Pick a time you&apos;re never
+                    chatting, so a late-night session doesn&apos;t get cut off mid-conversation.
+                  </p>
+                  {rolloverTouchedThisSession &&
+                    (((metadata.daySummaries as Record<string, unknown> | undefined) &&
+                      Object.keys(metadata.daySummaries as Record<string, unknown>).length > 0) ||
+                      ((metadata.weekSummaries as Record<string, unknown> | undefined) &&
+                        Object.keys(metadata.weekSummaries as Record<string, unknown>).length > 0)) && (
+                      <div className="flex items-start gap-1.5 rounded-md bg-amber-400/10 px-2 py-1.5 ring-1 ring-amber-400/20">
+                        <AlertTriangle size="0.75rem" className="mt-[0.125rem] shrink-0 text-amber-400/80" />
+                        <p className="text-[0.625rem] text-amber-400/80 leading-snug">
+                          Existing summaries were built with the previous setting. For today, messages near the rollover
+                          hour may be duplicated or missing from the prompt. From tomorrow onward, new day summaries
+                          will line up correctly. To adjust an older summary, use{" "}
+                          <span className="font-medium">Edit Summaries</span> above.
+                        </p>
+                      </div>
+                    )}
+                </div>
+
+                {/* Recent message tail */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <MessageCircle size="0.75rem" className="text-[var(--primary)]" />
+                    <span className="text-xs font-medium">Recent Message Tail</span>
+                  </div>
+                  <input
+                    type="number"
+                    min={0}
+                    max={50}
+                    step={1}
+                    value={(metadata.summaryTailMessages as number | undefined) ?? 10}
+                    onChange={(e) => {
+                      const raw = Number(e.target.value);
+                      const clamped = Number.isFinite(raw) ? Math.max(0, Math.min(50, Math.floor(raw))) : 10;
+                      updateMeta.mutate({ id: chat.id, summaryTailMessages: clamped });
+                    }}
+                    className="w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+                  />
+                  <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                    How many recent messages to keep word-for-word, even once they&apos;re summarized. Helps characters
+                    pick up the actual flow of last night&apos;s conversation instead of just the gist. Set to{" "}
+                    <span className="font-medium">0</span> to disable.
                   </p>
                 </div>
-                <Pencil size="0.875rem" className="shrink-0 text-[var(--muted-foreground)]" />
-              </button>
+              </div>
             </Section>
           )}
 
@@ -3582,7 +4851,7 @@ export function ChatSettingsDrawer({
             <Section
               label="Memory Recall"
               icon={<Brain size="0.875rem" />}
-              help="When enabled, relevant fragments from this chat are automatically recalled and injected into the prompt as memories. Uses a local embedding model — no API cost."
+              help="When enabled, relevant fragments from this chat are automatically recalled and injected into the prompt as memories. Uses the local embedding model when available, or the configured embedding connection."
             >
               {renderMemoryRecallControls(metadata.sceneStatus === "active")}
             </Section>
@@ -3755,6 +5024,39 @@ export function ChatSettingsDrawer({
                   />
                 </div>
               </button>
+
+              {/* Draft translate button toggle */}
+              <button
+                onClick={() => {
+                  updateMeta.mutate({ id: chat.id, showInputTranslateButton: !metadata.showInputTranslateButton });
+                }}
+                className={cn(
+                  "flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left transition-all",
+                  metadata.showInputTranslateButton
+                    ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
+                    : "bg-[var(--secondary)] hover:bg-[var(--accent)]",
+                )}
+              >
+                <div className="flex-1 min-w-0">
+                  <span className="text-[0.6875rem] font-medium">Show Draft Translate Button</span>
+                  <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                    Add a translate button beside Send so you can translate and edit your message before sending it.
+                  </p>
+                </div>
+                <div
+                  className={cn(
+                    "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
+                    metadata.showInputTranslateButton ? "bg-[var(--primary)]" : "bg-[var(--muted-foreground)]/50",
+                  )}
+                >
+                  <div
+                    className={cn(
+                      "h-4 w-4 rounded-full bg-white shadow-sm transition-transform",
+                      metadata.showInputTranslateButton && "translate-x-3.5",
+                    )}
+                  />
+                </div>
+              </button>
             </div>
           </Section>
 
@@ -3830,6 +5132,18 @@ export function ChatSettingsDrawer({
               )}
             </div>
           </Section>
+
+          {/* Impersonate (global settings applied to /impersonate generations) */}
+          <Section
+            label="Impersonate"
+            icon={<Drama size="0.875rem" />}
+            help="Global settings applied to every /impersonate generation across all chats."
+          >
+            <ImpersonateSettingsContent
+              presets={(presets ?? []) as Array<{ id: string; name: string }>}
+              connections={textConnectionsList}
+            />
+          </Section>
         </div>
       </div>
 
@@ -3879,40 +5193,84 @@ export function ChatSettingsDrawer({
               </div>
             </div>
 
-            {agentAddPreview.agent.id !== "chat-summary" ? (
-              <div className="space-y-1.5">
-                <label className="block text-[0.6875rem] font-semibold text-[var(--foreground)]">Context Size</label>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="number"
-                    min={1}
-                    max={200}
-                    value={agentAddPreview.contextSize}
-                    onChange={(e) => {
-                      const value = parseInt(e.target.value, 10);
-                      setAgentAddPreview((current) =>
-                        current
-                          ? {
-                              ...current,
-                              contextSize: Number.isFinite(value) ? Math.max(1, Math.min(200, value)) : 5,
-                            }
-                          : current,
-                      );
-                    }}
-                    disabled={addingAgentToChat}
-                    className="w-28 rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm tabular-nums ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)] disabled:cursor-not-allowed disabled:opacity-60"
-                  />
-                  <span className="text-[0.6875rem] text-[var(--muted-foreground)]">messages</span>
+            <div className="space-y-1.5">
+              <label className="block text-[0.6875rem] font-semibold text-[var(--foreground)]">Agent Budget</label>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {agentAddPreview.agent.id !== "chat-summary" ? (
+                  <div>
+                    <label className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                      Context Size
+                    </label>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="number"
+                        min={1}
+                        max={200}
+                        value={agentAddPreview.contextSize}
+                        onChange={(e) => {
+                          const value = parseInt(e.target.value, 10);
+                          setAgentAddPreview((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  contextSize: Number.isFinite(value)
+                                    ? Math.max(1, Math.min(200, value))
+                                    : DEFAULT_AGENT_CONTEXT_SIZE,
+                                }
+                              : current,
+                          );
+                        }}
+                        disabled={addingAgentToChat}
+                        className="w-28 rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm tabular-nums ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)] disabled:cursor-not-allowed disabled:opacity-60"
+                      />
+                      <span className="text-[0.6875rem] text-[var(--muted-foreground)]">messages</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-xl bg-[var(--accent)]/50 px-3 py-2.5 text-[0.6875rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+                    Chat Summary context size is managed in the Chat Summary panel after you add the agent.
+                  </div>
+                )}
+                <div>
+                  <label className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                    Max Output Tokens
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="number"
+                      min={MIN_AGENT_MAX_TOKENS}
+                      max={MAX_AGENT_MAX_TOKENS}
+                      value={agentAddPreview.maxTokens}
+                      onChange={(e) => {
+                        const value = parseInt(e.target.value, 10);
+                        setAgentAddPreview((current) =>
+                          current
+                            ? {
+                                ...current,
+                                maxTokens: normalizeAgentMaxTokensInputValue(
+                                  Number.isFinite(value) ? value : undefined,
+                                ),
+                              }
+                            : current,
+                        );
+                      }}
+                      onBlur={() => {
+                        setAgentAddPreview((current) =>
+                          current ? { ...current, maxTokens: normalizeAgentMaxTokens(current.maxTokens) } : current,
+                        );
+                      }}
+                      disabled={addingAgentToChat}
+                      className="w-32 rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm tabular-nums ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)] disabled:cursor-not-allowed disabled:opacity-60"
+                    />
+                    <span className="text-[0.6875rem] text-[var(--muted-foreground)]">tokens</span>
+                  </div>
                 </div>
-                <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-                  How many recent chat messages this agent should receive as working context.
-                </p>
               </div>
-            ) : (
-              <div className="rounded-xl bg-[var(--accent)]/50 px-3 py-2.5 text-[0.6875rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
-                Context size for automated summaries is managed in the Chat Summary panel after you add the agent.
-              </div>
-            )}
+              <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                Context size controls recent chat messages. Max output reserves completion room; lower it on small local
+                contexts if logs show the prompt budget collapsing.
+              </p>
+            </div>
 
             {agentAddIntervalMeta && agentAddPreview.runInterval != null && (
               <div className="space-y-1.5">
@@ -3920,27 +5278,126 @@ export function ChatSettingsDrawer({
                   {agentAddIntervalMeta.label}
                 </label>
                 <div className="flex items-center gap-3">
-                  <input
-                    type="number"
-                    min={1}
-                    max={agentAddIntervalMeta.max}
-                    value={agentAddPreview.runInterval}
-                    onChange={(e) => {
-                      const value = parseInt(e.target.value, 10);
-                      setAgentAddPreview((current) =>
-                        current
-                          ? {
-                              ...current,
-                              runInterval: Number.isFinite(value)
-                                ? Math.max(1, Math.min(agentAddIntervalMeta.max, value))
-                                : agentAddIntervalMeta.defaultValue,
-                            }
-                          : current,
-                      );
-                    }}
-                    disabled={addingAgentToChat}
-                    className="w-28 rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm tabular-nums ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)] disabled:cursor-not-allowed disabled:opacity-60"
-                  />
+                  {agentAddPreview.agent.builtIn ? (
+                    <input
+                      type="number"
+                      min={1}
+                      max={agentAddIntervalMeta.max}
+                      value={agentAddPreview.runInterval}
+                      onChange={(e) => {
+                        setAgentAddPreview((current) =>
+                          current
+                            ? {
+                                ...current,
+                                runInterval: parseCadenceInputValue(
+                                  e.target.value,
+                                  agentAddIntervalMeta.defaultValue,
+                                  agentAddIntervalMeta.max,
+                                ),
+                              }
+                            : current,
+                        );
+                      }}
+                      disabled={addingAgentToChat}
+                      className="w-28 rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm tabular-nums ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)] disabled:cursor-not-allowed disabled:opacity-60"
+                    />
+                  ) : (
+                    <div className="relative w-28">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={
+                          agentAddCadenceInputFocused
+                            ? String(agentAddPreview.runInterval)
+                            : getCadenceInputValue(agentAddPreview.runInterval)
+                        }
+                        onFocus={(e) => {
+                          setAgentAddCadenceInputFocused(true);
+                          e.target.select();
+                        }}
+                        onBlur={() => setAgentAddCadenceInputFocused(false)}
+                        onKeyDown={(e) => {
+                          if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+                          e.preventDefault();
+                          const delta = e.key === "ArrowUp" ? 1 : -1;
+                          setAgentAddPreview((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  runInterval: stepCadenceValue(
+                                    current.runInterval ?? 1,
+                                    delta,
+                                    agentAddIntervalMeta.max,
+                                  ),
+                                }
+                              : current,
+                          );
+                        }}
+                        onChange={(e) => {
+                          setAgentAddPreview((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  runInterval: parseCadenceInputValue(
+                                    e.target.value,
+                                    current.runInterval ?? 1,
+                                    agentAddIntervalMeta.max,
+                                  ),
+                                }
+                              : current,
+                          );
+                        }}
+                        disabled={addingAgentToChat}
+                        className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 pr-8 text-sm tabular-nums ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)] disabled:cursor-not-allowed disabled:opacity-60"
+                      />
+                      <div className="absolute right-1 top-1/2 flex -translate-y-1/2 flex-col overflow-hidden rounded-md">
+                        <button
+                          type="button"
+                          aria-label="Increase trigger cadence"
+                          disabled={addingAgentToChat}
+                          onClick={() => {
+                            setAgentAddPreview((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    runInterval: stepCadenceValue(
+                                      current.runInterval ?? 1,
+                                      1,
+                                      agentAddIntervalMeta.max,
+                                    ),
+                                  }
+                                : current,
+                            );
+                          }}
+                          className="flex h-4 w-5 items-center justify-center text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <ChevronUp size="0.6875rem" />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label="Decrease trigger cadence"
+                          disabled={addingAgentToChat}
+                          onClick={() => {
+                            setAgentAddPreview((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    runInterval: stepCadenceValue(
+                                      current.runInterval ?? 1,
+                                      -1,
+                                      agentAddIntervalMeta.max,
+                                    ),
+                                  }
+                                : current,
+                            );
+                          }}
+                          className="flex h-4 w-5 items-center justify-center text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <ChevronDown size="0.6875rem" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{agentAddIntervalMeta.unit}</span>
                 </div>
                 <p className="text-[0.625rem] text-[var(--muted-foreground)]">{agentAddIntervalMeta.help}</p>
@@ -4033,6 +5490,7 @@ function MemoryRecallMemoriesModal({ chatId, open, onClose }: { chatId: string; 
   const memoriesQuery = useChatMemories(chatId, open);
   const deleteMemory = useDeleteChatMemory(chatId);
   const clearMemories = useClearChatMemories(chatId);
+  const refreshMemories = useRefreshChatMemories(chatId);
   const memories = useMemo(() => memoriesQuery.data ?? [], [memoriesQuery.data]);
   const totalTokens = useMemo(() => estimateMemoryTokens(memories), [memories]);
 
@@ -4074,12 +5532,15 @@ function MemoryRecallMemoriesModal({ chatId, open, onClose }: { chatId: string; 
           <div className="flex items-center gap-1">
             <button
               type="button"
-              onClick={() => void memoriesQuery.refetch()}
-              disabled={memoriesQuery.isFetching}
+              onClick={() => refreshMemories.mutate()}
+              disabled={memoriesQuery.isFetching || refreshMemories.isPending}
               className="rounded-lg p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-50"
-              title="Refresh"
+              title="Rebuild memories from current chat messages"
             >
-              <RefreshCw size="0.8125rem" className={cn(memoriesQuery.isFetching && "animate-spin")} />
+              <RefreshCw
+                size="0.8125rem"
+                className={cn((memoriesQuery.isFetching || refreshMemories.isPending) && "animate-spin")}
+              />
             </button>
             <button
               type="button"
@@ -4123,7 +5584,13 @@ function MemoryRecallMemoriesModal({ chatId, open, onClose }: { chatId: string; 
                     </div>
                     <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5">
                       <span>{memory.messageCount} messages</span>
-                      <span>{memory.hasEmbedding ? "Vectorized" : "Waiting for vector"}</span>
+                      <span>
+                        {memory.hasEmbedding
+                          ? "Vectorized"
+                          : memory.embeddingStatus === "unavailable"
+                            ? "Embedding unavailable"
+                            : "Waiting for vector"}
+                      </span>
                       <span>Created {formatMemoryDate(memory.createdAt)}</span>
                     </div>
                   </div>
@@ -4302,6 +5769,166 @@ function AdvancedParametersSection({
   );
 }
 
+// ── Impersonate settings content (rendered inside an Impersonate Section) ──
+function ImpersonateSettingsContent({
+  presets,
+  connections,
+}: {
+  presets: Array<{ id: string; name: string }>;
+  connections: Array<{ id: string; name: string }>;
+}) {
+  const promptTemplate = useUIStore((s) => s.impersonatePromptTemplate);
+  const setPromptTemplate = useUIStore((s) => s.setImpersonatePromptTemplate);
+  const showQuickButton = useUIStore((s) => s.impersonateShowQuickButton);
+  const setShowQuickButton = useUIStore((s) => s.setImpersonateShowQuickButton);
+  const cyoaChoices = useUIStore((s) => s.impersonateCyoaChoices);
+  const setCyoaChoices = useUIStore((s) => s.setImpersonateCyoaChoices);
+  const presetId = useUIStore((s) => s.impersonatePresetId);
+  const setPresetId = useUIStore((s) => s.setImpersonatePresetId);
+  const connectionId = useUIStore((s) => s.impersonateConnectionId);
+  const setConnectionId = useUIStore((s) => s.setImpersonateConnectionId);
+  const blockAgents = useUIStore((s) => s.impersonateBlockAgents);
+  const setBlockAgents = useUIStore((s) => s.setImpersonateBlockAgents);
+  const hasPromptTemplate = promptTemplate.trim().length > 0;
+
+  const [defaultOpen, setDefaultOpen] = useState(false);
+
+  return (
+    <div className="space-y-2.5">
+      <div className="space-y-1">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="text-xs font-semibold">Prompt Template</span>
+            <HelpTooltip text="Optional global instruction sent to the model when you /impersonate. Leave empty to use the chat-specific prompt, or the built-in default if that chat has none. Macros like {{user}}, {{persona_description}} and {{impersonate_direction}} are replaced before sending." />
+          </div>
+          <span className="shrink-0 text-[0.625rem] text-[var(--muted-foreground)]/80">
+            {hasPromptTemplate ? "Custom" : "Using chat/built-in default"}
+          </span>
+        </div>
+        <textarea
+          value={promptTemplate}
+          onChange={(e) => setPromptTemplate(e.target.value)}
+          placeholder="Empty = use chat/built-in default"
+          rows={4}
+          className="min-h-20 w-full resize-y rounded-lg bg-[var(--secondary)] px-3 py-1.5 font-mono text-xs leading-relaxed outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+        />
+        <div className="flex items-center justify-between gap-2">
+          <button
+            onClick={() => setDefaultOpen((v) => !v)}
+            className="flex items-center gap-1 rounded-md px-1 py-0.5 text-[0.625rem] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)]/70 hover:text-[var(--foreground)]"
+          >
+            {defaultOpen ? <ChevronDown size="0.6875rem" /> : <ChevronRight size="0.6875rem" />}
+            Built-in default
+          </button>
+          {hasPromptTemplate ? (
+            <button
+              onClick={() => setPromptTemplate("")}
+              className="flex items-center gap-1 rounded-md bg-[var(--secondary)] px-2 py-0.5 text-[0.625rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+              title="Reset to default"
+            >
+              <RotateCcw size="0.625rem" />
+              Reset
+            </button>
+          ) : (
+            <span className="text-[0.625rem] text-[var(--muted-foreground)]/80">Using chat/built-in default</span>
+          )}
+        </div>
+        {defaultOpen && (
+          <pre className="m-0 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[var(--secondary)]/40 px-3 py-2 font-mono text-[0.625rem] leading-relaxed text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+            {DEFAULT_IMPERSONATE_PROMPT}
+          </pre>
+        )}
+      </div>
+
+      <div className="grid gap-x-2 gap-y-1.5 sm:grid-cols-[minmax(7.5rem,1fr)_8.75rem]">
+        <label className="order-1 space-y-1 rounded-lg bg-[var(--secondary)]/25 px-3 py-1.5 ring-1 ring-[var(--border)]">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[0.6875rem] font-semibold">Preset</span>
+            <HelpTooltip text="Use a specific prompt preset for roleplay impersonate generations only. Conversation mode does not use prompt presets. Falls back to the chat's preset when set to 'Use chat default'." />
+          </div>
+          <select
+            value={presetId ?? ""}
+            onChange={(e) => setPresetId(e.target.value || null)}
+            className="w-full rounded-lg bg-[var(--secondary)] px-2.5 py-1.5 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+          >
+            <option value="">Use chat default</option>
+            {presets.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="order-3 space-y-1 rounded-lg bg-[var(--secondary)]/25 px-3 py-1.5 ring-1 ring-[var(--border)] sm:order-3">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[0.6875rem] font-semibold">Connection</span>
+            <HelpTooltip text="Use a specific connection (model/provider) for impersonate generations only. Useful for routing impersonate to a cheaper or faster model." />
+          </div>
+          <select
+            value={connectionId ?? ""}
+            onChange={(e) => setConnectionId(e.target.value || null)}
+            className="w-full rounded-lg bg-[var(--secondary)] px-2.5 py-1.5 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+          >
+            <option value="">Use chat default</option>
+            <option value="random">Random</option>
+            {connections.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="order-2 flex min-h-[2.875rem] min-w-0 items-center justify-between gap-1.5 rounded-lg bg-[var(--secondary)]/25 px-2.5 py-1.5 text-xs font-semibold ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)]/40 sm:order-2">
+          <span className="min-w-0">Quick button</span>
+          <span className="flex shrink-0 items-center gap-1.5">
+            <input
+              type="checkbox"
+              checked={showQuickButton}
+              onChange={(e) => setShowQuickButton(e.target.checked)}
+              className="h-3.5 w-3.5 rounded border-[var(--border)] accent-[var(--primary)]"
+            />
+            <span onClick={(e) => e.preventDefault()}>
+              <HelpTooltip text="Show a one-click impersonate button in the chat input toolbar. When pressed with text in the input, it sends that text as the impersonate direction." />
+            </span>
+          </span>
+        </label>
+
+        <label className="order-4 flex min-h-[2.875rem] min-w-0 items-center justify-between gap-1.5 rounded-lg bg-[var(--secondary)]/25 px-2.5 py-1.5 text-xs font-semibold ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)]/40">
+          <span className="min-w-0">Skip agents</span>
+          <span className="flex shrink-0 items-center gap-1.5">
+            <input
+              type="checkbox"
+              checked={blockAgents}
+              onChange={(e) => setBlockAgents(e.target.checked)}
+              className="h-3.5 w-3.5 rounded border-[var(--border)] accent-[var(--primary)]"
+            />
+            <span onClick={(e) => e.preventDefault()}>
+              <HelpTooltip text="When enabled, the agent pipeline (trackers, lorebook routers, etc.) is suppressed during impersonate so generations stay fast and don't trigger world-state mutations." />
+            </span>
+          </span>
+        </label>
+
+        <label className="order-5 flex min-h-[2.875rem] min-w-0 items-center justify-between gap-2 rounded-lg bg-[var(--secondary)]/25 px-2.5 py-1.5 text-xs font-semibold ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)]/40 sm:col-span-2">
+          <span className="min-w-0">Use CYOA as direction</span>
+          <span className="flex shrink-0 items-center gap-1.5">
+            <input
+              type="checkbox"
+              checked={cyoaChoices}
+              onChange={(e) => setCyoaChoices(e.target.checked)}
+              className="h-3.5 w-3.5 rounded border-[var(--border)] accent-[var(--primary)]"
+            />
+            <span onClick={(e) => e.preventDefault()}>
+              <HelpTooltip text="When enabled, clicking a CYOA option uses it as the direction for an impersonate generation instead of sending the option as a normal user message." />
+            </span>
+          </span>
+        </label>
+      </div>
+    </div>
+  );
+}
+
 // ── Reusable section wrapper ──
 function Section({
   label,
@@ -4442,6 +6069,46 @@ function PickerDropdown({
       {/* Footer — always visible below the scrollable list */}
       {footer}
     </div>
+  );
+}
+
+// ── Sprite display slider ──
+function SpriteRangeSlider({
+  label,
+  value,
+  min,
+  max,
+  step,
+  suffix,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  suffix: string;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="flex min-w-0 flex-col gap-1.5 rounded-lg bg-[var(--secondary)]/50 px-2.5 py-2 text-[0.625rem] text-[var(--muted-foreground)]">
+      <span className="flex items-center justify-between gap-2">
+        <span className="font-medium text-[var(--foreground)]">{label}</span>
+        <span className="rounded-full bg-[var(--background)] px-2 py-0.5 text-[0.5625rem] tabular-nums text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+          {value}
+          {suffix}
+        </span>
+      </span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(event) => onChange(Number(event.target.value))}
+        className="h-8 w-full cursor-pointer accent-[var(--primary)]"
+      />
+    </label>
   );
 }
 
@@ -4981,5 +6648,111 @@ function HapticConnectionPanel() {
         </div>
       )}
     </div>
+  );
+}
+
+function ConversationNotesSection({ chatId }: { chatId: string }) {
+  const notesQuery = useChatNotes(chatId);
+  const deleteNote = useDeleteChatNote(chatId);
+  const clearNotes = useClearChatNotes(chatId);
+  const notes = useMemo<ConversationNote[]>(() => notesQuery.data ?? [], [notesQuery.data]);
+  const totalChars = useMemo(() => notes.reduce((acc, n) => acc + n.content.length, 0), [notes]);
+
+  const handleDelete = async (note: ConversationNote) => {
+    const ok = await showConfirmDialog({
+      title: "Delete Note",
+      message: "Remove this note from the connected roleplay's prompt?",
+      confirmLabel: "Delete",
+      tone: "destructive",
+    });
+    if (ok) deleteNote.mutate(note.id);
+  };
+
+  const handleClear = async () => {
+    if (notes.length === 0) return;
+    const ok = await showConfirmDialog({
+      title: "Clear All Notes",
+      message: "Remove every durable note from this roleplay? This cannot be undone.",
+      confirmLabel: "Clear all",
+      tone: "destructive",
+    });
+    if (ok) clearNotes.mutate();
+  };
+
+  return (
+    <Section
+      label="Conversation Notes"
+      icon={<StickyNote size="0.875rem" />}
+      count={notes.length}
+      help="Durable notes the connected conversation's character has saved using <note>. They persist in this roleplay's prompt every turn until cleared."
+    >
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-2 text-[0.625rem] text-[var(--muted-foreground)]">
+          <span>
+            {notesQuery.isLoading
+              ? "Loading…"
+              : notesQuery.error
+                ? "Failed to load."
+                : notes.length === 0
+                  ? "No notes saved yet."
+                  : `${notes.length} ${notes.length === 1 ? "note" : "notes"} · ${totalChars.toLocaleString()} chars`}
+          </span>
+          {notes.length > 0 && !notesQuery.isLoading && !notesQuery.error && (
+            <button
+              type="button"
+              onClick={handleClear}
+              disabled={clearNotes.isPending}
+              className="rounded-md p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)] disabled:opacity-40"
+              title="Clear all notes"
+            >
+              <Trash2 size="0.75rem" />
+            </button>
+          )}
+        </div>
+
+        {notesQuery.isLoading ? (
+          <p className="rounded-lg bg-[var(--secondary)]/50 px-3 py-3 text-center text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+            Loading notes…
+          </p>
+        ) : notesQuery.error ? (
+          <p className="rounded-lg bg-[var(--destructive)]/10 px-3 py-3 text-[0.625rem] leading-relaxed text-[var(--destructive)] ring-1 ring-[var(--destructive)]/25">
+            Failed to load notes.
+          </p>
+        ) : notes.length === 0 ? (
+          <p className="rounded-lg bg-[var(--secondary)]/50 px-3 py-3 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+            Characters in the connected conversation can save things they want this roleplay to durably remember by
+            wrapping text in <code className="rounded bg-[var(--accent)]/60 px-1">{"<note>...</note>"}</code>. Saved
+            notes will appear here.
+          </p>
+        ) : (
+          <ul className="space-y-1.5">
+            {notes.map((note) => (
+              <li
+                key={note.id}
+                className="flex items-start gap-2 rounded-lg bg-[var(--card)] px-2.5 py-2 ring-1 ring-[var(--border)]"
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="whitespace-pre-wrap break-words text-[0.6875rem] leading-relaxed text-[var(--foreground)]">
+                    {note.content}
+                  </p>
+                  <p className="mt-1 text-[0.5625rem] text-[var(--muted-foreground)]">
+                    {formatMemoryDate(note.createdAt)}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleDelete(note)}
+                  disabled={deleteNote.isPending}
+                  className="shrink-0 rounded-md p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)] disabled:opacity-40"
+                  title="Delete this note"
+                >
+                  <Trash2 size="0.6875rem" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </Section>
   );
 }

@@ -2,14 +2,73 @@
 // Routes: Connections
 // ──────────────────────────────────────────────
 import type { FastifyInstance } from "fastify";
-import { createConnectionSchema, inferImageSource } from "@marinara-engine/shared";
+import { MODEL_LISTS, createConnectionSchema, inferImageSource } from "@marinara-engine/shared";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
+import { fetchOpenAIChatGPTModels, getOpenAIChatGPTAuth } from "../services/llm/openai-chatgpt-auth.js";
+import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
+import { isImageLocalUrlsEnabled, isProviderLocalUrlsEnabled } from "../config/runtime-config.js";
+import { normalizeLoopbackUrl, safeFetch } from "../utils/security.js";
 
 function resolveImageGenerationSource(conn: Record<string, unknown>, baseUrl: string): string {
   const explicitSource = typeof conn.imageGenerationSource === "string" ? conn.imageGenerationSource : "";
   const model = typeof conn.model === "string" ? conn.model : "";
   return inferImageSource(explicitSource || model, baseUrl);
+}
+
+function localUrlPolicyForProvider(provider: string, imageSource: string) {
+  const isLocalImageBackend =
+    provider === "image_generation" && (imageSource === "comfyui" || imageSource === "automatic1111");
+  const isImage = provider === "image_generation";
+  return {
+    allowLocal: isLocalImageBackend || (isImage && isImageLocalUrlsEnabled()) ? true : isProviderLocalUrlsEnabled(),
+    allowLoopback: true,
+    allowMdns: provider !== "image_generation" || isLocalImageBackend || isImageLocalUrlsEnabled(),
+    allowedProtocols: ["https:", "http:"],
+    flagName: isImage ? "IMAGE_LOCAL_URLS_ENABLED" : "PROVIDER_LOCAL_URLS_ENABLED",
+  };
+}
+
+function normalizeConnectionTestBaseUrl(baseUrl: string, provider: string): string {
+  if (provider !== "image_generation") return baseUrl;
+  try {
+    return normalizeLoopbackUrl(baseUrl).replace(/\/+$/, "");
+  } catch {
+    return baseUrl;
+  }
+}
+
+function buildStabilityUrl(baseUrl: string, targetPath: string): string {
+  try {
+    const url = new URL(baseUrl);
+    const parts = url.pathname.split("/").filter(Boolean);
+    const versionIndex = parts.findIndex((part) => part === "v1" || part === "v2beta");
+    const prefix = versionIndex >= 0 ? parts.slice(0, versionIndex) : parts;
+    url.pathname = `/${[...prefix, ...targetPath.split("/").filter(Boolean)].join("/")}`;
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return `${baseUrl.replace(/\/+$/, "")}/${targetPath.replace(/^\/+/, "")}`;
+  }
+}
+
+function isStabilityV1Base(baseUrl: string): boolean {
+  try {
+    const parts = new URL(baseUrl).pathname.split("/").filter(Boolean);
+    return parts.includes("v1") && !parts.includes("v2beta");
+  } catch {
+    return /\/v1(?:\/|$)/i.test(baseUrl) && !/\/v2beta(?:\/|$)/i.test(baseUrl);
+  }
+}
+
+function knownStabilityImageModels() {
+  return MODEL_LISTS.image_generation
+    .filter((model) => {
+      const id = model.id.toLowerCase();
+      return id.startsWith("sd3") || id.startsWith("stable-image");
+    })
+    .map((model) => ({ id: model.id, name: model.name }));
 }
 
 export async function connectionsRoutes(app: FastifyInstance) {
@@ -89,10 +148,21 @@ export async function connectionsRoutes(app: FastifyInstance) {
         };
       }
 
+      if (conn.provider === "openai_chatgpt") {
+        const auth = await getOpenAIChatGPTAuth();
+        const detail = auth.planType ? ` (${auth.planType})` : "";
+        return {
+          success: true,
+          message: `ChatGPT login found via Codex auth${detail}. Requests will use the local ChatGPT session.`,
+          latencyMs: Date.now() - start,
+          modelName: conn.model,
+        };
+      }
+
       // Simple models list fetch to verify the key works
       const { PROVIDERS } = await import("@marinara-engine/shared");
       const provider = PROVIDERS[conn.provider as keyof typeof PROVIDERS];
-      const baseUrl = conn.baseUrl || provider?.defaultBaseUrl || "";
+      let baseUrl = conn.baseUrl || provider?.defaultBaseUrl || "";
 
       if (!baseUrl) {
         return {
@@ -112,11 +182,15 @@ export async function connectionsRoutes(app: FastifyInstance) {
 
       const imageSource =
         conn.provider === "image_generation" ? resolveImageGenerationSource(conn as any, baseUrl) : "";
+      baseUrl = normalizeConnectionTestBaseUrl(baseUrl, conn.provider);
       // image_generation has no standard modelsEndpoint — use provider-specific checks
       let testUrl: string;
       if (conn.provider === "image_generation" && imageSource === "novelai") {
         // NovelAI: validate the API key via the user subscription endpoint
         testUrl = "https://api.novelai.net/user/subscription";
+      } else if (conn.provider === "image_generation" && imageSource === "stability") {
+        // Stability's generation endpoints live under v2beta, but account/key checks are v1.
+        testUrl = buildStabilityUrl(baseUrl, "v1/user/account");
       } else if (conn.provider === "image_generation" && imageSource === "comfyui") {
         // ComfyUI: ping the system stats endpoint
         testUrl = `${baseUrl}/system_stats`;
@@ -127,7 +201,11 @@ export async function connectionsRoutes(app: FastifyInstance) {
         testUrl = `${baseUrl}${provider?.modelsEndpoint || "/models"}`;
       }
 
-      const res = await fetch(testUrl, { headers });
+      const res = await safeFetch(testUrl, {
+        headers,
+        policy: localUrlPolicyForProvider(conn.provider, imageSource),
+        maxResponseBytes: 2 * 1024 * 1024,
+      });
       const latencyMs = Date.now() - start;
 
       if (res.ok) {
@@ -165,9 +243,20 @@ export async function connectionsRoutes(app: FastifyInstance) {
         return { models };
       }
 
+      if (conn.provider === "openai_chatgpt") {
+        try {
+          const models = await fetchOpenAIChatGPTModels();
+          if (models.length > 0) return { models };
+        } catch {
+          // Fall through to the curated list so the selector remains usable
+          // before the host has run `codex login`.
+        }
+        return { models: MODEL_LISTS.openai_chatgpt.map((m) => ({ id: m.id, name: m.name })) };
+      }
+
       const { PROVIDERS } = await import("@marinara-engine/shared");
       const provider = PROVIDERS[conn.provider as keyof typeof PROVIDERS];
-      const baseUrl = conn.baseUrl || provider?.defaultBaseUrl || "";
+      let baseUrl = conn.baseUrl || provider?.defaultBaseUrl || "";
 
       if (!baseUrl) {
         return reply.status(400).send({ error: "No base URL configured" });
@@ -189,6 +278,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
       // ── Special handling for local image gen services ──
       const imageSource =
         conn.provider === "image_generation" ? resolveImageGenerationSource(conn as any, baseUrl) : "";
+      baseUrl = normalizeConnectionTestBaseUrl(baseUrl, conn.provider);
       const lowerBase = baseUrl.toLowerCase();
       const sanitizeProviderBody = (body: string): string => {
         if (body.includes("<html") || body.includes("<!DOCTYPE")) {
@@ -197,9 +287,69 @@ export async function connectionsRoutes(app: FastifyInstance) {
         return body.slice(0, 300);
       };
 
+      // Stability AI: v2beta has task-specific generation endpoints, not /models.
+      // Validate the key via v1 account, then either fetch legacy v1 engines or return the curated v2beta list.
+      if (conn.provider === "image_generation" && imageSource === "stability") {
+        const accountRes = await safeFetch(buildStabilityUrl(baseUrl, "v1/user/account"), {
+          headers,
+          policy: localUrlPolicyForProvider(conn.provider, imageSource),
+          maxResponseBytes: 2 * 1024 * 1024,
+        });
+        if (!accountRes.ok) {
+          const body = await accountRes.text();
+          return reply.status(502).send({
+            error: `Stability AI returned ${accountRes.status}: ${sanitizeProviderBody(body)}`,
+          });
+        }
+
+        if (isStabilityV1Base(baseUrl)) {
+          const res = await safeFetch(buildStabilityUrl(baseUrl, "v1/engines/list"), {
+            headers,
+            policy: localUrlPolicyForProvider(conn.provider, imageSource),
+            maxResponseBytes: 5 * 1024 * 1024,
+          });
+          if (!res.ok) {
+            const body = await res.text();
+            return reply.status(502).send({
+              error: `Stability AI returned ${res.status}: ${sanitizeProviderBody(body)}`,
+            });
+          }
+
+          const text = await res.text();
+          let json: unknown;
+          try {
+            json = JSON.parse(text);
+          } catch {
+            return reply.status(502).send({
+              error: `Failed to fetch models: ${sanitizeProviderBody(text)}`,
+            });
+          }
+
+          const engines = Array.isArray(json)
+            ? json
+            : Array.isArray((json as { engines?: unknown }).engines)
+              ? (json as { engines: unknown[] }).engines
+              : [];
+          const models = engines
+            .map((engine) => {
+              if (!engine || typeof engine !== "object") return null;
+              const record = engine as { id?: string; name?: string; description?: string };
+              const id = record.id ?? "";
+              return id ? { id, name: record.name ?? record.description ?? id } : null;
+            })
+            .filter((model): model is { id: string; name: string } => Boolean(model));
+          return { models: models.length ? models : knownStabilityImageModels() };
+        }
+
+        return { models: knownStabilityImageModels() };
+      }
+
       // ComfyUI: fetch checkpoints from object_info
       if (conn.provider === "image_generation" && imageSource === "comfyui") {
-        const res = await fetch(`${baseUrl}/object_info/CheckpointLoaderSimple`);
+        const res = await safeFetch(`${baseUrl}/object_info/CheckpointLoaderSimple`, {
+          policy: localUrlPolicyForProvider(conn.provider, imageSource),
+          maxResponseBytes: 5 * 1024 * 1024,
+        });
         if (!res.ok) {
           return reply.status(502).send({ error: `ComfyUI returned ${res.status}` });
         }
@@ -212,7 +362,10 @@ export async function connectionsRoutes(app: FastifyInstance) {
 
       // AUTOMATIC1111 / SD Web UI: fetch models from /sdapi/v1/sd-models
       if (conn.provider === "image_generation" && imageSource === "automatic1111") {
-        const res = await fetch(`${baseUrl}/sdapi/v1/sd-models`);
+        const res = await safeFetch(`${baseUrl}/sdapi/v1/sd-models`, {
+          policy: localUrlPolicyForProvider(conn.provider, imageSource),
+          maxResponseBytes: 5 * 1024 * 1024,
+        });
         if (!res.ok) {
           return reply.status(502).send({ error: `SD Web UI returned ${res.status}` });
         }
@@ -225,7 +378,17 @@ export async function connectionsRoutes(app: FastifyInstance) {
       }
 
       if (conn.provider === "image_generation" && lowerBase.includes("nano-gpt.com")) {
-        const res = await fetch(`${baseUrl}/image-models`, { headers });
+        const res = await safeFetch(`${baseUrl}/image-models`, {
+          headers,
+          policy: {
+            allowLocal: isProviderLocalUrlsEnabled(),
+            allowLoopback: true,
+            allowMdns: true,
+            allowedProtocols: ["https:", "http:"],
+            flagName: "PROVIDER_LOCAL_URLS_ENABLED",
+          },
+          maxResponseBytes: 5 * 1024 * 1024,
+        });
         if (!res.ok) {
           const body = await res.text();
           return reply.status(502).send({ error: `Provider returned ${res.status}: ${sanitizeProviderBody(body)}` });
@@ -245,6 +408,31 @@ export async function connectionsRoutes(app: FastifyInstance) {
         };
       }
 
+      if (conn.provider === "image_generation" && imageSource === "openrouter") {
+        const modelsUrl = `${baseUrl}/models?output_modalities=image`;
+        const res = await safeFetch(modelsUrl, {
+          headers,
+          policy: localUrlPolicyForProvider(conn.provider, imageSource),
+          maxResponseBytes: 5 * 1024 * 1024,
+        });
+        if (!res.ok) {
+          const body = await res.text();
+          return reply.status(502).send({
+            error: `OpenRouter returned ${res.status}: ${sanitizeProviderBody(body)}`,
+          });
+        }
+        const text = await res.text();
+        let json: Record<string, unknown>;
+        try {
+          json = JSON.parse(text) as Record<string, unknown>;
+        } catch {
+          return reply.status(502).send({
+            error: `Failed to fetch models: ${sanitizeProviderBody(text)}`,
+          });
+        }
+        return { models: normalizeModelsResponse("openrouter", json) };
+      }
+
       // Use `||` so image_generation's empty modelsEndpoint falls back to /models
       // (same as POST /:id/test). `??` would keep "" and hit the provider root HTML.
       let modelsUrl = `${baseUrl}${provider?.modelsEndpoint || "/models"}`;
@@ -252,7 +440,17 @@ export async function connectionsRoutes(app: FastifyInstance) {
         modelsUrl += `?key=${conn.apiKey}`;
       }
 
-      const res = await fetch(modelsUrl, { headers });
+      const res = await safeFetch(modelsUrl, {
+        headers,
+        policy: {
+          allowLocal: isProviderLocalUrlsEnabled(),
+          allowLoopback: true,
+          allowMdns: true,
+          allowedProtocols: ["https:", "http:"],
+          flagName: "PROVIDER_LOCAL_URLS_ENABLED",
+        },
+        maxResponseBytes: 5 * 1024 * 1024,
+      });
       if (!res.ok) {
         const body = await res.text();
         return reply.status(502).send({
@@ -297,6 +495,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
     const imgApiKey = conn.apiKey || "";
     const imgSource = conn.imageGenerationSource || imgModel;
     const imgServiceHint = conn.imageService || imgSource;
+    const imageDefaults = resolveConnectionImageDefaults(conn);
 
     const BASE_PROMPT = "plate of spaghetti with marinara sauce";
 
@@ -308,6 +507,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
         width: 512,
         height: 512,
         comfyWorkflow: conn.comfyuiWorkflow || undefined,
+        imageDefaults,
       });
       return {
         success: true,
@@ -328,6 +528,97 @@ export async function connectionsRoutes(app: FastifyInstance) {
     }
   });
 
+  // ── Diagnose Claude (Subscription) — verifies which model the SDK actually
+  //    billed against. The Claude Agent SDK can silently route a request to a
+  //    smaller model (fast mode, post-rate-limit `cooldown` state, account-tier
+  //    gating) without surfacing the swap to the caller. We send a tiny prompt
+  //    through the SDK with fast mode forced off, then return the model(s) the
+  //    SDK reports in `modelUsage` plus its `fast_mode_state` so the UI can
+  //    show "you asked for X, the SDK billed Y." ──
+  app.post<{ Params: { id: string } }>("/:id/diagnose-claude-subscription", async (req, reply) => {
+    const conn = await storage.getWithKey(req.params.id);
+    if (!conn) return reply.status(404).send({ error: "Connection not found" });
+    if (conn.provider !== "claude_subscription") {
+      return reply.status(400).send({ error: "Not a Claude (Subscription) connection" });
+    }
+    if (!conn.model) {
+      return reply.status(400).send({ error: "No model configured. Pick a model first." });
+    }
+
+    const start = Date.now();
+    const requestedModel = conn.model;
+    let responseText = "";
+    let modelsBilled: string[] = [];
+    let modelUsageDetail: Array<{ model: string; inputTokens: number; outputTokens: number }> = [];
+    let fastModeState: string | null = null;
+    const errors: string[] = [];
+
+    try {
+      const sdk = await import("@anthropic-ai/claude-agent-sdk");
+      // The user's empirically reliable self-ID prompt. Asking the model "which
+      // Claude family are you (Opus/Sonnet/Haiku)" with a one-word constraint
+      // produces consistent, non-hallucinated answers — versions are unreliable
+      // but the family tier is not. Combined with the SDK-side `modelUsage`
+      // readout below, this gives two independent signals on the same call.
+      const fastMode = conn.claudeFastMode === "true";
+      // Use the Claude Code preset for `systemPrompt`. Without it the SDK
+      // strips the model's version awareness and every model falsely answers
+      // "Sonnet" — see the chat provider for the full explanation. Passing the
+      // preset gives a clean signal on the model's true identity.
+      const queryHandle = sdk.query({
+        prompt:
+          "[OOC, hold on for one second, and tell me which claude model you are, you don't need to give me the version, are you Opus, Sonnet, Or Haiku? Answer with only the 1 word model name.]",
+        options: {
+          model: requestedModel,
+          systemPrompt: { type: "preset", preset: "claude_code" },
+          tools: [],
+          permissionMode: "bypassPermissions",
+          includePartialMessages: false,
+          settings: { fastMode },
+          ...(conn.apiKey ? { env: { ...process.env, ANTHROPIC_API_KEY: conn.apiKey } } : {}),
+        },
+      });
+
+      for await (const message of queryHandle) {
+        if (message.type === "assistant") {
+          const blocks = (message.message?.content ?? []) as Array<{ type: string; text?: string }>;
+          for (const block of blocks) {
+            if (block.type === "text" && block.text) responseText += block.text;
+          }
+        } else if (message.type === "result") {
+          const usage = message.modelUsage ?? {};
+          modelsBilled = Object.keys(usage);
+          modelUsageDetail = Object.entries(usage).map(([model, u]) => ({
+            model,
+            inputTokens: (u as { inputTokens?: number }).inputTokens ?? 0,
+            outputTokens: (u as { outputTokens?: number }).outputTokens ?? 0,
+          }));
+          fastModeState = message.fast_mode_state ?? null;
+          if (message.subtype !== "success") {
+            const detail = message.errors?.length ? message.errors.join("; ") : message.subtype;
+            errors.push(detail);
+          }
+        }
+      }
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : "Unknown error");
+    }
+
+    const latencyMs = Date.now() - start;
+    const billedDifferent = modelsBilled.length > 0 && !modelsBilled.includes(requestedModel);
+    return {
+      success: errors.length === 0,
+      requestedModel,
+      modelsBilled,
+      modelUsageDetail,
+      billedDifferent,
+      fastModeState,
+      response: responseText.slice(0, 500),
+      errors,
+      latencyMs,
+    };
+  });
+
   // ── Test message — sends "hi" to the model and returns the response ──
   app.post<{ Params: { id: string } }>("/:id/test-message", async (req, reply) => {
     const conn = await storage.getWithKey(req.params.id);
@@ -341,9 +632,9 @@ export async function connectionsRoutes(app: FastifyInstance) {
     const providerDef = PROVIDERS[conn.provider as keyof typeof PROVIDERS];
     const baseUrl = (conn.baseUrl || providerDef?.defaultBaseUrl || "").replace(/\/+$/, "");
 
-    // Claude (Subscription) is HTTP-less — the SDK manages the endpoint, so
-    // skip the baseUrl precondition. Every other provider still requires one.
-    if (!baseUrl && conn.provider !== "claude_subscription") {
+    // Local subscription/session providers manage their own endpoint, so skip
+    // the baseUrl precondition. Every HTTP provider still requires one.
+    if (!baseUrl && conn.provider !== "claude_subscription" && conn.provider !== "openai_chatgpt") {
       return reply.status(400).send({ error: "No base URL configured" });
     }
 
@@ -356,6 +647,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
         conn.maxContext,
         conn.openrouterProvider,
         conn.maxTokensOverride,
+        conn.claudeFastMode === "true",
       );
 
       let fullResponse = "";
@@ -430,7 +722,16 @@ function normalizeModelsResponse(provider: string, json: Record<string, unknown>
     }
 
     case "cohere": {
-      // Cohere returns { models: [{ name: "command-r-plus", ... }] }
+      // Cohere native v2 returns { models: [{ name: "command-r-plus", ... }] }.
+      // The OpenAI compatibility endpoint returns { data: [{ id: "command-r-plus", ... }] }.
+      const data = (json.data ?? []) as Array<{
+        id?: string;
+        name?: string;
+      }>;
+      if (data.length > 0) {
+        return data.map((m) => ({ id: m.id ?? "", name: m.name ?? m.id ?? "" })).filter((m) => m.id);
+      }
+
       const models = (json.models ?? []) as Array<{
         name?: string;
         endpoints?: string[];

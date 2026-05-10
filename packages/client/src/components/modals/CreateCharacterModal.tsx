@@ -52,7 +52,7 @@ export function CreateCharacterModal({ open, onClose }: Props) {
           tags: [],
           creator: "",
           character_version: "1.0",
-          extensions: {},
+          extensions: { altDescriptions: [] },
           alternate_greetings: [],
           character_book: undefined,
           post_history_instructions: "",

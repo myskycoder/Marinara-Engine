@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildElevenLabsTextInput, resolveTTSRequestVoice } from "../src/routes/tts.routes.js";
+import {
+  buildElevenLabsTextInput,
+  isAllowedTTSAudioContentType,
+  resolveTTSRequestVoice,
+} from "../src/routes/tts.routes.js";
 
 test("ElevenLabs TTS prefixes expression tone tags", () => {
   assert.equal(buildElevenLabsTextInput("Stay behind me.", "scared"), "[scared] Stay behind me.");
@@ -28,4 +32,15 @@ test("TTS requests can override the configured voice", () => {
 
 test("TTS request voice falls back to the configured voice when blank", () => {
   assert.equal(resolveTTSRequestVoice("alloy", "   "), "alloy");
+});
+
+test("TTS audio content-type guard accepts audio responses", () => {
+  assert.equal(isAllowedTTSAudioContentType("audio/mpeg"), true);
+  assert.equal(isAllowedTTSAudioContentType("audio/wav; charset=binary"), true);
+  assert.equal(isAllowedTTSAudioContentType("application/octet-stream"), true);
+});
+
+test("TTS audio content-type guard rejects provider JSON errors", () => {
+  assert.equal(isAllowedTTSAudioContentType("application/json; charset=utf-8"), false);
+  assert.equal(isAllowedTTSAudioContentType(null), false);
 });

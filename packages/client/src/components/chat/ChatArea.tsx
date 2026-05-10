@@ -35,15 +35,17 @@ import { useCharacters, usePersonas } from "../../hooks/use-characters";
 import { useConnections } from "../../hooks/use-connections";
 import { usePageActivity } from "../../hooks/use-page-activity";
 import { api } from "../../lib/api-client";
+import { getChatDisplayName, parseChatMetadata } from "../../lib/chat-display";
 import { parseCharacterDisplayData } from "../../lib/character-display";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { useGameStateStore } from "../../stores/game-state.store";
 import { toast } from "sonner";
-import { BookOpen, HelpCircle, MessageSquare, Theater } from "lucide-react";
+import { BookOpen, Check, HelpCircle, MessageSquare, Theater, X } from "lucide-react";
 import type { SpritePlacement, SpriteSide } from "@marinara-engine/shared";
 import { useUIStore } from "../../stores/ui.store";
 import { useAgentStore } from "../../stores/agent.store";
 import { cn } from "../../lib/utils";
+import { Modal } from "../ui/Modal";
 import { useEncounter } from "../../hooks/use-encounter";
 import { useScene } from "../../hooks/use-scene";
 import { useEncounterStore } from "../../stores/encounter.store";
@@ -61,6 +63,45 @@ import { NewChatConnectionGate } from "./NewChatConnectionGate";
 import { ChatCommonOverlays } from "./ChatCommonOverlays";
 
 export type { CharacterMap };
+
+const normalizeSpriteDisplayValue = (value: unknown, fallback: number, min: number, max: number): number => {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(min, Math.min(max, numeric));
+};
+
+const INTUITIVE_SWIPE_MIN_DISTANCE = 56;
+const INTUITIVE_SWIPE_MAX_VERTICAL_DRIFT = 44;
+
+const shouldIgnoreIntuitiveSwipeTarget = (target: EventTarget | null): boolean => {
+  if (!(target instanceof Element)) return false;
+  return Boolean(
+    target.closest(
+      [
+        "input",
+        "textarea",
+        "select",
+        "button",
+        "a",
+        '[contenteditable="true"]',
+        '[role="button"]',
+        "[data-radix-popper-content-wrapper]",
+        "[data-no-intuitive-swipe]",
+      ].join(", "),
+    ),
+  );
+};
+
+type AgentInjectionReviewItem = {
+  agentType: string;
+  agentName: string;
+  text: string;
+};
+
+type AgentInjectionReviewRequest = {
+  chatId: string;
+  injections: AgentInjectionReviewItem[];
+};
 
 const ChatConversationSurface = lazy(async () => {
   const module = await import("./ChatConversationSurface");
@@ -90,10 +131,13 @@ export function ChatArea() {
   const messagesPerPage = useUIStore((s) => s.messagesPerPage);
   const centerCompact = useUIStore((s) => s.centerCompact);
   const guideGenerations = useUIStore((s) => s.guideGenerations);
+  const intuitiveSwipeNavigation = useUIStore((s) => s.intuitiveSwipeNavigation);
+  const intuitiveSwipeRerollLatest = useUIStore((s) => s.intuitiveSwipeRerollLatest);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevScrollHeightRef = useRef(0);
   const isLoadingMoreRef = useRef(false);
+  const intuitiveTouchStartRef = useRef<{ x: number; y: number; target: EventTarget | null } | null>(null);
   // Tracks whether the initial load stagger animation has played.
   // After the first render with messages, new/re-mounted messages
   // skip the entry animation to avoid a visible flash on refetch.
@@ -104,6 +148,8 @@ export function ChatArea() {
   const [sceneJournalOpen, setSceneJournalOpen] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [spriteArrangeMode, setSpriteArrangeMode] = useState(false);
+  const [agentInjectionReview, setAgentInjectionReview] = useState<AgentInjectionReviewRequest | null>(null);
+  const [agentInjectionDrafts, setAgentInjectionDrafts] = useState<Record<string, string>>({});
 
   // Delete dialog & multi-select state
   const [deleteDialogMessageId, setDeleteDialogMessageId] = useState<string | null>(null);
@@ -116,19 +162,27 @@ export function ChatArea() {
   // Game mode loads ALL messages (no pagination) so the in-game log
   // shows the full session history instead of only the latest page.
   const isGameChat = (chat as unknown as { mode?: string })?.mode === "game";
+  const messagePageSize = isGameChat ? 0 : messagesPerPage;
   const {
     data: msgData,
     isLoading,
     fetchNextPage,
     hasNextPage,
     isFetchingNextPage,
-  } = useChatMessages(activeChatId, isGameChat ? 0 : messagesPerPage);
+    refetch: refetchMessages,
+  } = useChatMessages(activeChatId, messagePageSize, !!chat);
   const messages = useMemo<MessageWithSwipes[] | undefined>(
     () => (msgData ? [...msgData.pages].reverse().flat() : undefined),
     [msgData],
   );
   const { data: messageCountData } = useChatMessageCount(activeChatId);
   const totalMessageCount = messageCountData?.count ?? messages?.length ?? 0;
+  const loadedMessageCount = messages?.length ?? 0;
+  useEffect(() => {
+    if (!isGameChat || loadedMessageCount <= 0) return;
+    if (totalMessageCount <= loadedMessageCount) return;
+    void refetchMessages();
+  }, [isGameChat, loadedMessageCount, refetchMessages, totalMessageCount]);
   const messageOffset = messages ? totalMessageCount - messages.length : 0;
   const messageIdByOrderIndex = useMemo(() => {
     const map = new Map<number, string>();
@@ -163,6 +217,37 @@ export function ChatArea() {
   const pendingNewChatMode = useChatStore((s) => s.pendingNewChatMode);
   const failedAgentTypes = useAgentStore((s) => s.failedAgentTypes);
   const agentProcessing = useAgentStore((s) => s.isProcessing);
+
+  useEffect(() => {
+    const handleReviewRequest = (event: Event) => {
+      const detail = (event as CustomEvent<AgentInjectionReviewRequest>).detail;
+      if (!detail?.chatId || !Array.isArray(detail.injections)) return;
+      if (detail.chatId !== useChatStore.getState().activeChatId) return;
+      setAgentInjectionReview(detail);
+      setAgentInjectionDrafts(
+        Object.fromEntries(detail.injections.map((injection) => [injection.agentType, injection.text])),
+      );
+    };
+    window.addEventListener("marinara:agent-injection-review", handleReviewRequest);
+    return () => window.removeEventListener("marinara:agent-injection-review", handleReviewRequest);
+  }, []);
+
+  const handleContinueAgentInjectionReview = useCallback(() => {
+    if (!agentInjectionReview) return;
+    const overrides = agentInjectionReview.injections.map((injection) => ({
+      agentType: injection.agentType,
+      text: agentInjectionDrafts[injection.agentType] ?? injection.text,
+    }));
+    const chatId = agentInjectionReview.chatId;
+    setAgentInjectionReview(null);
+    setAgentInjectionDrafts({});
+    void generate({ chatId, connectionId: null, agentInjectionOverrides: overrides });
+  }, [agentInjectionDrafts, agentInjectionReview, generate]);
+
+  const handleCloseAgentInjectionReview = useCallback(() => {
+    setAgentInjectionReview(null);
+    setAgentInjectionDrafts({});
+  }, []);
 
   const handleQuickStart = useCallback(
     (mode: "conversation" | "roleplay" | "game") => {
@@ -297,15 +382,18 @@ export function ChatArea() {
   const { startEncounter } = useEncounter();
   const { concludeScene, abandonScene, forkScene, isForking } = useScene();
   const encounterActive = useEncounterStore((s) => s.active || s.showConfigModal);
+  const roleplaySpriteScale = useUIStore((s) => s.roleplaySpriteScale);
 
   // Sprite sidebar settings from chat metadata
   const chatMeta = useMemo(() => {
     if (!chat) return {};
     const raw = (chat as unknown as { metadata?: string | Record<string, unknown> }).metadata;
-    return typeof raw === "string" ? JSON.parse(raw) : (raw ?? {});
+    return parseChatMetadata(raw);
   }, [chat]);
   const spriteCharacterIds: string[] = Array.isArray(chatMeta.spriteCharacterIds) ? chatMeta.spriteCharacterIds : [];
   const spritePosition: SpriteSide = chatMeta.spritePosition === "right" ? "right" : "left";
+  const spriteScale = normalizeSpriteDisplayValue(chatMeta.spriteScale, roleplaySpriteScale, 0.5, 1.75);
+  const spriteOpacity = normalizeSpriteDisplayValue(chatMeta.spriteOpacity, 1, 0.15, 1);
   const spritePlacements = useMemo(
     () => normalizeSpritePlacements(chatMeta.spritePlacements),
     [chatMeta.spritePlacements],
@@ -381,10 +469,17 @@ export function ChatArea() {
   // only set on truthy values, leaving the global chatBackground stale when
   // switching to a chat whose metadata has been cleared, which made a removed
   // background re-appear after a chat switch round-trip.
+  const restoredChatBackgroundRef = useRef<{ chatId: string | null; url: string | null; isSyncing: boolean }>({
+    chatId: null,
+    url: null,
+    isSyncing: false,
+  });
   useEffect(() => {
     if (!chat?.id) return;
     const bg = chatMeta.background as string | null | undefined;
-    useUIStore.getState().setChatBackground(bg ? `/api/backgrounds/file/${encodeURIComponent(bg)}` : null);
+    const restoredUrl = bg ? `/api/backgrounds/file/${encodeURIComponent(bg)}` : null;
+    restoredChatBackgroundRef.current = { chatId: chat.id, url: restoredUrl, isSyncing: true };
+    useUIStore.getState().setChatBackground(restoredUrl);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chat?.id]);
 
@@ -399,6 +494,17 @@ export function ChatArea() {
   useEffect(() => {
     if (!chat?.id) return;
     const savedFilename = (chatMeta.background as string | null | undefined) ?? null;
+    const restoredBackground = restoredChatBackgroundRef.current;
+
+    if (
+      restoredBackground.isSyncing &&
+      (restoredBackground.chatId !== chat.id || chatBackground !== restoredBackground.url)
+    ) {
+      return;
+    }
+    if (restoredBackground.isSyncing) {
+      restoredBackground.isSyncing = false;
+    }
 
     if (!chatBackground) {
       if (savedFilename === null) return;
@@ -448,30 +554,41 @@ export function ChatArea() {
     };
   }, []);
 
+  const persistSpriteExpressions = useCallback(
+    (expressions: Record<string, string>) => {
+      if (!chat?.id) return;
+      updateMeta.mutate({ id: chat.id, spriteExpressions: expressions });
+      // Also persist to the last assistant message's extra so it's per-swipe
+      if (messages?.length) {
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const m = messages[i]!;
+          if (m.role === "assistant") {
+            updateMessageExtra.mutate({
+              messageId: m.id,
+              extra: { spriteExpressions: expressions },
+            });
+            break;
+          }
+        }
+      }
+    },
+    [chat?.id, updateMeta, messages, updateMessageExtra],
+  );
+
   const handleExpressionChange = useCallback(
-    (characterId: string, expression: string) => {
+    (characterId: string, expression: string, options?: { immediate?: boolean }) => {
       if (!chat?.id) return;
       pendingExpressions.current = { ...pendingExpressions.current, [characterId]: expression };
       if (expressionSaveTimer.current) clearTimeout(expressionSaveTimer.current);
+      if (options?.immediate) {
+        persistSpriteExpressions(pendingExpressions.current);
+        return;
+      }
       expressionSaveTimer.current = setTimeout(() => {
-        updateMeta.mutate({ id: chat!.id, spriteExpressions: pendingExpressions.current });
-        // Also persist to the last assistant message's extra so it's per-swipe
-        if (messages?.length) {
-          for (let i = messages.length - 1; i >= 0; i--) {
-            const m = messages[i]!;
-            if (m.role === "assistant") {
-              updateMessageExtra.mutate({
-                messageId: m.id,
-                extra: { spriteExpressions: pendingExpressions.current },
-              });
-              break;
-            }
-          }
-        }
+        persistSpriteExpressions(pendingExpressions.current);
       }, 1000);
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [chat?.id, updateMeta, messages, updateMessageExtra],
+    [chat?.id, persistSpriteExpressions],
   );
 
   const handleSpritePlacementChange = useCallback(
@@ -655,11 +772,12 @@ export function ChatArea() {
   }, [messages]);
 
   const handleRegenerate = useCallback(
-    async (messageId: string) => {
+    async (messageId: string, options?: { skipTouchConfirm?: boolean }) => {
       if (!activeChatId || isStreaming) return;
       // On touch devices, confirm to prevent accidental taps
       if (
-        matchMedia("(pointer: coarse)").matches &&
+        !options?.skipTouchConfirm &&
+        window.matchMedia("(pointer: coarse)").matches &&
         !(await showConfirmDialog({
           title: "Regenerate Message",
           message: "Regenerate this message as a new swipe?",
@@ -701,6 +819,16 @@ export function ChatArea() {
     await retryAgents(activeChatId, types);
   }, [activeChatId, isStreaming, agentProcessing, enabledAgentTypes, retryAgents]);
 
+  const handleRerunSingleTracker = useCallback(
+    async (agentType: string) => {
+      if (!activeChatId || isStreaming || agentProcessing) return;
+      const trackerIds = new Set(BUILT_IN_AGENTS.filter((a) => a.category === "tracker").map((a) => a.id));
+      if (!trackerIds.has(agentType) || !enabledAgentTypes.has(agentType)) return;
+      await retryAgents(activeChatId, [agentType]);
+    },
+    [activeChatId, isStreaming, agentProcessing, enabledAgentTypes, retryAgents],
+  );
+
   const handleSetActiveSwipe = useCallback(
     (messageId: string, index: number) => {
       setActiveSwipe.mutate(
@@ -708,7 +836,7 @@ export function ChatArea() {
         {
           onSuccess: () => {
             // Refetch game state so the HUD shows trackers for the active swipe
-            if (activeChatId) {
+            if (isGameChat && activeChatId) {
               api
                 .get<import("@marinara-engine/shared").GameState | null>(`/chats/${activeChatId}/game-state`)
                 .then((gs) => {
@@ -720,7 +848,7 @@ export function ChatArea() {
         },
       );
     },
-    [setActiveSwipe, activeChatId],
+    [setActiveSwipe, isGameChat, activeChatId],
   );
 
   const handleEdit = useCallback(
@@ -733,6 +861,13 @@ export function ChatArea() {
   const handleToggleConversationStart = useCallback(
     (messageId: string, current: boolean) => {
       updateMessageExtra.mutate({ messageId, extra: { isConversationStart: !current } });
+    },
+    [updateMessageExtra],
+  );
+
+  const handleToggleHiddenFromAI = useCallback(
+    (messageId: string, current: boolean) => {
+      updateMessageExtra.mutate({ messageId, extra: { hiddenFromAI: !current } });
     },
     [updateMessageExtra],
   );
@@ -778,6 +913,185 @@ export function ChatArea() {
     }
     return null;
   }, [messages]);
+
+  const latestAssistantMessageForSwipes = useMemo(() => {
+    if (!messages) return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const candidate = messages[i]!;
+      if (candidate.role === "assistant") return candidate;
+    }
+    return null;
+  }, [messages]);
+
+  const latestUserMessageForEdit = useMemo(() => {
+    if (!messages) return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const candidate = messages[i]!;
+      if (candidate.role === "user") return candidate;
+    }
+    return null;
+  }, [messages]);
+
+  const intuitiveSwipeBlocked =
+    settingsOpen ||
+    filesOpen ||
+    galleryOpen ||
+    wizardOpen ||
+    spriteArrangeMode ||
+    multiSelectMode ||
+    Boolean(deleteDialogMessageId) ||
+    Boolean(peekPromptData) ||
+    encounterActive;
+
+  const navigateLatestSwipe = useCallback(
+    (direction: -1 | 1) => {
+      const supportsMode = chatMode === "conversation" || isRoleplay;
+      if (!supportsMode || !intuitiveSwipeNavigation || intuitiveSwipeBlocked) return false;
+      if (!activeChatId || isStreaming || agentProcessing || !latestAssistantMessageForSwipes) return false;
+
+      const swipeCount = latestAssistantMessageForSwipes.swipeCount ?? 1;
+      const activeIndex = latestAssistantMessageForSwipes.activeSwipeIndex ?? 0;
+
+      if (direction < 0) {
+        if (activeIndex <= 0) return false;
+        handleSetActiveSwipe(latestAssistantMessageForSwipes.id, activeIndex - 1);
+        return true;
+      }
+
+      if (activeIndex < swipeCount - 1) {
+        handleSetActiveSwipe(latestAssistantMessageForSwipes.id, activeIndex + 1);
+        return true;
+      }
+
+      if (!intuitiveSwipeRerollLatest) return false;
+      void handleRegenerate(latestAssistantMessageForSwipes.id, { skipTouchConfirm: true });
+      return true;
+    },
+    [
+      activeChatId,
+      agentProcessing,
+      chatMode,
+      handleRegenerate,
+      handleSetActiveSwipe,
+      intuitiveSwipeBlocked,
+      intuitiveSwipeNavigation,
+      intuitiveSwipeRerollLatest,
+      isRoleplay,
+      isStreaming,
+      latestAssistantMessageForSwipes,
+    ],
+  );
+
+  useEffect(() => {
+    if (!intuitiveSwipeNavigation || intuitiveSwipeBlocked) return;
+
+    const supportsMode = chatMode === "conversation" || isRoleplay;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+
+      if (event.key === "ArrowUp") {
+        if (!supportsMode || !latestUserMessageForEdit) return;
+        if (event.repeat || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+        const target = event.target;
+        if (target instanceof Element) {
+          // Don't hijack up-arrow when the user is typing or already editing.
+          // Allow it from the chat input only when it's empty (shell-style recall).
+          if (target.tagName === "TEXTAREA") {
+            const ta = target as HTMLTextAreaElement;
+            if (ta.value.length > 0) return;
+          } else if (
+            target.tagName === "INPUT" ||
+            target.tagName === "SELECT" ||
+            target.getAttribute("contenteditable") === "true"
+          ) {
+            return;
+          }
+        }
+        event.preventDefault();
+        window.dispatchEvent(
+          new CustomEvent("marinara:start-edit-message", {
+            detail: { messageId: latestUserMessageForEdit.id },
+          }),
+        );
+        return;
+      }
+
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      if (shouldIgnoreIntuitiveSwipeTarget(event.target)) return;
+
+      if (event.repeat && event.key === "ArrowRight" && latestAssistantMessageForSwipes) {
+        const swipeCount = latestAssistantMessageForSwipes.swipeCount ?? 1;
+        const activeIndex = latestAssistantMessageForSwipes.activeSwipeIndex ?? 0;
+        if (activeIndex >= swipeCount - 1) return;
+      }
+
+      const handled = navigateLatestSwipe(event.key === "ArrowLeft" ? -1 : 1);
+      if (handled) event.preventDefault();
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [
+    chatMode,
+    intuitiveSwipeBlocked,
+    intuitiveSwipeNavigation,
+    isRoleplay,
+    latestAssistantMessageForSwipes,
+    latestUserMessageForEdit,
+    navigateLatestSwipe,
+  ]);
+
+  useEffect(() => {
+    if (!intuitiveSwipeNavigation || intuitiveSwipeBlocked) return;
+
+    const handleTouchStart = (event: TouchEvent) => {
+      const surface = scrollRef.current;
+      const target = event.target;
+      if (
+        event.touches.length !== 1 ||
+        !surface ||
+        !(target instanceof Node) ||
+        !surface.contains(target) ||
+        shouldIgnoreIntuitiveSwipeTarget(target)
+      ) {
+        intuitiveTouchStartRef.current = null;
+        return;
+      }
+      const touch = event.touches.item(0);
+      if (!touch) return;
+      intuitiveTouchStartRef.current = {
+        x: touch.clientX,
+        y: touch.clientY,
+        target: event.target,
+      };
+    };
+
+    const handleTouchEnd = (event: TouchEvent) => {
+      const start = intuitiveTouchStartRef.current;
+      intuitiveTouchStartRef.current = null;
+      const touch = event.changedTouches.item(0);
+      if (!start || !touch || shouldIgnoreIntuitiveSwipeTarget(start.target)) return;
+
+      const deltaX = touch.clientX - start.x;
+      const deltaY = touch.clientY - start.y;
+      const absX = Math.abs(deltaX);
+      const absY = Math.abs(deltaY);
+      if (absX < INTUITIVE_SWIPE_MIN_DISTANCE || absY > INTUITIVE_SWIPE_MAX_VERTICAL_DRIFT || absX < absY * 1.35) {
+        return;
+      }
+
+      const handled = navigateLatestSwipe(deltaX < 0 ? 1 : -1);
+      if (handled) event.preventDefault();
+    };
+
+    window.addEventListener("touchstart", handleTouchStart, { passive: true });
+    window.addEventListener("touchend", handleTouchEnd, { passive: false });
+    return () => {
+      window.removeEventListener("touchstart", handleTouchStart);
+      window.removeEventListener("touchend", handleTouchEnd);
+    };
+  }, [intuitiveSwipeBlocked, intuitiveSwipeNavigation, navigateLatestSwipe]);
 
   useEffect(() => {
     if (chat) useChatStore.getState().setActiveChat(chat);
@@ -1010,9 +1324,9 @@ export function ChatArea() {
       <>
         <div
           data-component="ChatArea.EmptyState"
-          className="flex flex-1 flex-col items-center overflow-y-auto p-4 sm:p-8"
+          className="flex flex-1 flex-col items-center overflow-y-auto p-3 sm:p-5 lg:p-6"
         >
-          <div className="flex w-full max-w-md flex-col items-center gap-4 sm:gap-6 my-auto py-4">
+          <div className="flex w-full max-w-2xl flex-col items-center gap-3 py-2 sm:gap-4 sm:py-3 lg:pt-4 lg:pb-5">
             {/* Central hero */}
             <div className="relative">
               <div
@@ -1024,7 +1338,13 @@ export function ChatArea() {
                 <img
                   src={showEmptyStateEffects ? "/logo-splash.gif" : "/logo.png"}
                   alt="Marinara Engine"
-                  className="h-full w-full object-cover"
+                  width={80}
+                  height={80}
+                  decoding="async"
+                  className={cn(
+                    "h-full w-full",
+                    showEmptyStateEffects ? "object-cover" : "object-contain p-1.5 sm:p-2",
+                  )}
                 />
               </div>
             </div>
@@ -1081,40 +1401,42 @@ export function ChatArea() {
             />
 
             {/* Footer */}
-            <div className="mt-2 flex flex-col items-center gap-3">
-              <p className="text-xs text-[var(--muted-foreground)]/60">
-                Created by{" "}
-                <a
-                  href="https://spicymarinara.github.io/"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="underline decoration-[var(--muted-foreground)]/30 hover:text-[var(--primary)] hover:decoration-[var(--primary)]/40 transition-colors"
-                >
-                  Marinara
-                </a>
-              </p>
-              <p className="text-[0.625rem] text-[var(--muted-foreground)]/50">
-                Partnered with{" "}
-                <a
-                  href="https://linkapi.ai/"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="underline decoration-[var(--muted-foreground)]/30 hover:text-[var(--primary)] hover:decoration-[var(--primary)]/40 transition-colors"
-                >
-                  LinkAPI
-                </a>
-              </p>
-              <p className="text-[0.625rem] text-[var(--muted-foreground)]/50">
-                Art and logo by{" "}
-                <a
-                  href="https://huntercolliex.carrd.co/"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="underline decoration-[var(--muted-foreground)]/30 hover:text-[var(--primary)] hover:decoration-[var(--primary)]/40 transition-colors"
-                >
-                  Huntercolliex
-                </a>
-              </p>
+            <div className="flex w-full max-w-2xl flex-col items-center gap-2">
+              <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-0.5 text-center text-[0.625rem] leading-tight text-[var(--muted-foreground)]/55 sm:text-xs">
+                <span>
+                  Created by{" "}
+                  <a
+                    href="https://spicymarinara.github.io/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline decoration-[var(--muted-foreground)]/30 transition-colors hover:text-[var(--primary)] hover:decoration-[var(--primary)]/40"
+                  >
+                    Marinara
+                  </a>
+                </span>
+                <span>
+                  Partnered with{" "}
+                  <a
+                    href="https://linkapi.ai/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline decoration-[var(--muted-foreground)]/30 transition-colors hover:text-[var(--primary)] hover:decoration-[var(--primary)]/40"
+                  >
+                    LinkAPI
+                  </a>
+                </span>
+                <span>
+                  Art and logo by{" "}
+                  <a
+                    href="https://huntercolliex.carrd.co/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline decoration-[var(--muted-foreground)]/30 transition-colors hover:text-[var(--primary)] hover:decoration-[var(--primary)]/40"
+                  >
+                    Huntercolliex
+                  </a>
+                </span>
+              </div>
               <div className="flex gap-2">
                 <a
                   href="https://discord.com/invite/KdAkTg94ME"
@@ -1141,8 +1463,8 @@ export function ChatArea() {
               </div>
 
               {/* Special thanks */}
-              <p className="mt-1 max-w-xs text-center text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]/40">
-                Special thanks to Jorge, Cha1latte, Javedz678, Teuku, Shadota, Romu, Mm14141, MagicGoddess, John,
+              <p className="max-w-[42rem] px-1 text-center text-[0.625rem] leading-snug text-[var(--muted-foreground)]/40 sm:max-w-[46rem]">
+                Special thanks to Xel, Jorge, Cha1latte, Javedz678, Teuku, Shadota, Romu, Mm14141, MagicGoddess, John,
                 Pwildani, Romu, Felor, MuniMuni, Guybrush01, Joshellis625, LukaTheHero, Coxde, JorgeLTE, Seele The Seal
                 King, Loungemeister, Kale, Tabris, GREGOR OVECH, Coins, Tacoman, Jorge, Promansis, Kitsumiro, Sheep,
                 Pod042, Prolix, PlutoMayhem, Mezzeh, Kuc0, Exalted, Yang Best Girl, MidnightSleeper, Geechan,
@@ -1152,14 +1474,14 @@ export function ChatArea() {
               {/* Restart tutorial */}
               <button
                 onClick={() => useUIStore.getState().setHasCompletedOnboarding(false)}
-                className="mt-1 inline-flex items-center gap-1 rounded-md px-2 py-1 text-[0.625rem] text-[var(--muted-foreground)]/40 transition-colors hover:text-[var(--muted-foreground)] hover:bg-[var(--secondary)]/60"
+                className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[0.625rem] text-[var(--muted-foreground)]/40 transition-colors hover:bg-[var(--secondary)]/60 hover:text-[var(--muted-foreground)]"
                 title="Replay tutorial"
               >
                 <HelpCircle size="0.75rem" />
                 Replay Tutorial
               </button>
 
-              <p className="mt-2 text-[0.625rem] tracking-wide text-[var(--muted-foreground)]/30">v{APP_VERSION}</p>
+              <p className="text-[0.625rem] tracking-wide text-[var(--muted-foreground)]/30">v{APP_VERSION}</p>
             </div>
           </div>
         </div>
@@ -1194,14 +1516,24 @@ export function ChatArea() {
   // Unified layout — mode-aware rendering
   // ═══════════════════════════════════════════════
   const msgPayload = (messages ?? []).map((m) => ({ role: m.role, characterId: m.characterId, content: m.content }));
-  const chatList = (allChats as Array<{ id: string; name: string }> | undefined) ?? [];
+  const chatList =
+    (allChats as Array<{ id: string; name: string; metadata?: string | Record<string, unknown> }> | undefined) ?? [];
   const connectedChatName = chat?.connectedChatId
-    ? chatList.find((item) => item.id === chat.connectedChatId)?.name
+    ? getChatDisplayName(chatList.find((item) => item.id === chat.connectedChatId))
     : undefined;
+  const activeSceneChat = chatMeta.activeSceneChatId
+    ? chatList.find((item) => item.id === chatMeta.activeSceneChatId)
+    : undefined;
+  const activeSceneMeta = parseChatMetadata(activeSceneChat?.metadata);
+  const hasActiveLinkedScene = activeSceneChat && activeSceneMeta.sceneStatus === "active";
   const isSceneChat = chatMeta.sceneStatus === "active" || Boolean(chatMeta.sceneOriginChatId);
   const conversationSceneInfo =
-    chatMeta.activeSceneChatId && chatList.some((item) => item.id === chatMeta.activeSceneChatId)
-      ? { variant: "origin" as const, sceneChatId: chatMeta.activeSceneChatId }
+    chatMeta.activeSceneChatId && hasActiveLinkedScene
+      ? {
+          variant: "origin" as const,
+          sceneChatId: chatMeta.activeSceneChatId,
+          sceneChatName: getChatDisplayName(activeSceneChat),
+        }
       : chatMeta.sceneStatus === "active"
         ? {
             variant: "scene" as const,
@@ -1230,6 +1562,8 @@ export function ChatArea() {
                 comment: display.comment,
                 avatarUrl: c.avatarPath ?? undefined,
                 avatarCrop: parsed.extensions?.avatarCrop || null,
+                nameColor: parsed.extensions?.nameColor || undefined,
+                dialogueColor: parsed.extensions?.dialogueColor || undefined,
                 description: parsed.description ?? "",
                 personality: parsed.personality ?? "",
                 backstory: parsed.extensions?.backstory ?? "",
@@ -1259,6 +1593,8 @@ export function ChatArea() {
             chatBackground={chatBackground}
             onOpenSettings={() => setSettingsOpen(true)}
             onDeleteMessage={handleDelete}
+            multiSelectMode={multiSelectMode}
+            selectedMessageIds={selectedMessageIds}
           />
 
           <ChatCommonOverlays
@@ -1419,6 +1755,8 @@ export function ChatArea() {
           spriteCharacterIds={spriteCharacterIds}
           spriteExpressions={spriteExpressions}
           spritePlacements={spritePlacements}
+          spriteScale={spriteScale}
+          spriteOpacity={spriteOpacity}
           hasCustomSpritePlacements={hasCustomSpritePlacements}
           spriteArrangeMode={spriteArrangeMode}
           enabledAgentTypes={enabledAgentTypes}
@@ -1458,6 +1796,7 @@ export function ChatArea() {
           onEdit={handleEdit}
           onSetActiveSwipe={handleSetActiveSwipe}
           onToggleConversationStart={handleToggleConversationStart}
+          onToggleHiddenFromAI={handleToggleHiddenFromAI}
           onPeekPrompt={handlePeekPrompt}
           onBranch={isSceneChat ? undefined : handleBranch}
           onCloneSceneFromHere={isSceneChat ? handleCloneSceneFromHere : undefined}
@@ -1465,6 +1804,7 @@ export function ChatArea() {
           onToggleSelectMessage={handleToggleSelectMessage}
           onSummaryContextSizeChange={handleSummaryContextSizeChange}
           onRerunTrackers={handleRerunTrackers}
+          onRerunSingleTracker={handleRerunSingleTracker}
           onStartEncounter={() => startEncounter()}
           onConcludeScene={() => concludeScene(activeChatId)}
           onAbandonScene={() => abandonScene(activeChatId)}
@@ -1503,6 +1843,15 @@ export function ChatArea() {
           isGrouped={isGrouped}
         />
       </Suspense>
+      {agentInjectionReview && (
+        <AgentInjectionReviewModal
+          request={agentInjectionReview}
+          drafts={agentInjectionDrafts}
+          onDraftChange={(agentType, text) => setAgentInjectionDrafts((current) => ({ ...current, [agentType]: text }))}
+          onContinue={handleContinueAgentInjectionReview}
+          onClose={handleCloseAgentInjectionReview}
+        />
+      )}
       {pendingNewChatMode && (
         <NewChatConnectionGate
           mode={pendingNewChatMode}
@@ -1524,6 +1873,67 @@ function TypingIndicator() {
         <span className="h-2 w-2 animate-bounce rounded-full bg-[var(--muted-foreground)]/60 [animation-delay:300ms]" />
       </div>
     </div>
+  );
+}
+
+function AgentInjectionReviewModal({
+  request,
+  drafts,
+  onDraftChange,
+  onContinue,
+  onClose,
+}: {
+  request: AgentInjectionReviewRequest;
+  drafts: Record<string, string>;
+  onDraftChange: (agentType: string, text: string) => void;
+  onContinue: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal open onClose={onClose} title="Writer Agent Review" width="max-w-3xl">
+      <div className="flex flex-col gap-3">
+        <p className="text-xs leading-relaxed text-[var(--muted-foreground)]">
+          Edit the writer guidance before the main reply starts.
+        </p>
+        <div className="flex max-h-[55dvh] flex-col gap-2 overflow-y-auto pr-1">
+          {request.injections.map((injection) => (
+            <div key={injection.agentType} className="rounded-lg border border-[var(--border)] bg-[var(--card)]/60">
+              <div className="flex items-center justify-between gap-2 border-b border-[var(--border)] px-3 py-2">
+                <div className="min-w-0">
+                  <div className="truncate text-xs font-semibold text-[var(--foreground)]">{injection.agentName}</div>
+                  <div className="truncate text-[0.625rem] text-[var(--muted-foreground)]">{injection.agentType}</div>
+                </div>
+              </div>
+              <textarea
+                value={drafts[injection.agentType] ?? injection.text}
+                onChange={(event) => onDraftChange(injection.agentType, event.target.value)}
+                rows={6}
+                className="min-h-32 w-full resize-y rounded-b-lg border-0 bg-[var(--secondary)]/35 px-3 py-2 font-mono text-xs leading-relaxed text-[var(--foreground)] outline-none focus:ring-1 focus:ring-[var(--ring)]"
+                spellCheck={false}
+              />
+            </div>
+          ))}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-[var(--border)] pt-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-3 py-2 text-xs text-[var(--foreground)] transition-colors hover:bg-[var(--accent)]"
+          >
+            <X size="0.875rem" />
+            Close
+          </button>
+          <button
+            type="button"
+            onClick={onContinue}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90"
+          >
+            <Check size="0.875rem" />
+            Continue
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 

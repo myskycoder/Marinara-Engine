@@ -2,7 +2,7 @@
 // Layout: Right Panel (polished with panel transitions)
 // ──────────────────────────────────────────────
 import { lazy, Suspense, type ComponentType, type LazyExoticComponent, type ReactNode } from "react";
-import { X, Users, BookOpen, FileText, Link, Sparkles, Settings, UserCircle, Bot } from "lucide-react";
+import { X, Users, BookOpen, FileText, Link, Sparkles, Settings, User, Bot } from "lucide-react";
 import { useUIStore } from "../../stores/ui.store";
 
 const CharactersPanel = lazy(() =>
@@ -33,7 +33,7 @@ const PANEL_CONFIG: Record<string, { title: string; icon: ReactNode; gradient: s
   presets: { title: "Presets", icon: <FileText size="0.875rem" />, gradient: "from-purple-400 to-violet-500" },
   connections: { title: "Connections", icon: <Link size="0.875rem" />, gradient: "from-sky-400 to-blue-500" },
   agents: { title: "Agents", icon: <Sparkles size="0.875rem" />, gradient: "from-pink-300 to-purple-400" },
-  personas: { title: "Personas", icon: <UserCircle size="0.875rem" />, gradient: "from-emerald-400 to-teal-500" },
+  personas: { title: "Personas", icon: <User size="0.875rem" />, gradient: "from-emerald-400 to-teal-500" },
   settings: { title: "Settings", icon: <Settings size="0.875rem" />, gradient: "from-gray-400 to-gray-500" },
 };
 

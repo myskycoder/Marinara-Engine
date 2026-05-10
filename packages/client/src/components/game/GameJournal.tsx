@@ -21,9 +21,11 @@ import {
   Loader2,
   Info,
   Upload,
+  Wand2,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { api } from "../../lib/api-client";
+import { applyInlineMarkdown, renderMarkdownBlocks } from "../../lib/markdown";
 import { AnimatedText } from "./AnimatedText";
 import { useRegenerateNpcAssets } from "../../hooks/use-game";
 import { GameNpcCardPanel } from "./GameNpcCardPanel";
@@ -55,7 +57,12 @@ interface Journal {
   quests: QuestEntry[];
   locations: string[];
   npcLog: Array<{ npcName: string; interactions: string[] }>;
-  inventoryLog: Array<{ item: string; action: "acquired" | "used" | "lost"; quantity: number; timestamp: string }>;
+  inventoryLog: Array<{
+    item: string;
+    action: "acquired" | "used" | "lost" | "removed";
+    quantity: number;
+    timestamp: string;
+  }>;
 }
 
 interface GameJournalProps {
@@ -67,6 +74,9 @@ interface GameJournalProps {
   npcSpriteExpressions?: string[];
   onClose: () => void;
   onNpcPortraitClick?: (npcName: string) => void;
+  onNpcPortraitGenerate?: (npcName: string) => void;
+  npcPortraitGenerationEnabled?: boolean;
+  generatingNpcPortraitNames?: Set<string>;
   onNpcRemove?: (npcName: string) => Promise<void> | void;
 }
 
@@ -101,6 +111,11 @@ function cleanNpcDisplayName(value: string): string {
   return value.replace(TRAILING_REPUTATION_LABEL, "").trim() || value;
 }
 
+function normalizeNpcEntryTitle(value: string): string {
+  const title = value.replace(/^[^\p{L}\p{N}]+/u, "").trim();
+  return normalizeNpcName(cleanNpcDisplayName(title));
+}
+
 function dedupeNpcInteractions(interactions: string[]): string[] {
   const seen = new Set<string>();
   const deduped: string[] = [];
@@ -131,6 +146,42 @@ function shouldShowNpcDescription(npc: GameNpc): boolean {
   return (npc as GameNpc & { descriptionSource?: string }).descriptionSource === "model" && !!npc.description?.trim();
 }
 
+function shouldShowJournalNpc(npc: GameNpc): boolean {
+  const source = (npc as GameNpc & { descriptionSource?: string }).descriptionSource;
+  const hasReputationChange = Number.isFinite(npc.reputation) && npc.reputation !== 0;
+  const hasRelationshipNotes = Array.isArray(npc.notes) && npc.notes.some((note) => !!note.trim());
+  return source === "model" || hasReputationChange || hasRelationshipNotes;
+}
+
+function isDuplicateInventoryEntry(
+  left: { item: string; action: string; quantity: number; timestamp: string },
+  right: { item: string; action: string; quantity: number; timestamp: string },
+): boolean {
+  if (normalizeNpcName(left.item) !== normalizeNpcName(right.item)) return false;
+  if (left.action !== right.action || left.quantity !== right.quantity) return false;
+  const leftTime = Date.parse(left.timestamp);
+  const rightTime = Date.parse(right.timestamp);
+  if (!Number.isFinite(leftTime) || !Number.isFinite(rightTime)) return true;
+  return Math.abs(leftTime - rightTime) <= 10_000;
+}
+
+function JournalMarkdown({ text, className }: { text: string; className?: string }) {
+  const rendered = useMemo(() => renderMarkdownBlocks(text, applyInlineMarkdown, "game-journal"), [text]);
+  return <div className={cn("mari-message-content whitespace-pre-wrap", className)}>{rendered}</div>;
+}
+
+function dedupeAdjacentInventoryEntries<
+  T extends { item: string; action: string; quantity: number; timestamp: string },
+>(items: T[]): T[] {
+  const deduped: T[] = [];
+  for (const item of items) {
+    const previous = deduped[deduped.length - 1];
+    if (previous && isDuplicateInventoryEntry(previous, item)) continue;
+    deduped.push(item);
+  }
+  return deduped;
+}
+
 export function GameJournal({
   chatId,
   npcs,
@@ -138,6 +189,9 @@ export function GameJournal({
   npcSpriteExpressions,
   onClose,
   onNpcPortraitClick,
+  onNpcPortraitGenerate,
+  npcPortraitGenerationEnabled = false,
+  generatingNpcPortraitNames,
   onNpcRemove,
 }: GameJournalProps) {
   const [journal, setJournal] = useState<Journal | null>(null);
@@ -215,6 +269,25 @@ export function GameJournal({
     [onNpcRemove],
   );
 
+  const journalNpcs = useMemo(() => (npcs ?? []).filter(shouldShowJournalNpc), [npcs]);
+
+  const trackedNpcNames = useMemo(() => {
+    const names = new Set<string>();
+    for (const npc of journalNpcs) {
+      const key = normalizeNpcName(cleanNpcDisplayName(npc.name));
+      if (key) names.add(key);
+    }
+    return names;
+  }, [journalNpcs]);
+
+  const visibleEntries = useMemo(
+    () =>
+      (journal?.entries ?? []).filter(
+        (entry) => entry.type !== "npc" || trackedNpcNames.has(normalizeNpcEntryTitle(entry.title)),
+      ),
+    [journal?.entries, trackedNpcNames],
+  );
+
   if (!journal) {
     return (
       <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/70 backdrop-blur-sm">
@@ -274,23 +347,26 @@ export function GameJournal({
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4">
-        {activeTab === "all" && <TimelineView entries={journal.entries} />}
+        {activeTab === "all" && <TimelineView entries={visibleEntries} />}
         {activeTab === "npcs" && (
           <NpcsView
             chatId={chatId}
             npcLog={journal.npcLog}
-            npcs={npcs}
+            npcs={journalNpcs}
             npcSpriteExpressions={npcSpriteExpressions}
             onNpcPortraitClick={onNpcPortraitClick}
             onNpcOpenCard={setNpcCardNpc}
             onPreviewPortrait={(src, alt) => setPortraitPreview({ src, alt })}
+            onNpcPortraitGenerate={onNpcPortraitGenerate}
+            npcPortraitGenerationEnabled={npcPortraitGenerationEnabled}
+            generatingNpcPortraitNames={generatingNpcPortraitNames}
             onNpcRemove={onNpcRemove ? handleRemoveNpc : undefined}
             removingNpcName={removingNpcName}
           />
         )}
         {activeTab === "locations" && <LocationsView locations={journal.locations} />}
         {activeTab === "inventory" && <InventoryView items={journal.inventoryLog} />}
-        {activeTab === "library" && <LibraryView entries={journal.entries.filter((e) => e.type === "note")} />}
+        {activeTab === "library" && <LibraryView entries={visibleEntries.filter((e) => e.type === "note")} />}
         {activeTab === "notes" && <NotesView notes={playerNotes} onChange={handleNotesChange} saved={notesSaved} />}
       </div>
     </div>
@@ -384,6 +460,9 @@ function NpcsView({
   onNpcPortraitClick,
   onNpcOpenCard,
   onPreviewPortrait,
+  onNpcPortraitGenerate,
+  npcPortraitGenerationEnabled,
+  generatingNpcPortraitNames,
   onNpcRemove,
   removingNpcName,
 }: {
@@ -394,6 +473,9 @@ function NpcsView({
   onNpcPortraitClick?: (npcName: string) => void;
   onNpcOpenCard?: (npc: GameNpc) => void;
   onPreviewPortrait?: (src: string, alt: string) => void;
+  onNpcPortraitGenerate?: (npcName: string) => void;
+  npcPortraitGenerationEnabled?: boolean;
+  generatingNpcPortraitNames?: Set<string>;
   onNpcRemove?: (npcName: string) => void;
   removingNpcName?: string | null;
 }) {
@@ -432,16 +514,13 @@ function NpcsView({
   }, []);
 
   const trackedNpcs = npcs ?? [];
-  const hasContent = trackedNpcs.length > 0 || npcLog.length > 0;
+  const hasContent = trackedNpcs.length > 0;
 
   if (!hasContent) {
     return <div className="text-center text-xs text-white/40">No NPCs encountered yet.</div>;
   }
 
-  const npcMap = new Map<
-    string,
-    { npc?: GameNpc; interactions: string[]; displayName: string; originalName: string }
-  >();
+  const npcMap = new Map<string, { npc: GameNpc; interactions: string[]; displayName: string; originalName: string }>();
   for (const n of trackedNpcs) {
     const displayName = cleanNpcDisplayName(n.name);
     const key = normalizeNpcName(displayName);
@@ -456,13 +535,11 @@ function NpcsView({
     const interactions = dedupeNpcInteractions(entry.interactions);
     if (existing) {
       existing.interactions = dedupeNpcInteractions([...existing.interactions, ...interactions]);
-    } else {
-      npcMap.set(key, { interactions, displayName, originalName: entry.npcName });
     }
   }
   const entries = [...npcMap.values()].sort((left, right) => {
-    const metDelta = Number(Boolean(right.npc?.met)) - Number(Boolean(left.npc?.met));
-    if (metDelta !== 0) return metDelta;
+    const repDelta = Math.abs(right.npc.reputation) - Math.abs(left.npc.reputation);
+    if (repDelta !== 0) return repDelta;
     return left.displayName.localeCompare(right.displayName);
   });
 
@@ -586,7 +663,12 @@ function NpcsView({
       {entries.map((entry) => {
         const name = cleanNpcDisplayName(entry.npc?.name ?? entry.displayName);
         const rep = entry.npc ? reputationLabel(entry.npc.reputation) : null;
+        const showReputation = !!entry.npc && entry.npc.reputation !== 0;
         const canUploadPortrait = !!entry.npc && !!onNpcPortraitClick;
+        const canGeneratePortrait =
+          !!entry.npc && !!onNpcPortraitGenerate && npcPortraitGenerationEnabled === true;
+        const portraitGenerating =
+          !!entry.npc && (generatingNpcPortraitNames?.has(entry.npc.name.trim().toLowerCase()) ?? false);
         // Two distinct UI states:
         //   - `isRegenInFlight`: user clicked Regenerate and the mutation
         //     is running. Spinner animates, button disabled.
@@ -604,49 +686,69 @@ function NpcsView({
             <div className="flex items-center gap-2">
               {entry.npc ? (
                 canUploadPortrait ? (
-                  entry.npc.avatarUrl ? (
-                    <div className="flex shrink-0 items-center gap-0.5">
-                      <button
-                        type="button"
-                        onClick={() => onPreviewPortrait?.(entry.npc!.avatarUrl!, `${name} portrait`)}
-                        className="rounded-full transition-transform hover:scale-[1.05] focus:outline-none focus:ring-2 focus:ring-white/20"
-                        title="View portrait"
-                      >
-                        <img
-                          src={entry.npc.avatarUrl}
-                          alt=""
-                          className={cn(
-                            "h-6 w-6 rounded-full object-cover ring-1 ring-white/10 transition-colors hover:ring-white/25",
-                            isAssetPending && "animate-pulse",
-                          )}
-                        />
-                      </button>
+                  <div className="group/journal-avatar relative shrink-0">
+                    {entry.npc.avatarUrl ? (
+                      <div className="flex items-center gap-0.5">
+                        <button
+                          type="button"
+                          onClick={() => onPreviewPortrait?.(entry.npc!.avatarUrl!, `${name} portrait`)}
+                          className="rounded-full transition-transform hover:scale-[1.05] focus:outline-none focus:ring-2 focus:ring-white/20"
+                          title="View portrait"
+                        >
+                          <img
+                            src={entry.npc.avatarUrl}
+                            alt=""
+                            className={cn(
+                              "h-6 w-6 rounded-full object-cover ring-1 ring-white/10 transition-colors hover:ring-white/25",
+                              isAssetPending && "animate-pulse",
+                            )}
+                          />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onNpcPortraitClick?.(entry.npc!.name)}
+                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/10 text-white/55 ring-1 ring-white/10 transition-colors hover:bg-white/15 hover:text-white/90 hover:ring-white/25"
+                          title="Upload or replace NPC portrait"
+                        >
+                          <Upload size={11} aria-hidden />
+                        </button>
+                      </div>
+                    ) : (
                       <button
                         type="button"
                         onClick={() => onNpcPortraitClick?.(entry.npc!.name)}
-                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/10 text-white/55 ring-1 ring-white/10 transition-colors hover:bg-white/15 hover:text-white/90 hover:ring-white/25"
+                        className="shrink-0 rounded-full transition-transform hover:scale-[1.05] focus:outline-none focus:ring-2 focus:ring-white/20"
                         title="Upload or replace NPC portrait"
                       >
-                        <Upload size={11} aria-hidden />
+                        <div
+                          className={cn(
+                            "flex h-6 w-6 items-center justify-center rounded-full bg-white/10 text-[0.6rem] font-semibold text-white/60 ring-1 ring-white/10 transition-colors hover:ring-white/25",
+                            isAssetPending && "animate-pulse",
+                          )}
+                        >
+                          {name[0]?.toUpperCase() ?? "?"}
+                        </div>
                       </button>
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => onNpcPortraitClick?.(entry.npc!.name)}
-                      className="shrink-0 rounded-full transition-transform hover:scale-[1.05] focus:outline-none focus:ring-2 focus:ring-white/20"
-                      title="Upload or replace NPC portrait"
-                    >
-                      <div
-                        className={cn(
-                          "flex h-6 w-6 items-center justify-center rounded-full bg-white/10 text-[0.6rem] font-semibold text-white/60 ring-1 ring-white/10 transition-colors hover:ring-white/25",
-                          isAssetPending && "animate-pulse",
-                        )}
+                    )}
+                    {canGeneratePortrait && (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onNpcPortraitGenerate?.(entry.npc!.name);
+                        }}
+                        disabled={portraitGenerating}
+                        className="absolute -right-1 -top-1 inline-flex h-4 w-4 items-center justify-center rounded-full bg-black/75 text-[var(--primary)] opacity-0 ring-1 ring-white/15 transition-opacity disabled:cursor-wait group-hover/journal-avatar:opacity-100 max-md:opacity-100"
+                        title="Generate NPC portrait"
                       >
-                        {name[0]?.toUpperCase() ?? "?"}
-                      </div>
-                    </button>
-                  )
+                        {portraitGenerating ? (
+                          <Loader2 size="0.6rem" className="animate-spin" />
+                        ) : (
+                          <Wand2 size="0.6rem" />
+                        )}
+                      </button>
+                    )}
+                  </div>
                 ) : entry.npc.avatarUrl ? (
                   <button
                     type="button"
@@ -676,7 +778,7 @@ function NpcsView({
                 </div>
               )}
               <span className="flex-1 text-xs font-medium text-white/80">
-                {entry.npc?.emoji ? `${entry.npc.emoji} ` : ""}
+                {entry.npc.emoji ? `${entry.npc.emoji} ` : ""}
                 {name}
               </span>
               {entry.npc && onNpcOpenCard && (
@@ -698,7 +800,9 @@ function NpcsView({
               >
                 {entry.npc ? (entry.npc.met ? "Met" : "Not Met") : "Journal Only"}
               </span>
-              {rep && <span className={cn("text-[10px] font-medium", rep.color)}>{rep.text}</span>}
+              {showReputation && rep && (
+                <span className={cn("text-[10px] font-medium", rep.color)}>{rep.text}</span>
+              )}
               {entry.npc?.id && (
                 <button
                   type="button"
@@ -731,15 +835,10 @@ function NpcsView({
                 </button>
               )}
             </div>
-            {entry.npc && shouldShowNpcDescription(entry.npc) && (
+            {shouldShowNpcDescription(entry.npc) && (
               <div className="mt-1 text-[0.6rem] text-white/40">{entry.npc.description}</div>
             )}
             {entry.npc?.location && <div className="mt-0.5 text-[0.6rem] text-white/30">📍 {entry.npc.location}</div>}
-            {!entry.npc && entry.interactions.length > 0 && (
-              <div className="mt-1 text-[0.6rem] text-white/30">
-                {entry.interactions.length} journal note{entry.interactions.length === 1 ? "" : "s"}
-              </div>
-            )}
           </div>
         );
       })}
@@ -767,9 +866,16 @@ function LocationsView({ locations }: { locations: string[] }) {
 function InventoryView({
   items,
 }: {
-  items: Array<{ item: string; action: "acquired" | "used" | "lost"; quantity: number; timestamp: string }>;
+  items: Array<{
+    item: string;
+    action: "acquired" | "used" | "lost" | "removed";
+    quantity: number;
+    timestamp: string;
+  }>;
 }) {
-  if (items.length === 0) {
+  const visibleItems = dedupeAdjacentInventoryEntries(items);
+
+  if (visibleItems.length === 0) {
     return <div className="text-center text-xs text-white/40">No items in inventory log.</div>;
   }
 
@@ -777,11 +883,12 @@ function InventoryView({
     acquired: "text-emerald-400",
     used: "text-amber-400",
     lost: "text-red-400",
+    removed: "text-red-300",
   };
 
   return (
     <div className="flex flex-col gap-1">
-      {[...items].reverse().map((item, i) => (
+      {[...visibleItems].reverse().map((item, i) => (
         <div
           key={i}
           className="flex items-center justify-between rounded-lg border border-white/5 bg-white/3 px-3 py-1.5"
@@ -821,7 +928,7 @@ function LibraryView({ entries }: { entries: JournalEntry[] }) {
               </span>
               <span className="ml-auto text-[0.5625rem] text-white/30">{entry.timestamp}</span>
             </div>
-            <div className="mt-1.5 whitespace-pre-wrap text-xs leading-relaxed text-white/70">{text}</div>
+            <JournalMarkdown text={text} className="mt-1.5 text-xs leading-relaxed text-white/70" />
           </div>
         );
       })}
@@ -842,13 +949,22 @@ function NotesView({ notes, onChange, saved }: { notes: string; onChange: (text:
           {saved ? "Saved" : "Saving..."}
         </span>
       </div>
-      <textarea
-        value={notes}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder="Write your notes here... track clues, plans, NPC names, theories — anything you want to remember."
-        className="flex-1 resize-none rounded-lg border border-white/10 bg-black/40 px-3 py-2.5 text-xs leading-relaxed text-white/80 outline-none placeholder:text-white/25 focus:border-white/20"
-        spellCheck={false}
-      />
+      <div className="grid min-h-0 flex-1 gap-2 md:grid-cols-2">
+        <textarea
+          value={notes}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="Write your notes here... track clues, plans, NPC names, theories — anything you want to remember."
+          className="min-h-44 resize-none rounded-lg border border-white/10 bg-black/40 px-3 py-2.5 text-xs leading-relaxed text-white/80 outline-none placeholder:text-white/25 focus:border-white/20 md:min-h-0"
+          spellCheck={false}
+        />
+        <div className="min-h-44 overflow-auto rounded-lg border border-white/10 bg-white/5 px-3 py-2.5 md:min-h-0">
+          {notes.trim() ? (
+            <JournalMarkdown text={notes} className="text-xs leading-relaxed text-white/75" />
+          ) : (
+            <div className="text-xs text-white/30">Nothing written yet.</div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

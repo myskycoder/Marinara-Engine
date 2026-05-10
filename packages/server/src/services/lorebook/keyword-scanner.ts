@@ -4,7 +4,14 @@
 // and returns activated entries respecting all
 // matching rules (regex, whole-word, case, selective).
 // ──────────────────────────────────────────────
-import type { LorebookEntry, SelectiveLogic, ActivationCondition, LorebookSchedule } from "@marinara-engine/shared";
+import type {
+  ActivationCondition,
+  LorebookEntry,
+  LorebookFilterMode,
+  LorebookMatchingSource,
+  LorebookSchedule,
+  SelectiveLogic,
+} from "@marinara-engine/shared";
 
 /** Compute cosine similarity between two vectors. Returns 0 for empty/mismatched vectors. */
 function cosineSimilarity(a: number[], b: number[]): number {
@@ -34,6 +41,8 @@ export interface ActivatedEntry {
   matchedKeys: string[];
   /** Priority order for injection */
   injectionOrder: number;
+  /** True when sticky state kept this entry active without a fresh keyword match */
+  sticky?: boolean;
 }
 
 /** Runtime state for timing (sticky/cooldown/delay). */
@@ -47,6 +56,12 @@ export interface EntryTimingState {
   /** Delay messages remaining before first activation */
   delayRemaining: number;
 }
+
+type LorebookFilterValueContext = {
+  activeCharacterIds: Set<string>;
+  activeCharacterTags: Set<string>;
+  generationTriggers: Set<string>;
+};
 
 /** Game state fields used for condition evaluation. */
 export interface GameStateForScanning {
@@ -207,12 +222,8 @@ function evaluateSchedule(schedule: LorebookSchedule | null, gameState: GameStat
 /**
  * Check timing state (sticky/cooldown/delay).
  */
-function checkTiming(
-  entry: LorebookEntry,
-  timingState: EntryTimingState | undefined,
-  currentMessageIndex: number,
-): boolean {
-  if (!timingState) return true;
+function checkTiming(entry: LorebookEntry, timingState: EntryTimingState | undefined): boolean {
+  if (!timingState) return !(entry.delay !== null && entry.delay > 0);
 
   // Delay: must wait N messages before first activation
   if (entry.delay !== null && entry.delay > 0) {
@@ -225,6 +236,144 @@ function checkTiming(
   }
 
   return true;
+}
+
+function passesContextualActivationGate(
+  entry: LorebookEntry,
+  filterContext: LorebookFilterValueContext,
+  gameState: GameStateForScanning | null,
+): boolean {
+  if (!entry.enabled) return false;
+  if (!passesEntryFilters(entry, filterContext)) return false;
+  if (!evaluateConditions(entry.activationConditions, gameState)) return false;
+  if (!evaluateSchedule(entry.schedule, gameState)) return false;
+  return true;
+}
+
+function passesActivationGate(
+  entry: LorebookEntry,
+  timingState: EntryTimingState | undefined,
+  filterContext: LorebookFilterValueContext,
+  gameState: GameStateForScanning | null,
+  ignoreTiming: boolean = false,
+): boolean {
+  if (!passesContextualActivationGate(entry, filterContext, gameState)) return false;
+  if (!ignoreTiming && !checkTiming(entry, timingState)) return false;
+  if (entry.probability !== null && entry.probability < 100) {
+    if (Math.random() * 100 >= entry.probability) return false;
+  }
+  return true;
+}
+
+function hasTimingConfig(entry: LorebookEntry): boolean {
+  return (
+    (entry.sticky !== null && entry.sticky > 0) ||
+    (entry.cooldown !== null && entry.cooldown > 0) ||
+    (entry.delay !== null && entry.delay > 0)
+  );
+}
+
+function cloneTimingState(state: EntryTimingState): EntryTimingState {
+  return {
+    lastActivatedAt: state.lastActivatedAt,
+    stickyCount: state.stickyCount,
+    cooldownRemaining: state.cooldownRemaining,
+    delayRemaining: state.delayRemaining,
+  };
+}
+
+function shouldPersistTimingState(entry: LorebookEntry, state: EntryTimingState): boolean {
+  if (state.stickyCount > 0 || state.cooldownRemaining > 0 || state.delayRemaining > 0) return true;
+  if (entry.delay !== null && entry.delay > 0) return true;
+  return false;
+}
+
+export function updateTimingStatesForScan(
+  entries: LorebookEntry[],
+  activatedEntries: ActivatedEntry[],
+  previousStates: Map<string, EntryTimingState> = new Map(),
+  currentMessageIndex: number,
+): Map<string, EntryTimingState> {
+  const nextStates = new Map<string, EntryTimingState>();
+  const activatedById = new Map(activatedEntries.map((entry) => [entry.entry.id, entry]));
+
+  for (const entry of entries) {
+    if (!hasTimingConfig(entry)) continue;
+    const previous = previousStates.get(entry.id);
+    const state: EntryTimingState = previous
+      ? cloneTimingState(previous)
+      : {
+          lastActivatedAt: null,
+          stickyCount: 0,
+          cooldownRemaining: 0,
+          delayRemaining: entry.delay !== null && entry.delay > 0 ? entry.delay : 0,
+        };
+
+    const activated = activatedById.get(entry.id);
+    if (activated && !activated.sticky) {
+      state.lastActivatedAt = currentMessageIndex;
+      state.stickyCount = entry.sticky !== null && entry.sticky > 0 ? entry.sticky : 0;
+      state.cooldownRemaining = entry.cooldown !== null && entry.cooldown > 0 ? entry.cooldown : 0;
+      state.delayRemaining = 0;
+    } else {
+      if (state.delayRemaining > 0) state.delayRemaining -= 1;
+      if (state.cooldownRemaining > 0) state.cooldownRemaining -= 1;
+      if (state.stickyCount > 0) state.stickyCount -= 1;
+    }
+
+    if (shouldPersistTimingState(entry, state)) {
+      nextStates.set(entry.id, state);
+    }
+  }
+
+  return nextStates;
+}
+
+function normalizeFilterValue(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function makeValueSet(values: string[] | undefined) {
+  return new Set((values ?? []).map(normalizeFilterValue).filter(Boolean));
+}
+
+function passesValueFilter(
+  mode: LorebookFilterMode | undefined,
+  filters: string[] | undefined,
+  activeValues: Set<string>,
+) {
+  const normalizedMode = mode ?? "any";
+  const filterValues = makeValueSet(filters);
+  if (normalizedMode === "any" || filterValues.size === 0) return true;
+  const hasMatch = Array.from(filterValues).some((value) => activeValues.has(value));
+  return normalizedMode === "include" ? hasMatch : !hasMatch;
+}
+
+function passesEntryFilters(entry: LorebookEntry, context: LorebookFilterValueContext) {
+  return (
+    passesValueFilter(entry.characterFilterMode, entry.characterFilterIds, context.activeCharacterIds) &&
+    passesValueFilter(entry.characterTagFilterMode, entry.characterTagFilters, context.activeCharacterTags) &&
+    passesValueFilter(entry.generationTriggerFilterMode, entry.generationTriggerFilters, context.generationTriggers)
+  );
+}
+
+export function lorebookEntryPassesContextFilters(
+  entry: LorebookEntry,
+  options: { activeCharacterIds?: string[]; activeCharacterTags?: string[]; generationTriggers?: string[] },
+) {
+  return passesEntryFilters(entry, {
+    activeCharacterIds: makeValueSet(options.activeCharacterIds),
+    activeCharacterTags: makeValueSet(options.activeCharacterTags),
+    generationTriggers: makeValueSet(options.generationTriggers?.length ? options.generationTriggers : ["chat"]),
+  });
+}
+
+function getAdditionalMatchingText(entry: LorebookEntry, sourceText: Partial<Record<LorebookMatchingSource, string>>) {
+  if (!entry.additionalMatchingSources?.length) return "";
+  return entry.additionalMatchingSources
+    .map((source) => sourceText[source]?.trim() ?? "")
+    .filter(Boolean)
+    .join("\n");
 }
 
 /**
@@ -278,6 +427,16 @@ export interface ScanOptions {
   chatEmbedding?: number[] | null;
   /** Cosine similarity threshold for semantic matching (0-1, default 0.3). */
   semanticThreshold?: number;
+  /** Active character IDs for per-entry include/exclude gates. */
+  activeCharacterIds?: string[];
+  /** Tags from active character cards for per-entry include/exclude gates. */
+  activeCharacterTags?: string[];
+  /** Generation trigger names for per-entry include/exclude gates. */
+  generationTriggers?: string[];
+  /** Extra source text entries may opt into scanning. */
+  additionalMatchingSourceText?: Partial<Record<LorebookMatchingSource, string>>;
+  /** Ignore sticky/cooldown/delay runtime state for preview/debug scans. */
+  ignoreTiming?: boolean;
 }
 
 /**
@@ -296,7 +455,17 @@ export function scanForActivatedEntries(
     currentMessageIndex = messages.length,
     chatEmbedding = null,
     semanticThreshold = 0.3,
+    activeCharacterIds = [],
+    activeCharacterTags = [],
+    generationTriggers = ["chat"],
+    additionalMatchingSourceText = {},
+    ignoreTiming = false,
   } = options;
+  const filterContext: LorebookFilterValueContext = {
+    activeCharacterIds: makeValueSet(activeCharacterIds),
+    activeCharacterTags: makeValueSet(activeCharacterTags),
+    generationTriggers: makeValueSet(generationTriggers.length > 0 ? generationTriggers : ["chat"]),
+  };
 
   // Build the text to scan from recent messages
   const messagesToScan = scanDepth > 0 ? messages.slice(-scanDepth) : messages;
@@ -306,10 +475,24 @@ export function scanForActivatedEntries(
   const activatedIds = new Set<string>();
 
   for (const entry of entries) {
-    // Skip disabled entries
-    if (!entry.enabled) continue;
+    const timingState = timingStates.get(entry.id);
 
-    // Constant entries are always activated
+    if (!ignoreTiming && timingState?.stickyCount && timingState.stickyCount > 0) {
+      if (!passesContextualActivationGate(entry, filterContext, gameState)) continue;
+      activated.push({
+        entry,
+        matchedKeys: ["[sticky]"],
+        injectionOrder: entry.order,
+        sticky: true,
+      });
+      activatedIds.add(entry.id);
+      continue;
+    }
+
+    if (!passesActivationGate(entry, timingState, filterContext, gameState, ignoreTiming)) continue;
+
+    // Constant entries still activate without keywords, but they obey timing,
+    // context filters, activation conditions, schedule, and probability gates.
     if (entry.constant) {
       activated.push({
         entry,
@@ -320,34 +503,16 @@ export function scanForActivatedEntries(
       continue;
     }
 
-    // Probability check
-    if (entry.probability !== null && entry.probability < 100) {
-      if (Math.random() * 100 > entry.probability) continue;
-    }
-
-    // Check timing
-    if (!checkTiming(entry, timingStates.get(entry.id), currentMessageIndex)) {
-      continue;
-    }
-
-    // Check activation conditions
-    if (!evaluateConditions(entry.activationConditions, gameState)) {
-      continue;
-    }
-
-    // Check schedule
-    if (!evaluateSchedule(entry.schedule, gameState)) {
-      continue;
-    }
-
     // Per-entry scan depth override
-    const entryScanText =
+    const baseEntryScanText =
       entry.scanDepth !== null && entry.scanDepth > 0
         ? messages
             .slice(-entry.scanDepth)
             .map((m) => m.content)
             .join("\n")
         : combinedText;
+    const extraMatchingText = getAdditionalMatchingText(entry, additionalMatchingSourceText);
+    const entryScanText = extraMatchingText ? `${baseEntryScanText}\n${extraMatchingText}` : baseEntryScanText;
 
     const matchOptions = {
       useRegex: entry.useRegex,
@@ -379,6 +544,8 @@ export function scanForActivatedEntries(
     for (const entry of entries) {
       if (!entry.enabled || entry.constant || activatedIds.has(entry.id)) continue;
       if (!entry.embedding || entry.embedding.length === 0) continue;
+      const timingState = timingStates.get(entry.id);
+      if (!passesActivationGate(entry, timingState, filterContext, gameState, ignoreTiming)) continue;
 
       const similarity = cosineSimilarity(chatEmbedding, entry.embedding);
       if (similarity >= semanticThreshold) {

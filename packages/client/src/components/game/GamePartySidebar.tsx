@@ -245,9 +245,11 @@ export function GamePartySidebar({
                       {selectedCard.inventory.slice(0, 5).map((item) => (
                         <div
                           key={`${item.name}-${item.location ?? "bag"}`}
-                          className="flex items-center justify-between text-[0.5625rem]"
+                          className="flex items-start justify-between gap-1 text-[0.5625rem]"
                         >
-                          <span className="truncate text-amber-100/70">{item.name}</span>
+                          <span className="min-w-0 flex-1 whitespace-normal break-words leading-tight text-amber-100/70 [overflow-wrap:anywhere]">
+                            {item.name}
+                          </span>
                           {item.quantity && item.quantity > 1 && (
                             <span className="ml-1 shrink-0 font-mono text-amber-400/40">×{item.quantity}</span>
                           )}

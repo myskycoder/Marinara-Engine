@@ -31,8 +31,14 @@ export function useConnection(id: string | null) {
 export function useCreateConnection() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (data: { name: string; provider: string; apiKey: string; baseUrl?: string; model?: string }) =>
-      api.post("/connections", data),
+    mutationFn: (data: {
+      name: string;
+      provider: string;
+      apiKey: string;
+      baseUrl?: string;
+      model?: string;
+      maxContext?: number;
+    }) => api.post("/connections", data),
     onSuccess: () => qc.invalidateQueries({ queryKey: connectionKeys.list() }),
   });
 }
@@ -74,6 +80,25 @@ export function useTestMessage() {
   return useMutation({
     mutationFn: (id: string) =>
       api.post<{ success: boolean; response: string; latencyMs: number }>(`/connections/${id}/test-message`),
+  });
+}
+
+export interface ClaudeSubscriptionDiagnosis {
+  success: boolean;
+  requestedModel: string;
+  modelsBilled: string[];
+  modelUsageDetail: Array<{ model: string; inputTokens: number; outputTokens: number }>;
+  billedDifferent: boolean;
+  fastModeState: "off" | "cooldown" | "on" | null;
+  response: string;
+  errors: string[];
+  latencyMs: number;
+}
+
+export function useDiagnoseClaudeSubscription() {
+  return useMutation({
+    mutationFn: (id: string) =>
+      api.post<ClaudeSubscriptionDiagnosis>(`/connections/${id}/diagnose-claude-subscription`),
   });
 }
 

@@ -4,9 +4,10 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api-client";
 
-const agentKeys = {
+export const agentKeys = {
   all: ["agents"] as const,
   detail: (id: string) => ["agents", id] as const,
+  customRuns: (chatId: string) => ["agents", "runs", "custom", chatId] as const,
 };
 
 export interface AgentConfigRow {
@@ -23,10 +24,27 @@ export interface AgentConfigRow {
   updatedAt: string;
 }
 
-export function useAgentConfigs() {
+export interface AgentRunRow {
+  id: string;
+  agentConfigId: string;
+  agentType: string;
+  agentName: string;
+  chatId: string;
+  messageId: string;
+  resultType: string;
+  resultData: unknown;
+  tokensUsed: number;
+  durationMs: number;
+  success: boolean;
+  error: string | null;
+  createdAt: string;
+}
+
+export function useAgentConfigs(enabled = true) {
   return useQuery({
     queryKey: agentKeys.all,
     queryFn: () => api.get<AgentConfigRow[]>("/agents"),
+    enabled,
     staleTime: 5 * 60_000,
   });
 }
@@ -40,10 +58,30 @@ export function useAgentConfig(id: string | null) {
   });
 }
 
+export function useCustomAgentRuns(chatId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: agentKeys.customRuns(chatId ?? ""),
+    queryFn: () => api.get<AgentRunRow[]>(`/agents/runs/${chatId}/custom`),
+    enabled: !!chatId && enabled,
+    staleTime: 15_000,
+  });
+}
+
 export function useUpdateAgent() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, ...data }: { id: string } & Record<string, unknown>) => api.patch(`/agents/${id}`, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: agentKeys.all });
+    },
+  });
+}
+
+export function useUpdateAgentByType() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ agentType, ...data }: { agentType: string } & Record<string, unknown>) =>
+      api.patch(`/agents/type/${agentType}`, data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: agentKeys.all });
     },
@@ -56,6 +94,17 @@ export function useCreateAgent() {
     mutationFn: (data: Record<string, unknown>) => api.post("/agents", data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: agentKeys.all });
+    },
+  });
+}
+
+export function useUpdateAgentRunData() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, resultData }: { id: string; chatId: string; resultData: unknown }) =>
+      api.patch(`/agents/runs/${id}`, { resultData }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.customRuns(variables.chatId) });
     },
   });
 }

@@ -2,10 +2,23 @@
 // LLM Provider — Registry & Factory
 // ──────────────────────────────────────────────
 import { OpenAIProvider } from "./providers/openai.provider.js";
+import { OpenAIChatGPTProvider } from "./providers/openai-chatgpt.provider.js";
 import { AnthropicProvider } from "./providers/anthropic.provider.js";
 import { ClaudeSubscriptionProvider } from "./providers/claude-subscription.provider.js";
 import { GoogleProvider } from "./providers/google.provider.js";
 import type { BaseLLMProvider } from "./base-provider.js";
+
+function normalizeCohereOpenAIBaseUrl(baseUrl: string): string {
+  const trimmed = baseUrl.replace(/\/+$/, "");
+  const lower = trimmed.toLowerCase();
+
+  if (lower.includes("/compatibility/v1")) return trimmed;
+  if (lower === "https://api.cohere.com/v2" || lower === "https://api.cohere.ai/v2") {
+    return "https://api.cohere.ai/compatibility/v1";
+  }
+
+  return trimmed;
+}
 
 /**
  * Factory that creates the correct LLM provider for a given provider type.
@@ -17,6 +30,8 @@ export function createLLMProvider(
   maxContext?: number | null,
   openrouterProvider?: string | null,
   maxTokensOverride?: number | null,
+  /** Claude (Subscription) only. When true, asks the Agent SDK to use fast-mode routing. */
+  claudeFastMode?: boolean,
 ): BaseLLMProvider {
   const normalizedMaxContext =
     typeof maxContext === "number" && Number.isFinite(maxContext) && maxContext > 0
@@ -31,10 +46,34 @@ export function createLLMProvider(
     case "openai":
     case "openrouter":
     case "nanogpt":
+    case "xai":
     case "mistral":
-    case "cohere":
     case "custom":
-      return new OpenAIProvider(baseUrl, apiKey, normalizedMaxContext, openrouterProvider, normalizedMaxTokensOverride);
+      return new OpenAIProvider(
+        baseUrl,
+        apiKey,
+        normalizedMaxContext,
+        openrouterProvider,
+        normalizedMaxTokensOverride,
+        provider,
+      );
+    case "openai_chatgpt":
+      return new OpenAIChatGPTProvider(
+        baseUrl,
+        apiKey,
+        normalizedMaxContext,
+        openrouterProvider,
+        normalizedMaxTokensOverride,
+      );
+    case "cohere":
+      return new OpenAIProvider(
+        normalizeCohereOpenAIBaseUrl(baseUrl),
+        apiKey,
+        normalizedMaxContext,
+        openrouterProvider,
+        normalizedMaxTokensOverride,
+        "cohere",
+      );
     case "anthropic":
       return new AnthropicProvider(
         baseUrl,
@@ -50,10 +89,18 @@ export function createLLMProvider(
         normalizedMaxContext,
         openrouterProvider,
         normalizedMaxTokensOverride,
+        claudeFastMode ?? false,
       );
     case "google":
       return new GoogleProvider(baseUrl, apiKey, normalizedMaxContext, openrouterProvider, normalizedMaxTokensOverride);
     default:
-      return new OpenAIProvider(baseUrl, apiKey, normalizedMaxContext, openrouterProvider, normalizedMaxTokensOverride);
+      return new OpenAIProvider(
+        baseUrl,
+        apiKey,
+        normalizedMaxContext,
+        openrouterProvider,
+        normalizedMaxTokensOverride,
+        "custom",
+      );
   }
 }

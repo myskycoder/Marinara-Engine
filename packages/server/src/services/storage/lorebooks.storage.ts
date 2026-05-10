@@ -1,15 +1,23 @@
 // ──────────────────────────────────────────────
 // Storage: Lorebooks
 // ──────────────────────────────────────────────
-import { eq, desc, and, like, inArray } from "drizzle-orm";
+import { eq, desc, and, like, inArray, asc } from "drizzle-orm";
 import type { DB } from "../../db/connection.js";
-import { lorebooks, lorebookEntries } from "../../db/schema/index.js";
+import {
+  lorebooks,
+  lorebookCharacterLinks,
+  lorebookEntries,
+  lorebookFolders,
+  lorebookPersonaLinks,
+} from "../../db/schema/index.js";
 import { newId, now } from "../../utils/id-generator.js";
 import type {
   CreateLorebookInput,
   UpdateLorebookInput,
   CreateLorebookEntryInput,
   UpdateLorebookEntryInput,
+  CreateLorebookFolderInput,
+  UpdateLorebookFolderInput,
 } from "@marinara-engine/shared";
 import { normalizeTimestampOverrides, type TimestampOverrides } from "../import/import-timestamps.js";
 
@@ -22,20 +30,49 @@ function resolveTimestamps(overrides?: TimestampOverrides | null) {
   };
 }
 
+function uniqueStrings(values: unknown): string[] {
+  const raw = Array.isArray(values) ? values : [];
+  return Array.from(
+    new Set(raw.map((value) => (typeof value === "string" ? value.trim() : "")).filter((value) => value.length > 0)),
+  );
+}
+
+function resolveLinkIds(arrayValue: unknown, singleValue: unknown): string[] {
+  const fromArray = uniqueStrings(arrayValue);
+  if (fromArray.length > 0) return fromArray;
+  return uniqueStrings(typeof singleValue === "string" ? [singleValue] : []);
+}
+
 /** Parse DB row booleans ("true"/"false") → real booleans and JSON strings → objects. */
 function parseLorebookRow(row: Record<string, unknown>) {
+  const characterIds = resolveLinkIds(row.characterIds, row.characterId);
+  const personaIds = resolveLinkIds(row.personaIds, row.personaId);
   return {
     ...row,
     recursiveScanning: row.recursiveScanning === "true",
     maxRecursionDepth: typeof row.maxRecursionDepth === "number" ? row.maxRecursionDepth : 3,
+    isGlobal: row.isGlobal === "true",
     enabled: row.enabled === "true",
     generatedBy: row.generatedBy || null,
     sourceAgentId: row.sourceAgentId || null,
-    characterId: row.characterId || null,
-    personaId: row.personaId || null,
+    characterId: characterIds[0] ?? null,
+    characterIds,
+    personaId: personaIds[0] ?? null,
+    personaIds,
     chatId: row.chatId || null,
     tags: JSON.parse((row.tags as string) || "[]"),
   };
+}
+
+function parseStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
 }
 
 function parseEntryRow(row: Record<string, unknown>) {
@@ -49,8 +86,16 @@ function parseEntryRow(row: Record<string, unknown>) {
     useRegex: row.useRegex === "true",
     locked: row.locked === "true",
     preventRecursion: row.preventRecursion === "true",
-    keys: JSON.parse((row.keys as string) || "[]"),
-    secondaryKeys: JSON.parse((row.secondaryKeys as string) || "[]"),
+    folderId: (row.folderId as string | null | undefined) ?? null,
+    keys: parseStringArray(row.keys),
+    secondaryKeys: parseStringArray(row.secondaryKeys),
+    characterFilterMode: row.characterFilterMode || "any",
+    characterFilterIds: parseStringArray(row.characterFilterIds),
+    characterTagFilterMode: row.characterTagFilterMode || "any",
+    characterTagFilters: parseStringArray(row.characterTagFilters),
+    generationTriggerFilterMode: row.generationTriggerFilterMode || "any",
+    generationTriggerFilters: parseStringArray(row.generationTriggerFilters),
+    additionalMatchingSources: parseStringArray(row.additionalMatchingSources),
     relationships: JSON.parse((row.relationships as string) || "{}"),
     dynamicState: JSON.parse((row.dynamicState as string) || "{}"),
     activationConditions: JSON.parse((row.activationConditions as string) || "[]"),
@@ -59,13 +104,90 @@ function parseEntryRow(row: Record<string, unknown>) {
   };
 }
 
+function parseFolderRow(row: Record<string, unknown>) {
+  return {
+    ...row,
+    enabled: row.enabled === "true",
+    parentFolderId: (row.parentFolderId as string | null | undefined) ?? null,
+  };
+}
+
+type LorebookRow = typeof lorebooks.$inferSelect;
+
+async function hydrateLorebookRows(db: DB, rows: LorebookRow[]) {
+  if (rows.length === 0) return [];
+  const bookIds = rows.map((row) => row.id);
+  const [characterRows, personaRows] = await Promise.all([
+    db
+      .select()
+      .from(lorebookCharacterLinks)
+      .where(inArray(lorebookCharacterLinks.lorebookId, bookIds))
+      .orderBy(asc(lorebookCharacterLinks.lorebookId), asc(lorebookCharacterLinks.characterId)),
+    db
+      .select()
+      .from(lorebookPersonaLinks)
+      .where(inArray(lorebookPersonaLinks.lorebookId, bookIds))
+      .orderBy(asc(lorebookPersonaLinks.lorebookId), asc(lorebookPersonaLinks.personaId)),
+  ]);
+  const characterIdsByBook = new Map<string, string[]>();
+  for (const link of characterRows) {
+    const ids = characterIdsByBook.get(link.lorebookId) ?? [];
+    ids.push(link.characterId);
+    characterIdsByBook.set(link.lorebookId, ids);
+  }
+  const personaIdsByBook = new Map<string, string[]>();
+  for (const link of personaRows) {
+    const ids = personaIdsByBook.get(link.lorebookId) ?? [];
+    ids.push(link.personaId);
+    personaIdsByBook.set(link.lorebookId, ids);
+  }
+  return rows.map((row) =>
+    parseLorebookRow({
+      ...(row as Record<string, unknown>),
+      characterIds: characterIdsByBook.get(row.id) ?? [],
+      personaIds: personaIdsByBook.get(row.id) ?? [],
+    }),
+  );
+}
+
+async function syncLorebookLinks(
+  db: Pick<DB, "delete" | "insert">,
+  lorebookId: string,
+  characterIds: string[],
+  personaIds: string[],
+) {
+  const timestamp = now();
+  await db.delete(lorebookCharacterLinks).where(eq(lorebookCharacterLinks.lorebookId, lorebookId));
+  await db.delete(lorebookPersonaLinks).where(eq(lorebookPersonaLinks.lorebookId, lorebookId));
+  if (characterIds.length > 0) {
+    await db.insert(lorebookCharacterLinks).values(
+      characterIds.map((characterId) => ({
+        id: newId(),
+        lorebookId,
+        characterId,
+        createdAt: timestamp,
+      })),
+    );
+  }
+  if (personaIds.length > 0) {
+    await db.insert(lorebookPersonaLinks).values(
+      personaIds.map((personaId) => ({
+        id: newId(),
+        lorebookId,
+        personaId,
+        createdAt: timestamp,
+      })),
+    );
+  }
+}
+
 export function createLorebooksStorage(db: DB) {
   return {
     // ── Lorebooks ──
 
     async list() {
       const rows = await db.select().from(lorebooks).orderBy(desc(lorebooks.updatedAt));
-      return rows.map((r) => parseLorebookRow(r as Record<string, unknown>));
+      return hydrateLorebookRows(db, rows);
     },
 
     async listByCategory(category: string) {
@@ -74,25 +196,17 @@ export function createLorebooksStorage(db: DB) {
         .from(lorebooks)
         .where(eq(lorebooks.category, category))
         .orderBy(desc(lorebooks.updatedAt));
-      return rows.map((r) => parseLorebookRow(r as Record<string, unknown>));
+      return hydrateLorebookRows(db, rows);
     },
 
     async listByCharacter(characterId: string) {
-      const rows = await db
-        .select()
-        .from(lorebooks)
-        .where(eq(lorebooks.characterId, characterId))
-        .orderBy(desc(lorebooks.updatedAt));
-      return rows.map((r) => parseLorebookRow(r as Record<string, unknown>));
+      const all = (await this.list()) as Array<{ characterIds?: string[]; characterId?: string | null }>;
+      return all.filter((row) => row.characterIds?.includes(characterId) || row.characterId === characterId);
     },
 
     async listByPersona(personaId: string) {
-      const rows = await db
-        .select()
-        .from(lorebooks)
-        .where(eq(lorebooks.personaId, personaId))
-        .orderBy(desc(lorebooks.updatedAt));
-      return rows.map((r) => parseLorebookRow(r as Record<string, unknown>));
+      const all = (await this.list()) as Array<{ personaIds?: string[]; personaId?: string | null }>;
+      return all.filter((row) => row.personaIds?.includes(personaId) || row.personaId === personaId);
     },
 
     async listByChat(chatId: string) {
@@ -101,36 +215,41 @@ export function createLorebooksStorage(db: DB) {
         .from(lorebooks)
         .where(eq(lorebooks.chatId, chatId))
         .orderBy(desc(lorebooks.updatedAt));
-      return rows.map((r) => parseLorebookRow(r as Record<string, unknown>));
+      return hydrateLorebookRows(db, rows);
     },
 
     async getById(id: string) {
       const rows = await db.select().from(lorebooks).where(eq(lorebooks.id, id));
-      const row = rows[0];
-      return row ? parseLorebookRow(row as Record<string, unknown>) : null;
+      return (await hydrateLorebookRows(db, rows))[0] ?? null;
     },
 
     async create(input: CreateLorebookInput, timestampOverrides?: TimestampOverrides | null) {
       const id = newId();
       const timestamp = resolveTimestamps(timestampOverrides);
-      await db.insert(lorebooks).values({
-        id,
-        name: input.name,
-        description: input.description ?? "",
-        category: input.category ?? "uncategorized",
-        scanDepth: input.scanDepth ?? 2,
-        tokenBudget: input.tokenBudget ?? 2048,
-        recursiveScanning: String(input.recursiveScanning ?? false),
-        maxRecursionDepth: input.maxRecursionDepth ?? 3,
-        characterId: input.characterId ?? null,
-        personaId: input.personaId ?? null,
-        chatId: input.chatId ?? null,
-        enabled: String(input.enabled ?? true),
-        tags: input.tags ? JSON.stringify(input.tags) : "[]",
-        generatedBy: input.generatedBy ?? null,
-        sourceAgentId: input.sourceAgentId ?? null,
-        createdAt: timestamp.createdAt,
-        updatedAt: timestamp.updatedAt,
+      const characterIds = resolveLinkIds(input.characterIds, input.characterId);
+      const personaIds = resolveLinkIds(input.personaIds, input.personaId);
+      await db.transaction(async (tx) => {
+        await tx.insert(lorebooks).values({
+          id,
+          name: input.name,
+          description: input.description ?? "",
+          category: input.category ?? "uncategorized",
+          scanDepth: input.scanDepth ?? 2,
+          tokenBudget: input.tokenBudget ?? 2048,
+          recursiveScanning: String(input.recursiveScanning ?? false),
+          maxRecursionDepth: input.maxRecursionDepth ?? 3,
+          characterId: characterIds[0] ?? null,
+          personaId: personaIds[0] ?? null,
+          chatId: input.chatId ?? null,
+          isGlobal: String(input.isGlobal ?? false),
+          enabled: String(input.enabled ?? true),
+          tags: input.tags ? JSON.stringify(input.tags) : "[]",
+          generatedBy: input.generatedBy ?? null,
+          sourceAgentId: input.sourceAgentId ?? null,
+          createdAt: timestamp.createdAt,
+          updatedAt: timestamp.updatedAt,
+        });
+        await syncLorebookLinks(tx, id, characterIds, personaIds);
       });
       return this.getById(id);
     },
@@ -144,20 +263,40 @@ export function createLorebooksStorage(db: DB) {
       if (input.tokenBudget !== undefined) updates.tokenBudget = input.tokenBudget;
       if (input.recursiveScanning !== undefined) updates.recursiveScanning = String(input.recursiveScanning);
       if (input.maxRecursionDepth !== undefined) updates.maxRecursionDepth = input.maxRecursionDepth;
-      if (input.characterId !== undefined) updates.characterId = input.characterId;
-      if (input.personaId !== undefined) updates.personaId = input.personaId;
+      const shouldUpdateCharacterLinks = input.characterIds !== undefined || input.characterId !== undefined;
+      const shouldUpdatePersonaLinks = input.personaIds !== undefined || input.personaId !== undefined;
+      const current = shouldUpdateCharacterLinks || shouldUpdatePersonaLinks ? ((await this.getById(id)) as any) : null;
+      if ((shouldUpdateCharacterLinks || shouldUpdatePersonaLinks) && !current) return null;
+      const nextCharacterIds = shouldUpdateCharacterLinks
+        ? resolveLinkIds(input.characterIds, input.characterId)
+        : ((current?.characterIds as string[] | undefined) ?? []);
+      const nextPersonaIds = shouldUpdatePersonaLinks
+        ? resolveLinkIds(input.personaIds, input.personaId)
+        : ((current?.personaIds as string[] | undefined) ?? []);
+      if (shouldUpdateCharacterLinks) updates.characterId = nextCharacterIds[0] ?? null;
+      if (shouldUpdatePersonaLinks) updates.personaId = nextPersonaIds[0] ?? null;
       if (input.chatId !== undefined) updates.chatId = input.chatId;
+      if (input.isGlobal !== undefined) updates.isGlobal = String(input.isGlobal);
       if (input.enabled !== undefined) updates.enabled = String(input.enabled);
       if (input.tags !== undefined) updates.tags = JSON.stringify(input.tags);
       if (input.generatedBy !== undefined) updates.generatedBy = input.generatedBy;
       if (input.sourceAgentId !== undefined) updates.sourceAgentId = input.sourceAgentId;
 
-      await db.update(lorebooks).set(updates).where(eq(lorebooks.id, id));
+      await db.transaction(async (tx) => {
+        await tx.update(lorebooks).set(updates).where(eq(lorebooks.id, id));
+        if (shouldUpdateCharacterLinks || shouldUpdatePersonaLinks) {
+          await syncLorebookLinks(tx, id, nextCharacterIds, nextPersonaIds);
+        }
+      });
       return this.getById(id);
     },
 
     async remove(id: string) {
-      await db.delete(lorebooks).where(eq(lorebooks.id, id));
+      await db.transaction(async (tx) => {
+        await tx.delete(lorebookCharacterLinks).where(eq(lorebookCharacterLinks.lorebookId, id));
+        await tx.delete(lorebookPersonaLinks).where(eq(lorebookPersonaLinks.lorebookId, id));
+        await tx.delete(lorebooks).where(eq(lorebooks.id, id));
+      });
     },
 
     // ── Entries ──
@@ -185,11 +324,18 @@ export function createLorebooksStorage(db: DB) {
     /**
      * Get all enabled entries from lorebooks that are relevant for a given context.
      * A lorebook is relevant if it's enabled AND one of:
+     *  - `isGlobal` is true
      *  - Its ID is in `activeLorebookIds` (user explicitly added it to this chat)
      *  - Its `characterId` matches one of the chat's active characters
      *  - Its `personaId` matches the chat's active persona
      *  - Its `chatId` matches the current chat
      * When no filters are provided, returns entries from ALL enabled lorebooks (legacy behavior).
+     *
+     * Folder gate: an entry whose `folderId` points at a disabled folder is
+     * excluded here, regardless of the entry's own `enabled` flag. The entry's
+     * own flag is preserved in the database — re-enabling the folder restores
+     * each entry's previous individual setting. Entries with a NULL `folderId`
+     * (root-level entries) are unaffected.
      */
     async listActiveEntries(filters?: {
       activeLorebookIds?: string[];
@@ -197,16 +343,29 @@ export function createLorebooksStorage(db: DB) {
       personaId?: string | null;
       chatId?: string;
     }) {
-      const enabledBooks = await db.select().from(lorebooks).where(eq(lorebooks.enabled, "true"));
+      const enabledBookRows = await db.select().from(lorebooks).where(eq(lorebooks.enabled, "true"));
+      const enabledBooks = (await hydrateLorebookRows(db, enabledBookRows)) as unknown as Array<{
+        id: string;
+        isGlobal: boolean;
+        characterId?: string | null;
+        characterIds?: string[];
+        personaId?: string | null;
+        personaIds?: string[];
+        chatId?: string | null;
+      }>;
 
       let relevantBooks = enabledBooks;
       if (filters) {
         relevantBooks = enabledBooks.filter((b) => {
+          // Globally active lorebooks bypass all scope filters
+          if (b.isGlobal) return true;
           // Explicitly added to this chat
           if (filters.activeLorebookIds?.includes(b.id)) return true;
           // Belongs to one of the active characters
+          if ((b.characterIds ?? []).some((id) => filters.characterIds?.includes(id))) return true;
           if (b.characterId && filters.characterIds?.includes(b.characterId)) return true;
           // Belongs to the active persona
+          if (filters.personaId && (b.personaIds ?? []).includes(filters.personaId)) return true;
           if (b.personaId && b.personaId === filters.personaId) return true;
           // Belongs to this chat
           if (b.chatId && b.chatId === filters.chatId) return true;
@@ -216,12 +375,24 @@ export function createLorebooksStorage(db: DB) {
 
       const bookIds = relevantBooks.map((b) => b.id);
       if (bookIds.length === 0) return [];
+
+      // Build the disabled-folder ID set for the relevant lorebooks. Done as
+      // an in-memory filter (rather than a SQL anti-join) because folder
+      // counts per book are small and this keeps the existing query shape.
+      const disabledFolderRows = await db
+        .select({ id: lorebookFolders.id })
+        .from(lorebookFolders)
+        .where(and(inArray(lorebookFolders.lorebookId, bookIds), eq(lorebookFolders.enabled, "false")));
+      const disabledFolderIds = new Set(disabledFolderRows.map((r) => r.id));
+
       const rows = await db
         .select()
         .from(lorebookEntries)
         .where(and(inArray(lorebookEntries.lorebookId, bookIds), eq(lorebookEntries.enabled, "true")))
         .orderBy(lorebookEntries.order);
-      return rows.map((r) => parseEntryRow(r as Record<string, unknown>));
+      const parsed = rows.map((r) => parseEntryRow(r as Record<string, unknown>));
+      if (disabledFolderIds.size === 0) return parsed;
+      return parsed.filter((e) => !e.folderId || !disabledFolderIds.has(e.folderId as string));
     },
 
     async getEntry(id: string) {
@@ -233,9 +404,25 @@ export function createLorebooksStorage(db: DB) {
     async createEntry(input: CreateLorebookEntryInput) {
       const id = newId();
       const timestamp = now();
+      // If a folderId is supplied, the folder must exist AND live in the same
+      // lorebook. Without this check, the route layer accepts any string and
+      // we'd silently create orphaned entries that disappear from the editor's
+      // grouped view and bypass the disabled-folder activation gate.
+      const requestedFolderId = input.folderId ?? null;
+      if (requestedFolderId !== null) {
+        const folderRows = await db
+          .select({ lorebookId: lorebookFolders.lorebookId })
+          .from(lorebookFolders)
+          .where(eq(lorebookFolders.id, requestedFolderId));
+        const folderRow = folderRows[0];
+        if (!folderRow || folderRow.lorebookId !== input.lorebookId) {
+          throw new Error("folderId does not belong to this lorebook");
+        }
+      }
       await db.insert(lorebookEntries).values({
         id,
         lorebookId: input.lorebookId,
+        folderId: requestedFolderId,
         name: input.name,
         content: input.content ?? "",
         description: input.description ?? "",
@@ -250,6 +437,13 @@ export function createLorebooksStorage(db: DB) {
         matchWholeWords: String(input.matchWholeWords ?? false),
         caseSensitive: String(input.caseSensitive ?? false),
         useRegex: String(input.useRegex ?? false),
+        characterFilterMode: input.characterFilterMode ?? "any",
+        characterFilterIds: JSON.stringify(input.characterFilterIds ?? []),
+        characterTagFilterMode: input.characterTagFilterMode ?? "any",
+        characterTagFilters: JSON.stringify(input.characterTagFilters ?? []),
+        generationTriggerFilterMode: input.generationTriggerFilterMode ?? "any",
+        generationTriggerFilters: JSON.stringify(input.generationTriggerFilters ?? []),
+        additionalMatchingSources: JSON.stringify(input.additionalMatchingSources ?? []),
         position: input.position ?? 0,
         depth: input.depth ?? 0,
         order: input.order ?? 100,
@@ -275,9 +469,38 @@ export function createLorebooksStorage(db: DB) {
 
     async updateEntry(id: string, input: UpdateLorebookEntryInput) {
       const updates: Record<string, unknown> = { updatedAt: now() };
+      const shouldClearEmbedding =
+        input.name !== undefined ||
+        input.content !== undefined ||
+        input.keys !== undefined ||
+        input.secondaryKeys !== undefined;
       if (input.name !== undefined) updates.name = input.name;
       if (input.content !== undefined) updates.content = input.content;
       if (input.description !== undefined) updates.description = input.description;
+      if (input.folderId !== undefined) {
+        if (input.folderId !== null) {
+          // Resolve the entry's lorebook so we can check the folder belongs to
+          // the same lorebook. The route layer doesn't carry the lorebookId
+          // through the update payload, so we look it up here.
+          const entryRows = await db
+            .select({ lorebookId: lorebookEntries.lorebookId })
+            .from(lorebookEntries)
+            .where(eq(lorebookEntries.id, id));
+          const entryRow = entryRows[0];
+          if (!entryRow) {
+            throw new Error("entry not found");
+          }
+          const folderRows = await db
+            .select({ lorebookId: lorebookFolders.lorebookId })
+            .from(lorebookFolders)
+            .where(eq(lorebookFolders.id, input.folderId));
+          const folderRow = folderRows[0];
+          if (!folderRow || folderRow.lorebookId !== entryRow.lorebookId) {
+            throw new Error("folderId does not belong to this lorebook");
+          }
+        }
+        updates.folderId = input.folderId;
+      }
       if (input.keys !== undefined) updates.keys = JSON.stringify(input.keys);
       if (input.secondaryKeys !== undefined) updates.secondaryKeys = JSON.stringify(input.secondaryKeys);
       if (input.enabled !== undefined) updates.enabled = String(input.enabled);
@@ -289,6 +512,17 @@ export function createLorebooksStorage(db: DB) {
       if (input.matchWholeWords !== undefined) updates.matchWholeWords = String(input.matchWholeWords);
       if (input.caseSensitive !== undefined) updates.caseSensitive = String(input.caseSensitive);
       if (input.useRegex !== undefined) updates.useRegex = String(input.useRegex);
+      if (input.characterFilterMode !== undefined) updates.characterFilterMode = input.characterFilterMode;
+      if (input.characterFilterIds !== undefined) updates.characterFilterIds = JSON.stringify(input.characterFilterIds);
+      if (input.characterTagFilterMode !== undefined) updates.characterTagFilterMode = input.characterTagFilterMode;
+      if (input.characterTagFilters !== undefined)
+        updates.characterTagFilters = JSON.stringify(input.characterTagFilters);
+      if (input.generationTriggerFilterMode !== undefined)
+        updates.generationTriggerFilterMode = input.generationTriggerFilterMode;
+      if (input.generationTriggerFilters !== undefined)
+        updates.generationTriggerFilters = JSON.stringify(input.generationTriggerFilters);
+      if (input.additionalMatchingSources !== undefined)
+        updates.additionalMatchingSources = JSON.stringify(input.additionalMatchingSources);
       if (input.position !== undefined) updates.position = input.position;
       if (input.depth !== undefined) updates.depth = input.depth;
       if (input.order !== undefined) updates.order = input.order;
@@ -307,6 +541,7 @@ export function createLorebooksStorage(db: DB) {
       if (input.schedule !== undefined) updates.schedule = input.schedule ? JSON.stringify(input.schedule) : null;
       if (input.locked !== undefined) updates.locked = String(input.locked);
       if (input.preventRecursion !== undefined) updates.preventRecursion = String(input.preventRecursion);
+      if (shouldClearEmbedding) updates.embedding = null;
 
       await db.update(lorebookEntries).set(updates).where(eq(lorebookEntries.id, id));
       return this.getEntry(id);
@@ -330,18 +565,39 @@ export function createLorebooksStorage(db: DB) {
       return results;
     },
 
-    async reorderEntries(lorebookId: string, entryIds: string[]) {
-      const existingEntries = (await this.listEntries(lorebookId)).map((entry) => {
-        const row = entry as unknown as Record<string, unknown>;
-        return {
-          id: String(row.id),
-          order: typeof row.order === "number" ? row.order : Number(row.order ?? 0),
-        };
-      });
-      const orderById = new Map(existingEntries.map((entry) => [entry.id, entry.order]));
-      const existingIds = new Set(existingEntries.map((entry) => entry.id));
-      const orderedIds = entryIds.filter((id, index, ids) => existingIds.has(id) && ids.indexOf(id) === index);
-      const missingIds = existingEntries
+    /**
+     * Reorder entries inside a single container.
+     *
+     * `folderId` (undefined = legacy, null = root, string = inside that
+     * folder) scopes the reorder so that dragging within one container does
+     * not renumber entries in another. When `folderId` is undefined we keep
+     * the legacy behavior of renumbering every entry in the lorebook.
+     *
+     * Renumbering uses (index + 1) * 10 within the container, so each
+     * container's order space starts back at 10 — that's intentional and
+     * matches the user-facing "each folder is its own container" semantic
+     * (a folder at the top can hold high-Order entries without affecting
+     * root entries below it).
+     */
+    async reorderEntries(lorebookId: string, entryIds: string[], folderId?: string | null) {
+      const allEntries = (await this.listEntries(lorebookId)) as unknown as Array<Record<string, unknown>>;
+
+      const inScope =
+        folderId === undefined
+          ? allEntries
+          : allEntries.filter((row) => {
+              const rowFolder = (row.folderId as string | null | undefined) ?? null;
+              return rowFolder === folderId;
+            });
+
+      const scopeEntries = inScope.map((row) => ({
+        id: String(row.id),
+        order: typeof row.order === "number" ? row.order : Number(row.order ?? 0),
+      }));
+      const orderById = new Map(scopeEntries.map((entry) => [entry.id, entry.order]));
+      const scopeIds = new Set(scopeEntries.map((entry) => entry.id));
+      const orderedIds = entryIds.filter((id, index, ids) => scopeIds.has(id) && ids.indexOf(id) === index);
+      const missingIds = scopeEntries
         .map((entry) => entry.id)
         .filter((id) => !orderedIds.includes(id))
         .sort((leftId, rightId) => (orderById.get(leftId) ?? 0) - (orderById.get(rightId) ?? 0));
@@ -361,6 +617,127 @@ export function createLorebooksStorage(db: DB) {
     async removeEntry(id: string) {
       await db.delete(lorebookEntries).where(eq(lorebookEntries.id, id));
     },
+
+    // ── Folders ──
+
+    async listFolders(lorebookId: string) {
+      const rows = await db
+        .select()
+        .from(lorebookFolders)
+        .where(eq(lorebookFolders.lorebookId, lorebookId))
+        .orderBy(asc(lorebookFolders.order));
+      return rows.map((r) => parseFolderRow(r as Record<string, unknown>));
+    },
+
+    /**
+     * Look up a folder. When `lorebookId` is provided, the lookup is also
+     * scoped to that lorebook — needed because the route layer accepts both
+     * `:id` (lorebook) and `:folderId` and the two should always agree.
+     * Without this scope, `/lorebooks/A/folders/B` would happily return a
+     * folder belonging to lorebook `X`.
+     */
+    async getFolder(folderId: string, lorebookId?: string) {
+      const conditions = lorebookId
+        ? and(eq(lorebookFolders.id, folderId), eq(lorebookFolders.lorebookId, lorebookId))
+        : eq(lorebookFolders.id, folderId);
+      const rows = await db.select().from(lorebookFolders).where(conditions);
+      const row = rows[0];
+      return row ? parseFolderRow(row as Record<string, unknown>) : null;
+    },
+
+    async createFolder(lorebookId: string, input: CreateLorebookFolderInput) {
+      const id = newId();
+      const timestamp = now();
+      // If the caller didn't pass an explicit order, append after existing folders
+      // so the new one shows up at the bottom of the folder block by default.
+      let order = input.order ?? 0;
+      if (input.order === undefined || input.order === 0) {
+        const existing = await db
+          .select({ order: lorebookFolders.order })
+          .from(lorebookFolders)
+          .where(eq(lorebookFolders.lorebookId, lorebookId));
+        if (existing.length > 0) {
+          order = Math.max(...existing.map((r) => r.order ?? 0)) + 10;
+        } else {
+          order = 10;
+        }
+      }
+      await db.insert(lorebookFolders).values({
+        id,
+        lorebookId,
+        name: input.name,
+        enabled: String(input.enabled ?? true),
+        // v1 ignores any non-null parentFolderId — caller is the route layer.
+        parentFolderId: input.parentFolderId ?? null,
+        order,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+      return this.getFolder(id, lorebookId);
+    },
+
+    /**
+     * Update a folder. `lorebookId` is required so a malicious or buggy
+     * caller can't reach folders in a different lorebook by guessing the
+     * folder ID; the WHERE clause requires both to match.
+     */
+    async updateFolder(folderId: string, input: UpdateLorebookFolderInput, lorebookId?: string) {
+      const updates: Record<string, unknown> = { updatedAt: now() };
+      if (input.name !== undefined) updates.name = input.name;
+      if (input.enabled !== undefined) updates.enabled = String(input.enabled);
+      if (input.parentFolderId !== undefined) updates.parentFolderId = input.parentFolderId;
+      if (input.order !== undefined) updates.order = input.order;
+      const whereClause = lorebookId
+        ? and(eq(lorebookFolders.id, folderId), eq(lorebookFolders.lorebookId, lorebookId))
+        : eq(lorebookFolders.id, folderId);
+      await db.update(lorebookFolders).set(updates).where(whereClause);
+      return this.getFolder(folderId, lorebookId);
+    },
+
+    /**
+     * Remove a folder. Entries inside the folder are NOT deleted — their
+     * `folderId` is reset to NULL (root level) so the user doesn't lose
+     * data when they remove a folder by accident.
+     *
+     * `lorebookId` scopes the lookup so a request to
+     * `/lorebooks/A/folders/B` cannot reach a folder belonging to lorebook
+     * `X` and accidentally reparent that other lorebook's entries.
+     */
+    async removeFolder(folderId: string, lorebookId?: string) {
+      const folder = (await this.getFolder(folderId, lorebookId)) as Record<string, unknown> | null;
+      if (!folder) return;
+      const ownerLorebookId = folder.lorebookId as string;
+      await db
+        .update(lorebookEntries)
+        .set({ folderId: null, updatedAt: now() })
+        .where(and(eq(lorebookEntries.lorebookId, ownerLorebookId), eq(lorebookEntries.folderId, folderId)));
+      await db
+        .delete(lorebookFolders)
+        .where(and(eq(lorebookFolders.id, folderId), eq(lorebookFolders.lorebookId, ownerLorebookId)));
+    },
+
+    /** Renumber folders within a lorebook to match `folderIds` left-to-right. */
+    async reorderFolders(lorebookId: string, folderIds: string[]) {
+      const existing = (await this.listFolders(lorebookId)) as unknown as Array<{ id: string; order: number }>;
+      const orderById = new Map(existing.map((f) => [f.id, f.order]));
+      const existingIds = new Set(existing.map((f) => f.id));
+      const orderedIds = folderIds.filter((id, index, ids) => existingIds.has(id) && ids.indexOf(id) === index);
+      const missingIds = existing
+        .map((f) => f.id)
+        .filter((id) => !orderedIds.includes(id))
+        .sort((a, b) => (orderById.get(a) ?? 0) - (orderById.get(b) ?? 0));
+      const nextIds = [...orderedIds, ...missingIds];
+      const timestamp = now();
+      for (const [index, id] of nextIds.entries()) {
+        await db
+          .update(lorebookFolders)
+          .set({ order: (index + 1) * 10, updatedAt: timestamp })
+          .where(and(eq(lorebookFolders.id, id), eq(lorebookFolders.lorebookId, lorebookId)));
+      }
+      return this.listFolders(lorebookId);
+    },
+
+    // ── Search ──
 
     /** Search entries by keyword match in name/content/keys. */
     async searchEntries(query: string) {

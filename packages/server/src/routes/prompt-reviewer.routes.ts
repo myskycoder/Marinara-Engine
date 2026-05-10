@@ -73,6 +73,7 @@ export async function promptReviewerRoutes(app: FastifyInstance) {
     }
     // Claude (Subscription) uses the local Claude Agent SDK; no HTTP endpoint.
     if (!baseUrl && conn.provider === "claude_subscription") baseUrl = "claude-agent-sdk://local";
+    if (!baseUrl && conn.provider === "openai_chatgpt") baseUrl = "openai-chatgpt://codex-auth";
     if (!baseUrl) {
       return reply.status(400).send({ error: "No base URL configured for this connection" });
     }
@@ -112,6 +113,8 @@ export async function promptReviewerRoutes(app: FastifyInstance) {
           { role: "assistant", content: "(Sample assistant response)" },
         ],
         activeLorebookIds: [],
+        disableLorebooks: true,
+        previewOnly: true,
       };
 
       const result = await assemblePrompt(assemblerInput);

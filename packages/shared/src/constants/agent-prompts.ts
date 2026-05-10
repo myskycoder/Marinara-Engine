@@ -87,6 +87,7 @@ If no issues found, return: { "issues": [], "verdict": "clean" }`,
   /* ────────────────────────────────────────── */
   expression: `Analyze the emotional state of each character in the latest assistant message and pick the best matching sprite expression from their AVAILABLE sprites, listed in <available_sprites>.
 The <available_sprites> block lists characters in the format: CharacterName (CharacterID): expression1, expression2, ...
+Some listed expressions are simple group keys. For example, if the list includes joy, the engine may randomly display a concrete matching sprite like joy_01 or joy_laugh. Use the simple listed key; do not invent variant filenames that are not listed.
 Respond ONLY with valid JSON.
 Output format:
 {
@@ -94,7 +95,7 @@ Output format:
     {
       "characterId": "string (MUST be the exact CharacterID from the parentheses in <available_sprites>)",
       "characterName": "string",
-      "expression": "string (MUST be one of the character's available sprite names)",
+      "expression": "string (MUST be one of the character's listed available expressions or group keys)",
       "transition": "crossfade | bounce | shake | hop | none"
     }
   ]
@@ -107,8 +108,8 @@ Transition guide:
 - none: instant swap (neutral reset, very minor change).
 Instructions:
 1. ONLY include characters listed in <available_sprites>. If a character is not listed there, do NOT include them.
-2. The characterId MUST be the exact ID string from the parentheses, e.g. if the entry says "Dottore (abc123): happy, sad" then characterId must be "abc123".
-3. When a character's emotion is ambiguous, pick the closest available expression name rather than guessing a generic one.`,
+2. The characterId MUST be the exact ID string from the parentheses, e.g. if the entry says "Dottore (abc123): happy, sad" then characterId must be "abc123". Never invent, reuse, or copy a different ID from chat history.
+3. When a character's emotion is ambiguous, pick the closest listed available expression or group key rather than guessing a generic one.`,
 
   /* ────────────────────────────────────────── */
   "echo-chamber": `Simulate a live streaming-service chat full of anonymous viewers reacting to the roleplay on screen. Generate a batch of short messages from fictional viewers commenting on the latest story beat.
@@ -249,7 +250,7 @@ Output format (JSON only):
 5. If nothing noteworthy was established this turn, return: { "updates": [] }
 6. DEDUPLICATION, CRITICAL: Check the <existing_entries> list of existing lorebook entries before creating anything. If an entry with the same or a very similar name already exists, use "update" instead of "create". NEVER create a second entry for a subject that's already covered. Prefer updating and enriching an existing entry over making a new one.
 7. LOCKED ENTRIES: Entries marked as locked CANNOT be modified. Do not emit updates targeting locked entry names. Respect the user's protection.
-8. When updating an existing entry, MERGE new information with the existing content. Do NOT replace or erase existing details. Add the new facts while keeping everything that was already there.
+8. When updating an existing entry, do NOT rewrite the full entry. Return only the durable additions in "newFacts"; the app will append them to the existing content without erasing old details. Use "content" for creates, or only for an update when the existing entry is empty or malformed.
 9. CHAT SUMMARY AWARENESS: If a <chat_summary> block is provided, it contains information already captured by the summary system. Do NOT create lorebook entries for facts that are only restated from the summary and not newly established in the latest messages. Only record genuinely new lore not already covered by the summary.
 Output format:
 {
@@ -257,7 +258,8 @@ Output format:
     {
       "action": "create|update",
       "entryName": "string — name of the entry (must match existing name exactly when updating)",
-      "content": "string — the lore content to store (when updating: include ALL existing info plus new details)",
+      "content": "string — full lore content for creates; for updates, only use this if replacing an empty or malformed entry is truly necessary",
+      "newFacts": ["string — for updates only: atomic new facts to append to the existing entry without rewriting it"],
       "keys": ["string — activation keywords for this entry"],
       "tag": "string — category tag (character, location, item, faction, event, lore)",
       "reason": "string — why this should be recorded."
@@ -421,18 +423,18 @@ Schema:
 }
 1. Stats range from 0 to 100 (percentage-based). Never set any stat below 0 or above 100.
 2. Changes must be proportional to what actually happened. Don't swing wildly over minor events.
-  2a. Small routine actions = small changes (1–5%):
+  2a. Small routine actions = small changes (1–10%):
     Walking around → Energy -1 to -3%, Hygiene -1 to -2%
     Eating a snack → Satiety +5 to +10%
     Brief rest → Energy +3 to +5%
-  2b. Moderate events = moderate changes (5–15%):
+  2b. Moderate events = moderate changes (10–50%):
     A full meal → Satiety +20 to +40%
     A short nap → Energy +10 to +20%
     Getting splashed with water → Hygiene -10 to -15%
-  2c. Major events = large changes (15–40%):
-    Falling into mud → Hygiene -20 to -40%
-    Full night's sleep → Energy +40 to +60%
-    Taking a bath/shower → Hygiene → 95–100%
+  2c. Major events = large changes (50–100%):
+    Falling into mud → Hygiene -50%
+    Full night's sleep → Energy → 95–100%
+    Taking a bath/shower → Hygiene → 95–100%s
 3. Time passage naturally decays stats: Energy, Satiety, and Hygiene decrease slowly over time, even without events.
 4. Preserve previous values and only adjust what the narrative warrants. If nothing relevant happened, return the previous values unchanged.
 5. Track the player persona's current status — a short phrase summarising what they are doing or their condition.
@@ -483,25 +485,30 @@ Consider:
 - Setting (tavern, battlefield, peaceful meadow, dark dungeon, etc.).
 - Pace (action, slow dialogue, exploration, rest).
 - Genre cues (fantasy → orchestral/folk, sci-fi → synth/electronic, horror → dark ambient).
-You have five tools:
-1. spotify_get_playlists — List the user's playlists (call first to see their library).
-2. spotify_get_playlist_tracks — Get tracks from a playlist or Liked Songs. Using playlistId='liked' returns the FULL Liked library (up to 500 tracks).
-3. spotify_search — Search Spotify's catalogue by mood, genre, artist, or keywords.
-4. spotify_play — Play a specific track or playlist URI.
-5. spotify_set_volume — Adjust volume (lower for quiet dialogue, higher for action).
+You have six tools:
+1. spotify_get_current_playback — Check what is already playing and on which device.
+2. spotify_get_playlists — List the user's playlists.
+3. spotify_get_playlist_tracks — Get a compact candidate shortlist from a playlist or Liked Songs. The server indexes/caches the full source and returns only scored candidates.
+4. spotify_search — Search Spotify's catalogue by mood, genre, artist, or keywords.
+5. spotify_play — Play a specific track or playlist URI.
+6. spotify_set_volume — Adjust volume (lower for quiet dialogue, higher for action).
 IMPORTANT! You MUST use the tool functions above to actually control Spotify.
 - To play music, call spotify_play with the URI. Do NOT just return a URI in JSON without calling the tool.
-- To search, call spotify_search. To list playlists, call spotify_get_playlists.
+- To inspect current playback, call spotify_get_current_playback. To search, call spotify_search. To list playlists, call spotify_get_playlists.
 - To adjust volume, call spotify_set_volume.
 - Only AFTER you have used the tools should you respond with the JSON summary below.
 Rules:
-1. ALWAYS check the user's Liked Songs (playlistId='liked') first — this returns their full library. Pick from their personal library whenever a good match exists — they chose those songs for a reason. Only search the catalogue if nothing in their library fits.
-2. Only change music when the mood noticeably shifts. Don't change every single turn.
-3. Playing an entire playlist URI is fine if it fits the mood (e.g., a "battle music" or "chill" playlist).
-4. Prefer instrumental or ambient tracks for immersion — lyrics can be distracting.
-5. Use volume as a narrative tool: quiet for intimate moments, louder for epic scenes.
-6. If the current scene doesn't warrant a change, respond with action "none" (no tool calls needed).
-7. When playing music, queue multiple tracks (3-5) that fit the mood so playback doesn't stop after one song.
+1. ALWAYS check current playback first. If <spotify_dj_constraints> includes manualRetry or forceFreshPick, choose a different fitting track and call spotify_play even if the current track still fits. Otherwise, if the existing track still fits, keep it and return action "none" or adjust volume only.
+2. Respect any <spotify_dj_constraints> block. If it says Liked Songs, use playlistId='liked'. If it names an artist, search with artist:<name>. If it names a playlist, use that playlist before searching elsewhere.
+3. Pick from the user's personal library whenever a good match exists — they chose those songs for a reason. Only search the catalogue if the configured source allows it or nothing personal fits.
+4. When choosing from a configured playlist or Liked Songs, call spotify_get_playlist_tracks with query/mood terms and candidateLimit 30-80. Do NOT manually page through the whole playlist.
+4a. In game mode, pick ONE best track for the current scene and call spotify_play with only that track URI. The app will loop it until the DJ picks a new track.
+5. Only change music when the mood noticeably shifts. Don't change every single turn, except on manualRetry/forceFreshPick where the user explicitly requested a new pick.
+6. Playing an entire playlist URI is fine if it fits the mood (e.g., a "battle music" or "chill" playlist).
+7. Prefer instrumental or ambient tracks for immersion — lyrics can be distracting.
+8. Use volume as a narrative tool: quiet for intimate moments, louder for epic scenes.
+9. If the current scene doesn't warrant a change, respond with action "none".
+10. Outside game mode, when playing music, queue multiple tracks (3-5) that fit the mood so playback doesn't stop after one song.
 After using the tools, respond with ONLY valid JSON.
 Schema:
 {

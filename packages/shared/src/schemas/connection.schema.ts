@@ -5,6 +5,7 @@ import { z } from "zod";
 
 export const apiProviderSchema = z.enum([
   "openai",
+  "openai_chatgpt",
   "anthropic",
   "claude_subscription",
   "google",
@@ -12,6 +13,7 @@ export const apiProviderSchema = z.enum([
   "cohere",
   "openrouter",
   "nanogpt",
+  "xai",
   "custom",
   "image_generation",
 ]);
@@ -27,6 +29,7 @@ export const createConnectionSchema = z.object({
   useForRandom: z.boolean().default(false),
   defaultForAgents: z.boolean().default(false),
   enableCaching: z.boolean().default(false),
+  cachingAtDepth: z.number().int().min(0).default(5),
   embeddingModel: z.string().default(""),
   embeddingBaseUrl: z.string().url().or(z.literal("")).default(""),
   embeddingConnectionId: z.string().nullable().default(null),
@@ -35,6 +38,8 @@ export const createConnectionSchema = z.object({
   comfyuiWorkflow: z.string().nullable().default(null),
   imageService: z.string().nullable().default(null),
   maxTokensOverride: z.number().int().min(1).nullable().default(null),
+  maxParallelJobs: z.number().int().min(1).max(16).default(1),
+  claudeFastMode: z.boolean().default(false),
 });
 
 export type CreateConnectionInput = z.infer<typeof createConnectionSchema>;

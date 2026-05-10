@@ -3,8 +3,8 @@
 // and localhost llama-server inference
 // ──────────────────────────────────────────────
 
-import type { FastifyPluginAsync, FastifyReply } from "fastify";
-import { logger } from "../lib/logger.js";
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
+import { logger, logDebugOverride } from "../lib/logger.js";
 import { z } from "zod";
 import { sidecarModelService } from "../services/sidecar/sidecar-model.service.js";
 import { mlxRuntimeService } from "../services/sidecar/mlx-runtime.service.js";
@@ -32,6 +32,8 @@ import {
   type SidecarDownloadProgress,
   type SidecarQuantization,
 } from "@marinara-engine/shared";
+import { isSidecarRuntimeInstallEnabled } from "../config/runtime-config.js";
+import { isAdminAuthorized, requirePrivilegedAccess } from "../middleware/privileged-gate.js";
 
 const quantizationSchema = z.enum(["q8_0", "q4_k_m"]);
 const hfRepoSchema = z
@@ -39,11 +41,19 @@ const hfRepoSchema = z
   .trim()
   .regex(/^[^/\s]+\/[^/\s]+$/, "Repository must be in owner/repo format");
 
-export const sidecarRoutes: FastifyPluginAsync = async (app) => {
-  app.addHook("onClose", async () => {
-    await sidecarProcessService.stop();
-  });
+export function isRuntimeInstallRequestAllowed(request: FastifyRequest): boolean {
+  return isSidecarRuntimeInstallEnabled() || isAdminAuthorized(request);
+}
 
+function runtimeInstallDisabledPayload() {
+  return {
+    error: "Sidecar runtime install is disabled",
+    message:
+      "Set SIDECAR_RUNTIME_INSTALL_ENABLED=true or enter the matching Admin Access secret to allow runtime installation from the API.",
+  };
+}
+
+export const sidecarRoutes: FastifyPluginAsync = async (app) => {
   app.get("/status", async () => {
     void sidecarProcessService
       .syncForCurrentConfig({ suppressKnownFailure: true, allowRuntimeInstall: false })
@@ -84,6 +94,10 @@ export const sidecarRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.post("/runtime/install", async (req, reply) => {
+    if (!requirePrivilegedAccess(req, reply, { feature: "Sidecar runtime install" })) return;
+    if (!isRuntimeInstallRequestAllowed(req)) {
+      return reply.status(403).send(runtimeInstallDisabledPayload());
+    }
     const body = z.object({ reinstall: z.boolean().optional() }).parse(req.body ?? {});
 
     await handleDownloadSse(reply, async () => {
@@ -95,7 +109,8 @@ export const sidecarRoutes: FastifyPluginAsync = async (app) => {
     });
   });
 
-  app.post("/restart", async () => {
+  app.post("/restart", async (req, reply) => {
+    if (!requirePrivilegedAccess(req, reply, { feature: "Sidecar restart" })) return;
     await sidecarProcessService.restart();
     return { ok: true };
   });
@@ -126,7 +141,11 @@ export const sidecarRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
-  app.post("/reinstall", async () => {
+  app.post("/reinstall", async (req, reply) => {
+    if (!requirePrivilegedAccess(req, reply, { feature: "Sidecar runtime reinstall" })) return;
+    if (!isRuntimeInstallRequestAllowed(req)) {
+      return reply.status(403).send(runtimeInstallDisabledPayload());
+    }
     await sidecarProcessService.reinstallRuntime();
     return { ok: true };
   });
@@ -183,6 +202,7 @@ export const sidecarRoutes: FastifyPluginAsync = async (app) => {
   app.post<{
     Body: { quantization: SidecarQuantization };
   }>("/download", async (req, reply) => {
+    if (!requirePrivilegedAccess(req, reply, { feature: "Sidecar model download" })) return;
     const { quantization } = z.object({ quantization: quantizationSchema }).parse(req.body);
     await handleDownloadSse(reply, async () => {
       await sidecarProcessService.stop();
@@ -194,6 +214,7 @@ export const sidecarRoutes: FastifyPluginAsync = async (app) => {
   app.post<{
     Body: { repo: string; modelPath?: string };
   }>("/download/custom", async (req, reply) => {
+    if (!requirePrivilegedAccess(req, reply, { feature: "Sidecar custom model download" })) return;
     const body = z
       .object({
         repo: hfRepoSchema,
@@ -208,7 +229,8 @@ export const sidecarRoutes: FastifyPluginAsync = async (app) => {
     });
   });
 
-  app.post("/download/cancel", async () => {
+  app.post("/download/cancel", async (req, reply) => {
+    if (!requirePrivilegedAccess(req, reply, { feature: "Sidecar download cancel" })) return;
     sidecarModelService.cancelDownload();
     mlxRuntimeService.cancelInstall();
     sidecarRuntimeService.cancelInstall();
@@ -216,6 +238,7 @@ export const sidecarRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.delete("/model", async (_req, reply) => {
+    if (!requirePrivilegedAccess(_req, reply, { feature: "Sidecar model deletion" })) return;
     if (isInferenceBusy()) {
       return reply.status(409).send({ error: "Cannot delete the sidecar model while inference is in progress" });
     }
@@ -243,16 +266,37 @@ export const sidecarRoutes: FastifyPluginAsync = async (app) => {
       currentBackground: z.string().nullable().optional(),
       currentMusic: z.string().nullable().optional(),
       recentMusic: z.array(z.string()).max(20).optional(),
+      availableSpotifyTracks: z
+        .array(
+          z.object({
+            uri: z.string().min(1).max(300),
+            name: z.string().min(1).max(300),
+            artist: z.string().min(1).max(300),
+            album: z.string().max(300).nullable().optional(),
+            position: z.number().nullable().optional(),
+            score: z.number().nullable().optional(),
+          }),
+        )
+        .max(50)
+        .optional(),
       currentAmbient: z.string().nullable().optional(),
       currentWeather: z.string().nullable().optional(),
       currentTimeOfDay: z.string().nullable().optional(),
+      canGenerateBackgrounds: z.boolean().optional(),
       canGenerateIllustrations: z.boolean().optional(),
       artStylePrompt: z.string().nullable().optional(),
+      imagePromptInstructions: z.string().max(1200).nullable().optional(),
     }),
+    debugMode: z.boolean().optional().default(false),
   });
 
   app.post("/analyze-scene", async (req, reply) => {
     const body = sceneBodySchema.parse(req.body);
+    const requestDebug = body.debugMode === true;
+    const debugLogsEnabled = requestDebug || logger.isLevelEnabled("debug");
+    const debugLog = (message: string, ...args: any[]) => {
+      logDebugOverride(requestDebug, message, ...args);
+    };
     const available = await isInferenceAvailable();
     if (!available) {
       return reply.status(503).send({ error: "Sidecar model is not available" });
@@ -266,11 +310,33 @@ export const sidecarRoutes: FastifyPluginAsync = async (app) => {
     const userPrompt = buildSceneAnalyzerUserPrompt(body.narration, body.playerAction, sceneCtx);
 
     try {
+      if (debugLogsEnabled) {
+        debugLog(
+          "[debug/game/scene-analysis:sidecar] request narrationChars=%d playerActionChars=%d state=%s bgOptions=%d sfxOptions=%d widgets=%d npcs=%d generateBackgrounds=%s generateIllustration=%s",
+          body.narration.length,
+          body.playerAction?.length ?? 0,
+          body.context.currentState ?? "unknown",
+          bgTags.length,
+          sfxTags.length,
+          body.context.activeWidgets?.length ?? 0,
+          body.context.trackedNpcs?.length ?? 0,
+          !!body.context.canGenerateBackgrounds,
+          !!body.context.canGenerateIllustrations,
+        );
+        debugLog("[debug/game/scene-analysis:sidecar] system prompt:\n%s", systemPrompt);
+        debugLog("[debug/game/scene-analysis:sidecar] user prompt:\n%s", userPrompt);
+      }
+
       const raw = await analyzeScene(systemPrompt, userPrompt);
+      if (debugLogsEnabled) {
+        debugLog("[debug/game/scene-analysis:sidecar] parsed model response:\n%s", JSON.stringify(raw, null, 2));
+      }
 
       const ppCtx: PostProcessContext = {
         availableBackgrounds: bgTags,
         availableSfx: sfxTags,
+        availableSpotifyTracks: body.context.availableSpotifyTracks ?? [],
+        canGenerateBackgrounds: !!body.context.canGenerateBackgrounds,
         validWidgetIds: new Set(
           (body.context.activeWidgets ?? [])
             .map((widget) =>
@@ -295,6 +361,8 @@ export const sidecarRoutes: FastifyPluginAsync = async (app) => {
         state: (body.context.currentState as GameActiveState) ?? "exploration",
         weather: result.weather ?? body.context.currentWeather ?? null,
         timeOfDay: result.timeOfDay ?? body.context.currentTimeOfDay ?? null,
+        musicGenre: result.musicGenre,
+        musicIntensity: result.musicIntensity,
         currentMusic: body.context.currentMusic ?? null,
         recentMusic: body.context.recentMusic ?? null,
         availableMusic: musicTags,
@@ -305,11 +373,16 @@ export const sidecarRoutes: FastifyPluginAsync = async (app) => {
         state: (body.context.currentState as GameActiveState) ?? "exploration",
         weather: result.weather ?? body.context.currentWeather ?? null,
         timeOfDay: result.timeOfDay ?? body.context.currentTimeOfDay ?? null,
+        locationKind: result.locationKind,
         currentAmbient: body.context.currentAmbient ?? null,
         availableAmbient: ambientTags,
         background: result.background ?? body.context.currentBackground,
       });
       result.ambient = scoredAmbient ?? null;
+
+      if (debugLogsEnabled) {
+        debugLog("[debug/game/scene-analysis:sidecar] final result:\n%s", JSON.stringify(result, null, 2));
+      }
 
       return { result };
     } catch (error) {

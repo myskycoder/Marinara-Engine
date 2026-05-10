@@ -12,8 +12,10 @@ import {
   useTestConnection,
   useTestMessage,
   useTestImageGeneration,
+  useDiagnoseClaudeSubscription,
   useFetchModels,
   useSaveConnectionDefaults,
+  type ClaudeSubscriptionDiagnosis,
 } from "../../hooks/use-connections";
 import {
   ArrowLeft,
@@ -36,6 +38,8 @@ import {
   ChevronDown,
   ExternalLink,
   ImageIcon,
+  RotateCcw,
+  SlidersHorizontal,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { showConfirmDialog } from "../../lib/app-dialogs";
@@ -53,7 +57,20 @@ import {
   MODEL_LISTS,
   IMAGE_GENERATION_SOURCES,
   inferImageSource,
+  IMAGE_DEFAULTS_STORAGE_KEY,
+  COMFYUI_SAMPLER_OPTIONS,
+  COMFYUI_SCHEDULER_OPTIONS,
+  NOVELAI_NOISE_SCHEDULE_OPTIONS,
+  NOVELAI_SAMPLER_OPTIONS,
+  SD_WEBUI_SAMPLER_OPTIONS,
+  SD_WEBUI_SCHEDULER_OPTIONS,
+  createDefaultImageGenerationProfile,
+  imageSourceToDefaultsService,
+  normalizeImageGenerationProfile,
+  sanitizeImageGenerationProfile,
   type APIProvider,
+  type ImageDefaultsService,
+  type ImageGenerationDefaultsProfile,
 } from "@marinara-engine/shared";
 
 /** Links where users can obtain API keys for each provider */
@@ -65,7 +82,24 @@ const API_KEY_LINKS: Partial<Record<APIProvider, { label: string; url: string }>
   cohere: { label: "Get your Cohere API key", url: "https://dashboard.cohere.com/api-keys" },
   openrouter: { label: "Get your OpenRouter API key", url: "https://openrouter.ai/keys" },
   nanogpt: { label: "Get your NanoGPT API key", url: "https://nano-gpt.com/api" },
+  xai: { label: "Get your xAI API key", url: "https://console.x.ai" },
 };
+
+const DEFAULT_CACHING_AT_DEPTH = 5;
+const MAX_CACHING_AT_DEPTH = 100;
+const DEFAULT_MAX_PARALLEL_JOBS = 1;
+const MAX_PARALLEL_JOBS = 16;
+
+function normalizeCachingAtDepth(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return DEFAULT_CACHING_AT_DEPTH;
+  return Math.min(MAX_CACHING_AT_DEPTH, Math.floor(value));
+}
+
+function normalizeMaxParallelJobs(value: unknown): number {
+  const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(numeric) || numeric < 1) return DEFAULT_MAX_PARALLEL_JOBS;
+  return Math.min(MAX_PARALLEL_JOBS, Math.floor(numeric));
+}
 
 // ═══════════════════════════════════════════════
 //  Main Editor
@@ -81,6 +115,7 @@ export function ConnectionEditor() {
   const testConnection = useTestConnection();
   const testMessage = useTestMessage();
   const testImageGeneration = useTestImageGeneration();
+  const diagnoseClaudeSubscription = useDiagnoseClaudeSubscription();
   const fetchModels = useFetchModels();
   const saveConnectionDefaults = useSaveConnectionDefaults();
   const { data: allConnections } = useConnections();
@@ -101,7 +136,9 @@ export function ConnectionEditor() {
   const [localApiKey, setLocalApiKey] = useState("");
   const [localModel, setLocalModel] = useState("");
   const [localMaxContext, setLocalMaxContext] = useState(128000);
+  const [localMaxParallelJobs, setLocalMaxParallelJobs] = useState(DEFAULT_MAX_PARALLEL_JOBS);
   const [localEnableCaching, setLocalEnableCaching] = useState(false);
+  const [localCachingAtDepth, setLocalCachingAtDepth] = useState(DEFAULT_CACHING_AT_DEPTH);
   const [localDefaultForAgents, setLocalDefaultForAgents] = useState(false);
   const [localEmbeddingModel, setLocalEmbeddingModel] = useState("");
   const [localEmbeddingBaseUrl, setLocalEmbeddingBaseUrl] = useState("");
@@ -111,9 +148,12 @@ export function ConnectionEditor() {
   const [localComfyuiWorkflow, setLocalComfyuiWorkflow] = useState("");
   const [localImageService, setLocalImageService] = useState<string | null>(null);
   const [localMaxTokensOverride, setLocalMaxTokensOverride] = useState<number | null>(null);
+  const [localClaudeFastMode, setLocalClaudeFastMode] = useState(false);
   const [localDefaultParametersEnabled, setLocalDefaultParametersEnabled] = useState(false);
   const [localDefaultParameters, setLocalDefaultParameters] =
     useState<EditableGenerationParameters>(ROLEPLAY_PARAMETER_DEFAULTS);
+  const [localImageDefaults, setLocalImageDefaults] = useState<ImageGenerationDefaultsProfile | null>(null);
+  const [imageDefaultsExpanded, setImageDefaultsExpanded] = useState(false);
 
   // Test results
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; latencyMs: number } | null>(null);
@@ -131,6 +171,7 @@ export function ConnectionEditor() {
     prompt: string;
     error?: string;
   } | null>(null);
+  const [claudeDiagResult, setClaudeDiagResult] = useState<ClaudeSubscriptionDiagnosis | null>(null);
 
   // Model search
   const [modelSearch, setModelSearch] = useState("");
@@ -192,29 +233,42 @@ export function ConnectionEditor() {
     setLocalApiKey(""); // never pre-fill (it's masked)
     setLocalModel((c.model as string) ?? "");
     setLocalMaxContext(Number(c.maxContext) || 128000);
+    setLocalMaxParallelJobs(normalizeMaxParallelJobs(c.maxParallelJobs));
     setLocalEnableCaching(c.enableCaching === "true" || c.enableCaching === true);
+    setLocalCachingAtDepth(normalizeCachingAtDepth(c.cachingAtDepth));
     setLocalDefaultForAgents(c.defaultForAgents === "true" || c.defaultForAgents === true);
     setLocalEmbeddingModel((c.embeddingModel as string) ?? "");
     setLocalEmbeddingBaseUrl((c.embeddingBaseUrl as string) ?? "");
     setLocalEmbeddingConnectionId((c.embeddingConnectionId as string) ?? "");
     setLocalOpenrouterProvider((c.openrouterProvider as string) ?? "");
-    setLocalImageGenerationSource(
+    const imageGenerationSource =
       (c.provider as APIProvider) === "image_generation"
         ? ((c.imageGenerationSource as string) ??
-            (c.imageService as string) ??
-            inferImageSource((c.model as string) ?? "", (c.baseUrl as string) ?? ""))
-        : "",
-    );
+          (c.imageService as string) ??
+          inferImageSource((c.model as string) ?? "", (c.baseUrl as string) ?? ""))
+        : "";
+    const imageService = ((c.imageService as string | null) ?? (c.imageGenerationSource as string | null)) || null;
+    const defaultsService = imageSourceToDefaultsService(imageService || imageGenerationSource);
+    const storedImageDefaults = defaultsService
+      ? getStoredImageGenerationDefaults(c.defaultParameters, defaultsService)
+      : null;
+    setLocalImageGenerationSource(imageGenerationSource);
     setLocalComfyuiWorkflow((c.comfyuiWorkflow as string) ?? "");
-    setLocalImageService(((c.imageService as string | null) ?? (c.imageGenerationSource as string | null)) || null);
+    setLocalImageService(imageService);
     setLocalMaxTokensOverride(typeof c.maxTokensOverride === "number" ? (c.maxTokensOverride as number) : null);
+    setLocalClaudeFastMode(c.claudeFastMode === "true" || c.claudeFastMode === true);
     setLocalDefaultParametersEnabled(!!parseEditableGenerationParameters(c.defaultParameters));
     setLocalDefaultParameters(getEditableGenerationParameters(ROLEPLAY_PARAMETER_DEFAULTS, c.defaultParameters));
+    setLocalImageDefaults(
+      defaultsService ? (storedImageDefaults ?? createDefaultImageGenerationProfile(defaultsService)) : null,
+    );
+    setImageDefaultsExpanded(!!storedImageDefaults);
     setDirty(false);
     setSaveError(null);
     setTestResult(null);
     setMsgResult(null);
     setImgTestResult(null);
+    setClaudeDiagResult(null);
   }, [conn]);
 
   const comfyWorkflowValidation = useMemo(() => {
@@ -267,6 +321,19 @@ export function ConnectionEditor() {
     localProvider === "image_generation"
       ? localImageGenerationSource || localImageService || effectiveImageGenerationSource
       : "";
+  const selectedImageDefaultsService = imageSourceToDefaultsService(selectedImageService);
+
+  useEffect(() => {
+    if (localProvider !== "image_generation" || !selectedImageDefaultsService) {
+      setLocalImageDefaults(null);
+      return;
+    }
+    setLocalImageDefaults((current) =>
+      current?.service === selectedImageDefaultsService
+        ? sanitizeImageGenerationProfile(current, selectedImageDefaultsService)
+        : createDefaultImageGenerationProfile(selectedImageDefaultsService),
+    );
+  }, [localProvider, selectedImageDefaultsService]);
 
   // Model list for current provider
   const providerModels = useMemo(() => {
@@ -317,7 +384,9 @@ export function ConnectionEditor() {
       baseUrl: localBaseUrl,
       model: localModel,
       maxContext: localMaxContext,
+      maxParallelJobs: localMaxParallelJobs,
       enableCaching: localEnableCaching,
+      cachingAtDepth: localCachingAtDepth,
       defaultForAgents: localDefaultForAgents,
       embeddingModel: localEmbeddingModel,
       embeddingBaseUrl: localEmbeddingBaseUrl,
@@ -329,6 +398,7 @@ export function ConnectionEditor() {
       imageService:
         localProvider === "image_generation" ? localImageGenerationSource || localImageService || null : null,
       maxTokensOverride: localMaxTokensOverride ?? null,
+      claudeFastMode: localClaudeFastMode,
     };
     // Only send API key if user typed a new one
     if (localApiKey.trim()) {
@@ -340,6 +410,18 @@ export function ConnectionEditor() {
         await saveConnectionDefaults.mutateAsync({
           id: connectionDetailId,
           params: localDefaultParametersEnabled ? (localDefaultParameters as unknown as Record<string, unknown>) : null,
+        });
+      } else {
+        const nextImageDefaults =
+          selectedImageDefaultsService && localImageDefaults
+            ? sanitizeImageGenerationProfile(localImageDefaults, selectedImageDefaultsService)
+            : null;
+        await saveConnectionDefaults.mutateAsync({
+          id: connectionDetailId,
+          params: buildImageDefaultParameters(
+            (conn as Record<string, unknown> | null)?.defaultParameters,
+            nextImageDefaults,
+          ),
         });
       }
       setDirty(false);
@@ -356,7 +438,9 @@ export function ConnectionEditor() {
     localApiKey,
     localModel,
     localMaxContext,
+    localMaxParallelJobs,
     localEnableCaching,
+    localCachingAtDepth,
     localDefaultForAgents,
     localEmbeddingModel,
     localEmbeddingBaseUrl,
@@ -366,10 +450,14 @@ export function ConnectionEditor() {
     localComfyuiWorkflow,
     localImageService,
     localMaxTokensOverride,
+    localClaudeFastMode,
     localDefaultParametersEnabled,
     localDefaultParameters,
+    selectedImageDefaultsService,
+    localImageDefaults,
     updateConnection,
     saveConnectionDefaults,
+    conn,
   ]);
 
   const handleDelete = useCallback(async () => {
@@ -427,6 +515,33 @@ export function ConnectionEditor() {
         }),
     });
   }, [connectionDetailId, dirty, handleSave, testMessage]);
+
+  const handleDiagnoseClaudeSubscription = useCallback(async () => {
+    if (!connectionDetailId) return;
+    if (dirty) {
+      try {
+        await handleSave();
+      } catch {
+        return;
+      }
+    }
+    setClaudeDiagResult(null);
+    diagnoseClaudeSubscription.mutate(connectionDetailId, {
+      onSuccess: (data) => setClaudeDiagResult(data),
+      onError: (err) =>
+        setClaudeDiagResult({
+          success: false,
+          requestedModel: localModel,
+          modelsBilled: [],
+          modelUsageDetail: [],
+          billedDifferent: false,
+          fastModeState: null,
+          response: "",
+          errors: [err instanceof Error ? err.message : "Failed"],
+          latencyMs: 0,
+        }),
+    });
+  }, [connectionDetailId, dirty, handleSave, diagnoseClaudeSubscription, localModel]);
 
   const handleTestImage = useCallback(async () => {
     if (!connectionDetailId) return;
@@ -509,6 +624,9 @@ export function ConnectionEditor() {
 
   const providerDef = PROVIDERS[localProvider];
   const isImageGenerationProvider = localProvider === "image_generation";
+  const isClaudeSubscriptionProvider = localProvider === "claude_subscription";
+  const isOpenAIChatGPTProvider = localProvider === "openai_chatgpt";
+  const isLocalAuthProvider = isClaudeSubscriptionProvider || isOpenAIChatGPTProvider;
 
   if (!connectionDetailId) return null;
 
@@ -655,11 +773,21 @@ export function ConnectionEditor() {
                 <button
                   key={key}
                   onClick={() => {
+                    const defaultModel = MODEL_LISTS[key]?.[0];
                     setLocalProvider(key);
                     // Auto-fill base URL
                     setLocalBaseUrl(info.defaultBaseUrl);
-                    // Clear model if switching provider
-                    setLocalModel("");
+                    // Clear model when switching providers, except xAI where
+                    // we can seed the newest supported Grok model.
+                    setLocalModel(key === "xai" ? (defaultModel?.id ?? "grok-4.3") : "");
+                    if (key === "xai" && defaultModel?.context) {
+                      setLocalMaxContext(defaultModel.context);
+                    }
+                    // Local subscription/session providers ignore the API key
+                    // field, so clear stale keys from other providers.
+                    if (key === "claude_subscription" || key === "openai_chatgpt") {
+                      setLocalApiKey("");
+                    }
                     markDirty();
                   }}
                   className={cn(
@@ -698,6 +826,32 @@ export function ConnectionEditor() {
               <p className="mt-1.5 text-[0.625rem] text-[var(--muted-foreground)]">
                 Subscription auth is the same mechanism Visual Studio Code and other Anthropic-endorsed IDE integrations
                 use. Embeddings are not available on this provider; configure a separate connection for embedding work.
+              </p>
+            </div>
+          )}
+
+          {/* ── OpenAI (ChatGPT) — prerequisites notice ── */}
+          {isOpenAIChatGPTProvider && (
+            <div className="rounded-xl bg-sky-400/5 px-3 py-2.5 ring-1 ring-sky-400/30">
+              <p className="flex items-start gap-1.5 text-[0.6875rem] text-sky-300">
+                <AlertCircle size="0.75rem" className="mt-px shrink-0" />
+                <span>
+                  Routes chat through your local <strong>Codex ChatGPT</strong> login so it uses your ChatGPT account
+                  instead of an OpenAI API key. Prerequisites on the Marinara host:
+                </span>
+              </p>
+              <ol className="mt-1.5 ml-4 list-decimal space-y-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
+                <li>
+                  Install Codex CLI: <code className="rounded bg-[var(--secondary)] px-1">npm i -g @openai/codex</code>
+                </li>
+                <li>
+                  Sign in once: <code className="rounded bg-[var(--secondary)] px-1">codex login</code>
+                </li>
+                <li>API Key and Base URL are not required - leave them blank.</li>
+              </ol>
+              <p className="mt-1.5 text-[0.625rem] text-[var(--muted-foreground)]">
+                Marinara reads the local Codex auth file and refreshes the ChatGPT session when possible. Embeddings are
+                not available on this provider; configure a separate connection for embedding work.
               </p>
             </div>
           )}
@@ -748,18 +902,20 @@ export function ConnectionEditor() {
               type="password"
               className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)] disabled:cursor-not-allowed disabled:opacity-70"
               placeholder={
-                localProvider === "claude_subscription"
+                isClaudeSubscriptionProvider
                   ? "Not used — managed by the Claude Agent SDK"
-                  : "••••••••  (leave empty to keep existing key)"
+                  : isOpenAIChatGPTProvider
+                    ? "Not used - read from local Codex ChatGPT login"
+                    : "••••••••  (leave empty to keep existing key)"
               }
-              disabled={localProvider === "claude_subscription"}
+              disabled={isLocalAuthProvider}
             />
-            {localProvider !== "claude_subscription" && (
+            {!isLocalAuthProvider && (
               <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
                 Your key is encrypted at rest. Leave blank when editing to keep the existing key.
               </p>
             )}
-            {localProvider !== "claude_subscription" && API_KEY_LINKS[localProvider] && (
+            {!isLocalAuthProvider && API_KEY_LINKS[localProvider] && (
               <a
                 href={API_KEY_LINKS[localProvider]!.url}
                 target="_blank"
@@ -782,6 +938,12 @@ export function ConnectionEditor() {
                 <code className="rounded bg-[var(--secondary)] px-1">claude</code> CLI session.
               </p>
             )}
+            {isOpenAIChatGPTProvider && (
+              <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
+                Authentication is read from your local{" "}
+                <code className="rounded bg-[var(--secondary)] px-1">codex login</code> session.
+              </p>
+            )}
           </FieldGroup>
 
           {/* ── Base URL ── */}
@@ -796,15 +958,17 @@ export function ConnectionEditor() {
                 setLocalBaseUrl(e.target.value);
                 markDirty();
               }}
-              className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm font-mono ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+              className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm font-mono ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)] disabled:cursor-not-allowed disabled:opacity-70"
               placeholder={
-                localProvider === "claude_subscription"
+                isClaudeSubscriptionProvider
                   ? "Not used — managed by the Claude Agent SDK"
-                  : providerDef?.defaultBaseUrl || "https://api.example.com/v1"
+                  : isOpenAIChatGPTProvider
+                    ? "Not used - ChatGPT Codex endpoint is selected automatically"
+                    : providerDef?.defaultBaseUrl || "https://api.example.com/v1"
               }
-              disabled={localProvider === "claude_subscription"}
+              disabled={isLocalAuthProvider}
             />
-            {providerDef?.defaultBaseUrl && !localBaseUrl && (
+            {providerDef?.defaultBaseUrl && !localBaseUrl && !isLocalAuthProvider && (
               <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
                 Default: {providerDef.defaultBaseUrl}
               </p>
@@ -815,6 +979,11 @@ export function ConnectionEditor() {
                 <code className="rounded bg-[var(--secondary)] px-1">claude</code> CLI auth.
               </p>
             )}
+            {isOpenAIChatGPTProvider && (
+              <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
+                Marinara sends requests to the ChatGPT Codex endpoint automatically using your local Codex auth.
+              </p>
+            )}
             {localProvider === "custom" && (
               <p className="mt-1.5 text-[0.625rem] text-[var(--muted-foreground)]">
                 Local model examples: Ollama →{" "}
@@ -823,7 +992,7 @@ export function ConnectionEditor() {
                 <code className="rounded bg-[var(--secondary)] px-1">http://localhost:5001/v1</code>
               </p>
             )}
-            {localProvider !== "claude_subscription" && (
+            {!isLocalAuthProvider && (
               <p className="mt-1.5 flex items-start gap-1 text-[0.625rem] text-amber-400/80">
                 <AlertCircle size="0.625rem" className="mt-px shrink-0" />
                 <span>
@@ -1140,7 +1309,7 @@ export function ConnectionEditor() {
             <FieldGroup
               label="ComfyUI Workflow (Optional)"
               icon={<Zap size="0.875rem" className="text-sky-400" />}
-              help="Paste a custom ComfyUI workflow JSON (API format). Use placeholders: %prompt%, %negative_prompt%, %width%, %height%, %seed%, %model%. Leave empty to use the built-in default txt2img workflow."
+              help="Paste a custom ComfyUI workflow JSON (API format). Use placeholders like %prompt%, %negative_prompt%, %width%, %height%, %seed%, %model%, %steps%, %cfg%, %sampler%, %scheduler%, and %denoise%. Leave empty to use the built-in default txt2img workflow."
             >
               <textarea
                 ref={comfyWorkflowTextareaRef}
@@ -1198,9 +1367,27 @@ export function ConnectionEditor() {
                 )}
               <p className="text-[0.55rem] text-[var(--muted-foreground)] mt-1">
                 Export your workflow from ComfyUI using <strong>Save (API Format)</strong> in the menu. Placeholders
-                like <code>%prompt%</code> will be replaced at generation time.
+                like <code>%prompt%</code>, <code>%steps%</code>, and <code>%sampler%</code> will be replaced at
+                generation time.
               </p>
             </FieldGroup>
+          )}
+
+          {localProvider === "image_generation" && selectedImageDefaultsService && localImageDefaults && (
+            <ImageGenerationDefaultsPanel
+              service={selectedImageDefaultsService}
+              value={localImageDefaults}
+              expanded={imageDefaultsExpanded}
+              onExpandedChange={setImageDefaultsExpanded}
+              onChange={(next) => {
+                setLocalImageDefaults(sanitizeImageGenerationProfile(next, selectedImageDefaultsService));
+                markDirty();
+              }}
+              onReset={() => {
+                setLocalImageDefaults(createDefaultImageGenerationProfile(selectedImageDefaultsService));
+                markDirty();
+              }}
+            />
           )}
 
           {/* ── Max Context ── */}
@@ -1229,10 +1416,10 @@ export function ConnectionEditor() {
             </FieldGroup>
           )}
 
-          {/* ── Max Tokens Override ── */}
-          {localProvider !== "image_generation" && localProvider !== "claude_subscription" && (
+          {/* ── Max Output Tokens Override ── */}
+          {localProvider !== "image_generation" && !isLocalAuthProvider && (
             <FieldGroup
-              label="Max Tokens Override"
+              label="Max Output Tokens Override"
               icon={<Zap size="0.875rem" className="text-amber-400" />}
               help="Hard cap on max_tokens for the API response (limiting output size). Use this for providers that enforce a lower limit than what the engine calculates (e.g. DeepSeek caps at 8192). Leave empty to let the engine decide."
             >
@@ -1254,6 +1441,36 @@ export function ConnectionEditor() {
               <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
                 Set to 0 or leave empty to disable. When set, no request to this connection will exceed this token limit
                 — including batched agent calls.
+              </p>
+            </FieldGroup>
+          )}
+
+          {/* ── Agent Parallel Jobs ── */}
+          {localProvider !== "image_generation" && (
+            <FieldGroup
+              label="Max Parallel Agent Jobs"
+              icon={<SlidersHorizontal size="0.875rem" className="text-fuchsia-400" />}
+              help="How many agent LLM requests Marinara may run at once for this connection. Higher values can speed up agent-heavy chats on providers that tolerate parallel calls."
+            >
+              <div className="flex items-center gap-3">
+                <DraftNumberInput
+                  value={localMaxParallelJobs}
+                  min={1}
+                  max={MAX_PARALLEL_JOBS}
+                  selectOnFocus
+                  onCommit={(nextValue) => {
+                    setLocalMaxParallelJobs(normalizeMaxParallelJobs(nextValue));
+                    markDirty();
+                  }}
+                  className="w-24 rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                />
+                <span className="text-xs text-[var(--muted-foreground)]">
+                  {localMaxParallelJobs === 1 ? "One agent job at a time" : `${localMaxParallelJobs} agent jobs`}
+                </span>
+              </div>
+              <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
+                Agent batches for the same connection can be split across this many parallel jobs. Set to 1 for the
+                safest provider behavior.
               </p>
             </FieldGroup>
           )}
@@ -1332,6 +1549,27 @@ export function ConnectionEditor() {
                   ? "Caches the system prompt explicitly and uses automatic caching for conversation history. Read tokens cost 90% less than regular input tokens. Cache writes cost 25% more on first use."
                   : "On OpenRouter, this currently targets Claude models by adding top-level cache_control. Cache reads are much cheaper than normal prompt tokens, while the first cache write costs more."}
               </p>
+              {localProvider === "anthropic" && localEnableCaching && (
+                <label className="mt-2 flex items-center justify-between gap-3 rounded-xl bg-[var(--secondary)]/40 px-3 py-2 ring-1 ring-[var(--border)]">
+                  <div className="min-w-0">
+                    <span className="block text-sm font-medium">Cache depth</span>
+                    <span className="block text-[0.625rem] text-[var(--muted-foreground)]">
+                      Messages back from the newest turn.
+                    </span>
+                  </div>
+                  <DraftNumberInput
+                    value={localCachingAtDepth}
+                    min={0}
+                    max={MAX_CACHING_AT_DEPTH}
+                    onCommit={(value) => {
+                      setLocalCachingAtDepth(normalizeCachingAtDepth(value));
+                      markDirty();
+                    }}
+                    className="h-8 w-16 rounded-lg bg-[var(--background)] px-2 text-right text-sm outline-none ring-1 ring-[var(--border)] transition-shadow focus:ring-[var(--primary)]/40"
+                    selectOnFocus
+                  />
+                </label>
+              )}
             </FieldGroup>
           )}
 
@@ -1371,6 +1609,57 @@ export function ConnectionEditor() {
               </p>
             )}
           </FieldGroup>
+
+          {/* ── Claude (Subscription) — Fast Mode toggle ── */}
+          {localProvider === "claude_subscription" && (
+            <FieldGroup
+              label="Fast Mode"
+              icon={<Zap size="0.875rem" className="text-amber-400" />}
+              help="When enabled, asks the Claude Agent SDK to use its faster routing tier — quicker responses but the SDK may use a smaller model behind the scenes (Sonnet/Haiku) even if you've selected Opus. Currently a no-op on every modern Claude model: Opus 4.7 has no faster variant to route to, and Anthropic dropped support for downgrading on the rest. The toggle is here for the day Anthropic re-enables it. Leave off."
+            >
+              <label className="flex items-start gap-3 rounded-xl bg-[var(--secondary)] px-3 py-2.5 ring-1 ring-[var(--border)]">
+                <input
+                  type="checkbox"
+                  checked={localClaudeFastMode}
+                  onChange={async (e) => {
+                    const next = e.target.checked;
+                    if (next) {
+                      const confirmed = await showConfirmDialog({
+                        title: "YOU DON'T WANT THIS SETTING ON!",
+                        message:
+                          "Fast mode is effectively a dead feature today — Claude/Anthropic removed support for downgrading current models, and Opus 4.7 has no faster variant for the SDK to route to. Turning this on does nothing useful for roleplay quality and may add overhead. The toggle exists only so we don't have to ship a new release if Anthropic re-enables it.\n\nAre you absolutely sure you want to enable it?",
+                        confirmLabel: "Enable anyway",
+                        cancelLabel: "Keep it off",
+                        tone: "destructive",
+                      });
+                      if (!confirmed) return;
+                    }
+                    setLocalClaudeFastMode(next);
+                    markDirty();
+                  }}
+                  className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer accent-amber-400"
+                />
+                <div className="min-w-0 flex-1 text-[0.6875rem] leading-relaxed">
+                  <div className="font-medium text-[var(--foreground)]">Use Claude Code fast-mode routing</div>
+                  <p className="mt-0.5 text-[var(--muted-foreground)]">
+                    <strong className="text-amber-400">99% of users should leave this off.</strong> Fast mode is
+                    effectively a dead feature today — Claude/Anthropic removed support for downgrading current models,
+                    and Opus 4.7 has no faster variant to route to. Turning it on does nothing useful for roleplay
+                    quality and may add overhead. The toggle exists only so we don&apos;t have to ship a new release if
+                    Anthropic re-enables it. Leave off until that happens.
+                  </p>
+                  <p className="mt-1.5 flex items-start gap-1 text-[var(--muted-foreground)]">
+                    <AlertCircle size="0.625rem" className="mt-px shrink-0 text-amber-400" />
+                    <span>
+                      <strong className="text-amber-400">Doesn&apos;t work on Claude Opus 4.7 yet.</strong> There is no
+                      faster Opus 4.7 variant for the SDK to route to, so this toggle is a no-op when Opus 4.7 is the
+                      selected model.
+                    </span>
+                  </p>
+                </div>
+              </label>
+            </FieldGroup>
+          )}
 
           {/* ── Embedding Model (for lorebook vectorization) ── */}
           {localProvider !== "image_generation" && localProvider !== "claude_subscription" && (
@@ -1490,6 +1779,21 @@ export function ConnectionEditor() {
                   Test Image
                 </button>
               )}
+              {localProvider === "claude_subscription" && (
+                <button
+                  onClick={handleDiagnoseClaudeSubscription}
+                  disabled={diagnoseClaudeSubscription.isPending || !localModel}
+                  className="flex items-center gap-1.5 rounded-xl bg-amber-400/10 px-4 py-2.5 text-xs font-medium text-amber-400 ring-1 ring-amber-400/20 transition-all hover:bg-amber-400/20 active:scale-[0.98] disabled:opacity-50"
+                  title="Verify which model the SDK actually bills against (catches silent fast-mode downgrades)"
+                >
+                  {diagnoseClaudeSubscription.isPending ? (
+                    <Loader2 size="0.8125rem" className="animate-spin" />
+                  ) : (
+                    <AlertCircle size="0.8125rem" />
+                  )}
+                  Diagnose Model Routing
+                </button>
+              )}
             </div>
 
             <p className="text-[0.625rem] text-[var(--muted-foreground)]">
@@ -1504,6 +1808,14 @@ export function ConnectionEditor() {
                 <>
                   {" "}
                   <strong>Test Image</strong> generates a 512×512 test image (requires saving first).
+                </>
+              )}
+              {localProvider === "claude_subscription" && (
+                <>
+                  {" "}
+                  <strong>Diagnose Model Routing</strong> sends a real prompt through the Claude Agent SDK and reports
+                  which model it actually billed against. Catches silent fast-mode / cooldown downgrades where you ask
+                  for Opus and quietly get Sonnet.
                 </>
               )}
             </p>
@@ -1542,6 +1854,116 @@ export function ConnectionEditor() {
                 ) : (
                   <span className="text-[var(--destructive)]">{imgTestResult.error || "No image returned"}</span>
                 )}
+              </TestResultCard>
+            )}
+
+            {/* Claude (Subscription) diagnosis result */}
+            {claudeDiagResult && (
+              <TestResultCard
+                label="Model Routing Diagnosis"
+                success={claudeDiagResult.success && !claudeDiagResult.billedDifferent}
+                latencyMs={claudeDiagResult.latencyMs}
+              >
+                <div className="mt-1.5 space-y-2">
+                  <div className="grid grid-cols-[max-content,1fr] gap-x-3 gap-y-1 text-[0.6875rem]">
+                    <span className="text-[var(--muted-foreground)]">Requested model:</span>
+                    <span className="font-mono">{claudeDiagResult.requestedModel}</span>
+                    <span className="text-[var(--muted-foreground)]">SDK billed against:</span>
+                    <span
+                      className={cn(
+                        "font-mono",
+                        claudeDiagResult.billedDifferent && "font-semibold text-[var(--destructive)]",
+                      )}
+                    >
+                      {(() => {
+                        const detail = claudeDiagResult.modelUsageDetail;
+                        if (detail.length === 0) {
+                          return claudeDiagResult.modelsBilled.length
+                            ? claudeDiagResult.modelsBilled.join(", ")
+                            : "(none reported)";
+                        }
+                        const primary = detail.filter((u) => u.model === claudeDiagResult.requestedModel);
+                        const secondary = detail.filter((u) => u.model !== claudeDiagResult.requestedModel);
+                        return (
+                          <span className="flex flex-col gap-1.5">
+                            {primary.length > 0 && (
+                              <span className="flex flex-col gap-0.5">
+                                <span className="text-[0.5625rem] font-sans uppercase tracking-wide text-emerald-400/80">
+                                  Roleplay generation
+                                </span>
+                                {primary.map((u) => (
+                                  <span key={u.model}>
+                                    {u.model}{" "}
+                                    <span className="text-[var(--muted-foreground)]">
+                                      (in {u.inputTokens}, out {u.outputTokens})
+                                    </span>
+                                  </span>
+                                ))}
+                              </span>
+                            )}
+                            {secondary.length > 0 && (
+                              <span className="flex flex-col gap-0.5">
+                                <span className="text-[0.5625rem] font-sans uppercase tracking-wide text-[var(--muted-foreground)]">
+                                  SDK session bookkeeping
+                                </span>
+                                {secondary.map((u) => (
+                                  <span key={u.model} className="text-[var(--muted-foreground)]">
+                                    {u.model} (in {u.inputTokens}, out {u.outputTokens})
+                                  </span>
+                                ))}
+                              </span>
+                            )}
+                          </span>
+                        );
+                      })()}
+                    </span>
+                    <span className="text-[var(--muted-foreground)]">Fast-mode state:</span>
+                    <span
+                      className={cn(
+                        "font-mono",
+                        claudeDiagResult.fastModeState && claudeDiagResult.fastModeState !== "off"
+                          ? "text-amber-400"
+                          : undefined,
+                      )}
+                    >
+                      {claudeDiagResult.fastModeState ?? "unknown"}
+                    </span>
+                  </div>
+                  {claudeDiagResult.billedDifferent && (
+                    <div className="rounded-lg bg-[var(--destructive)]/10 p-2.5 text-[0.6875rem] text-[var(--destructive)] ring-1 ring-[var(--destructive)]/30">
+                      Silent downgrade detected — you asked for <strong>{claudeDiagResult.requestedModel}</strong> but
+                      the SDK billed <strong>{claudeDiagResult.modelsBilled.join(", ")}</strong>. This is usually caused
+                      by Claude Code being in <code>cooldown</code> after hitting Opus rate limits, or fast mode being
+                      toggled on in your CLI settings. Run <code>claude /model</code> in your terminal to check.
+                    </div>
+                  )}
+                  {claudeDiagResult.modelUsageDetail.some((u) => u.model !== claudeDiagResult.requestedModel) && (
+                    <div className="rounded-lg bg-[var(--secondary)]/50 p-2.5 text-[0.6875rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+                      <strong className="text-[var(--foreground)]">Why is Haiku in the list?</strong> The Claude Agent
+                      SDK runs a <code>UserPromptSubmit</code> hook on every call that uses its small/fast model (Haiku)
+                      to auto-generate a session title and optional context for the main model. This is Claude Code
+                      session bookkeeping — it&apos;s organic to the subscription path, can&apos;t be cleanly disabled,
+                      and doesn&apos;t serve any of your roleplay output. Your actual response always comes from the
+                      model labeled <em>Roleplay generation</em> above. The Haiku tagalong adds only a few output tokens
+                      per turn and a tiny slice of quota.
+                    </div>
+                  )}
+                  {claudeDiagResult.response && (
+                    <div className="rounded-lg bg-[var(--secondary)] p-2.5 ring-1 ring-[var(--border)]">
+                      <div className="text-[0.5625rem] font-sans uppercase tracking-wide text-[var(--muted-foreground)]">
+                        Model Self Identifies As
+                      </div>
+                      <div className="mt-0.5 text-sm font-semibold text-[var(--foreground)]">
+                        {claudeDiagResult.response}
+                      </div>
+                    </div>
+                  )}
+                  {claudeDiagResult.errors.length > 0 && (
+                    <div className="text-[0.6875rem] text-[var(--destructive)]">
+                      {claudeDiagResult.errors.join("; ")}
+                    </div>
+                  )}
+                </div>
               </TestResultCard>
             )}
           </div>
@@ -1612,8 +2034,466 @@ function TestResultCard({
   );
 }
 
+function ImageGenerationDefaultsPanel({
+  service,
+  value,
+  expanded,
+  onExpandedChange,
+  onChange,
+  onReset,
+}: {
+  service: ImageDefaultsService;
+  value: ImageGenerationDefaultsProfile;
+  expanded: boolean;
+  onExpandedChange: (expanded: boolean) => void;
+  onChange: (next: ImageGenerationDefaultsProfile) => void;
+  onReset: () => void;
+}) {
+  const updateSeed = (seed: number) => {
+    onChange({ ...value, seed });
+  };
+
+  const automatic1111 = value.automatic1111 ?? createDefaultImageGenerationProfile("automatic1111").automatic1111!;
+  const comfyui = value.comfyui ?? createDefaultImageGenerationProfile("comfyui").comfyui!;
+  const novelai = value.novelai ?? createDefaultImageGenerationProfile("novelai").novelai!;
+
+  const updateAutomatic1111 = (patch: Partial<typeof automatic1111>) => {
+    onChange({
+      ...value,
+      service: "automatic1111",
+      automatic1111: { ...automatic1111, ...patch },
+    });
+  };
+
+  const updateComfyUi = (patch: Partial<typeof comfyui>) => {
+    onChange({
+      ...value,
+      service: "comfyui",
+      comfyui: { ...comfyui, ...patch },
+    });
+  };
+
+  const updateNovelAi = (patch: Partial<typeof novelai>) => {
+    onChange({
+      ...value,
+      service: "novelai",
+      novelai: { ...novelai, ...patch },
+    });
+  };
+
+  return (
+    <FieldGroup
+      label="Local Image Defaults"
+      icon={<SlidersHorizontal size="0.875rem" className="text-sky-400" />}
+      help="Connection-scoped defaults for local Stable Diffusion backends. These only apply when this image generation connection is selected for a generation."
+    >
+      <div className="rounded-xl bg-[var(--secondary)]/40 ring-1 ring-[var(--border)]">
+        <button
+          type="button"
+          onClick={() => onExpandedChange(!expanded)}
+          className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left transition-colors hover:bg-[var(--accent)]"
+        >
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-[var(--foreground)]">
+              {service === "comfyui"
+                ? "ComfyUI generation setup"
+                : service === "novelai"
+                  ? "NovelAI generation setup"
+                  : "AUTOMATIC1111 / Forge setup"}
+            </div>
+            <p className="mt-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
+              Prompt prefixes, sampler, scheduler, steps, guidance, seed, clip skip, and denoise.
+            </p>
+          </div>
+          <ChevronDown
+            size="0.875rem"
+            className={cn("shrink-0 text-[var(--muted-foreground)] transition-transform", expanded && "rotate-180")}
+          />
+        </button>
+
+        {expanded && (
+          <div className="space-y-4 border-t border-[var(--border)] p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                Seed -1 keeps generation random. Any non-negative seed is reused exactly for this connection.
+              </p>
+              <button
+                type="button"
+                onClick={onReset}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--card)] px-2.5 py-1.5 text-[0.625rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+              >
+                <RotateCcw size="0.6875rem" />
+                Reset
+              </button>
+            </div>
+
+            <div className="grid gap-2 sm:grid-cols-2">
+              <NumberSetting label="Seed" value={value.seed} min={-1} max={4_294_967_295} onCommit={updateSeed} />
+              {service === "automatic1111" ? (
+                <>
+                  <NumberSetting
+                    label="Steps"
+                    value={automatic1111.steps}
+                    min={1}
+                    max={150}
+                    onCommit={(steps) => updateAutomatic1111({ steps })}
+                  />
+                  <NumberSetting
+                    label="CFG Scale"
+                    value={automatic1111.cfgScale}
+                    min={0}
+                    max={30}
+                    integer={false}
+                    onCommit={(cfgScale) => updateAutomatic1111({ cfgScale })}
+                  />
+                  <NumberSetting
+                    label="Clip Skip"
+                    value={automatic1111.clipSkip ?? 0}
+                    min={0}
+                    max={12}
+                    onCommit={(clipSkip) => updateAutomatic1111({ clipSkip: clipSkip > 0 ? clipSkip : null })}
+                  />
+                  <NumberSetting
+                    label="Img2Img Denoise"
+                    value={automatic1111.denoisingStrength}
+                    min={0}
+                    max={1}
+                    integer={false}
+                    onCommit={(denoisingStrength) => updateAutomatic1111({ denoisingStrength })}
+                  />
+                </>
+              ) : service === "comfyui" ? (
+                <>
+                  <NumberSetting
+                    label="Steps"
+                    value={comfyui.steps}
+                    min={1}
+                    max={150}
+                    onCommit={(steps) => updateComfyUi({ steps })}
+                  />
+                  <NumberSetting
+                    label="CFG Scale"
+                    value={comfyui.cfgScale}
+                    min={0}
+                    max={30}
+                    integer={false}
+                    onCommit={(cfgScale) => updateComfyUi({ cfgScale })}
+                  />
+                  <NumberSetting
+                    label="Denoise"
+                    value={comfyui.denoisingStrength}
+                    min={0}
+                    max={1}
+                    integer={false}
+                    onCommit={(denoisingStrength) => updateComfyUi({ denoisingStrength })}
+                  />
+                  <NumberSetting
+                    label="Clip Skip"
+                    value={comfyui.clipSkip ?? 0}
+                    min={0}
+                    max={12}
+                    onCommit={(clipSkip) => updateComfyUi({ clipSkip: clipSkip > 0 ? clipSkip : null })}
+                  />
+                </>
+              ) : (
+                <>
+                  <NumberSetting
+                    label="Steps"
+                    value={novelai.steps}
+                    min={1}
+                    max={150}
+                    onCommit={(steps) => updateNovelAi({ steps })}
+                  />
+                  <NumberSetting
+                    label="Prompt Guidance"
+                    value={novelai.promptGuidance}
+                    min={0}
+                    max={30}
+                    integer={false}
+                    onCommit={(promptGuidance) => updateNovelAi({ promptGuidance })}
+                  />
+                  <NumberSetting
+                    label="Guidance Rescale"
+                    value={novelai.promptGuidanceRescale}
+                    min={0}
+                    max={1}
+                    integer={false}
+                    onCommit={(promptGuidanceRescale) => updateNovelAi({ promptGuidanceRescale })}
+                  />
+                  <NumberSetting
+                    label="UC Preset"
+                    value={novelai.undesiredContentPreset}
+                    min={0}
+                    max={4}
+                    onCommit={(undesiredContentPreset) => updateNovelAi({ undesiredContentPreset })}
+                  />
+                </>
+              )}
+            </div>
+
+            {service === "automatic1111" ? (
+              <>
+                <TextSetting
+                  label="Prompt Prefix"
+                  value={automatic1111.promptPrefix}
+                  onChange={(promptPrefix) => updateAutomatic1111({ promptPrefix })}
+                  placeholder="e.g. masterpiece, high quality"
+                />
+                <TextSetting
+                  label="Negative Prefix"
+                  value={automatic1111.negativePromptPrefix}
+                  onChange={(negativePromptPrefix) => updateAutomatic1111({ negativePromptPrefix })}
+                  placeholder="e.g. low quality, blurry"
+                />
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <ChoiceSetting
+                    label="Sampler"
+                    value={automatic1111.sampler}
+                    options={SD_WEBUI_SAMPLER_OPTIONS}
+                    onChange={(sampler) => updateAutomatic1111({ sampler })}
+                  />
+                  <ChoiceSetting
+                    label="Scheduler"
+                    value={automatic1111.scheduler}
+                    options={SD_WEBUI_SCHEDULER_OPTIONS}
+                    onChange={(scheduler) => updateAutomatic1111({ scheduler })}
+                  />
+                </div>
+                <label className="flex cursor-pointer items-center gap-3 rounded-lg bg-[var(--card)] px-3 py-2 ring-1 ring-[var(--border)]">
+                  <input
+                    type="checkbox"
+                    checked={automatic1111.restoreFaces}
+                    onChange={(event) => updateAutomatic1111({ restoreFaces: event.target.checked })}
+                    className="h-4 w-4 accent-sky-400"
+                  />
+                  <span className="text-xs text-[var(--foreground)]">Restore faces</span>
+                </label>
+              </>
+            ) : service === "comfyui" ? (
+              <>
+                <TextSetting
+                  label="Prompt Prefix"
+                  value={comfyui.promptPrefix}
+                  onChange={(promptPrefix) => updateComfyUi({ promptPrefix })}
+                  placeholder="e.g. masterpiece, high quality"
+                />
+                <TextSetting
+                  label="Negative Prefix"
+                  value={comfyui.negativePromptPrefix}
+                  onChange={(negativePromptPrefix) => updateComfyUi({ negativePromptPrefix })}
+                  placeholder="e.g. low quality, blurry"
+                />
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <ChoiceSetting
+                    label="Sampler"
+                    value={comfyui.sampler}
+                    options={COMFYUI_SAMPLER_OPTIONS}
+                    onChange={(sampler) => updateComfyUi({ sampler })}
+                  />
+                  <ChoiceSetting
+                    label="Scheduler"
+                    value={comfyui.scheduler}
+                    options={COMFYUI_SCHEDULER_OPTIONS}
+                    onChange={(scheduler) => updateComfyUi({ scheduler })}
+                  />
+                </div>
+                <p className="text-[0.55rem] text-[var(--muted-foreground)]">
+                  Custom ComfyUI workflows can use %steps%, %cfg%, %sampler%, %scheduler%, %denoise%, and %clip_skip%
+                  placeholders.
+                </p>
+              </>
+            ) : (
+              <>
+                <TextSetting
+                  label="Prompt Prefix"
+                  value={novelai.promptPrefix}
+                  onChange={(promptPrefix) => updateNovelAi({ promptPrefix })}
+                  placeholder="e.g. masterpiece, best quality"
+                />
+                <TextSetting
+                  label="Negative Prefix"
+                  value={novelai.negativePromptPrefix}
+                  onChange={(negativePromptPrefix) => updateNovelAi({ negativePromptPrefix })}
+                  placeholder="e.g. low quality, blurry"
+                />
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <ChoiceSetting
+                    label="Sampler"
+                    value={novelai.sampler}
+                    options={NOVELAI_SAMPLER_OPTIONS}
+                    onChange={(sampler) => updateNovelAi({ sampler })}
+                  />
+                  <ChoiceSetting
+                    label="Noise Schedule"
+                    value={novelai.noiseSchedule}
+                    options={NOVELAI_NOISE_SCHEDULE_OPTIONS}
+                    onChange={(noiseSchedule) => updateNovelAi({ noiseSchedule })}
+                  />
+                </div>
+                <p className="text-[0.55rem] text-[var(--muted-foreground)]">
+                  These values are sent with native NovelAI requests and embedded in generated PNG metadata for
+                  troubleshooting.
+                </p>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </FieldGroup>
+  );
+}
+
+function TextSetting({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <label className="block">
+      <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{label}</span>
+      <textarea
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        rows={2}
+        placeholder={placeholder}
+        className="mt-1 w-full resize-y rounded-lg bg-[var(--card)] px-3 py-2 text-xs ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)]/60 focus:outline-none focus:ring-sky-400/50"
+      />
+    </label>
+  );
+}
+
+function ChoiceSetting({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: ReadonlyArray<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+}) {
+  const listId = `image-default-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+  return (
+    <label className="block">
+      <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{label}</span>
+      <input
+        list={listId}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="mt-1 w-full rounded-lg bg-[var(--card)] px-3 py-2 text-xs ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)]/60 focus:outline-none focus:ring-sky-400/50"
+        placeholder="Backend default"
+      />
+      <datalist id={listId}>
+        {options.map((option) => (
+          <option key={`${label}-${option.value}`} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </datalist>
+    </label>
+  );
+}
+
+function NumberSetting({
+  label,
+  value,
+  min,
+  max,
+  integer = true,
+  onCommit,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  integer?: boolean;
+  onCommit: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  const commit = () => {
+    const parsed = Number(draft);
+    if (!Number.isFinite(parsed)) {
+      setDraft(String(value));
+      return;
+    }
+    const clamped = Math.min(max, Math.max(min, integer ? Math.trunc(parsed) : parsed));
+    setDraft(String(clamped));
+    onCommit(clamped);
+  };
+
+  return (
+    <label className="block">
+      <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{label}</span>
+      <input
+        value={draft}
+        type="number"
+        min={min}
+        max={max}
+        step={integer ? 1 : 0.05}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.currentTarget.blur();
+          }
+        }}
+        className="mt-1 w-full rounded-lg bg-[var(--card)] px-3 py-2 text-xs ring-1 ring-[var(--border)] focus:outline-none focus:ring-sky-400/50"
+      />
+    </label>
+  );
+}
+
 function formatContext(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
   if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(0)}K`;
   return String(tokens);
+}
+
+function getStoredImageGenerationDefaults(
+  raw: unknown,
+  service: ImageDefaultsService,
+): ImageGenerationDefaultsProfile | null {
+  const root = parseDefaultParametersRoot(raw);
+  if (!root[IMAGE_DEFAULTS_STORAGE_KEY]) return null;
+  return normalizeImageGenerationProfile(root[IMAGE_DEFAULTS_STORAGE_KEY], service).profile;
+}
+
+function buildImageDefaultParameters(
+  raw: unknown,
+  imageDefaults: ImageGenerationDefaultsProfile | null,
+): Record<string, unknown> | null {
+  const root = parseDefaultParametersRoot(raw);
+  if (imageDefaults) {
+    root[IMAGE_DEFAULTS_STORAGE_KEY] = imageDefaults;
+  } else {
+    delete root[IMAGE_DEFAULTS_STORAGE_KEY];
+  }
+  return Object.keys(root).length > 0 ? root : null;
+}
+
+function parseDefaultParametersRoot(raw: unknown): Record<string, unknown> {
+  if (!raw) return {};
+  let parsed: unknown = raw;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed) as unknown;
+    } catch {
+      return {};
+    }
+  }
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? { ...(parsed as Record<string, unknown>) }
+    : {};
 }

@@ -5,6 +5,7 @@
 /** Supported API providers. */
 export type APIProvider =
   | "openai"
+  | "openai_chatgpt"
   | "anthropic"
   | "claude_subscription"
   | "google"
@@ -12,6 +13,7 @@ export type APIProvider =
   | "cohere"
   | "openrouter"
   | "nanogpt"
+  | "xai"
   | "custom"
   | "image_generation";
 
@@ -32,6 +34,10 @@ export interface APIConnection {
   useForRandom: boolean;
   /** Whether this connection is the default for all agents */
   defaultForAgents: boolean;
+  /** Whether provider-native prompt caching is enabled */
+  enableCaching: boolean;
+  /** Conversation message depth for Anthropic cache breakpoints */
+  cachingAtDepth: number;
   /** Model to use for embedding generation (e.g. "text-embedding-3-small") */
   embeddingModel: string | null;
   /** Separate base URL for the embedding backend (e.g. a second llama.cpp on a different port) */
@@ -48,6 +54,8 @@ export interface APIConnection {
   defaultParameters: string | null;
   /** Hard cap on max_tokens for the API response (for providers with lower limits, e.g. DeepSeek at 8192). */
   maxTokensOverride: number | null;
+  /** Maximum number of agent LLM jobs Marinara may run at once for this connection. */
+  maxParallelJobs: number;
   createdAt: string;
   updatedAt: string;
 }

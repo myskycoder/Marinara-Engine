@@ -7,13 +7,10 @@
 import { Suspense, lazy, useState, useEffect, useRef, useCallback, useMemo, useLayoutEffect } from "react";
 import { createPortal } from "react-dom";
 import {
-  Clock,
   MapPin,
-  Thermometer,
   Users,
   Package,
   Scroll,
-  CalendarDays,
   Trash2,
   Sparkles,
   MessageCircle,
@@ -24,9 +21,12 @@ import {
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { api } from "../../lib/api-client";
+import { TrackerPanelIcon } from "../ui/TrackerPanelIcon";
 import { useGameStateStore } from "../../stores/game-state.store";
 import { useAgentStore } from "../../stores/agent.store";
-import { useAgentConfigs } from "../../hooks/use-agents";
+import { useAgentConfigs, useCustomAgentRuns, type AgentConfigRow } from "../../hooks/use-agents";
+import { useChat } from "../../hooks/use-chats";
+import { discardPendingGameStatePatch, useGameStatePatcher } from "../../hooks/use-game-state-patcher";
 import { useUIStore } from "../../stores/ui.store";
 import type {
   GameState,
@@ -35,19 +35,27 @@ import type {
   InventoryItem,
   QuestProgress,
   CustomTrackerField,
+  Message,
 } from "@marinara-engine/shared";
 import type { HudPosition } from "../../stores/ui.store";
+
+const ACTIONS_DROPDOWN_WIDTH_PX = 288;
 
 interface RoleplayHUDProps {
   chatId: string;
   characterCount: number;
   layout?: HudPosition;
+  isStreaming: boolean;
   onRetriggerTrackers?: () => void;
+  /** Re-run one tracker agent only (same pipeline as full tracker run). */
+  onRerunSingleTracker?: (agentType: string) => void;
   onRetryFailedAgents?: () => void;
   /** When true, tracker agents are manual — show a trigger button in the widget strip */
   manualTrackers?: boolean;
   /** When provided, overrides the globally-computed set so that only per-chat agents show widgets. */
   enabledAgentTypes?: Set<string>;
+  /** Chat messages (chronological) — used to resolve cached prompt injections on the latest assistant reply */
+  injectionSourceMessages?: Message[];
 }
 
 const RoleplayHUDActionsMenu = lazy(async () =>
@@ -77,16 +85,19 @@ export function RoleplayHUD({
   chatId,
   characterCount: _characterCount,
   layout = "top",
+  isStreaming,
   onRetriggerTrackers,
+  onRerunSingleTracker,
   onRetryFailedAgents,
   manualTrackers,
   mobileCompact,
   enabledAgentTypes: enabledAgentTypesProp,
+  injectionSourceMessages,
 }: RoleplayHUDProps & { mobileCompact?: boolean }) {
   const [agentsOpen, setAgentsOpen] = useState(false);
   const gameState = useGameStateStore((s) => s.current);
   const setGameState = useGameStateStore((s) => s.setGameState);
-  const setFlushPatch = useGameStateStore((s) => s.setFlushPatch);
+  const { patchField, patchPlayerStats } = useGameStatePatcher(chatId, "roleplay-hud");
 
   const { data: agentConfigs } = useAgentConfigs();
   const globalEnabledAgentTypes = useMemo(() => {
@@ -100,12 +111,38 @@ export function RoleplayHUD({
   }, [agentConfigs]);
   const enabledAgentTypes = enabledAgentTypesProp ?? globalEnabledAgentTypes;
 
+  const { data: chatForAgentsMenu } = useChat(chatId);
+  const agentsMenuMetadata = useMemo(() => {
+    const raw = chatForAgentsMenu?.metadata;
+    let m: Record<string, unknown> = {};
+    if (typeof raw === "string") {
+      try {
+        m = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        m = {};
+      }
+    } else if (raw && typeof raw === "object") {
+      m = raw as Record<string, unknown>;
+    }
+    return m;
+  }, [chatForAgentsMenu?.metadata]);
+  const showInjectionsTab = agentsMenuMetadata.showInjectionsPanel === true;
+  const showSecretPlotTab =
+    agentsMenuMetadata.showSecretPlotPanel === true && enabledAgentTypes.has("secret-plot-driver");
+
   const thoughtBubbles = useAgentStore((s) => s.thoughtBubbles);
   const isAgentProcessing = useAgentStore((s) => s.isProcessing);
   const failedAgentTypes = useAgentStore((s) => s.failedAgentTypes);
   const dismissThoughtBubble = useAgentStore((s) => s.dismissThoughtBubble);
   const clearThoughtBubbles = useAgentStore((s) => s.clearThoughtBubbles);
   const resetAgentStore = useAgentStore((s) => s.reset);
+  const trackerPanelEnabled = useUIStore((s) => s.trackerPanelEnabled);
+  const trackerPanelOpen = useUIStore((s) => s.trackerPanelOpen);
+  const trackerPanelHideHudWidgets = useUIStore((s) => s.trackerPanelHideHudWidgets);
+  const toggleTrackerPanel = useUIStore((s) => s.toggleTrackerPanel);
+
+  const isTrackerBusy = isAgentProcessing || isStreaming;
+  const showHudTrackerWidgets = !(trackerPanelEnabled && trackerPanelHideHudWidgets);
 
   useEffect(() => {
     if (!chatId) return;
@@ -126,103 +163,6 @@ export function RoleplayHUD({
     };
   }, [chatId, setGameState]);
 
-  // Debounced API patch — batches rapid field changes into a single call
-  const patchQueueRef = useRef<Record<string, unknown>>({});
-  const patchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const gameStateRef = useRef(gameState);
-  gameStateRef.current = gameState;
-
-  const patchField = useCallback(
-    (field: string, value: unknown) => {
-      // Optimistic local update
-      const prev = gameStateRef.current;
-      if (prev) {
-        setGameState({ ...prev, [field]: value });
-      } else {
-        setGameState({
-          id: "",
-          chatId,
-          messageId: "",
-          swipeIndex: 0,
-          date: null,
-          time: null,
-          location: null,
-          weather: null,
-          temperature: null,
-          presentCharacters: [],
-          recentEvents: [],
-          playerStats: null,
-          personaStats: null,
-          createdAt: "",
-          [field]: value,
-        } as GameState);
-      }
-      // Queue the field for a batched API call
-      patchQueueRef.current[field] = value;
-      if (patchTimerRef.current) clearTimeout(patchTimerRef.current);
-      patchTimerRef.current = setTimeout(() => {
-        const payload = { ...patchQueueRef.current, manual: true };
-        patchQueueRef.current = {};
-        api.patch(`/chats/${chatId}/game-state`, payload).catch(() => {});
-      }, 500);
-    },
-    [chatId, setGameState],
-  );
-
-  // Expose a flush function so generation can await pending patches before firing
-  const flushPatch = useCallback(async () => {
-    if (patchTimerRef.current) {
-      clearTimeout(patchTimerRef.current);
-      patchTimerRef.current = null;
-    }
-    const queued = patchQueueRef.current;
-    if (Object.keys(queued).length === 0) return;
-    const payload = { ...queued, manual: true };
-    patchQueueRef.current = {};
-    await api.patch(`/chats/${chatId}/game-state`, payload).catch(() => {});
-  }, [chatId]);
-
-  useEffect(() => {
-    setFlushPatch(flushPatch);
-    return () => setFlushPatch(null);
-  }, [flushPatch, setFlushPatch]);
-
-  // Flush pending patches on page unload so edits aren't lost on refresh
-  useEffect(() => {
-    const onBeforeUnload = () => {
-      if (patchTimerRef.current) clearTimeout(patchTimerRef.current);
-      const queued = patchQueueRef.current;
-      if (Object.keys(queued).length === 0) return;
-      const payload = { ...queued, manual: true };
-      patchQueueRef.current = {};
-      // keepalive lets the request outlive the page
-      fetch(`/api/chats/${chatId}/game-state`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        keepalive: true,
-      });
-    };
-    window.addEventListener("beforeunload", onBeforeUnload);
-    return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [chatId]);
-
-  const patchPlayerStats = useCallback(
-    (field: string, value: unknown) => {
-      const current = gameStateRef.current?.playerStats ?? {
-        stats: [],
-        attributes: null,
-        skills: {},
-        inventory: [],
-        activeQuests: [],
-        status: "",
-      };
-      const next = { ...current, [field]: value };
-      patchField("playerStats", next);
-    },
-    [patchField],
-  );
-
   const clearGameState = useCallback(() => {
     const cleared = {
       date: null,
@@ -242,8 +182,9 @@ export function RoleplayHUD({
       },
       personaStats: [],
     };
-    const prev = gameStateRef.current;
-    if (prev) {
+    discardPendingGameStatePatch(chatId);
+    const prev = useGameStateStore.getState().current;
+    if (prev?.chatId === chatId) {
       setGameState({ ...prev, ...cleared } as GameState);
     } else {
       setGameState({
@@ -273,6 +214,11 @@ export function RoleplayHUD({
   const inventory = playerStats?.inventory ?? [];
   const activeQuests = playerStats?.activeQuests ?? [];
   const customTrackerFields = playerStats?.customTrackerFields ?? [];
+  const hasPlayerTrackerSections =
+    enabledAgentTypes.has("persona-stats") ||
+    enabledAgentTypes.has("character-tracker") ||
+    enabledAgentTypes.has("quest") ||
+    enabledAgentTypes.has("custom-tracker");
 
   const isVertical = layout === "left" || layout === "right";
   // If mobileCompact, widgets are even narrower and action buttons are not cut off
@@ -285,12 +231,18 @@ export function RoleplayHUD({
         mobileCompact && "flex-1 min-w-0",
       )}
     >
+      {trackerPanelEnabled && !trackerPanelOpen && <TrackerPanelToggleButton onToggle={toggleTrackerPanel} />}
+
       {/* Actions (Agents + Clear) */}
       <ActionsGroup
+        chatId={chatId}
+        injectionSourceMessages={injectionSourceMessages}
+        agentConfigs={agentConfigs}
         isVertical={isVertical}
         agentsOpen={agentsOpen}
         setAgentsOpen={setAgentsOpen}
         isAgentProcessing={isAgentProcessing}
+        isGenerationBusy={isTrackerBusy}
         thoughtBubbles={thoughtBubbles}
         clearThoughtBubbles={clearThoughtBubbles}
         dismissThoughtBubble={dismissThoughtBubble}
@@ -299,152 +251,163 @@ export function RoleplayHUD({
         onRetriggerTrackers={onRetriggerTrackers}
         onRetryFailedAgents={onRetryFailedAgents}
         failedAgentTypes={failedAgentTypes}
+        showInjectionsTab={showInjectionsTab}
+        showSecretPlotTab={showSecretPlotTab}
       />
 
       {/* ── Mobile: combined widgets, centered ── */}
-      <div className={cn("flex items-center gap-0.5 md:hidden", mobileCompact && "flex-1 justify-center")}>
-        {enabledAgentTypes.has("world-state") && (
-          <CombinedWorldWidget
-            location={location ?? ""}
-            date={date ?? ""}
-            time={time ?? ""}
-            weather={weather ?? ""}
-            temperature={temperature ?? ""}
-            onSaveLocation={(v) => patchField("location", v)}
-            onSaveDate={(v) => patchField("date", v)}
-            onSaveTime={(v) => patchField("time", v)}
-            onSaveWeather={(v) => patchField("weather", v)}
-            onSaveTemperature={(v) => patchField("temperature", v)}
-            layout={layout}
-          />
-        )}
+      {showHudTrackerWidgets && (
+        <div className={cn("flex items-center gap-0.5 md:hidden", mobileCompact && "flex-1 justify-center")}>
+          {enabledAgentTypes.has("world-state") && (
+            <CombinedWorldWidget
+              location={location ?? ""}
+              date={date ?? ""}
+              time={time ?? ""}
+              weather={weather ?? ""}
+              temperature={temperature ?? ""}
+              onSaveLocation={(v) => patchField("location", v)}
+              onSaveDate={(v) => patchField("date", v)}
+              onSaveTime={(v) => patchField("time", v)}
+              onSaveWeather={(v) => patchField("weather", v)}
+              onSaveTemperature={(v) => patchField("temperature", v)}
+              layout={layout}
+              onRerunSingleTracker={onRerunSingleTracker}
+              isTrackerRetryBusy={isTrackerBusy}
+            />
+          )}
 
-        {(enabledAgentTypes.has("persona-stats") ||
-          enabledAgentTypes.has("character-tracker") ||
-          enabledAgentTypes.has("quest") ||
-          enabledAgentTypes.has("custom-tracker")) && (
-          <CombinedPlayerWidget
-            layout={layout}
-            showPersona={enabledAgentTypes.has("persona-stats")}
-            showCharacters={enabledAgentTypes.has("character-tracker")}
-            showQuests={enabledAgentTypes.has("quest")}
-            showCustomTracker={enabledAgentTypes.has("custom-tracker")}
-            personaStats={personaStatBars}
-            onUpdatePersonaStats={(bars) => patchField("personaStats", bars)}
-            personaStatus={personaStatus}
-            onUpdatePersonaStatus={(status) => patchPlayerStats("status", status)}
-            characters={presentCharacters}
-            onUpdateCharacters={(chars) => {
-              if (gameState) {
-                setGameState({ ...gameState, presentCharacters: chars });
-              }
-              api.patch(`/chats/${chatId}/game-state`, { presentCharacters: chars }).catch(() => {});
-            }}
-            inventory={inventory}
-            onUpdateInventory={(items) => patchPlayerStats("inventory", items)}
-            quests={activeQuests}
-            onUpdateQuests={(q) => patchPlayerStats("activeQuests", q)}
-            customTrackerFields={customTrackerFields}
-            onUpdateCustomTracker={(fields) => patchPlayerStats("customTrackerFields", fields)}
-          />
-        )}
+          {hasPlayerTrackerSections && (
+            <CombinedPlayerWidget
+              layout={layout}
+              showPersona={enabledAgentTypes.has("persona-stats")}
+              showCharacters={enabledAgentTypes.has("character-tracker")}
+              showQuests={enabledAgentTypes.has("quest")}
+              showCustomTracker={enabledAgentTypes.has("custom-tracker")}
+              personaStats={personaStatBars}
+              onUpdatePersonaStats={(bars) => patchField("personaStats", bars)}
+              personaStatus={personaStatus}
+              onUpdatePersonaStatus={(status) => patchPlayerStats("status", status)}
+              characters={presentCharacters}
+              onUpdateCharacters={(chars) => patchField("presentCharacters", chars)}
+              inventory={inventory}
+              onUpdateInventory={(items) => patchPlayerStats("inventory", items)}
+              quests={activeQuests}
+              onUpdateQuests={(q) => patchPlayerStats("activeQuests", q)}
+              customTrackerFields={customTrackerFields}
+              onUpdateCustomTracker={(fields) => patchPlayerStats("customTrackerFields", fields)}
+              onRerunSingleTracker={onRerunSingleTracker}
+              isTrackerRetryBusy={isTrackerBusy}
+            />
+          )}
 
-        {/* Manual tracker trigger button (mobile) */}
-        {manualTrackers && onRetriggerTrackers && (
-          <button
-            onClick={(e) => {
-              e.preventDefault();
-              onRetriggerTrackers();
-            }}
-            disabled={isAgentProcessing}
-            className={cn(
-              MOBILE_HUD_BTN,
-              "justify-center text-[0.5625rem] font-medium",
-              isAgentProcessing ? "text-purple-600 dark:text-purple-300" : "text-[var(--muted-foreground)]",
-            )}
-          >
-            <RefreshCw size="0.875rem" className={cn("shrink-0 h-4 w-4", isAgentProcessing && "animate-spin")} />
-          </button>
-        )}
-      </div>
+          {/* Manual tracker trigger button (mobile) */}
+          {manualTrackers && onRetriggerTrackers && (
+            <button
+              onClick={(e) => {
+                e.preventDefault();
+                onRetriggerTrackers();
+              }}
+              disabled={isTrackerBusy}
+              className={cn(
+                MOBILE_HUD_BTN,
+                "justify-center text-[0.5625rem] font-medium",
+                isTrackerBusy ? "text-purple-600 dark:text-purple-300" : "text-[var(--muted-foreground)]",
+              )}
+            >
+              <RefreshCw size="0.875rem" className={cn("shrink-0 h-4 w-4", isTrackerBusy && "animate-spin")} />
+            </button>
+          )}
+        </div>
+      )}
 
       {/* ── Desktop: separate individual widgets ── */}
-      <div className="hidden md:flex items-center gap-1.5">
-        {enabledAgentTypes.has("world-state") && (
-          <CombinedWorldWidget
-            location={location ?? ""}
-            date={date ?? ""}
-            time={time ?? ""}
-            weather={weather ?? ""}
-            temperature={temperature ?? ""}
-            onSaveLocation={(v) => patchField("location", v)}
-            onSaveDate={(v) => patchField("date", v)}
-            onSaveTime={(v) => patchField("time", v)}
-            onSaveWeather={(v) => patchField("weather", v)}
-            onSaveTemperature={(v) => patchField("temperature", v)}
-            layout={layout}
-          />
-        )}
+      {showHudTrackerWidgets && (
+        <div className="hidden md:flex items-center gap-1.5">
+          {enabledAgentTypes.has("world-state") && (
+            <CombinedWorldWidget
+              location={location ?? ""}
+              date={date ?? ""}
+              time={time ?? ""}
+              weather={weather ?? ""}
+              temperature={temperature ?? ""}
+              onSaveLocation={(v) => patchField("location", v)}
+              onSaveDate={(v) => patchField("date", v)}
+              onSaveTime={(v) => patchField("time", v)}
+              onSaveWeather={(v) => patchField("weather", v)}
+              onSaveTemperature={(v) => patchField("temperature", v)}
+              layout={layout}
+              onRerunSingleTracker={onRerunSingleTracker}
+              isTrackerRetryBusy={isTrackerBusy}
+            />
+          )}
 
-        {enabledAgentTypes.has("persona-stats") && (
-          <PersonaStatsWidget
-            bars={personaStatBars}
-            onUpdate={(bars) => patchField("personaStats", bars)}
-            status={personaStatus}
-            onUpdateStatus={(status) => patchPlayerStats("status", status)}
-            layout={layout}
-          />
-        )}
+          {enabledAgentTypes.has("persona-stats") && (
+            <PersonaStatsWidget
+              bars={personaStatBars}
+              onUpdate={(bars) => patchField("personaStats", bars)}
+              status={personaStatus}
+              onUpdateStatus={(status) => patchPlayerStats("status", status)}
+              layout={layout}
+              onRerunSingleTracker={onRerunSingleTracker}
+              isTrackerRetryBusy={isTrackerBusy}
+            />
+          )}
 
-        {enabledAgentTypes.has("character-tracker") && (
-          <CharactersWidget
-            characters={presentCharacters}
-            onUpdate={(chars) => {
-              if (gameState) {
-                setGameState({ ...gameState, presentCharacters: chars });
-              }
-              api.patch(`/chats/${chatId}/game-state`, { presentCharacters: chars }).catch(() => {});
-            }}
-            chatId={chatId}
-            layout={layout}
-          />
-        )}
+          {enabledAgentTypes.has("character-tracker") && (
+            <CharactersWidget
+              characters={presentCharacters}
+              onUpdate={(chars) => patchField("presentCharacters", chars)}
+              chatId={chatId}
+              layout={layout}
+              onRerunSingleTracker={onRerunSingleTracker}
+              isTrackerRetryBusy={isTrackerBusy}
+            />
+          )}
 
-        {enabledAgentTypes.has("persona-stats") && (
-          <InventoryWidget
-            items={inventory}
-            onUpdate={(items) => patchPlayerStats("inventory", items)}
-            layout={layout}
-          />
-        )}
+          {hasPlayerTrackerSections && (
+            <InventoryWidget
+              items={inventory}
+              onUpdate={(items) => patchPlayerStats("inventory", items)}
+              layout={layout}
+            />
+          )}
 
-        {enabledAgentTypes.has("quest") && (
-          <QuestsWidget quests={activeQuests} onUpdate={(q) => patchPlayerStats("activeQuests", q)} layout={layout} />
-        )}
+          {enabledAgentTypes.has("quest") && (
+            <QuestsWidget
+              quests={activeQuests}
+              onUpdate={(q) => patchPlayerStats("activeQuests", q)}
+              layout={layout}
+              onRerunSingleTracker={onRerunSingleTracker}
+              isTrackerRetryBusy={isTrackerBusy}
+            />
+          )}
 
-        {enabledAgentTypes.has("custom-tracker") && (
-          <CustomTrackerWidget
-            fields={customTrackerFields}
-            onUpdate={(fields) => patchPlayerStats("customTrackerFields", fields)}
-            layout={layout}
-          />
-        )}
+          {enabledAgentTypes.has("custom-tracker") && (
+            <CustomTrackerWidget
+              fields={customTrackerFields}
+              onUpdate={(fields) => patchPlayerStats("customTrackerFields", fields)}
+              layout={layout}
+              onRerunSingleTracker={onRerunSingleTracker}
+              isTrackerRetryBusy={isTrackerBusy}
+            />
+          )}
 
-        {/* Manual tracker trigger button (desktop) */}
-        {manualTrackers && onRetriggerTrackers && (
-          <button
-            onClick={(e) => {
-              e.preventDefault();
-              onRetriggerTrackers();
-            }}
-            disabled={isAgentProcessing}
-            className={cn(WIDGET, isAgentProcessing ? "text-purple-300" : "text-[var(--muted-foreground)]")}
-            title={isAgentProcessing ? "Trackers running…" : "Run Trackers"}
-          >
-            <RefreshCw size="0.875rem" className={cn(isAgentProcessing && "animate-spin")} />
-          </button>
-        )}
-      </div>
+          {/* Manual tracker trigger button (desktop) */}
+          {manualTrackers && onRetriggerTrackers && (
+            <button
+              onClick={(e) => {
+                e.preventDefault();
+                onRetriggerTrackers();
+              }}
+              disabled={isTrackerBusy}
+              className={cn(WIDGET, isTrackerBusy ? "text-purple-300" : "text-[var(--muted-foreground)]")}
+              title={isTrackerBusy ? "Trackers running…" : "Run Trackers"}
+            >
+              <RefreshCw size="0.875rem" className={cn(isTrackerBusy && "animate-spin")} />
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -469,11 +432,30 @@ function DeferredActionsFallback({ isAgentProcessing }: { isAgentProcessing: boo
   );
 }
 
+function TrackerPanelToggleButton({ onToggle }: { onToggle: () => void }) {
+  return (
+    <button
+      data-tracker-panel-toggle="roleplay-hud"
+      onClick={onToggle}
+      className={cn(WIDGET, "text-pink-200/75 hover:border-[var(--primary)]/40 hover:text-[var(--primary)]")}
+      title="Show Tracker Panel"
+      aria-label="Show Tracker Panel"
+    >
+      <TrackerPanelIcon size="1.05rem" strokeWidth={1.95} className="shrink-0" />
+      <span className="sr-only">Tracker Panel</span>
+    </button>
+  );
+}
+
 interface ActionsGroupProps {
+  chatId: string;
+  injectionSourceMessages?: Message[];
+  agentConfigs?: AgentConfigRow[];
   isVertical: boolean;
   agentsOpen: boolean;
   setAgentsOpen: (v: boolean) => void;
   isAgentProcessing: boolean;
+  isGenerationBusy: boolean;
   thoughtBubbles: Array<{ agentId: string; agentName: string; content: string; timestamp: number }>;
   clearThoughtBubbles: () => void;
   dismissThoughtBubble: (i: number) => void;
@@ -482,13 +464,19 @@ interface ActionsGroupProps {
   onRetriggerTrackers?: () => void;
   onRetryFailedAgents?: () => void;
   failedAgentTypes: string[];
+  showInjectionsTab?: boolean;
+  showSecretPlotTab?: boolean;
 }
 
 function ActionsGroup({
+  chatId,
+  injectionSourceMessages,
+  agentConfigs,
   isVertical: _isVertical,
   agentsOpen,
   setAgentsOpen,
   isAgentProcessing,
+  isGenerationBusy,
   thoughtBubbles,
   clearThoughtBubbles,
   dismissThoughtBubble,
@@ -497,6 +485,8 @@ function ActionsGroup({
   onRetriggerTrackers,
   onRetryFailedAgents,
   failedAgentTypes,
+  showInjectionsTab,
+  showSecretPlotTab,
 }: ActionsGroupProps) {
   const btnRef = useRef<HTMLButtonElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -505,6 +495,7 @@ function ActionsGroup({
   const toggleEchoChamber = useUIStore((s) => s.toggleEchoChamber);
   const echoMessages = useAgentStore((s) => s.echoMessages);
   const showEcho = enabledAgentTypes.has("echo-chamber");
+  const { data: customAgentRuns = [], isLoading: customAgentRunsLoading } = useCustomAgentRuns(chatId, agentsOpen);
 
   // Position with fixed layout to avoid overflow clipping
   useLayoutEffect(() => {
@@ -512,7 +503,7 @@ function ActionsGroup({
     const rect = btnRef.current.getBoundingClientRect();
     const maxH = 320;
     const top = rect.bottom + 4 + maxH > window.innerHeight ? rect.top - maxH - 4 : rect.bottom + 4;
-    const left = Math.min(rect.left, window.innerWidth - 288 - 8);
+    const left = Math.min(rect.left, window.innerWidth - ACTIONS_DROPDOWN_WIDTH_PX - 8);
     setPos({ top, left });
   }, [agentsOpen]);
 
@@ -536,7 +527,7 @@ function ActionsGroup({
 
   // Badge count — unique agent types that produced results
   const uniqueAgentCount = new Set(thoughtBubbles.map((b) => b.agentId)).size;
-  const badgeCount = uniqueAgentCount + (echoMessages.length > 0 ? 1 : 0);
+  const badgeCount = uniqueAgentCount + customAgentRuns.length + (echoMessages.length > 0 ? 1 : 0);
 
   // ── Shared dropdown portal (used by both desktop & mobile) ──
   const dropdownContent =
@@ -550,10 +541,17 @@ function ActionsGroup({
       >
         <Suspense fallback={<DeferredActionsFallback isAgentProcessing={isAgentProcessing} />}>
           <RoleplayHUDActionsMenu
+            chatId={chatId}
+            injectionSourceMessages={injectionSourceMessages}
             isAgentProcessing={isAgentProcessing}
+            isGenerationBusy={isGenerationBusy}
             thoughtBubbles={thoughtBubbles}
             clearThoughtBubbles={clearThoughtBubbles}
             dismissThoughtBubble={dismissThoughtBubble}
+            customAgentRuns={customAgentRuns}
+            customAgentRunsLoading={customAgentRunsLoading}
+            agentConfigs={agentConfigs}
+            enabledAgentTypes={enabledAgentTypes}
             showEcho={showEcho}
             echoChamberOpen={echoChamberOpen}
             toggleEchoChamber={toggleEchoChamber}
@@ -563,6 +561,8 @@ function ActionsGroup({
             onRetryFailedAgents={onRetryFailedAgents}
             failedAgentTypes={failedAgentTypes}
             onClose={() => setAgentsOpen(false)}
+            showInjectionsTab={showInjectionsTab}
+            showSecretPlotTab={showSecretPlotTab}
           />
         </Suspense>
       </div>,
@@ -610,36 +610,6 @@ function ActionsGroup({
 }
 
 // ═══════════════════════════════════════════════
-// Echo Chamber Toggle Button (desktop only — mobile folded into ActionsGroup)
-// ═══════════════════════════════════════════════
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function EchoChamberToggle() {
-  const echoChamberOpen = useUIStore((s) => s.echoChamberOpen);
-  const toggleEchoChamber = useUIStore((s) => s.toggleEchoChamber);
-  const echoMessages = useAgentStore((s) => s.echoMessages);
-
-  return (
-    <button
-      onClick={toggleEchoChamber}
-      className={cn(
-        "flex items-center gap-1 rounded-full bg-[var(--muted)]/20 border border-[var(--border)] px-2 py-1 text-[0.625rem] text-[var(--foreground)]/70 backdrop-blur-md transition-all hover:bg-[var(--muted)]/40 hover:text-[var(--foreground)] dark:bg-foreground/5 dark:border-foreground/10 dark:text-foreground/60 dark:hover:bg-foreground/10 dark:hover:text-foreground",
-        echoChamberOpen && "bg-purple-500/20 text-purple-600 border-purple-500/30 dark:text-purple-300",
-      )}
-      title="Toggle Echo Chamber panel"
-    >
-      <MessageCircle size="0.625rem" className="text-purple-400/70" />
-      <span>Echo</span>
-      {echoMessages.length > 0 && (
-        <span className="flex h-3.5 min-w-[0.875rem] items-center justify-center rounded-full bg-purple-500/80 px-1 text-[0.5rem] font-bold text-foreground">
-          {echoMessages.length}
-        </span>
-      )}
-    </button>
-  );
-}
-
-// ═══════════════════════════════════════════════
 // Combined Player Widget — merges Persona, Chars,
 // Inventory, and Quests into a single expandable panel
 // ═══════════════════════════════════════════════
@@ -662,6 +632,8 @@ function CombinedPlayerWidget({
   onUpdateQuests,
   customTrackerFields,
   onUpdateCustomTracker,
+  onRerunSingleTracker,
+  isTrackerRetryBusy,
 }: {
   layout?: HudPosition;
   showPersona: boolean;
@@ -680,6 +652,8 @@ function CombinedPlayerWidget({
   onUpdateQuests: (quests: QuestProgress[]) => void;
   customTrackerFields: CustomTrackerField[];
   onUpdateCustomTracker: (fields: CustomTrackerField[]) => void;
+  onRerunSingleTracker?: (agentType: string) => void;
+  isTrackerRetryBusy?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -726,6 +700,8 @@ function CombinedPlayerWidget({
             customTrackerFields={customTrackerFields}
             onUpdateCustomTracker={onUpdateCustomTracker}
             onClose={() => setOpen(false)}
+            onRerunSingleTracker={onRerunSingleTracker}
+            isTrackerRetryBusy={isTrackerRetryBusy}
           />
         </Suspense>
       </WidgetPopover>
@@ -843,11 +819,15 @@ function CharactersWidget({
   onUpdate,
   chatId,
   layout = "top",
+  onRerunSingleTracker,
+  isTrackerRetryBusy,
 }: {
   characters: PresentCharacter[];
   onUpdate: (chars: PresentCharacter[]) => void;
   chatId: string;
   layout?: HudPosition;
+  onRerunSingleTracker?: (agentType: string) => void;
+  isTrackerRetryBusy?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -886,7 +866,13 @@ function CharactersWidget({
         className="w-72 max-h-80 overflow-y-auto"
       >
         <Suspense fallback={<DeferredHUDPanelFallback label="Loading characters…" />}>
-          <CharactersPanel characters={characters} onUpdate={onUpdate} chatId={chatId} />
+          <CharactersPanel
+            characters={characters}
+            onUpdate={onUpdate}
+            chatId={chatId}
+            onRerunSingleTracker={onRerunSingleTracker}
+            isTrackerRetryBusy={isTrackerRetryBusy}
+          />
         </Suspense>
       </WidgetPopover>
     </div>
@@ -901,12 +887,16 @@ function PersonaStatsWidget({
   status,
   onUpdateStatus,
   layout = "top",
+  onRerunSingleTracker,
+  isTrackerRetryBusy,
 }: {
   bars: CharacterStat[];
   onUpdate: (bars: CharacterStat[]) => void;
   status: string;
   onUpdateStatus: (status: string) => void;
   layout?: HudPosition;
+  onRerunSingleTracker?: (agentType: string) => void;
+  isTrackerRetryBusy?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -952,7 +942,14 @@ function PersonaStatsWidget({
         className="w-60 max-h-80 overflow-y-auto"
       >
         <Suspense fallback={<DeferredHUDPanelFallback label="Loading persona stats…" />}>
-          <PersonaStatsPanel bars={bars} onUpdate={onUpdate} status={status} onUpdateStatus={onUpdateStatus} />
+          <PersonaStatsPanel
+            bars={bars}
+            onUpdate={onUpdate}
+            status={status}
+            onUpdateStatus={onUpdateStatus}
+            onRerunSingleTracker={onRerunSingleTracker}
+            isTrackerRetryBusy={isTrackerRetryBusy}
+          />
         </Suspense>
       </WidgetPopover>
     </div>
@@ -965,10 +962,14 @@ function CustomTrackerWidget({
   fields,
   onUpdate,
   layout = "top",
+  onRerunSingleTracker,
+  isTrackerRetryBusy,
 }: {
   fields: CustomTrackerField[];
   onUpdate: (fields: CustomTrackerField[]) => void;
   layout?: HudPosition;
+  onRerunSingleTracker?: (agentType: string) => void;
+  isTrackerRetryBusy?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -1027,7 +1028,12 @@ function CustomTrackerWidget({
         className="w-72 max-h-80 overflow-y-auto"
       >
         <Suspense fallback={<DeferredHUDPanelFallback label="Loading custom tracker…" />}>
-          <CustomTrackerPanel fields={fields} onUpdate={onUpdate} />
+          <CustomTrackerPanel
+            fields={fields}
+            onUpdate={onUpdate}
+            onRerunSingleTracker={onRerunSingleTracker}
+            isTrackerRetryBusy={isTrackerRetryBusy}
+          />
         </Suspense>
       </WidgetPopover>
     </div>
@@ -1114,10 +1120,14 @@ function QuestsWidget({
   quests,
   onUpdate,
   layout = "top",
+  onRerunSingleTracker,
+  isTrackerRetryBusy,
 }: {
   quests: QuestProgress[];
   onUpdate: (quests: QuestProgress[]) => void;
   layout?: HudPosition;
+  onRerunSingleTracker?: (agentType: string) => void;
+  isTrackerRetryBusy?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -1157,7 +1167,12 @@ function QuestsWidget({
         className="w-72 max-h-96 overflow-y-auto"
       >
         <Suspense fallback={<DeferredHUDPanelFallback label="Loading quests…" />}>
-          <QuestsPanel quests={quests} onUpdate={onUpdate} />
+          <QuestsPanel
+            quests={quests}
+            onUpdate={onUpdate}
+            onRerunSingleTracker={onRerunSingleTracker}
+            isTrackerRetryBusy={isTrackerRetryBusy}
+          />
         </Suspense>
       </WidgetPopover>
     </div>
@@ -1170,111 +1185,6 @@ function QuestsWidget({
 
 const WIDGET =
   "group flex w-10 h-10 max-md:w-auto max-md:h-auto max-md:px-2 max-md:py-1.5 flex-col items-center justify-center gap-0.5 max-md:gap-0 rounded-xl max-md:rounded-lg border border-[var(--border)] bg-[var(--card)]/80 backdrop-blur-md transition-all hover:bg-[var(--card)] dark:border-foreground/15 dark:bg-black/40 dark:hover:bg-black/60 cursor-pointer select-none overflow-hidden";
-const WIDGET_EDIT =
-  "flex w-10 h-10 max-md:w-auto max-md:h-auto max-md:px-2 max-md:py-1.5 flex-col items-center justify-center gap-0.5 max-md:gap-0 rounded-xl max-md:rounded-lg border border-[var(--border)] bg-[var(--card)] backdrop-blur-md dark:border-foreground/15 dark:bg-black/60 overflow-hidden";
-
-/** Hook: mobile single-tap = tooltip, double-tap = edit; desktop click = edit */
-function useWidgetTap(onEdit: () => void) {
-  const [showTip, setShowTip] = useState(false);
-  const lastTapRef = useRef(0);
-  const tipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isTouchRef = useRef(false);
-
-  const handleTouchStart = useCallback(() => {
-    isTouchRef.current = true;
-  }, []);
-
-  const handleClick = useCallback(() => {
-    if (!isTouchRef.current) {
-      onEdit();
-      return;
-    }
-    isTouchRef.current = false;
-    const now = Date.now();
-    if (now - lastTapRef.current < 350) {
-      setShowTip(false);
-      if (tipTimerRef.current) clearTimeout(tipTimerRef.current);
-      onEdit();
-    } else {
-      setShowTip(true);
-      if (tipTimerRef.current) clearTimeout(tipTimerRef.current);
-      tipTimerRef.current = setTimeout(() => setShowTip(false), 2000);
-    }
-    lastTapRef.current = now;
-  }, [onEdit]);
-
-  return { showTip, handleClick, handleTouchStart };
-}
-
-/** Truncated label with optional tooltip */
-function WidgetLabel({
-  value,
-  fallback,
-  showTip,
-  className,
-}: {
-  value: string;
-  fallback: string;
-  showTip?: boolean;
-  className?: string;
-}) {
-  return (
-    <span className={cn("relative w-full max-md:px-0.5", className)}>
-      <span
-        className={cn(
-          "block mx-auto max-w-[4.5rem] max-md:max-w-full overflow-x-auto scrollbar-hide whitespace-nowrap text-center text-[0.5625rem] max-md:text-[0.4375rem] font-semibold leading-tight",
-          !value && "italic opacity-40",
-        )}
-      >
-        {value || fallback}
-      </span>
-      {showTip && value && (
-        <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 whitespace-nowrap rounded bg-[var(--popover)] border border-[var(--border)] px-1.5 py-0.5 text-[0.5625rem] text-[var(--foreground)]/80 z-[9999] pointer-events-none animate-message-in dark:bg-black/90 dark:border-foreground/10 dark:text-foreground/80">
-          {value}
-        </span>
-      )}
-    </span>
-  );
-}
-
-function WidgetInput({
-  value,
-  onSave,
-  onCancel,
-  accent,
-}: {
-  value: string;
-  onSave: (v: string) => void;
-  onCancel: () => void;
-  accent: string;
-}) {
-  const [draft, setDraft] = useState(value);
-  const ref = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    ref.current?.focus();
-  }, []);
-  const commit = () => {
-    const t = draft.trim();
-    if (t && t !== value) onSave(t);
-    onCancel();
-  };
-  return (
-    <input
-      ref={ref}
-      value={draft}
-      onChange={(e) => setDraft(e.target.value)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") commit();
-        if (e.key === "Escape") onCancel();
-      }}
-      onBlur={commit}
-      className={cn(
-        "w-[4.5rem] max-md:w-full max-md:px-0.5 bg-transparent text-center text-[0.5625rem] max-md:text-[0.625rem] font-medium outline-none placeholder:text-[var(--muted-foreground)]/40 dark:placeholder:text-foreground/20",
-        accent,
-      )}
-    />
-  );
-}
 
 // ═══════════════════════════════════════════════
 // Combined World-State Widget (icon strip + popover, desktop & mobile)
@@ -1292,6 +1202,8 @@ function CombinedWorldWidget({
   onSaveWeather,
   onSaveTemperature,
   layout,
+  onRerunSingleTracker,
+  isTrackerRetryBusy,
 }: {
   location: string;
   date: string;
@@ -1304,6 +1216,8 @@ function CombinedWorldWidget({
   onSaveWeather: (v: string) => void;
   onSaveTemperature: (v: string) => void;
   layout: "top" | "left" | "right";
+  onRerunSingleTracker?: (agentType: string) => void;
+  isTrackerRetryBusy?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -1508,383 +1422,12 @@ function CombinedWorldWidget({
             pinColor={pinColor}
             tempColor={tempColor}
             onClose={() => setOpen(false)}
+            onRerunSingleTracker={onRerunSingleTracker}
+            isTrackerRetryBusy={isTrackerRetryBusy}
           />
         </Suspense>
       </WidgetPopover>
     </div>
-  );
-}
-
-// ── Location Widget ──────────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function LocationWidget({
-  value,
-  onSave,
-  className,
-}: {
-  value: string;
-  onSave: (v: string) => void;
-  className?: string;
-}) {
-  const [editing, setEditing] = useState(false);
-  const { showTip, handleClick, handleTouchStart } = useWidgetTap(() => setEditing(true));
-
-  if (editing) {
-    return (
-      <div className={cn(WIDGET_EDIT, "text-emerald-300")}>
-        <MapPin size="0.875rem" className="text-emerald-400/60 mb-0.5 max-md:h-3 max-md:w-3 max-md:mb-0" />
-        <WidgetInput value={value} onSave={onSave} onCancel={() => setEditing(false)} accent="text-emerald-300" />
-      </div>
-    );
-  }
-
-  return (
-    <button
-      onClick={handleClick}
-      onTouchStart={handleTouchStart}
-      className={cn(WIDGET, "text-emerald-300", showTip && "z-50", className)}
-      title={value || "Click to edit location"}
-    >
-      <div className="relative flex h-7 max-md:h-4 items-center justify-center shrink-0">
-        <div className="absolute inset-0 rounded-md overflow-hidden opacity-40">
-          <div className="absolute inset-0 bg-gradient-to-br from-emerald-900/60 via-emerald-800/40 to-emerald-950/60" />
-          <svg className="absolute inset-0 w-full h-full" viewBox="0 0 56 28">
-            <line
-              x1="0"
-              y1="9"
-              x2="56"
-              y2="9"
-              stroke="currentColor"
-              strokeWidth="0.3"
-              className="text-emerald-400/30"
-            />
-            <line
-              x1="0"
-              y1="19"
-              x2="56"
-              y2="19"
-              stroke="currentColor"
-              strokeWidth="0.3"
-              className="text-emerald-400/30"
-            />
-            <line
-              x1="14"
-              y1="0"
-              x2="14"
-              y2="28"
-              stroke="currentColor"
-              strokeWidth="0.3"
-              className="text-emerald-400/30"
-            />
-            <line
-              x1="28"
-              y1="0"
-              x2="28"
-              y2="28"
-              stroke="currentColor"
-              strokeWidth="0.3"
-              className="text-emerald-400/30"
-            />
-            <line
-              x1="42"
-              y1="0"
-              x2="42"
-              y2="28"
-              stroke="currentColor"
-              strokeWidth="0.3"
-              className="text-emerald-400/30"
-            />
-            <circle cx="20" cy="14" r="5" fill="currentColor" className="text-emerald-600/20" />
-            <circle cx="38" cy="10" r="4" fill="currentColor" className="text-emerald-600/15" />
-            <path
-              d="M8 20 Q14 12 22 18 Q30 24 40 16"
-              stroke="currentColor"
-              strokeWidth="0.5"
-              fill="none"
-              className="text-emerald-400/25"
-            />
-          </svg>
-        </div>
-        <MapPin
-          size="0.875rem"
-          className="relative text-emerald-400 drop-shadow-[0_0_4px_rgba(52,211,153,0.5)] max-md:h-3 max-md:w-3"
-        />
-      </div>
-      <WidgetLabel value={value} fallback="Location" showTip={showTip} />
-    </button>
-  );
-}
-
-// ── Calendar Widget ──────────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function CalendarWidget({
-  value,
-  onSave,
-  className,
-}: {
-  value: string;
-  onSave: (v: string) => void;
-  className?: string;
-}) {
-  const [editing, setEditing] = useState(false);
-  const { showTip, handleClick, handleTouchStart } = useWidgetTap(() => setEditing(true));
-  const { day, month } = value ? parseDateLabel(value) : { day: null, month: null };
-
-  if (editing) {
-    return (
-      <div className={cn(WIDGET_EDIT, "text-violet-300")}>
-        <CalendarDays size="0.875rem" className="text-violet-400/60 mb-0.5 max-md:h-3 max-md:w-3 max-md:mb-0" />
-        <WidgetInput value={value} onSave={onSave} onCancel={() => setEditing(false)} accent="text-violet-300" />
-      </div>
-    );
-  }
-
-  return (
-    <button
-      onClick={handleClick}
-      onTouchStart={handleTouchStart}
-      className={cn(WIDGET, "text-violet-300", showTip && "z-50", className)}
-      title={value || "Click to edit date"}
-    >
-      <div className="flex h-7 max-md:h-4 flex-col rounded-sm border border-violet-400/30 overflow-hidden bg-violet-950/30 shrink-0">
-        <div className="flex h-2.5 max-md:h-1.5 items-center justify-center bg-violet-500/25">
-          <span className="text-[5px] max-md:text-[3px] font-bold uppercase tracking-wider text-violet-300/80">
-            {month || "———"}
-          </span>
-        </div>
-        <div className="flex flex-1 items-center justify-center">
-          <span className="text-[0.75rem] max-md:text-[0.5rem] font-bold leading-none text-violet-200/80">
-            {day || "?"}
-          </span>
-        </div>
-      </div>
-      <WidgetLabel value={value} fallback="Date" showTip={showTip} />
-    </button>
-  );
-}
-
-// ── Clock Widget ─────────────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function ClockWidget({ value, onSave, className }: { value: string; onSave: (v: string) => void; className?: string }) {
-  const [editing, setEditing] = useState(false);
-  const { showTip, handleClick, handleTouchStart } = useWidgetTap(() => setEditing(true));
-  const hour = value ? extractHourFromTime(value) : -1;
-  const hourAngle = hour >= 0 ? ((hour % 12) / 12) * 360 - 90 : -90;
-  const minuteAngle = hour >= 0 ? (parseMinutes(value) / 60) * 360 - 90 : 90;
-
-  if (editing) {
-    return (
-      <div className={cn(WIDGET_EDIT, "text-amber-300")}>
-        <Clock size="0.875rem" className="text-amber-400/60 mb-0.5 max-md:h-3 max-md:w-3 max-md:mb-0" />
-        <WidgetInput value={value} onSave={onSave} onCancel={() => setEditing(false)} accent="text-amber-300" />
-      </div>
-    );
-  }
-
-  const period = value ? getTimePeriod(value) : null;
-
-  return (
-    <button
-      onClick={handleClick}
-      onTouchStart={handleTouchStart}
-      className={cn(WIDGET, "text-amber-300", showTip && "z-50", className)}
-      title={value || "Click to edit time"}
-    >
-      <div className="relative flex h-7 max-md:h-4 items-center justify-center shrink-0">
-        <svg viewBox="0 0 32 32" className="h-full w-full">
-          <circle
-            cx="16"
-            cy="16"
-            r="14"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="0.8"
-            className="text-amber-400/30"
-          />
-          <circle cx="16" cy="16" r="12.5" fill="currentColor" className="text-amber-950/30" />
-          {Array.from({ length: 12 }, (_, i) => {
-            const a = (i / 12) * Math.PI * 2 - Math.PI / 2;
-            const x1 = 16 + Math.cos(a) * 10.5;
-            const y1 = 16 + Math.sin(a) * 10.5;
-            const x2 = 16 + Math.cos(a) * 12;
-            const y2 = 16 + Math.sin(a) * 12;
-            return (
-              <line
-                key={i}
-                x1={x1}
-                y1={y1}
-                x2={x2}
-                y2={y2}
-                stroke="currentColor"
-                strokeWidth={i % 3 === 0 ? "1" : "0.5"}
-                className="text-amber-400/50"
-              />
-            );
-          })}
-          <line
-            x1="16"
-            y1="16"
-            x2={16 + Math.cos((hourAngle * Math.PI) / 180) * 6.5}
-            y2={16 + Math.sin((hourAngle * Math.PI) / 180) * 6.5}
-            stroke="currentColor"
-            strokeWidth="1.2"
-            strokeLinecap="round"
-            className="text-amber-300/80"
-          />
-          <line
-            x1="16"
-            y1="16"
-            x2={16 + Math.cos((minuteAngle * Math.PI) / 180) * 9}
-            y2={16 + Math.sin((minuteAngle * Math.PI) / 180) * 9}
-            stroke="currentColor"
-            strokeWidth="0.7"
-            strokeLinecap="round"
-            className="text-amber-200/60"
-          />
-          <circle cx="16" cy="16" r="1" fill="currentColor" className="text-amber-400/70" />
-        </svg>
-      </div>
-      <WidgetLabel value={value || period || ""} fallback="Time" showTip={showTip} />
-    </button>
-  );
-}
-
-// ── Weather Widget ───────────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function WeatherWidget({
-  value,
-  onSave,
-  className,
-}: {
-  value: string;
-  onSave: (v: string) => void;
-  className?: string;
-}) {
-  const [editing, setEditing] = useState(false);
-  const { showTip, handleClick, handleTouchStart } = useWidgetTap(() => setEditing(true));
-  const emoji = value ? getWeatherEmoji(value) : "🌤️";
-
-  if (editing) {
-    return (
-      <div className={cn(WIDGET_EDIT, "text-sky-300")}>
-        <span className="text-base max-md:text-xs mb-0.5">{emoji}</span>
-        <WidgetInput value={value} onSave={onSave} onCancel={() => setEditing(false)} accent="text-sky-300" />
-      </div>
-    );
-  }
-
-  return (
-    <button
-      onClick={handleClick}
-      onTouchStart={handleTouchStart}
-      className={cn(WIDGET, "text-sky-300", showTip && "z-50", className)}
-      title={value || "Click to edit weather"}
-    >
-      <div className="flex h-7 max-md:h-4 items-center justify-center shrink-0">
-        <span className="text-xl max-md:text-xs leading-none drop-shadow-[0_0_6px_rgba(56,189,248,0.3)]">{emoji}</span>
-      </div>
-      <WidgetLabel value={value} fallback="Weather" showTip={showTip} />
-    </button>
-  );
-}
-
-// ── Temperature Widget ───────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function TemperatureWidget({
-  value,
-  onSave,
-  className,
-}: {
-  value: string;
-  onSave: (v: string) => void;
-  className?: string;
-}) {
-  const [editing, setEditing] = useState(false);
-  const { showTip, handleClick, handleTouchStart } = useWidgetTap(() => setEditing(true));
-  const tempNumeric = value ? parseTemperature(value) : null;
-  const temp = tempNumeric ?? (value ? getTemperatureKeywordHint(value) : null);
-  const fillPct = temp !== null ? Math.max(5, Math.min(100, ((temp + 20) / 65) * 100)) : 40;
-  const fillColor =
-    temp !== null
-      ? temp < 0
-        ? "text-blue-400"
-        : temp < 15
-          ? "text-sky-400"
-          : temp < 30
-            ? "text-amber-400"
-            : "text-red-400"
-      : "text-rose-400/50";
-
-  if (editing) {
-    return (
-      <div className={cn(WIDGET_EDIT, "text-rose-300")}>
-        <Thermometer size="0.875rem" className="text-rose-400/60 mb-0.5 max-md:h-3 max-md:w-3 max-md:mb-0" />
-        <WidgetInput value={value} onSave={onSave} onCancel={() => setEditing(false)} accent="text-rose-300" />
-      </div>
-    );
-  }
-
-  return (
-    <button
-      onClick={handleClick}
-      onTouchStart={handleTouchStart}
-      className={cn(WIDGET, "text-rose-300", showTip && "z-50", className)}
-      title={value || "Click to edit temperature"}
-    >
-      <div className="relative flex h-7 max-md:h-4 items-center justify-center shrink-0">
-        <svg viewBox="0 0 16 32" className="h-full" style={{ width: "auto" }}>
-          <rect
-            x="5.5"
-            y="3"
-            width="5"
-            height="20"
-            rx="2.5"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="0.7"
-            className={temp !== null ? fillColor : "text-rose-400/20"}
-          />
-          <rect
-            x="6.5"
-            y={3 + 18 * (1 - fillPct / 100)}
-            width="3"
-            height={Math.max(1, 18 * (fillPct / 100))}
-            rx="1.5"
-            fill="currentColor"
-            className={fillColor}
-            opacity={temp !== null ? 1 : 0.2}
-          />
-          <circle
-            cx="8"
-            cy="26"
-            r="3.5"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="0.7"
-            className={temp !== null ? fillColor : "text-rose-400/20"}
-          />
-          <circle cx="8" cy="26" r="2.5" fill="currentColor" className={fillColor} opacity={temp !== null ? 1 : 0.25} />
-          {[0, 0.25, 0.5, 0.75, 1].map((t, i) => (
-            <line
-              key={i}
-              x1="10.5"
-              y1={3 + 18 * (1 - t)}
-              x2="12"
-              y2={3 + 18 * (1 - t)}
-              stroke="currentColor"
-              strokeWidth="0.4"
-              className="text-rose-400/25"
-            />
-          ))}
-        </svg>
-      </div>
-      <WidgetLabel value={tempNumeric !== null ? `${tempNumeric}°` : value} fallback="Temp" showTip={showTip} />
-    </button>
   );
 }
 
@@ -1932,18 +1475,6 @@ function extractHourFromTime(time: string): number {
 function parseMinutes(time: string): number {
   const m = time.match(/\b\d{1,2}[:.h](\d{2})\b/);
   return m ? parseInt(m[1]!, 10) : 0;
-}
-
-function getTimePeriod(time: string): string | null {
-  const t = time.toLowerCase();
-  if (t.includes("night") || t.includes("midnight")) return "Night";
-  if (t.includes("dawn") || t.includes("sunrise")) return "Dawn";
-  if (t.includes("morning")) return "Morning";
-  if (t.includes("noon") || t.includes("midday")) return "Midday";
-  if (t.includes("afternoon")) return "Afternoon";
-  if (t.includes("dusk") || t.includes("sunset")) return "Dusk";
-  if (t.includes("evening")) return "Evening";
-  return null;
 }
 
 function getWeatherEmoji(weather: string): string {

@@ -2,6 +2,7 @@
 // Importer: SillyTavern Character (JSON / V2 Card / CharX)
 // ──────────────────────────────────────────────
 import type { DB } from "../../db/connection.js";
+import { logger } from "../../lib/logger.js";
 import { createCharactersStorage } from "../storage/characters.storage.js";
 import { importSTLorebook } from "./st-lorebook.importer.js";
 import type { CharacterData } from "@marinara-engine/shared";
@@ -22,18 +23,32 @@ function ensureAvatarDir() {
   }
 }
 
+function countEmbeddedLorebookEntries(book: unknown): number {
+  return getCharacterBookEntries(book).length;
+}
+
 /**
  * Import a SillyTavern character card (JSON format).
  * Handles V1, V2, Pygmalion, and RisuAI formats.
  * If _avatarDataUrl is present, saves the avatar image.
  */
-export async function importSTCharacter(
-  raw: Record<string, unknown>,
-  db: DB,
-  options?: { timestampOverrides?: TimestampOverrides | null },
-) {
+export interface STCharacterImportPreview {
+  success: boolean;
+  name?: string;
+  hasEmbeddedLorebook: boolean;
+  embeddedLorebookEntries: number;
+  error?: string;
+}
+
+export interface STCharacterImportOptions {
+  timestampOverrides?: TimestampOverrides | null;
+  importEmbeddedLorebook?: boolean;
+}
+
+export async function importSTCharacter(raw: Record<string, unknown>, db: DB, options?: STCharacterImportOptions) {
   const storage = createCharactersStorage(db);
   const normalizedTimestamps = normalizeTimestampOverrides(options?.timestampOverrides);
+  const shouldImportEmbeddedLorebook = options?.importEmbeddedLorebook ?? true;
 
   // Extract avatar data URL if present (from PNG import)
   const avatarDataUrl = raw._avatarDataUrl as string | null;
@@ -43,21 +58,10 @@ export async function importSTCharacter(
   const botBrowserSource = raw._botBrowserSource as string | null;
   delete raw._botBrowserSource;
 
-  let data: CharacterData;
-
-  // Detect format
-  if ((raw.spec === "chara_card_v2" || raw.spec === "chara_card_v3") && raw.data) {
-    // V2 / V3 format — extract from data wrapper
-    data = normalizeV2(raw.data as Record<string, unknown>);
-  } else if (raw.char_name || raw.name) {
-    // V1 / Pygmalion format — convert to V2
-    data = convertV1toV2(raw);
-  } else if (raw.type === "character" && raw.data) {
-    // RisuAI format
-    data = convertRisuToV2((raw.data as Record<string, unknown>) ?? {});
-  } else {
-    // Try treating the whole object as character data
-    data = normalizeV2(raw);
+  const data = normalizeCharacterData(raw);
+  const rawEmbeddedLorebook = extractRawCharacterBook(raw) ?? data.character_book;
+  if (rawEmbeddedLorebook) {
+    data.character_book = normalizeCharacterBook(rawEmbeddedLorebook);
   }
 
   // Tag with browser source if imported from browser
@@ -70,14 +74,26 @@ export async function importSTCharacter(
       ? (data.extensions[IMPORT_METADATA_KEY] as Record<string, unknown>)
       : {};
   const cardSpecMetadata = buildCardSpecMetadata(raw);
-  const hasEmbeddedLorebook = !!data.character_book?.entries?.length;
+  const embeddedLorebookEntries = countEmbeddedLorebookEntries(data.character_book);
+  const hasEmbeddedLorebook = embeddedLorebookEntries > 0;
+  // Strip any `lorebookId` carried by the source card. That ID references
+  // the exporter's database (e.g. a different Marinara instance), not
+  // ours, so preserving it leaves an orphan pointer that makes "Edit
+  // Linked Lorebook" open a 404 editor before the auto-import below has
+  // a chance to set the real ID. The fresh value is written below at the
+  // end of the auto-import branch when (and only when) we actually
+  // created a lorebook in this DB.
+  const carriedEmbeddedLorebook =
+    typeof existingImportMetadata.embeddedLorebook === "object" && existingImportMetadata.embeddedLorebook
+      ? (existingImportMetadata.embeddedLorebook as Record<string, unknown>)
+      : {};
+  const { lorebookId: _staleLorebookId, ...sanitizedEmbeddedLorebook } = carriedEmbeddedLorebook;
+  void _staleLorebookId;
   data.extensions[IMPORT_METADATA_KEY] = {
     ...existingImportMetadata,
     ...(cardSpecMetadata ? { card: cardSpecMetadata } : {}),
     embeddedLorebook: {
-      ...(typeof existingImportMetadata.embeddedLorebook === "object" && existingImportMetadata.embeddedLorebook
-        ? (existingImportMetadata.embeddedLorebook as Record<string, unknown>)
-        : {}),
+      ...sanitizedEmbeddedLorebook,
       hasEmbeddedLorebook,
     },
   };
@@ -103,12 +119,21 @@ export async function importSTCharacter(
 
   // Extract character_book into a standalone lorebook linked to this character
   let lorebookResult: { lorebookId?: string; entriesImported?: number } | null = null;
-  if (data.character_book && charId) {
-    const bookRaw = data.character_book as unknown as Record<string, unknown>;
+  if (shouldImportEmbeddedLorebook && data.character_book && charId) {
+    const bookRaw = rawEmbeddedLorebook as unknown as Record<string, unknown>;
     // ST character_book uses the same shape as World Info
     const wiData: Record<string, unknown> = {
       name: `${data.name}'s Lorebook`,
       entries: bookRaw.entries ?? {},
+      description: bookRaw.description,
+      scan_depth: bookRaw.scan_depth,
+      scanDepth: bookRaw.scanDepth,
+      token_budget: bookRaw.token_budget,
+      tokenBudget: bookRaw.tokenBudget,
+      recursive_scanning: bookRaw.recursive_scanning,
+      recursiveScanning: bookRaw.recursiveScanning,
+      max_recursion_depth: bookRaw.max_recursion_depth,
+      maxRecursionDepth: bookRaw.maxRecursionDepth,
       extensions: bookRaw.extensions ?? {},
     };
 
@@ -137,9 +162,11 @@ export async function importSTCharacter(
         data.extensions[IMPORT_METADATA_KEY] = updatedImportMetadata;
         await storage.update(charId, { extensions: { ...data.extensions } }, undefined, {
           updatedAt: normalizedTimestamps?.updatedAt ?? normalizedTimestamps?.createdAt ?? null,
+          skipVersionSnapshot: true,
         });
       }
-    } catch {
+    } catch (err) {
+      logger.warn(err, "Lorebook extraction failed for character import");
       // Non-fatal — character was imported, just lorebook extraction failed
     }
   }
@@ -148,24 +175,46 @@ export async function importSTCharacter(
     success: true,
     characterId: charId,
     name: data.name,
+    embeddedLorebook: {
+      hasEmbeddedLorebook,
+      entries: embeddedLorebookEntries,
+      imported: !!lorebookResult,
+      skipped: hasEmbeddedLorebook && !shouldImportEmbeddedLorebook,
+    },
     ...(lorebookResult ? { lorebook: lorebookResult } : {}),
   };
+}
+
+export function inspectSTCharacter(raw: Record<string, unknown>): STCharacterImportPreview {
+  try {
+    const data = normalizeCharacterData(raw);
+    const embeddedLorebookEntries = countEmbeddedLorebookEntries(data.character_book);
+    return {
+      success: true,
+      name: data.name,
+      hasEmbeddedLorebook: embeddedLorebookEntries > 0,
+      embeddedLorebookEntries,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      hasEmbeddedLorebook: false,
+      embeddedLorebookEntries: 0,
+      error: error instanceof Error ? error.message : "Invalid character card",
+    };
+  }
 }
 
 /**
  * Import a CharX (.charx) file — RisuAI Character Card V3 zip format.
  * Extracts card.json and the main icon asset from the zip.
  */
-export async function importCharX(buf: Buffer, db: DB, options?: { timestampOverrides?: TimestampOverrides | null }) {
+export async function importCharX(buf: Buffer, db: DB, options?: STCharacterImportOptions) {
   const zip = new AdmZip(buf);
 
   // Extract card.json from root of the zip
-  const cardEntry = zip.getEntry("card.json");
-  if (!cardEntry) {
-    return { success: false, error: "Invalid .charx file: missing card.json at root." };
-  }
-
-  const cardJson = JSON.parse(cardEntry.getData().toString("utf-8")) as Record<string, unknown>;
+  const cardJson = readCharXCardJson(zip);
+  if (!cardJson) return { success: false, error: "Invalid .charx file: missing card.json at root." };
 
   // Resolve the main icon asset from the zip
   let avatarDataUrl: string | null = null;
@@ -209,6 +258,94 @@ export async function importCharX(buf: Buffer, db: DB, options?: { timestampOver
   return importSTCharacter(cardJson as Record<string, unknown>, db, options);
 }
 
+export function inspectCharX(buf: Buffer): STCharacterImportPreview {
+  try {
+    const zip = new AdmZip(buf);
+    const cardJson = readCharXCardJson(zip);
+    if (!cardJson) {
+      return {
+        success: false,
+        hasEmbeddedLorebook: false,
+        embeddedLorebookEntries: 0,
+        error: "Invalid .charx file: missing card.json at root.",
+      };
+    }
+    return inspectSTCharacter(cardJson);
+  } catch (error) {
+    return {
+      success: false,
+      hasEmbeddedLorebook: false,
+      embeddedLorebookEntries: 0,
+      error: error instanceof Error ? error.message : "Invalid .charx file",
+    };
+  }
+}
+
+function readCharXCardJson(zip: AdmZip): Record<string, unknown> | null {
+  const cardEntry = zip.getEntry("card.json");
+  if (!cardEntry) return null;
+  return JSON.parse(cardEntry.getData().toString("utf-8")) as Record<string, unknown>;
+}
+
+function normalizeCharacterData(raw: Record<string, unknown>): CharacterData {
+  // Detect format
+  if ((raw.spec === "chara_card_v2" || raw.spec === "chara_card_v3") && raw.data) {
+    // V2 / V3 format — extract from data wrapper
+    return normalizeV2(raw.data as Record<string, unknown>);
+  }
+  if (raw.char_name || raw.name) {
+    // V1 / Pygmalion format — convert to V2
+    return convertV1toV2(raw);
+  }
+  if (raw.type === "character" && raw.data) {
+    // RisuAI format
+    return convertRisuToV2((raw.data as Record<string, unknown>) ?? {});
+  }
+  // Try treating the whole object as character data
+  return normalizeV2(raw);
+}
+
+function extractRawCharacterBook(raw: Record<string, unknown>): unknown {
+  if ((raw.spec === "chara_card_v2" || raw.spec === "chara_card_v3") && raw.data && typeof raw.data === "object") {
+    return selectBestCharacterBook(raw.character_book, (raw.data as Record<string, unknown>).character_book);
+  }
+  if (raw.type === "character" && raw.data && typeof raw.data === "object") {
+    return selectBestCharacterBook(raw.character_book, (raw.data as Record<string, unknown>).character_book);
+  }
+  return raw.character_book;
+}
+
+function getCharacterBookEntries(raw: unknown): Record<string, unknown>[] {
+  if (!raw || typeof raw !== "object") return [];
+  const entries = (raw as Record<string, unknown>).entries;
+  if (Array.isArray(entries))
+    return entries.filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object");
+  if (entries && typeof entries === "object") {
+    return Object.values(entries).filter(
+      (entry): entry is Record<string, unknown> => !!entry && typeof entry === "object",
+    );
+  }
+  return [];
+}
+
+function selectBestCharacterBook(...books: unknown[]): unknown {
+  let best: unknown = null;
+  let bestNamedEntries = -1;
+
+  for (const book of books) {
+    if (!book || typeof book !== "object") continue;
+    const entries = getCharacterBookEntries(book);
+    if (entries.length === 0) continue;
+    const namedEntries = entries.filter((entry) => firstNonEmptyString(entry.comment, entry.name)).length;
+    if (namedEntries > bestNamedEntries) {
+      best = book;
+      bestNamedEntries = namedEntries;
+    }
+  }
+
+  return best;
+}
+
 function buildCardSpecMetadata(raw: Record<string, unknown>) {
   const spec = typeof raw.spec === "string" ? raw.spec : null;
   const specVersion = typeof raw.spec_version === "string" ? raw.spec_version : null;
@@ -248,7 +385,31 @@ function resolveCharXAsset(zip: AdmZip, uri: string, ext?: string): string | nul
   return `data:image/${mime};base64,${entry.getData().toString("base64")}`;
 }
 
+function normalizeAltDescriptions(raw: unknown): CharacterData["extensions"]["altDescriptions"] {
+  const entries = (() => {
+    if (Array.isArray(raw)) return raw;
+    if (typeof raw !== "string" || !raw.trim()) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  })();
+
+  return entries
+    .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object")
+    .map((entry, index) => ({
+      id: typeof entry.id === "string" && entry.id.trim() ? entry.id : `extension-${index}`,
+      label: typeof entry.label === "string" ? entry.label : "Extension",
+      content: typeof entry.content === "string" ? entry.content : "",
+      active: entry.active !== false,
+    }));
+}
+
 function normalizeV2(raw: Record<string, unknown>): CharacterData {
+  const rawExtensions =
+    raw.extensions && typeof raw.extensions === "object" ? (raw.extensions as Record<string, unknown>) : {};
   return {
     name: String(raw.name ?? "Unknown"),
     description: String(raw.description ?? ""),
@@ -264,24 +425,19 @@ function normalizeV2(raw: Record<string, unknown>): CharacterData {
     character_version: String(raw.character_version ?? ""),
     alternate_greetings: Array.isArray(raw.alternate_greetings) ? raw.alternate_greetings.map(String) : [],
     extensions: {
-      talkativeness: Number((raw.extensions as Record<string, unknown>)?.talkativeness ?? 0.5),
-      fav: Boolean((raw.extensions as Record<string, unknown>)?.fav),
-      world: String((raw.extensions as Record<string, unknown>)?.world ?? ""),
+      talkativeness: Number(rawExtensions.talkativeness ?? 0.5),
+      fav: Boolean(rawExtensions.fav),
+      world: String(rawExtensions.world ?? ""),
       depth_prompt: {
-        prompt: String(
-          ((raw.extensions as Record<string, unknown>)?.depth_prompt as Record<string, unknown>)?.prompt ?? "",
-        ),
-        depth: Number(
-          ((raw.extensions as Record<string, unknown>)?.depth_prompt as Record<string, unknown>)?.depth ?? 4,
-        ),
+        prompt: String((rawExtensions.depth_prompt as Record<string, unknown>)?.prompt ?? ""),
+        depth: Number((rawExtensions.depth_prompt as Record<string, unknown>)?.depth ?? 4),
         role:
-          (((raw.extensions as Record<string, unknown>)?.depth_prompt as Record<string, unknown>)?.role as
-            | "system"
-            | "user"
-            | "assistant") ?? "system",
+          ((rawExtensions.depth_prompt as Record<string, unknown>)?.role as "system" | "user" | "assistant") ??
+          "system",
       },
-      backstory: String((raw.extensions as Record<string, unknown>)?.backstory ?? ""),
-      appearance: String((raw.extensions as Record<string, unknown>)?.appearance ?? ""),
+      backstory: String(rawExtensions.backstory ?? ""),
+      appearance: String(rawExtensions.appearance ?? ""),
+      altDescriptions: normalizeAltDescriptions(rawExtensions.altDescriptions ?? rawExtensions.descriptionExtensions),
     },
     character_book: normalizeCharacterBook(raw.character_book),
   };
@@ -294,6 +450,13 @@ function normalizeStringArray(raw: unknown): string[] {
   return [];
 }
 
+function firstNonEmptyString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return null;
+}
+
 /**
  * Normalize a character_book from any format (ST World Info or V2 spec) into
  * the V2 CharacterBook shape with entries as an array of CharacterBookEntry objects.
@@ -302,18 +465,7 @@ function normalizeCharacterBook(raw: unknown): CharacterData["character_book"] {
   if (!raw || typeof raw !== "object") return null;
   const book = raw as Record<string, unknown>;
 
-  // entries can be an object { "0": {...}, "1": {...} } (ST) or an array [{...}, {...}] (V2)
-  const rawEntries = book.entries;
-  let entryList: Record<string, unknown>[];
-  if (Array.isArray(rawEntries)) {
-    entryList = rawEntries;
-  } else if (rawEntries && typeof rawEntries === "object") {
-    entryList = Object.values(rawEntries);
-  } else {
-    entryList = [];
-  }
-
-  const entries = entryList.map((e, i) => {
+  const entries = getCharacterBookEntries(book).map((e, i) => {
     const posRaw = e.position;
     let position: "before_char" | "after_char" = "before_char";
     if (typeof posRaw === "string") {
@@ -321,6 +473,7 @@ function normalizeCharacterBook(raw: unknown): CharacterData["character_book"] {
     } else if (typeof posRaw === "number") {
       position = posRaw === 1 ? "after_char" : "before_char";
     }
+    const title = firstNonEmptyString(e.comment, e.name) ?? `Entry ${i + 1}`;
 
     return {
       keys: normalizeStringArray(e.key ?? e.keys),
@@ -330,10 +483,10 @@ function normalizeCharacterBook(raw: unknown): CharacterData["character_book"] {
       enabled: e.disable != null ? !e.disable : e.enabled != null ? Boolean(e.enabled) : true,
       insertion_order: (e.order ?? e.insertion_order ?? 100) as number,
       case_sensitive: Boolean(e.caseSensitive ?? e.case_sensitive ?? false),
-      name: String(e.comment ?? e.name ?? `Entry ${i + 1}`),
+      name: title,
       priority: (e.priority ?? 10) as number,
       id: (e.uid ?? e.id ?? i) as number,
-      comment: String(e.comment ?? e.name ?? ""),
+      comment: title,
       selective: Boolean(e.selective ?? false),
       constant: Boolean(e.constant ?? false),
       position,

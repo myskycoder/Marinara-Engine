@@ -3,14 +3,17 @@
 // ──────────────────────────────────────────────
 import {
   APP_LANGUAGE_OPTIONS,
+  TRACKER_DATA_PANEL_SECTIONS,
   useUIStore,
-  type InstalledExtension,
+  type GameDialogueDisplayMode,
   type RoleplayAvatarStyle,
+  type TrackerDataPanelSection,
   type VisualTheme,
 } from "../../stores/ui.store";
-import { cn, generateClientId } from "../../lib/utils";
+import { cn } from "../../lib/utils";
+import { useExtensions, useCreateExtension, useDeleteExtension, useUpdateExtension } from "../../hooks/use-extensions";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "../../lib/api-client";
+import { ADMIN_SECRET_STORAGE_KEY, api, getAdminSecretHeader } from "../../lib/api-client";
 import { forceRefreshSpa } from "@/lib/browser-runtime";
 import React, { useRef, useState, useCallback, useEffect } from "react";
 import { toast } from "sonner";
@@ -24,6 +27,8 @@ import {
   useUpdateTheme,
 } from "../../hooks/use-themes";
 import {
+  ArrowDown,
+  ArrowUp,
   Upload,
   X,
   Image,
@@ -48,15 +53,20 @@ import {
   Download,
   FolderOpen,
   RefreshCw,
+  RotateCcw,
   ExternalLink,
+  ScrollText,
 } from "lucide-react";
 import { useClearAllData, useExpungeData, useUpdateChatMetadata, type ExpungeScope } from "../../hooks/use-chats";
 import { useChatStore } from "../../stores/chat.store";
 import { useGameAssetStore } from "../../stores/game-asset.store";
 import { chatKeys } from "../../hooks/use-chats";
 import { HelpTooltip } from "../ui/HelpTooltip";
+import { TrackerPanelIcon } from "../ui/TrackerPanelIcon";
 import { ConversationSoundSetting, ToggleSetting } from "./settings/SettingControls";
 import { DraftNumberInput } from "../ui/DraftNumberInput";
+import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatDialog";
+import { inspectCharacterFilesForEmbeddedLorebooks } from "../../lib/character-import";
 
 const TABS = [
   { id: "general", label: "General" },
@@ -103,6 +113,23 @@ const EXPUNGE_SCOPE_OPTIONS: Array<{ id: ExpungeScope; label: string; descriptio
   },
 ];
 
+async function readSettingsResponseError(res: Response, fallback: string) {
+  const contentType = res.headers.get("content-type") ?? "";
+
+  try {
+    if (contentType.includes("application/json")) {
+      const payload = (await res.json()) as { error?: unknown; message?: unknown };
+      const message = typeof payload.message === "string" ? payload.message : payload.error;
+      return typeof message === "string" && message.trim() ? message : fallback;
+    }
+
+    const text = (await res.text()).trim();
+    return text ? text.slice(0, 500) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 const ROLEPLAY_AVATAR_STYLE_OPTIONS: Array<{ id: RoleplayAvatarStyle; label: string; desc: string }> = [
   {
     id: "circles",
@@ -121,11 +148,47 @@ const ROLEPLAY_AVATAR_STYLE_OPTIONS: Array<{ id: RoleplayAvatarStyle; label: str
   },
 ];
 
+const GAME_DIALOGUE_DISPLAY_OPTIONS: Array<{ id: GameDialogueDisplayMode; label: string; desc: string }> = [
+  {
+    id: "classic",
+    label: "Classic VN",
+    desc: "One active segment in the VN box, with logs available from the Logs button.",
+  },
+  {
+    id: "stacked",
+    label: "History Above VN",
+    desc: "Shows prior segments above the VN box and keeps the full session scrollable there.",
+  },
+];
+
+const TRACKER_PANEL_CARD_OPTIONS: Record<TrackerDataPanelSection, { label: string; desc: string }> = {
+  world: {
+    label: "World State",
+    desc: "Date, time, location, weather, and temperature.",
+  },
+  persona: {
+    label: "Persona",
+    desc: "Persona status, stats, portrait, and inventory.",
+  },
+  characters: {
+    label: "Characters",
+    desc: "Present character cards, stats, portraits, and thoughts.",
+  },
+  quests: {
+    label: "Quests",
+    desc: "Active quest progress and objectives.",
+  },
+  custom: {
+    label: "Custom",
+    desc: "Extra tracker fields from custom tracker agents.",
+  },
+};
+
 const GAME_ASSET_CATEGORIES = [
   {
     id: "music",
     label: "Music",
-    defaultFolder: "exploration",
+    defaultFolder: "exploration/fantasy/calm",
     accept: "audio/*,.mp3,.ogg,.wav,.flac,.m4a,.aac,.webm",
   },
   {
@@ -159,6 +222,130 @@ const GAME_ASSET_CATEGORY_BY_ID = new Map(GAME_ASSET_CATEGORIES.map((category) =
 
 // Module-level set survives component remounts (e.g. mobile AnimatePresence unmount/remount)
 const mountedSettingsTabs = new Set<string>();
+
+function ImageDimensionRow({
+  label,
+  help,
+  width,
+  height,
+  onCommit,
+}: {
+  label: string;
+  help: string;
+  width: number;
+  height: number;
+  onCommit: (width: number, height: number) => void;
+}) {
+  return (
+    <div className="grid gap-2 rounded-lg bg-[var(--background)]/55 p-3 ring-1 ring-[var(--border)] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+      <div className="min-w-0">
+        <div className="inline-flex items-center gap-1 text-xs font-medium text-[var(--foreground)]">
+          {label}
+          <HelpTooltip text={help} />
+        </div>
+        <div className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">Pixels, clamped from 64 to 4096.</div>
+      </div>
+      <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-1.5 sm:w-40">
+        <DraftNumberInput
+          value={width}
+          min={64}
+          max={4096}
+          onCommit={(nextWidth) => onCommit(nextWidth, height)}
+          className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2 py-1 text-xs"
+        />
+        <span className="text-[0.625rem] text-[var(--muted-foreground)]">x</span>
+        <DraftNumberInput
+          value={height}
+          min={64}
+          max={4096}
+          onCommit={(nextHeight) => onCommit(width, nextHeight)}
+          className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2 py-1 text-xs"
+        />
+      </div>
+    </div>
+  );
+}
+
+function TrackerPanelCardOrderSetting() {
+  const trackerPanelSectionOrder = useUIStore((s) => s.trackerPanelSectionOrder);
+  const setTrackerPanelSectionOrder = useUIStore((s) => s.setTrackerPanelSectionOrder);
+  const orderedSections = [
+    ...trackerPanelSectionOrder.filter((section) => TRACKER_DATA_PANEL_SECTIONS.includes(section)),
+    ...TRACKER_DATA_PANEL_SECTIONS.filter((section) => !trackerPanelSectionOrder.includes(section)),
+  ];
+  const isDefaultOrder = orderedSections.every((section, index) => section === TRACKER_DATA_PANEL_SECTIONS[index]);
+
+  const moveCard = (section: TrackerDataPanelSection, direction: -1 | 1) => {
+    const index = orderedSections.indexOf(section);
+    const nextIndex = index + direction;
+    if (index < 0 || nextIndex < 0 || nextIndex >= orderedSections.length) return;
+
+    const nextOrder = [...orderedSections];
+    [nextOrder[index], nextOrder[nextIndex]] = [nextOrder[nextIndex]!, nextOrder[index]!];
+    setTrackerPanelSectionOrder(nextOrder);
+  };
+
+  return (
+    <div className="mt-1.5 flex flex-col gap-1.5 rounded-lg bg-[var(--background)]/36 p-1.5 ring-1 ring-[var(--border)]">
+      <div className="flex min-h-5 items-center justify-between gap-2 px-0.5">
+        <span className="inline-flex min-w-0 items-center gap-1 text-[0.625rem] font-medium text-[var(--foreground)]">
+          Card order
+          <HelpTooltip text="Controls the top-to-bottom order of tracker cards when their matching tracker agents are enabled for a chat." />
+        </span>
+        <button
+          type="button"
+          onClick={() => setTrackerPanelSectionOrder([...TRACKER_DATA_PANEL_SECTIONS])}
+          disabled={isDefaultOrder}
+          title="Reset tracker card order"
+          aria-label="Reset tracker card order"
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--secondary)] hover:text-[var(--foreground)] active:scale-95 disabled:cursor-default disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-[var(--muted-foreground)]"
+        >
+          <RotateCcw size="0.6875rem" />
+        </button>
+      </div>
+      <div className="grid gap-0.5">
+        {orderedSections.map((section, index) => {
+          const option = TRACKER_PANEL_CARD_OPTIONS[section];
+          return (
+            <div
+              key={section}
+              className="grid min-h-7 min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5 rounded-sm bg-[var(--secondary)]/42 px-1.5 py-1 ring-1 ring-[var(--border)]/60"
+              title={option.desc}
+            >
+              <div className="min-w-0">
+                <div className="truncate text-[0.6875rem] font-medium leading-4 text-[var(--foreground)]">
+                  {option.label}
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center gap-0.5">
+                <button
+                  type="button"
+                  onClick={() => moveCard(section, -1)}
+                  disabled={index === 0}
+                  title={`Move ${option.label} up`}
+                  aria-label={`Move ${option.label} up`}
+                  className="flex h-5 w-5 items-center justify-center rounded-sm text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--background)] hover:text-[var(--primary)] active:scale-95 disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--muted-foreground)]"
+                >
+                  <ArrowUp size="0.6875rem" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => moveCard(section, 1)}
+                  disabled={index === orderedSections.length - 1}
+                  title={`Move ${option.label} down`}
+                  aria-label={`Move ${option.label} down`}
+                  className="flex h-5 w-5 items-center justify-center rounded-sm text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--background)] hover:text-[var(--primary)] active:scale-95 disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--muted-foreground)]"
+                >
+                  <ArrowDown size="0.6875rem" />
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 export function SettingsPanel() {
   const settingsTab = useUIStore((s) => s.settingsTab);
@@ -216,10 +403,23 @@ function GeneralSettings() {
   const setStreamingSpeed = useUIStore((s) => s.setStreamingSpeed);
   const gameInstantTextReveal = useUIStore((s) => s.gameInstantTextReveal);
   const setGameInstantTextReveal = useUIStore((s) => s.setGameInstantTextReveal);
+  const gameMiddleMouseNav = useUIStore((s) => s.gameMiddleMouseNav);
+  const setGameMiddleMouseNav = useUIStore((s) => s.setGameMiddleMouseNav);
   const gameTextSpeed = useUIStore((s) => s.gameTextSpeed);
   const setGameTextSpeed = useUIStore((s) => s.setGameTextSpeed);
   const gameAutoPlayDelay = useUIStore((s) => s.gameAutoPlayDelay);
   const setGameAutoPlayDelay = useUIStore((s) => s.setGameAutoPlayDelay);
+  const reviewImagePromptsBeforeSend = useUIStore((s) => s.reviewImagePromptsBeforeSend);
+  const setReviewImagePromptsBeforeSend = useUIStore((s) => s.setReviewImagePromptsBeforeSend);
+  const imageBackgroundWidth = useUIStore((s) => s.imageBackgroundWidth);
+  const imageBackgroundHeight = useUIStore((s) => s.imageBackgroundHeight);
+  const setImageBackgroundDimensions = useUIStore((s) => s.setImageBackgroundDimensions);
+  const imagePortraitWidth = useUIStore((s) => s.imagePortraitWidth);
+  const imagePortraitHeight = useUIStore((s) => s.imagePortraitHeight);
+  const setImagePortraitDimensions = useUIStore((s) => s.setImagePortraitDimensions);
+  const imageSelfieWidth = useUIStore((s) => s.imageSelfieWidth);
+  const imageSelfieHeight = useUIStore((s) => s.imageSelfieHeight);
+  const setImageSelfieDimensions = useUIStore((s) => s.setImageSelfieDimensions);
   const enterToSendRP = useUIStore((s) => s.enterToSendRP);
   const setEnterToSendRP = useUIStore((s) => s.setEnterToSendRP);
   const enterToSendConvo = useUIStore((s) => s.enterToSendConvo);
@@ -232,6 +432,16 @@ function GeneralSettings() {
   const setMessagesPerPage = useUIStore((s) => s.setMessagesPerPage);
   const boldDialogue = useUIStore((s) => s.boldDialogue);
   const setBoldDialogue = useUIStore((s) => s.setBoldDialogue);
+  const trimIncompleteModelOutput = useUIStore((s) => s.trimIncompleteModelOutput);
+  const setTrimIncompleteModelOutput = useUIStore((s) => s.setTrimIncompleteModelOutput);
+  const speechToTextEnabled = useUIStore((s) => s.speechToTextEnabled);
+  const setSpeechToTextEnabled = useUIStore((s) => s.setSpeechToTextEnabled);
+  const spotifyPlayerEnabled = useUIStore((s) => s.spotifyPlayerEnabled);
+  const setSpotifyPlayerEnabled = useUIStore((s) => s.setSpotifyPlayerEnabled);
+  const intuitiveSwipeNavigation = useUIStore((s) => s.intuitiveSwipeNavigation);
+  const setIntuitiveSwipeNavigation = useUIStore((s) => s.setIntuitiveSwipeNavigation);
+  const intuitiveSwipeRerollLatest = useUIStore((s) => s.intuitiveSwipeRerollLatest);
+  const setIntuitiveSwipeRerollLatest = useUIStore((s) => s.setIntuitiveSwipeRerollLatest);
   const rescanGameAssets = useGameAssetStore((s) => s.rescanAssets);
   const assetFileRef = useRef<HTMLInputElement>(null);
   const [assetCategory, setAssetCategory] = useState<GameAssetCategoryId>("backgrounds");
@@ -332,6 +542,13 @@ function GeneralSettings() {
         help="When on, AI responses appear word-by-word as they're generated. When off, the full response appears at once after completion."
       />
 
+      <ToggleSetting
+        label="Spotify mini player"
+        checked={spotifyPlayerEnabled}
+        onChange={setSpotifyPlayerEnabled}
+        help="Shows a compact Spotify player in the top bar on desktop and as a draggable floating widget on mobile. Requires the Spotify DJ agent to be connected."
+      />
+
       {/* Streaming Speed */}
       <label
         className={cn(
@@ -364,6 +581,13 @@ function GeneralSettings() {
         checked={gameInstantTextReveal}
         onChange={setGameInstantTextReveal}
         help="When enabled, Game mode narration segments appear fully as soon as you enter them. This skips the typewriter effect and hides the narration speed control."
+      />
+
+      <ToggleSetting
+        label="Mouse-wheel + click navigation"
+        checked={gameMiddleMouseNav}
+        onChange={setGameMiddleMouseNav}
+        help="In Game mode, scroll the mouse wheel up to step back through past assistant turns and down to step forward. Clicking the scene background acts like the Next button. While reviewing the past, Next becomes Return — clicking the background or pressing Return jumps you back to where you were reading."
       />
 
       {/* Game Narration Text Speed */}
@@ -486,6 +710,76 @@ function GeneralSettings() {
         }
       />
 
+      <ToggleSetting
+        label="Trim incomplete model endings"
+        checked={trimIncompleteModelOutput}
+        onChange={setTrimIncompleteModelOutput}
+        help="When on, Marinara trims a trailing unfinished sentence from AI responses before saving the message. It leaves complete responses and command-only endings alone."
+      />
+
+      <ToggleSetting
+        label="Speech-to-text microphone"
+        checked={speechToTextEnabled}
+        onChange={setSpeechToTextEnabled}
+        help="When on, chat input bars show a microphone button for browser dictation. Handy still works independently by pasting into the focused input field."
+      />
+
+      <ToggleSetting
+        label="Intuitive swipe navigation"
+        checked={intuitiveSwipeNavigation}
+        onChange={setIntuitiveSwipeNavigation}
+        help="In Conversation and Roleplay modes, use Left/Right Arrow on desktop or horizontal touch swipes on mobile to move between alternate generations on the latest assistant message. Up Arrow edits your last sent message (only when the chat input is empty)."
+      />
+
+      <div className={cn("pl-5 transition-opacity", intuitiveSwipeNavigation ? "" : "pointer-events-none opacity-45")}>
+        <ToggleSetting
+          label="Reroll past the newest swipe"
+          checked={intuitiveSwipeRerollLatest}
+          onChange={setIntuitiveSwipeRerollLatest}
+          help="When intuitive swipes are enabled, pressing Right Arrow or swiping left on the newest swipe of the latest assistant message creates a new reroll."
+        />
+      </div>
+
+      <div className="rounded-xl bg-[var(--secondary)]/50 p-4 ring-1 ring-[var(--border)]">
+        <div className="mb-3 flex flex-col gap-1">
+          <div className="text-xs font-semibold text-[var(--foreground)]">Image Generation</div>
+          <p className="text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+            Review generated prompts before Game mode sends them, and set default canvases for generated assets.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-2.5">
+          <ToggleSetting
+            label="Expose image prompts before sending"
+            checked={reviewImagePromptsBeforeSend}
+            onChange={setReviewImagePromptsBeforeSend}
+            help="Shows generated image prompts for review before sending Game assets, character or persona avatars, and sprite generations to the image provider."
+          />
+
+          <ImageDimensionRow
+            label="Backgrounds"
+            help="Used for Game mode generated backgrounds and special scene illustrations."
+            width={imageBackgroundWidth}
+            height={imageBackgroundHeight}
+            onCommit={setImageBackgroundDimensions}
+          />
+          <ImageDimensionRow
+            label="Portraits"
+            help="Used for generated character and NPC portraits."
+            width={imagePortraitWidth}
+            height={imagePortraitHeight}
+            onCommit={setImagePortraitDimensions}
+          />
+          <ImageDimensionRow
+            label="Selfies"
+            help="Default selfie canvas for Roleplay and Conversation image commands when a chat does not override selfie resolution."
+            width={imageSelfieWidth}
+            height={imageSelfieHeight}
+            onCommit={setImageSelfieDimensions}
+          />
+        </div>
+      </div>
+
       {/* Game Assets Folders */}
       <div className="rounded-xl bg-[var(--secondary)]/50 p-4 ring-1 ring-[var(--border)]">
         <div className="mb-2 flex items-center justify-between gap-2">
@@ -580,7 +874,8 @@ function GeneralSettings() {
         <p className="mt-2.5 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
           On desktop, folder buttons open the server's asset folders. On mobile or a dedicated server, use upload here
           so files from your phone are copied onto the server. Audio supports MP3, OGG, WAV, FLAC, M4A, AAC, and WebM;
-          images support PNG, JPG, GIF, WebP, AVIF, and SVG for sprites.
+          images support PNG, JPG, GIF, WebP, AVIF, and SVG for sprites. Music folders use state/genre/intensity, such
+          as exploration/fantasy/calm.
         </p>
       </div>
     </div>
@@ -612,18 +907,31 @@ function AppearanceSettings() {
   );
   const fontFamily = useUIStore((s) => s.fontFamily);
   const setFontFamily = useUIStore((s) => s.setFontFamily);
-  const convoGradientFrom = useUIStore((s) => s.convoGradientFrom);
-  const setConvoGradientFrom = useUIStore((s) => s.setConvoGradientFrom);
-  const convoGradientTo = useUIStore((s) => s.convoGradientTo);
-  const setConvoGradientTo = useUIStore((s) => s.setConvoGradientTo);
-  const [draftFrom, setDraftFrom] = useState(convoGradientFrom);
-  const [draftTo, setDraftTo] = useState(convoGradientTo);
+  const convoGradient = useUIStore((s) => s.convoGradient);
+  const setConvoGradientField = useUIStore((s) => s.setConvoGradientField);
+  const [activeGradientScheme, setActiveGradientScheme] = useState<"dark" | "light">(theme);
+  const currentGradient = convoGradient[activeGradientScheme];
+  const [draftFrom, setDraftFrom] = useState(currentGradient.from);
+  const [draftTo, setDraftTo] = useState(currentGradient.to);
+
+  // Sync draft inputs when switching between scheme tabs so the text fields
+  // always reflect the stored value for the active scheme.
+  useEffect(() => {
+    setDraftFrom(currentGradient.from);
+    setDraftTo(currentGradient.to);
+  }, [activeGradientScheme, currentGradient.from, currentGradient.to]);
   const fontSize = useUIStore((s) => s.fontSize);
   const setFontSize = useUIStore((s) => s.setFontSize);
   const chatFontSize = useUIStore((s) => s.chatFontSize);
   const setChatFontSize = useUIStore((s) => s.setChatFontSize);
   const weatherEffects = useUIStore((s) => s.weatherEffects);
   const setWeatherEffects = useUIStore((s) => s.setWeatherEffects);
+  const trackerPanelEnabled = useUIStore((s) => s.trackerPanelEnabled);
+  const setTrackerPanelEnabled = useUIStore((s) => s.setTrackerPanelEnabled);
+  const trackerPanelHideHudWidgets = useUIStore((s) => s.trackerPanelHideHudWidgets);
+  const setTrackerPanelHideHudWidgets = useUIStore((s) => s.setTrackerPanelHideHudWidgets);
+  const trackerPanelUseExpressionSprites = useUIStore((s) => s.trackerPanelUseExpressionSprites);
+  const setTrackerPanelUseExpressionSprites = useUIStore((s) => s.setTrackerPanelUseExpressionSprites);
 
   // Text appearance
   const chatFontColor = useUIStore((s) => s.chatFontColor);
@@ -632,8 +940,16 @@ function AppearanceSettings() {
   const setChatFontOpacity = useUIStore((s) => s.setChatFontOpacity);
   const roleplayAvatarStyle = useUIStore((s) => s.roleplayAvatarStyle);
   const setRoleplayAvatarStyle = useUIStore((s) => s.setRoleplayAvatarStyle);
+  const roleplayAvatarScale = useUIStore((s) => s.roleplayAvatarScale);
+  const setRoleplayAvatarScale = useUIStore((s) => s.setRoleplayAvatarScale);
+  const roleplaySpriteScale = useUIStore((s) => s.roleplaySpriteScale);
+  const setRoleplaySpriteScale = useUIStore((s) => s.setRoleplaySpriteScale);
+  const gameDialogueDisplayMode = useUIStore((s) => s.gameDialogueDisplayMode);
+  const setGameDialogueDisplayMode = useUIStore((s) => s.setGameDialogueDisplayMode);
   const gameAvatarScale = useUIStore((s) => s.gameAvatarScale);
   const setGameAvatarScale = useUIStore((s) => s.setGameAvatarScale);
+  const gameFullBodySpriteScale = useUIStore((s) => s.gameFullBodySpriteScale);
+  const setGameFullBodySpriteScale = useUIStore((s) => s.setGameFullBodySpriteScale);
   const textStrokeWidth = useUIStore((s) => s.textStrokeWidth);
   const setTextStrokeWidth = useUIStore((s) => s.setTextStrokeWidth);
   const textStrokeColor = useUIStore((s) => s.textStrokeColor);
@@ -948,6 +1264,35 @@ function AppearanceSettings() {
 
       <div className="flex flex-col gap-2">
         <div className="flex items-center gap-1.5">
+          <TrackerPanelIcon size="0.875rem" strokeWidth={1.95} className="text-[var(--muted-foreground)]" />
+          <span className="text-xs font-medium">Tracker Panel</span>
+          <HelpTooltip text="Adds a compact side panel button to the Roleplay HUD for the fixed tracker board." />
+        </div>
+        <ToggleSetting
+          label="Show tracker panel button"
+          checked={trackerPanelEnabled}
+          onChange={setTrackerPanelEnabled}
+          help="When on, Roleplay HUD shows a side-panel button for the fixed Tracker panel."
+        />
+        <div className={cn("pl-5 transition-opacity", trackerPanelEnabled ? "" : "pointer-events-none opacity-45")}>
+          <ToggleSetting
+            label="Replace tracker HUD icons"
+            checked={trackerPanelHideHudWidgets}
+            onChange={setTrackerPanelHideHudWidgets}
+            help="Hides the old world/player tracker icon strip so the Tracker panel can dock to the edge. The Agents button stays visible."
+          />
+          <ToggleSetting
+            label="Use expression sprites for tracker portraits"
+            checked={trackerPanelUseExpressionSprites}
+            onChange={setTrackerPanelUseExpressionSprites}
+            help="When on, tracker portraits can switch to Expression Engine sprites if that agent is enabled for the chat and the character has matching sprite images."
+          />
+          <TrackerPanelCardOrderSetting />
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-1.5">
           <Image size="0.75rem" className="text-[var(--muted-foreground)]" />
           <span className="text-xs font-medium">Roleplay Avatars</span>
           <HelpTooltip text="Choose how avatars sit next to roleplay messages. Small Circles keeps the current compact layout. Small Rectangles keeps avatars beside the bubble but gives portraits a taller frame. Glued Side Panel embeds a larger portrait strip into the message bubble itself." />
@@ -1001,21 +1346,93 @@ function AppearanceSettings() {
             </button>
           ))}
         </div>
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/45 p-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <div className="flex h-20 w-full shrink-0 items-end justify-center gap-3 overflow-hidden rounded-md bg-black/30 ring-1 ring-[var(--border)]/70 sm:w-28">
+              <div
+                className={cn(
+                  "mb-2 border border-white/20 bg-gradient-to-b from-rose-300/85 via-fuchsia-300/65 to-slate-900/90 shadow-lg transition-all",
+                  roleplayAvatarStyle === "circles"
+                    ? "rounded-full"
+                    : roleplayAvatarStyle === "rectangles"
+                      ? "rounded-xl"
+                      : "rounded-md",
+                )}
+                style={{
+                  width: `${
+                    roleplayAvatarStyle === "panel"
+                      ? Math.min(5.5, 2.2 * roleplayAvatarScale)
+                      : Math.min(5.5, (roleplayAvatarStyle === "rectangles" ? 2.15 : 2) * roleplayAvatarScale)
+                  }rem`,
+                  height: `${
+                    roleplayAvatarStyle === "circles"
+                      ? Math.min(5.5, 2 * roleplayAvatarScale)
+                      : Math.min(6, (roleplayAvatarStyle === "rectangles" ? 2.7 : 3.4) * roleplayAvatarScale)
+                  }rem`,
+                }}
+              />
+              <div
+                className="mb-1 rounded-full border border-white/20 bg-gradient-to-b from-violet-200/85 via-purple-200/70 to-slate-900/95 shadow-lg transition-all"
+                style={{
+                  width: `${Math.min(2.1, 0.85 * roleplaySpriteScale)}rem`,
+                  height: `${Math.min(4.7, 3.2 * roleplaySpriteScale)}rem`,
+                }}
+              />
+            </div>
+            <div className="grid min-w-0 flex-1 gap-3">
+              <label className="flex min-w-0 flex-col gap-1">
+                <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">Message avatar scale</span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="range"
+                    min={0.75}
+                    max={2.5}
+                    step={0.05}
+                    value={roleplayAvatarScale}
+                    onChange={(e) => setRoleplayAvatarScale(Number(e.target.value))}
+                    className="min-w-0 flex-1 accent-[var(--primary)]"
+                  />
+                  <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
+                    {Math.round(roleplayAvatarScale * 100)}%
+                  </span>
+                </div>
+              </label>
+              <label className="flex min-w-0 flex-col gap-1">
+                <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">Default sprite scale</span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="range"
+                    min={0.5}
+                    max={1.75}
+                    step={0.05}
+                    value={roleplaySpriteScale}
+                    onChange={(e) => setRoleplaySpriteScale(Number(e.target.value))}
+                    className="min-w-0 flex-1 accent-[var(--primary)]"
+                  />
+                  <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
+                    {Math.round(roleplaySpriteScale * 100)}%
+                  </span>
+                </div>
+              </label>
+            </div>
+          </div>
+        </div>
         <p className="text-[0.625rem] text-[var(--muted-foreground)]">
           Rectangles keep the compact side slot but give portraits a bit more vertical room. The larger panel crops
           portraits from the top on short messages and fades them back into the bubble background on taller ones.
+          Per-chat sprite sizing still overrides the default sprite scale here.
         </p>
       </div>
 
       <div className="flex flex-col gap-2">
         <div className="flex items-center gap-1.5">
           <Image size="0.75rem" className="text-[var(--muted-foreground)]" />
-          <span className="text-xs font-medium">Game Avatars</span>
-          <HelpTooltip text="Scales Game mode VN portraits and full-body sprites. The game view clamps oversized art so it still fits on small screens." />
+          <span className="text-xs font-medium">Game VN Art</span>
+          <HelpTooltip text="Scales Game mode dialogue portraits separately from the center full-body sprites. Oversized art is still clamped per viewport." />
         </div>
         <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/45 p-3">
-          <div className="flex items-center gap-3">
-            <div className="flex h-16 w-20 shrink-0 items-end justify-center overflow-hidden rounded-md bg-black/30 ring-1 ring-[var(--border)]/70">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <div className="flex h-20 w-full shrink-0 items-end justify-center gap-3 overflow-hidden rounded-md bg-black/30 ring-1 ring-[var(--border)]/70 sm:w-28">
               <div
                 className="mb-1 rounded-lg border border-white/20 bg-gradient-to-b from-sky-300/80 via-cyan-200/65 to-slate-800/90 shadow-lg transition-all"
                 style={{
@@ -1023,25 +1440,77 @@ function AppearanceSettings() {
                   height: `${Math.min(3.9, 2.6 * gameAvatarScale)}rem`,
                 }}
               />
+              <div
+                className="mb-1 rounded-full border border-white/20 bg-gradient-to-b from-rose-200/85 via-fuchsia-200/70 to-slate-900/95 shadow-lg transition-all"
+                style={{
+                  width: `${Math.min(2.2, 0.9 * gameFullBodySpriteScale)}rem`,
+                  height: `${Math.min(4.8, 3.4 * gameFullBodySpriteScale)}rem`,
+                }}
+              />
             </div>
-            <label className="flex min-w-0 flex-1 flex-col gap-1">
-              <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">Avatar and sprite scale</span>
-              <div className="flex items-center gap-2">
-                <input
-                  type="range"
-                  min={0.75}
-                  max={1.75}
-                  step={0.05}
-                  value={gameAvatarScale}
-                  onChange={(e) => setGameAvatarScale(Number(e.target.value))}
-                  className="min-w-0 flex-1 accent-[var(--primary)]"
-                />
-                <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
-                  {Math.round(gameAvatarScale * 100)}%
-                </span>
-              </div>
-            </label>
+            <div className="grid min-w-0 flex-1 gap-3">
+              <label className="flex min-w-0 flex-col gap-1">
+                <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">Dialogue portrait scale</span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="range"
+                    min={0.75}
+                    max={1.75}
+                    step={0.05}
+                    value={gameAvatarScale}
+                    onChange={(e) => setGameAvatarScale(Number(e.target.value))}
+                    className="min-w-0 flex-1 accent-[var(--primary)]"
+                  />
+                  <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
+                    {Math.round(gameAvatarScale * 100)}%
+                  </span>
+                </div>
+              </label>
+              <label className="flex min-w-0 flex-col gap-1">
+                <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">Full-body sprite scale</span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="range"
+                    min={0.75}
+                    max={2.75}
+                    step={0.05}
+                    value={gameFullBodySpriteScale}
+                    onChange={(e) => setGameFullBodySpriteScale(Number(e.target.value))}
+                    className="min-w-0 flex-1 accent-[var(--primary)]"
+                  />
+                  <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
+                    {Math.round(gameFullBodySpriteScale * 100)}%
+                  </span>
+                </div>
+              </label>
+            </div>
           </div>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-1.5">
+          <ScrollText size="0.75rem" className="text-[var(--muted-foreground)]" />
+          <span className="text-xs font-medium">Game Dialogue Display</span>
+          <HelpTooltip text="Choose whether Game mode uses the classic VN box or shows a scrollable segment history directly above it." />
+        </div>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {GAME_DIALOGUE_DISPLAY_OPTIONS.map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              onClick={() => setGameDialogueDisplayMode(opt.id)}
+              className={cn(
+                "flex flex-col items-start gap-1 rounded-lg border p-3 text-left text-xs transition-all",
+                gameDialogueDisplayMode === opt.id
+                  ? "border-[var(--primary)] bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]"
+                  : "border-[var(--border)] hover:border-[var(--primary)]/40",
+              )}
+            >
+              <span className="font-semibold">{opt.label}</span>
+              <span className="text-[0.625rem] leading-tight text-[var(--muted-foreground)]">{opt.desc}</span>
+            </button>
+          ))}
         </div>
       </div>
 
@@ -1064,26 +1533,55 @@ function AppearanceSettings() {
         </p>
       </div>
 
-      {/* ── Conversation Gradient ── */}
+      {/* ── Conversation Gradient (per color-scheme) ── */}
       <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-1.5">
-          <Palette size="0.75rem" className="text-[var(--muted-foreground)]" />
-          <span className="text-xs font-medium">Conversation Theme</span>
-          <HelpTooltip text="Set a background gradient for all Conversation-mode chats, similar to Discord." />
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5">
+            <Palette size="0.75rem" className="text-[var(--muted-foreground)]" />
+            <span className="text-xs font-medium">Conversation Theme</span>
+            <HelpTooltip text="Set a background gradient for all Conversation-mode chats, separately for dark and light color schemes." />
+          </div>
+          {/* Scheme tabs */}
+          <div className="flex rounded-lg bg-[var(--secondary)] p-0.5 text-[0.625rem]">
+            <button
+              type="button"
+              onClick={() => setActiveGradientScheme("dark")}
+              className={cn(
+                "rounded-md px-2 py-1 transition-colors",
+                activeGradientScheme === "dark"
+                  ? "bg-[var(--primary)] text-[var(--primary-foreground)] shadow-sm"
+                  : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
+              )}
+            >
+              Dark
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveGradientScheme("light")}
+              className={cn(
+                "rounded-md px-2 py-1 transition-colors",
+                activeGradientScheme === "light"
+                  ? "bg-[var(--primary)] text-[var(--primary-foreground)] shadow-sm"
+                  : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
+              )}
+            >
+              Light
+            </button>
+          </div>
         </div>
         {/* Preview */}
         <div
           className="h-16 rounded-lg ring-1 ring-[var(--border)]"
-          style={{ background: `linear-gradient(135deg, ${convoGradientFrom}, ${convoGradientTo})` }}
+          style={{ background: `linear-gradient(135deg, ${currentGradient.from}, ${currentGradient.to})` }}
         />
         <div className="grid grid-cols-2 gap-3">
           <label className="flex flex-col gap-1">
             <div className="flex items-center gap-2">
               <input
                 type="color"
-                value={convoGradientFrom}
+                value={currentGradient.from}
                 onChange={(e) => {
-                  setConvoGradientFrom(e.target.value);
+                  setConvoGradientField(activeGradientScheme, "from", e.target.value);
                   setDraftFrom(e.target.value);
                 }}
                 className="h-8 w-8 flex-shrink-0 cursor-pointer rounded-md border border-[var(--border)] bg-transparent p-0.5"
@@ -1093,9 +1591,10 @@ function AppearanceSettings() {
                 value={draftFrom}
                 onChange={(e) => {
                   setDraftFrom(e.target.value);
-                  if (/^#[0-9a-fA-F]{6}$/.test(e.target.value)) setConvoGradientFrom(e.target.value);
+                  if (/^#[0-9a-fA-F]{6}$/.test(e.target.value))
+                    setConvoGradientField(activeGradientScheme, "from", e.target.value);
                 }}
-                onBlur={() => setDraftFrom(convoGradientFrom)}
+                onBlur={() => setDraftFrom(currentGradient.from)}
                 className="w-full rounded-md bg-[var(--secondary)] px-2 py-1.5 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
               />
             </div>
@@ -1104,9 +1603,9 @@ function AppearanceSettings() {
             <div className="flex items-center gap-2">
               <input
                 type="color"
-                value={convoGradientTo}
+                value={currentGradient.to}
                 onChange={(e) => {
-                  setConvoGradientTo(e.target.value);
+                  setConvoGradientField(activeGradientScheme, "to", e.target.value);
                   setDraftTo(e.target.value);
                 }}
                 className="h-8 w-8 flex-shrink-0 cursor-pointer rounded-md border border-[var(--border)] bg-transparent p-0.5"
@@ -1116,24 +1615,28 @@ function AppearanceSettings() {
                 value={draftTo}
                 onChange={(e) => {
                   setDraftTo(e.target.value);
-                  if (/^#[0-9a-fA-F]{6}$/.test(e.target.value)) setConvoGradientTo(e.target.value);
+                  if (/^#[0-9a-fA-F]{6}$/.test(e.target.value))
+                    setConvoGradientField(activeGradientScheme, "to", e.target.value);
                 }}
-                onBlur={() => setDraftTo(convoGradientTo)}
+                onBlur={() => setDraftTo(currentGradient.to)}
                 className="w-full rounded-md bg-[var(--secondary)] px-2 py-1.5 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
               />
             </div>
           </label>
         </div>
         <button
+          type="button"
           onClick={() => {
-            setConvoGradientFrom("#0a0a0e");
-            setConvoGradientTo("#1c2133");
-            setDraftFrom("#0a0a0e");
-            setDraftTo("#1c2133");
+            const defaults =
+              activeGradientScheme === "dark" ? { from: "#0a0a0e", to: "#1c2133" } : { from: "#f2eff7", to: "#eae6f0" };
+            setConvoGradientField(activeGradientScheme, "from", defaults.from);
+            setConvoGradientField(activeGradientScheme, "to", defaults.to);
+            setDraftFrom(defaults.from);
+            setDraftTo(defaults.to);
           }}
           className="text-[0.625rem] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors self-start"
         >
-          Reset to default
+          Reset {activeGradientScheme === "dark" ? "Dark" : "Light"} to default
         </button>
       </div>
 
@@ -1821,10 +2324,11 @@ const CSS_TEMPLATE = `/* ══════════════════�
 `;
 
 function ExtensionsSettings() {
-  const extensions = useUIStore((s) => s.installedExtensions);
-  const addExtension = useUIStore((s) => s.addExtension);
-  const removeExtension = useUIStore((s) => s.removeExtension);
-  const toggleExtension = useUIStore((s) => s.toggleExtension);
+  const { data: extensions, isLoading } = useExtensions();
+  const extensionList = extensions ?? [];
+  const createExtension = useCreateExtension();
+  const updateExtension = useUpdateExtension();
+  const deleteExtension = useDeleteExtension();
   const fileRef = useRef<HTMLInputElement>(null);
 
   const handleImportExtension = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1832,46 +2336,45 @@ function ExtensionsSettings() {
     if (!file) return;
     try {
       const text = await file.text();
+      const installedAt = new Date().toISOString();
 
       if (file.name.endsWith(".json")) {
         const parsed = JSON.parse(text);
-        const ext: InstalledExtension = {
-          id: generateClientId(),
-          name: parsed.name ?? file.name.replace(/\.json$/, ""),
+        const name = parsed.name ?? file.name.replace(/\.json$/, "");
+        await createExtension.mutateAsync({
+          name,
           description: parsed.description ?? "",
-          css: parsed.css ?? undefined,
-          js: parsed.js ?? undefined,
+          css: parsed.css ?? null,
+          js: parsed.js ?? null,
           enabled: true,
-          installedAt: new Date().toISOString(),
-        };
-        addExtension(ext);
-        toast.success(`Extension "${ext.name}" installed`);
+          installedAt,
+        });
+        toast.success(`Extension "${name}" installed`);
       } else if (file.name.endsWith(".js")) {
-        const ext: InstalledExtension = {
-          id: generateClientId(),
-          name: file.name.replace(/\.js$/, ""),
+        const name = file.name.replace(/\.js$/, "");
+        await createExtension.mutateAsync({
+          name,
           description: "JS extension imported from file",
           js: text,
           enabled: true,
-          installedAt: new Date().toISOString(),
-        };
-        addExtension(ext);
-        toast.success(`Extension "${ext.name}" installed`);
+          installedAt,
+        });
+        toast.success(`Extension "${name}" installed`);
       } else if (file.name.endsWith(".css")) {
-        const ext: InstalledExtension = {
-          id: generateClientId(),
-          name: file.name.replace(/\.css$/, ""),
+        const name = file.name.replace(/\.css$/, "");
+        await createExtension.mutateAsync({
+          name,
           description: "CSS extension imported from file",
           css: text,
           enabled: true,
-          installedAt: new Date().toISOString(),
-        };
-        addExtension(ext);
+          installedAt,
+        });
+        toast.success(`Extension "${name}" installed`);
       } else {
-        toast.error("Only .json and .css extension files are supported.");
+        toast.error("Only .json, .css, and .js extension files are supported.");
       }
-    } catch {
-      toast.error("Failed to import extension.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to import extension.");
     }
     e.target.value = "";
   };
@@ -1896,7 +2399,7 @@ function ExtensionsSettings() {
       <div className="flex flex-col gap-1.5">
         <span className="text-xs font-medium">Installed Extensions</span>
 
-        {extensions.map((ext) => (
+        {extensionList.map((ext) => (
           <div
             key={ext.id}
             className={cn(
@@ -1907,7 +2410,7 @@ function ExtensionsSettings() {
             )}
           >
             <button
-              onClick={() => toggleExtension(ext.id)}
+              onClick={() => updateExtension.mutate({ id: ext.id, enabled: !ext.enabled })}
               className={cn(
                 "rounded p-0.5 transition-colors",
                 ext.enabled
@@ -1925,7 +2428,7 @@ function ExtensionsSettings() {
               )}
             </div>
             <button
-              onClick={() => removeExtension(ext.id)}
+              onClick={() => deleteExtension.mutate(ext.id)}
               className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/10 hover:text-[var(--destructive)]"
               title="Remove extension"
             >
@@ -1934,9 +2437,9 @@ function ExtensionsSettings() {
           </div>
         ))}
 
-        {extensions.length === 0 && (
+        {!isLoading && extensionList.length === 0 && (
           <p className="py-2 text-center text-[0.625rem] text-[var(--muted-foreground)]">
-            No extensions installed. Import a .json or .css extension file above.
+            No extensions installed. Import a .json, .css, or .js extension file above.
           </p>
         )}
       </div>
@@ -1992,7 +2495,10 @@ function ImportSettings() {
       }
       const res = await fetch("/api/backup/import-profile", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...getAdminSecretHeader(),
+        },
         body: text,
       });
       const data = await res.json();
@@ -2021,7 +2527,7 @@ function ImportSettings() {
       {/* Profile import */}
       <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500/20 to-teal-500/20 px-3 py-3 text-xs font-semibold ring-1 ring-emerald-500/30 transition-all hover:ring-emerald-500/50 active:scale-[0.98]">
         <Download size="1rem" />
-        Import Profile (Full Export)
+        Import Profile (JSON)
         <input type="file" accept=".json" onChange={handleProfileImport} className="hidden" />
       </label>
 
@@ -2102,9 +2608,21 @@ function ImportButton({
     if (!file) return;
     try {
       let res: Response;
+      let importEmbeddedLorebook: boolean | undefined;
 
       // "auto" mode: send binary files (PNG) as multipart, JSON files as JSON body
       const effectiveMode = mode === "auto" ? (file.name.toLowerCase().endsWith(".json") ? "json" : "file") : mode;
+      if (endpoint === "/import/st-character") {
+        const previews = await inspectCharacterFilesForEmbeddedLorebooks([file]);
+        const preview = previews[0];
+        if (preview) {
+          importEmbeddedLorebook = window.confirm(
+            `${preview.name ?? file.name} includes an embedded lorebook with ${preview.embeddedLorebookEntries} entr${
+              preview.embeddedLorebookEntries === 1 ? "y" : "ies"
+            }.\n\nImport it as a standalone Marinara lorebook too?`,
+          );
+        }
+      }
 
       if (effectiveMode === "json") {
         const text = await file.text();
@@ -2113,6 +2631,9 @@ function ImportButton({
         if (endpoint.includes("lorebook") || endpoint.includes("preset")) {
           json.__filename = file.name.replace(/\.json$/i, "");
         }
+        if (endpoint === "/import/st-character" && importEmbeddedLorebook !== undefined) {
+          json.importEmbeddedLorebook = importEmbeddedLorebook;
+        }
         res = await fetch(`/api${endpoint}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2120,6 +2641,9 @@ function ImportButton({
         });
       } else {
         const formData = new FormData();
+        if (endpoint === "/import/st-character" && importEmbeddedLorebook !== undefined) {
+          formData.append("importEmbeddedLorebook", String(importEmbeddedLorebook));
+        }
         formData.append("file", file);
         res = await fetch(`/api${endpoint}`, {
           method: "POST",
@@ -2170,23 +2694,28 @@ function AdvancedSettings() {
   const [selectedScopes, setSelectedScopes] = useState<ExpungeScope[]>(["chats"]);
   const [confirmAction, setConfirmAction] = useState<"selected" | "all" | null>(null);
   const [exportingProfile, setExportingProfile] = useState(false);
+  const [exportProfileDialogOpen, setExportProfileDialogOpen] = useState(false);
   const [refreshingSpa, setRefreshingSpa] = useState(false);
+  const [adminSecret, setAdminSecret] = useState(() => localStorage.getItem(ADMIN_SECRET_STORAGE_KEY) ?? "");
 
-  const handleExportProfile = async () => {
+  const handleExportProfile = async (format: ExportFormatChoice) => {
     setExportingProfile(true);
+    setExportProfileDialogOpen(false);
     try {
-      const res = await fetch("/api/backup/export-profile");
-      if (!res.ok) throw new Error("Export failed");
+      const res = await fetch(`/api/backup/export-profile?format=${format}`, {
+        headers: getAdminSecretHeader(),
+      });
+      if (!res.ok) throw new Error(await readSettingsResponseError(res, "Export failed"));
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "marinara-profile.json";
+      a.download = format === "compatible" ? "marinara-compatible-export.zip" : "marinara-profile.json";
       a.click();
       URL.revokeObjectURL(url);
-      toast.success("Profile exported!");
-    } catch {
-      toast.error("Failed to export profile");
+      toast.success(format === "compatible" ? "Compatible export created!" : "Profile exported!");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to export profile");
     } finally {
       setExportingProfile(false);
     }
@@ -2223,8 +2752,11 @@ function AdvancedSettings() {
   const handleCreateBackup = async () => {
     setCreatingBackup(true);
     try {
-      const res = await fetch("/api/backup/download", { method: "POST" });
-      if (!res.ok) throw new Error("Backup failed");
+      const res = await fetch("/api/backup/download", {
+        method: "POST",
+        headers: getAdminSecretHeader(),
+      });
+      if (!res.ok) throw new Error(await readSettingsResponseError(res, "Backup failed"));
 
       // Pull the filename from Content-Disposition if provided
       const disposition = res.headers.get("content-disposition") ?? "";
@@ -2278,8 +2810,8 @@ function AdvancedSettings() {
       URL.revokeObjectURL(url);
       toast.success("Backup downloaded!");
       qc.invalidateQueries({ queryKey: ["backups"] });
-    } catch {
-      toast.error("Failed to create backup");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to create backup");
     } finally {
       setCreatingBackup(false);
     }
@@ -2310,10 +2842,23 @@ function AdvancedSettings() {
     },
   });
 
+  const saveAdminSecret = useCallback(() => {
+    const trimmed = adminSecret.trim();
+    if (trimmed) {
+      localStorage.setItem(ADMIN_SECRET_STORAGE_KEY, trimmed);
+      toast.success("Admin secret saved for this browser");
+    } else {
+      localStorage.removeItem(ADMIN_SECRET_STORAGE_KEY);
+      toast.info("Admin secret cleared");
+    }
+  }, [adminSecret]);
+
   const updateCheck = useQuery<{
     currentVersion: string;
     currentCommit: string | null;
     currentBuild: string;
+    targetRef: string;
+    targetCommit: string | null;
     latestVersion: string;
     updateAvailable: boolean;
     versionUpdate?: boolean;
@@ -2322,6 +2867,9 @@ function AdvancedSettings() {
     releaseNotes: string;
     publishedAt: string;
     installType: "git" | "standalone";
+    applyAvailable?: boolean;
+    updatesApplyEnabled?: boolean;
+    applyUnavailableReason?: "disabled" | "unsupported-install" | null;
   }>({
     queryKey: ["update-check"],
     queryFn: () => api.get("/updates/check"),
@@ -2330,7 +2878,15 @@ function AdvancedSettings() {
   });
 
   const applyUpdate = useMutation({
-    mutationFn: () => api.post<{ status: string; message: string }>("/updates/apply"),
+    mutationFn: () =>
+      api.post<{ status: string; message: string }>("/updates/apply", {
+        confirm: true,
+        currentVersion: updateCheck.data?.currentVersion ?? health.data?.version ?? APP_VERSION,
+        currentCommit: updateCheck.data?.currentCommit ?? health.data?.commit ?? null,
+        currentBuild: updateCheck.data?.currentBuild ?? health.data?.build ?? null,
+        targetRef: updateCheck.data?.targetRef,
+        targetCommit: updateCheck.data?.targetCommit,
+      }),
     onSuccess: (data) => {
       if (data.status === "already_up_to_date") {
         toast.info(data.message);
@@ -2347,6 +2903,12 @@ function AdvancedSettings() {
   const currentReleaseLabel = `v${health.data?.version ?? updateCheck.data?.currentVersion ?? APP_VERSION}`;
   const currentCommit = health.data?.commit ?? updateCheck.data?.currentCommit ?? null;
   const currentBuildLabel = currentCommit ? `Build: ${currentCommit.slice(0, 7)}` : "Build: unavailable";
+  const commitsBehind = updateCheck.data?.commitsBehind ?? 0;
+  const applyUnavailableReason = updateCheck.data?.applyUnavailableReason ?? null;
+  const applyUnavailableCopy =
+    applyUnavailableReason === "disabled"
+      ? "This install can check for updates, but applying them from the browser is disabled. Relaunch the app if you use the launcher, or update manually. Advanced git installs can enable server-side apply with UPDATES_APPLY_ENABLED=true."
+      : "This install can check for updates, but it cannot apply them from the browser. Relaunch the app if you use the launcher, or update manually for your install type.";
   const isClearing = clearAllData.isPending || expungeData.isPending;
   const isAllScopesSelected = selectedScopes.length === EXPUNGE_SCOPE_OPTIONS.length;
 
@@ -2375,7 +2937,40 @@ function AdvancedSettings() {
 
   return (
     <div className="flex flex-col gap-3">
+      <ExportFormatDialog
+        open={exportProfileDialogOpen}
+        title="Export Profile"
+        description="Native creates a Marinara profile JSON for restoring your data in Marinara. Compatible creates a ZIP of folderless JSON files for other platforms."
+        nativeDescription="Keeps Marinara fields, lorebook folders, character/persona metadata, presets, agents, and themes for re-import."
+        compatibleDescription="Exports direct character JSON, simple persona JSON, and folderless lorebooks for other roleplay tools."
+        onClose={() => setExportProfileDialogOpen(false)}
+        onSelect={handleExportProfile}
+      />
+
       <div className="text-xs text-[var(--muted-foreground)]">Advanced settings for power users.</div>
+
+      <div className="flex flex-col gap-2 rounded-lg bg-[var(--secondary)]/40 p-2.5 ring-1 ring-[var(--border)]">
+        <div className="flex items-center gap-1.5">
+          <Power size="0.75rem" className="text-[var(--muted-foreground)]" />
+          <span className="text-xs font-medium">Admin Access</span>
+        </div>
+        <div className="flex gap-2 max-sm:flex-col">
+          <input
+            type="password"
+            value={adminSecret}
+            onChange={(e) => setAdminSecret(e.target.value)}
+            placeholder="ADMIN_SECRET"
+            className="flex-1 rounded-lg bg-[var(--background)] px-3 py-2 text-xs outline-none ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)]/50 focus:ring-[var(--primary)]"
+          />
+          <button
+            onClick={saveAdminSecret}
+            className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95"
+          >
+            <Save size="0.75rem" />
+            Save
+          </button>
+        </div>
+      </div>
 
       {/* ── Updates ── */}
       <div className="flex flex-col gap-2">
@@ -2423,7 +3018,7 @@ function AdvancedSettings() {
               <span className="text-xs font-medium">
                 {updateCheck.data.versionUpdate
                   ? `v${updateCheck.data.latestVersion} available`
-                  : `${updateCheck.data.commitsBehind ?? 1} new update${(updateCheck.data.commitsBehind ?? 1) !== 1 ? "s" : ""} available`}
+                  : `${commitsBehind} commit${commitsBehind !== 1 ? "s" : ""} behind ${updateCheck.data.targetRef ?? "origin/main"}`}
               </span>
               {updateCheck.data.versionUpdate && (
                 <a
@@ -2441,7 +3036,13 @@ function AdvancedSettings() {
                 {updateCheck.data.releaseNotes}
               </p>
             )}
-            {updateCheck.data.installType === "git" ? (
+            {commitsBehind > 0 && (
+              <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                Commit counts compare this build with {updateCheck.data.targetRef ?? "origin/main"} and may include
+                unreleased development commits, not just tagged releases.
+              </p>
+            )}
+            {updateCheck.data.applyAvailable ? (
               <button
                 onClick={() => applyUpdate.mutate()}
                 disabled={applyUpdate.isPending}
@@ -2460,22 +3061,30 @@ function AdvancedSettings() {
                 )}
               </button>
             ) : (
-              <div className="flex flex-col gap-1.5">
-                <a
-                  href={updateCheck.data.releaseUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95"
-                >
-                  <Download size="0.8125rem" />
-                  Download v{updateCheck.data.latestVersion}
-                </a>
-                <span className="text-[0.625rem] text-[var(--muted-foreground)]">
-                  Docker users:{" "}
-                  <code className="rounded bg-[var(--background)] px-1 py-0.5">
-                    docker compose pull && docker compose up -d
-                  </code>
-                </span>
+              <div className="flex flex-col gap-1.5 rounded-lg bg-[var(--background)]/60 p-2 ring-1 ring-[var(--border)]">
+                <div className="flex items-start gap-1.5">
+                  <AlertTriangle size="0.8125rem" className="mt-0.5 shrink-0 text-amber-500" />
+                  <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{applyUnavailableCopy}</span>
+                </div>
+                {updateCheck.data.versionUpdate && (
+                  <a
+                    href={updateCheck.data.releaseUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95"
+                  >
+                    <Download size="0.8125rem" />
+                    Download v{updateCheck.data.latestVersion}
+                  </a>
+                )}
+                {applyUnavailableReason === "unsupported-install" && (
+                  <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+                    Docker users:{" "}
+                    <code className="rounded bg-[var(--background)] px-1 py-0.5">
+                      docker compose pull && docker compose up -d
+                    </code>
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -2563,7 +3172,7 @@ function AdvancedSettings() {
         <div className="flex items-center gap-1.5">
           <Download size="0.75rem" className="text-[var(--muted-foreground)]" />
           <span className="text-xs font-medium">Backup & Export</span>
-          <HelpTooltip text="Download a full backup as a .zip archive (database + avatars, sprites, backgrounds, gallery, fonts, knowledge sources). Your browser will ask where to save it. Useful on mobile where the server's data folder isn't directly accessible." />
+          <HelpTooltip text="Download a full backup as a .zip archive (storage snapshots + avatars, sprites, backgrounds, gallery, fonts, knowledge sources). The zip also includes marinara-profile.json for one-click restore through Import Profile (JSON). The raw folders are for manual recovery." />
         </div>
         <button
           onClick={handleCreateBackup}
@@ -2583,7 +3192,7 @@ function AdvancedSettings() {
           )}
         </button>
         <button
-          onClick={handleExportProfile}
+          onClick={() => setExportProfileDialogOpen(true)}
           disabled={exportingProfile}
           className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs font-medium ring-1 ring-[var(--border)] transition-all hover:bg-[var(--secondary)]/80 active:scale-95 disabled:opacity-50"
         >

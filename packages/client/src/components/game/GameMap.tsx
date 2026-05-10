@@ -1,12 +1,24 @@
 // ──────────────────────────────────────────────
 // Game: Map Wrapper (switches between grid and node)
 // ──────────────────────────────────────────────
-import { useState, useCallback, useEffect, type RefObject } from "react";
+import { useState, useCallback, useEffect, useRef, type PointerEvent, type RefObject } from "react";
 import { motion } from "framer-motion";
 import type { GameMap, GameActiveState } from "@marinara-engine/shared";
 import { GameGridMap } from "./GameGridMap";
 import { GameNodeMap } from "./GameNodeMap";
-import { ChevronDown, ChevronUp, Map as MapIcon, Wand2, X, Compass, MessageCircle, Swords, Moon } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  Map as MapIcon,
+  Wand2,
+  X,
+  Compass,
+  MessageCircle,
+  Swords,
+  Moon,
+  Minus,
+  Plus,
+} from "lucide-react";
 import { cn } from "../../lib/utils";
 import { PanelLockButton, useDraggablePanel } from "./DraggablePanel";
 
@@ -16,6 +28,10 @@ const STATE_CONFIG: Record<GameActiveState, { icon: typeof Compass; label: strin
   combat: { icon: Swords, label: "Combat", color: "text-red-300" },
   travel_rest: { icon: Moon, label: "Travel & Rest", color: "text-amber-300" },
 };
+
+const MAP_ZOOM_MIN = 0.75;
+const MAP_ZOOM_MAX = 1.8;
+const MAP_ZOOM_STEP = 0.25;
 
 type TimePhase = "midnight" | "night" | "dawn" | "morning" | "noon" | "afternoon" | "evening";
 
@@ -129,7 +145,21 @@ interface TimeOfDayIndicatorProps {
 
 function TimeOfDayIndicator({ timeOfDay, size = "desktop", className }: TimeOfDayIndicatorProps) {
   const phase = normalizeTimePhase(timeOfDay);
-  if (!phase) return null;
+  if (!phase) {
+    return (
+      <span
+        className={cn(
+          "relative flex shrink-0 items-center justify-center overflow-hidden rounded-full border border-white/20 bg-black/55 text-[0.625rem] font-bold leading-none text-white/75 shadow-[0_2px_8px_rgba(0,0,0,0.24)]",
+          size === "mobile" ? "h-3.5 w-6" : "h-4 w-7",
+          className,
+        )}
+        aria-label="Time of day unknown"
+        title="Time of day unknown"
+      >
+        ?
+      </span>
+    );
+  }
 
   const label = getTimePhaseLabel(phase);
   const nightPhase = phase === "night" || phase === "midnight";
@@ -145,7 +175,7 @@ function TimeOfDayIndicator({ timeOfDay, size = "desktop", className }: TimeOfDa
       aria-label={`Time of day: ${label}`}
       title={`Time of day: ${label}`}
     >
-      <span className="absolute inset-x-[12%] bottom-[2px] h-px bg-white/45" />
+      {!nightPhase && <span className="absolute inset-x-[12%] bottom-[2px] h-px bg-white/45" />}
       {nightPhase && (
         <>
           <span className="absolute left-[18%] top-[22%] h-[1.5px] w-[1.5px] rounded-full bg-white/80" />
@@ -167,6 +197,129 @@ function TimeOfDayIndicator({ timeOfDay, size = "desktop", className }: TimeOfDa
         {nightPhase && <span className="absolute inset-y-0 right-[-1px] w-[55%] rounded-full bg-slate-900/85" />}
       </span>
     </span>
+  );
+}
+
+interface DayTimeIndicatorProps {
+  day?: number | null;
+  timeOfDay?: string | null;
+  onDayChange?: (day: number) => void;
+  size?: "desktop" | "mobile";
+  className?: string;
+}
+
+function normalizeDayInput(value: string): number | null {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.max(1, Math.min(9999, parsed));
+}
+
+function getTimeOfDayStatusLabel(timeOfDay?: string | null): string {
+  const phase = normalizeTimePhase(timeOfDay);
+  return phase ? `Time of day: ${getTimePhaseLabel(phase)}` : "Time of day unknown";
+}
+
+function DayTimeIndicator({ day, timeOfDay, onDayChange, size = "desktop", className }: DayTimeIndicatorProps) {
+  const safeDay = Math.max(1, Math.floor(day ?? 1));
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(String(safeDay));
+  const skipCommitRef = useRef(false);
+  const timeLabel = getTimeOfDayStatusLabel(timeOfDay);
+  const rootClassName = cn(
+    "inline-flex shrink-0 items-stretch overflow-hidden rounded-full border border-white/20 bg-black/55 text-white/85 shadow-[0_2px_8px_rgba(0,0,0,0.2)]",
+    size === "mobile" ? "h-7 text-[0.6875rem]" : "h-5 text-[0.625rem]",
+    className,
+  );
+  const dayClassName = cn(
+    "flex items-center justify-center font-semibold leading-none",
+    size === "mobile" ? "min-w-14 px-2.5" : "min-w-11 px-1.5",
+  );
+  const dividerClassName = cn("my-auto w-px shrink-0 bg-white/20", size === "mobile" ? "h-5" : "h-3.5");
+  const timeClassName = cn(
+    "h-full rounded-l-none rounded-r-full border-0 shadow-none",
+    size === "mobile" ? "w-8" : "w-7",
+  );
+
+  useEffect(() => {
+    if (!editing) setDraft(String(safeDay));
+  }, [editing, safeDay]);
+
+  const commit = useCallback(() => {
+    if (skipCommitRef.current) {
+      skipCommitRef.current = false;
+      setEditing(false);
+      setDraft(String(safeDay));
+      return;
+    }
+    const next = normalizeDayInput(draft);
+    setEditing(false);
+    if (next == null) {
+      setDraft(String(safeDay));
+      return;
+    }
+    setDraft(String(next));
+    if (next !== safeDay) onDayChange?.(next);
+  }, [draft, onDayChange, safeDay]);
+
+  if (editing) {
+    return (
+      <div
+        className={cn(rootClassName, "focus-within:ring-2 focus-within:ring-white/35")}
+        onClick={(event) => event.stopPropagation()}
+        onPointerDown={(event) => event.stopPropagation()}
+        title={`Day ${safeDay}. ${timeLabel}.`}
+        aria-label={`Day ${safeDay}. ${timeLabel}.`}
+      >
+        <input
+          autoFocus
+          inputMode="numeric"
+          min={1}
+          max={9999}
+          value={draft}
+          onChange={(event) => setDraft(event.target.value.replace(/[^\d]/g, "").slice(0, 4))}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            event.stopPropagation();
+            if (event.key === "Escape") {
+              skipCommitRef.current = true;
+              setDraft(String(safeDay));
+              setEditing(false);
+            } else if (event.key === "Enter") {
+              event.preventDefault();
+              event.currentTarget.blur();
+            }
+          }}
+          className={cn(
+            "h-full bg-transparent text-center font-semibold text-white outline-none",
+            size === "mobile" ? "w-14 px-2.5 text-[0.6875rem]" : "w-11 px-1.5 text-[0.625rem]",
+          )}
+          aria-label="Edit game day"
+        />
+        <span className={dividerClassName} aria-hidden="true" />
+        <TimeOfDayIndicator timeOfDay={timeOfDay} size={size} className={timeClassName} />
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={(event) => {
+        event.stopPropagation();
+        setEditing(true);
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+      className={cn(
+        rootClassName,
+        "transition-colors hover:bg-black/75 hover:text-white focus:outline-none focus:ring-2 focus:ring-white/35",
+      )}
+      title={`Day ${safeDay}. ${timeLabel}. Tap to edit day.`}
+      aria-label={`Day ${safeDay}. ${timeLabel}. Tap to edit day.`}
+    >
+      <span className={dayClassName}>Day {safeDay}</span>
+      <span className={dividerClassName} aria-hidden="true" />
+      <TimeOfDayIndicator timeOfDay={timeOfDay} size={size} className={timeClassName} />
+    </button>
   );
 }
 
@@ -196,6 +349,62 @@ function buildMapOptions(map: GameMap | null, maps?: GameMap[]): GameMap[] {
   });
 }
 
+function nextMapZoom(current: number, delta: number): number {
+  const next = Math.round((current + delta) * 100) / 100;
+  return Math.min(MAP_ZOOM_MAX, Math.max(MAP_ZOOM_MIN, next));
+}
+
+interface MapZoomControlsProps {
+  zoom: number;
+  onZoomOut: () => void;
+  onZoomIn: () => void;
+}
+
+function MapZoomControls({ zoom, onZoomOut, onZoomIn }: MapZoomControlsProps) {
+  const atMin = zoom <= MAP_ZOOM_MIN;
+  const atMax = zoom >= MAP_ZOOM_MAX;
+
+  const stopPointer = (event: PointerEvent<HTMLDivElement | HTMLButtonElement>) => {
+    event.stopPropagation();
+  };
+
+  return (
+    <div
+      className="absolute right-1.5 top-1.5 z-20 flex h-6 overflow-hidden rounded-md border border-white/15 bg-black/85 shadow-lg shadow-black/35"
+      onPointerDown={stopPointer}
+      title={`Map zoom: ${Math.round(zoom * 100)}%`}
+    >
+      <button
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          onZoomOut();
+        }}
+        disabled={atMin}
+        className="flex h-full w-5 items-center justify-center text-white/80 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
+        title="Zoom out"
+        aria-label="Zoom out map"
+      >
+        <Minus size={11} />
+      </button>
+      <span className="w-px bg-white/15" />
+      <button
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          onZoomIn();
+        }}
+        disabled={atMax}
+        className="flex h-full w-5 items-center justify-center text-white/80 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
+        title="Zoom in"
+        aria-label="Zoom in map"
+      >
+        <Plus size={11} />
+      </button>
+    </div>
+  );
+}
+
 interface GameMapProps {
   map: GameMap | null;
   maps?: GameMap[];
@@ -205,12 +414,17 @@ interface GameMapProps {
   onMove: (position: { x: number; y: number } | string) => void;
   selectedPosition?: { x: number; y: number } | string | null;
   onGenerateMap?: () => void;
+  generateMapDisabled?: boolean;
   /** Disable interactive elements (e.g. during narration playback) */
   disabled?: boolean;
   /** Current game state — shown as icon left of the location name */
   gameState?: GameActiveState;
   /** Current time of day — shown as a compact sky indicator. */
   timeOfDay?: string | null;
+  /** In-game day number, starting at 1. */
+  day?: number | null;
+  /** Called when the user edits the visible day number. */
+  onDayChange?: (day: number) => void;
 }
 
 interface MapGenerateButtonProps {
@@ -256,19 +470,30 @@ export function GameMapPanel({
   onMove,
   selectedPosition,
   onGenerateMap,
+  generateMapDisabled,
   disabled,
   gameState,
   timeOfDay,
+  day,
+  onDayChange,
   chatId,
   constraintsRef,
 }: GameMapPanelProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [stateHovered, setStateHovered] = useState(false);
+  const [mapZoom, setMapZoom] = useState(1);
   const { locked, toggleLocked, x, y, handleDragEnd } = useDraggablePanel(chatId, "map");
   const mapOptions = buildMapOptions(map, maps);
   const selectedMapId = viewedMapId ?? getMapId(map);
   const activeMap = activeMapId == null || selectedMapId === activeMapId;
   const mapInteractionDisabled = disabled || !activeMap;
+  const zoomControls = (
+    <MapZoomControls
+      zoom={mapZoom}
+      onZoomOut={() => setMapZoom((current) => nextMapZoom(current, -MAP_ZOOM_STEP))}
+      onZoomIn={() => setMapZoom((current) => nextMapZoom(current, MAP_ZOOM_STEP))}
+    />
+  );
 
   if (!map) {
     return (
@@ -295,11 +520,12 @@ export function GameMapPanel({
   const shouldMarquee = mapName.length > 18;
   const stateCfg = gameState ? STATE_CONFIG[gameState] : null;
   const StateIcon = stateCfg?.icon ?? null;
-  const hasLeadingStatus = Boolean(StateIcon || timeOfDay);
+  const hasLeadingStatus = Boolean(StateIcon || timeOfDay || day);
 
   return (
     <motion.div
       data-tour="game-map"
+      data-game-skip-bg-nav="true"
       drag={!locked}
       dragMomentum={false}
       dragElastic={0}
@@ -340,7 +566,7 @@ export function GameMapPanel({
                 )}
               </span>
             )}
-            <TimeOfDayIndicator timeOfDay={timeOfDay} />
+            <DayTimeIndicator day={day} timeOfDay={timeOfDay} onDayChange={onDayChange} />
           </div>
         )}
         <span className="block min-w-0 flex-1 overflow-hidden text-center font-semibold text-[var(--foreground)]">
@@ -384,9 +610,11 @@ export function GameMapPanel({
             selectedPosition={selectedPosition}
             disabled={mapInteractionDisabled}
             showPartyPosition={activeMap}
+            zoom={mapZoom}
             topLeftAction={
-              onGenerateMap ? <MapGenerateButton onGenerateMap={onGenerateMap} disabled={disabled} /> : null
+              onGenerateMap ? <MapGenerateButton onGenerateMap={onGenerateMap} disabled={generateMapDisabled} /> : null
             }
+            topRightAction={zoomControls}
           />
         ) : (
           <GameNodeMap
@@ -395,9 +623,11 @@ export function GameMapPanel({
             selectedNodeId={typeof selectedPosition === "string" ? selectedPosition : null}
             disabled={mapInteractionDisabled}
             showPartyPosition={activeMap}
+            zoom={mapZoom}
             topLeftAction={
-              onGenerateMap ? <MapGenerateButton onGenerateMap={onGenerateMap} disabled={disabled} /> : null
+              onGenerateMap ? <MapGenerateButton onGenerateMap={onGenerateMap} disabled={generateMapDisabled} /> : null
             }
+            topRightAction={zoomControls}
           />
         ))}
     </motion.div>
@@ -415,9 +645,12 @@ interface MobileMapButtonProps {
   onMove: (position: { x: number; y: number } | string) => void;
   selectedPosition?: { x: number; y: number } | string | null;
   onGenerateMap?: () => void;
+  generateMapDisabled?: boolean;
   disabled?: boolean;
   gameState?: GameActiveState;
   timeOfDay?: string | null;
+  day?: number | null;
+  onDayChange?: (day: number) => void;
 }
 
 /** Mobile-only: map icon button in top-left that opens a centered modal. */
@@ -430,16 +663,27 @@ export function MobileMapButton({
   onMove,
   selectedPosition,
   onGenerateMap,
+  generateMapDisabled,
   disabled,
   gameState,
   timeOfDay,
+  day,
+  onDayChange,
 }: MobileMapButtonProps) {
   const [open, setOpen] = useState(false);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
+  const [mapZoom, setMapZoom] = useState(1);
   const mapOptions = buildMapOptions(map, maps);
   const selectedMapId = viewedMapId ?? getMapId(map);
   const activeMap = activeMapId == null || selectedMapId === activeMapId;
   const mapInteractionDisabled = disabled || !activeMap;
+  const zoomControls = (
+    <MapZoomControls
+      zoom={mapZoom}
+      onZoomOut={() => setMapZoom((current) => nextMapZoom(current, -MAP_ZOOM_STEP))}
+      onZoomIn={() => setMapZoom((current) => nextMapZoom(current, MAP_ZOOM_STEP))}
+    />
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -476,17 +720,22 @@ export function MobileMapButton({
     activeMap &&
     !disabled &&
     selectedNode != null &&
-    (adjacentIds.has(selectedNode) || selectedNode === currentNode?.id);
+    (selectedNodeData?.discovered || adjacentIds.has(selectedNode) || selectedNode === currentNode?.id);
 
   return (
     <>
       {/* Floating map icon */}
-      <button
-        onClick={() => setOpen(true)}
-        className="relative flex h-10 w-10 items-center justify-center rounded-xl border border-white/15 bg-black/60 text-white/80 shadow-lg backdrop-blur-md transition-colors active:bg-white/10"
-      >
-        <MapIcon size={18} />
-      </button>
+      <div className="flex items-center gap-1.5">
+        <button
+          onClick={() => setOpen(true)}
+          className="relative flex h-10 w-10 items-center justify-center rounded-xl border border-white/15 bg-black/60 text-white/80 shadow-lg backdrop-blur-md transition-colors active:bg-white/10"
+          aria-label="Open map"
+          title="Open map"
+        >
+          <MapIcon size={18} />
+        </button>
+        <DayTimeIndicator day={day} timeOfDay={timeOfDay} onDayChange={onDayChange} size="mobile" />
+      </div>
 
       {/* Modal overlay */}
       {open && (
@@ -504,7 +753,7 @@ export function MobileMapButton({
             {/* Header */}
             <div className="flex items-center gap-2 border-b border-white/10 px-4 py-3">
               <StateIcon size={14} className={stateCfg?.color ?? "text-white/60"} />
-              <TimeOfDayIndicator timeOfDay={timeOfDay} />
+              <DayTimeIndicator day={day} timeOfDay={timeOfDay} onDayChange={onDayChange} size="mobile" />
               <div className="min-w-0 flex-1 overflow-hidden">
                 <p className="block overflow-hidden whitespace-nowrap text-sm font-bold text-[var(--foreground)]">
                   {(map?.name || "Map").length > 18 ? (
@@ -586,11 +835,12 @@ export function MobileMapButton({
                   selectedPosition={selectedPosition}
                   disabled={mapInteractionDisabled}
                   showPartyPosition={activeMap}
+                  zoom={mapZoom}
                   topLeftAction={
                     onGenerateMap ? (
                       <MapGenerateButton
                         onGenerateMap={onGenerateMap}
-                        disabled={disabled}
+                        disabled={generateMapDisabled}
                         onAfterGenerate={() => {
                           setOpen(false);
                           setSelectedNode(null);
@@ -598,6 +848,7 @@ export function MobileMapButton({
                       />
                     ) : null
                   }
+                  topRightAction={zoomControls}
                   onCellClick={(x, y) => {
                     onMove({ x, y });
                     setOpen(false);
@@ -610,11 +861,12 @@ export function MobileMapButton({
                   selectedNodeId={selectedNode}
                   disabled={mapInteractionDisabled}
                   showPartyPosition={activeMap}
+                  zoom={mapZoom}
                   topLeftAction={
                     onGenerateMap ? (
                       <MapGenerateButton
                         onGenerateMap={onGenerateMap}
-                        disabled={disabled}
+                        disabled={generateMapDisabled}
                         onAfterGenerate={() => {
                           setOpen(false);
                           setSelectedNode(null);
@@ -622,16 +874,17 @@ export function MobileMapButton({
                       />
                     ) : null
                   }
+                  topRightAction={zoomControls}
                 />
               )}
             </div>
 
             {/* Selected node footer — shown when a node is tapped */}
-            {selectedNodeData && selectedNodeData.discovered && (
+            {selectedNodeData && (
               <div className="flex items-center gap-2 border-t border-white/10 px-4 py-2.5">
-                <span className="text-sm">{selectedNodeData.emoji}</span>
+                <span className="text-sm">{selectedNodeData.discovered ? selectedNodeData.emoji : "❓"}</span>
                 <span className="min-w-0 flex-1 truncate text-xs font-medium text-[var(--foreground)]">
-                  {selectedNodeData.label}
+                  {selectedNodeData.discovered ? selectedNodeData.label : "Unknown location"}
                 </span>
                 {canTravel && selectedNode !== currentNode?.id && (
                   <button

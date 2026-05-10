@@ -5,7 +5,9 @@
 //           Appearance, Scenario
 // ──────────────────────────────────────────────
 import { useState, useEffect, useRef, useCallback } from "react";
+import { toast } from "sonner";
 import { usePersonas, useUpdatePersona, useUploadPersonaAvatar, useDeletePersona } from "../../hooks/use-characters";
+import { useConnections } from "../../hooks/use-connections";
 import { useUIStore } from "../../stores/ui.store";
 import {
   ArrowLeft,
@@ -31,6 +33,9 @@ import {
   Loader2,
   Wand2,
   ImageDown,
+  Eraser,
+  RotateCcw,
+  Crop,
 } from "lucide-react";
 import { cn, generateClientId } from "../../lib/utils";
 import { showAlertDialog, showConfirmDialog } from "../../lib/app-dialogs";
@@ -43,12 +48,19 @@ import {
   useCharacterSprites,
   useUploadSprite,
   useDeleteSprite,
+  useCleanupSavedSprites,
+  useRestoreSpriteCleanupBackup,
   useSpriteCapabilities,
   spriteKeys,
   type SpriteInfo,
 } from "../../hooks/use-characters";
 import { useQueryClient } from "@tanstack/react-query";
 import { SpriteGenerationModal } from "../ui/SpriteGenerationModal";
+import { AvatarGenerationModal } from "../ui/AvatarGenerationModal";
+import { SpriteFrameEditor } from "../ui/SpriteFrameEditor";
+import { SpriteWandCleanupEditor } from "../ui/SpriteWandCleanupEditor";
+import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatDialog";
+import { Modal } from "../ui/Modal";
 
 // ── Tabs ──
 const TABS = [
@@ -113,11 +125,14 @@ export function PersonaEditor() {
   const updatePersona = useUpdatePersona();
   const uploadAvatar = useUploadPersonaAvatar();
   const deletePersona = useDeletePersona();
+  const { data: connectionsList } = useConnections();
 
   const [activeTab, setActiveTab] = useState<TabId>("description");
   const [formData, setFormData] = useState<PersonaFormData | null>(null);
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [avatarGeneratorOpen, setAvatarGeneratorOpen] = useState(false);
   const loadedPersonaIdRef = useRef<string | null>(null);
   const latestAvatarUploadTokenRef = useRef<string | null>(null);
   const setEditorDirty = useUIStore((s) => s.setEditorDirty);
@@ -127,6 +142,9 @@ export function PersonaEditor() {
   const [saving, setSaving] = useState(false);
   const [showUnsavedWarning, setShowUnsavedWarning] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageGenerationAvailable =
+    Array.isArray(connectionsList) &&
+    (connectionsList as Array<{ provider?: string }>).some((connection) => connection.provider === "image_generation");
 
   // Find the persona from the list
   const rawPersona = (allPersonas as PersonaRow[] | undefined)?.find((p) => p.id === personaId);
@@ -224,6 +242,22 @@ export function PersonaEditor() {
     e.target.value = "";
   };
 
+  const handleGeneratedAvatar = useCallback(
+    async (avatarDataUrl: string) => {
+      if (!personaId) return;
+      const uploadToken = generateClientId();
+      latestAvatarUploadTokenRef.current = uploadToken;
+      setAvatarPreview(avatarDataUrl);
+      await uploadAvatar.mutateAsync({
+        id: personaId,
+        avatar: avatarDataUrl,
+        filename: `persona-${personaId}-${Date.now()}.png`,
+      });
+      toast.success("Persona avatar generated.");
+    },
+    [personaId, uploadAvatar],
+  );
+
   const handleDelete = async () => {
     if (!personaId) return;
     if (
@@ -267,6 +301,28 @@ export function PersonaEditor() {
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden bg-[var(--background)]">
+      <ExportFormatDialog
+        open={exportDialogOpen}
+        title="Export Persona"
+        description="Native keeps Marinara persona metadata. Compatible exports simple persona JSON for other tools."
+        compatibleDescription="Exports persona fields directly without the Marinara wrapper."
+        onClose={() => setExportDialogOpen(false)}
+        onSelect={(format: ExportFormatChoice) => {
+          if (!personaId) return;
+          setExportDialogOpen(false);
+          void api.download(`/characters/personas/${personaId}/export?format=${format}`);
+        }}
+      />
+      <AvatarGenerationModal
+        open={avatarGeneratorOpen}
+        title="Generate Persona Avatar"
+        entityName={formData.name}
+        defaultAppearance={formData.appearance || formData.description || formData.personality}
+        defaultAvatarUrl={avatarPreview}
+        onClose={() => setAvatarGeneratorOpen(false)}
+        onUseAvatar={handleGeneratedAvatar}
+      />
+
       {/* ── Header ── */}
       <div className="flex flex-wrap items-center gap-3 border-b border-[var(--border)] bg-[var(--card)] px-4 py-3 max-md:gap-2 max-md:px-3">
         <button
@@ -290,6 +346,19 @@ export function PersonaEditor() {
           <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
             <Camera size="1rem" className="text-white" />
           </div>
+          {imageGenerationAvailable && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                setAvatarGeneratorOpen(true);
+              }}
+              className="absolute right-0.5 top-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-[var(--card)]/95 text-[var(--primary)] opacity-0 shadow-md ring-1 ring-[var(--border)] transition-opacity hover:bg-[var(--card)] group-hover:opacity-100 max-md:opacity-100"
+              title="Generate avatar"
+            >
+              <Wand2 size="0.75rem" />
+            </button>
+          )}
           <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleAvatarUpload} />
         </div>
 
@@ -314,7 +383,7 @@ export function PersonaEditor() {
 
         {/* Export */}
         <button
-          onClick={() => api.download(`/characters/personas/${personaId}/export`)}
+          onClick={() => setExportDialogOpen(true)}
           className="rounded-xl p-2 text-[var(--muted-foreground)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
           title="Export persona"
         >
@@ -504,11 +573,24 @@ function PersonaSpritesTab({
   const { data: spriteCapabilities } = useSpriteCapabilities();
   const uploadSprite = useUploadSprite();
   const deleteSprite = useDeleteSprite();
+  const cleanupSavedSprites = useCleanupSavedSprites();
+  const restoreSpriteCleanupBackup = useRestoreSpriteCleanupBackup();
   const queryClient = useQueryClient();
   const [category, setCategory] = useState<SpriteCategory>("expressions");
   const [newExpression, setNewExpression] = useState("");
   const [uploading, setUploading] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [cleaningSprites, setCleaningSprites] = useState(false);
+  const [savedCleanupStrength, setSavedCleanupStrength] = useState(35);
+  const [restoringCleanup, setRestoringCleanup] = useState(false);
+  const [lastCleanupBackupId, setLastCleanupBackupId] = useState<string | null>(null);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [framingSprite, setFramingSprite] = useState<SpriteInfo | null>(null);
+  const [savingFrame, setSavingFrame] = useState(false);
+  const [wandCleanupSprite, setWandCleanupSprite] = useState<SpriteInfo | null>(null);
+  const [savingWandCleanup, setSavingWandCleanup] = useState(false);
+  const [deleteSpriteRequest, setDeleteSpriteRequest] = useState<SpriteInfo | null>(null);
+  const [deletingSprites, setDeletingSprites] = useState<"single" | "all" | null>(null);
   const [folderProgress, setFolderProgress] = useState<{ done: number; total: number } | null>(null);
   const [spriteGenOpen, setSpriteGenOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -516,6 +598,9 @@ function PersonaSpritesTab({
   const pendingExpressionRef = useRef("");
 
   const allSprites = (sprites as SpriteInfo[] | undefined) ?? [];
+  const portraitExpressionNames = allSprites
+    .filter((s) => !s.expression.toLowerCase().startsWith("full_"))
+    .map((s) => s.expression);
   const visibleSprites = allSprites.filter((s) =>
     category === "full-body" ? s.expression.startsWith("full_") : !s.expression.startsWith("full_"),
   );
@@ -525,6 +610,11 @@ function PersonaSpritesTab({
   const suggestedExpressions = DEFAULT_EXPRESSIONS.filter((e) => !existingExpressions.has(e));
   const spriteGenerationUnavailable = spriteCapabilities?.spriteGenerationAvailable === false;
   const spriteGenerationReason = spriteCapabilities?.reason ?? "Sprite generation is unavailable on this platform.";
+  const backgroundCleanupUnavailable = spriteCapabilities?.backgroundRemovalAvailable === false;
+  const backgroundCleanupReason = spriteCapabilities?.reason ?? "Background cleanup is unavailable on this platform.";
+  const backgroundRemoverUnavailable = spriteCapabilities?.backgroundRemover?.installed === false;
+  const backgroundRemoverReason =
+    spriteCapabilities?.backgroundRemover?.reason ?? "Local backgroundremover is not installed.";
 
   const normalizeExpressionForCategory = (raw: string) => {
     const cleaned = raw
@@ -538,7 +628,10 @@ function PersonaSpritesTab({
     return cleaned.replace(/^full_/, "");
   };
 
-  const displayExpression = (stored: string) => (category === "full-body" ? stored.replace(/^full_/, "") : stored);
+  const displayExpression = useCallback(
+    (stored: string) => (category === "full-body" ? stored.replace(/^full_/, "") : stored),
+    [category],
+  );
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -595,19 +688,29 @@ function PersonaSpritesTab({
     e.target.value = "";
   };
 
-  const handleDelete = async (expression: string) => {
-    if (
-      !(await showConfirmDialog({
-        title: "Delete Sprite",
-        message: `Delete sprite for "${expression}"?`,
-        confirmLabel: "Delete",
-        tone: "destructive",
-      }))
-    ) {
-      return;
+  const handleDeleteSingleSprite = useCallback(async () => {
+    if (!deleteSpriteRequest) return;
+    setDeletingSprites("single");
+    try {
+      await deleteSprite.mutateAsync({ characterId: personaId, expression: deleteSpriteRequest.expression });
+      setDeleteSpriteRequest(null);
+    } finally {
+      setDeletingSprites(null);
     }
-    await deleteSprite.mutateAsync({ characterId: personaId, expression });
-  };
+  }, [deleteSprite, deleteSpriteRequest, personaId]);
+
+  const handleDeleteVisibleSprites = useCallback(async () => {
+    if (visibleSprites.length === 0) return;
+    setDeletingSprites("all");
+    try {
+      for (const sprite of visibleSprites) {
+        await deleteSprite.mutateAsync({ characterId: personaId, expression: sprite.expression });
+      }
+      setDeleteSpriteRequest(null);
+    } finally {
+      setDeletingSprites(null);
+    }
+  }, [deleteSprite, personaId, visibleSprites]);
 
   const downloadSpriteFile = useCallback(async (sprite: SpriteInfo) => {
     const response = await fetch(sprite.url);
@@ -627,7 +730,7 @@ function PersonaSpritesTab({
   }, []);
 
   const handleExportSprites = useCallback(
-    async (spritesToExport: SpriteInfo[]) => {
+    async (spritesToExport: SpriteInfo[], modeLabel: "visible" | "all") => {
       if (spritesToExport.length === 0) return;
 
       setExporting(true);
@@ -649,12 +752,120 @@ function PersonaSpritesTab({
             message: "No sprites were exported. Please try again.",
             tone: "destructive",
           });
+        } else {
+          toast.success(
+            modeLabel === "all"
+              ? `Exported ${successCount} sprite${successCount === 1 ? "" : "s"}.`
+              : `Exported ${successCount} ${category === "full-body" ? "full-body" : "expression"} sprite${successCount === 1 ? "" : "s"}.`,
+          );
         }
       } finally {
         setExporting(false);
       }
     },
-    [downloadSpriteFile],
+    [category, downloadSpriteFile],
+  );
+
+  const handleCleanVisibleSprites = useCallback(async () => {
+    if (visibleSprites.length === 0) return;
+
+    const modeLabel = category === "full-body" ? "full-body" : "expression";
+    if (
+      !(await showConfirmDialog({
+        title: "Clean Sprite Backgrounds",
+        message: `Run the local backgroundremover model on ${visibleSprites.length} saved ${modeLabel} sprite${visibleSprites.length === 1 ? "" : "s"} at strength ${savedCleanupStrength}? Marinara will keep a restore point in case the cleanup looks wrong.`,
+        confirmLabel: "Clean",
+      }))
+    ) {
+      return;
+    }
+
+    setCleaningSprites(true);
+    try {
+      const result = await cleanupSavedSprites.mutateAsync({
+        characterId: personaId,
+        expressions: visibleSprites.map((sprite) => sprite.expression),
+        cleanupStrength: savedCleanupStrength,
+        engine: "backgroundremover",
+      });
+
+      if (result.processed > 0) {
+        setLastCleanupBackupId(result.backupId ?? null);
+        toast.success(
+          `Cleaned ${result.processed} saved sprite${result.processed === 1 ? "" : "s"} with backgroundremover.`,
+        );
+      }
+      if (result.failed.length > 0) {
+        toast.warning(`${result.failed.length} sprite${result.failed.length === 1 ? "" : "s"} could not be cleaned.`);
+      }
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to clean saved sprites.");
+    } finally {
+      setCleaningSprites(false);
+    }
+  }, [category, cleanupSavedSprites, personaId, savedCleanupStrength, visibleSprites]);
+
+  const handleRestoreLastCleanup = useCallback(async () => {
+    if (!lastCleanupBackupId) return;
+    setRestoringCleanup(true);
+    try {
+      const result = await restoreSpriteCleanupBackup.mutateAsync({
+        characterId: personaId,
+        backupId: lastCleanupBackupId,
+      });
+      if (result.restored > 0) {
+        toast.success(`Restored ${result.restored} sprite${result.restored === 1 ? "" : "s"} from the cleanup backup.`);
+      }
+      if (result.failed.length > 0) {
+        toast.warning(`${result.failed.length} sprite${result.failed.length === 1 ? "" : "s"} could not be restored.`);
+      } else {
+        setLastCleanupBackupId(null);
+      }
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to restore sprite cleanup backup.");
+    } finally {
+      setRestoringCleanup(false);
+    }
+  }, [lastCleanupBackupId, personaId, restoreSpriteCleanupBackup]);
+
+  const handleApplySpriteFrame = useCallback(
+    async (croppedDataUrl: string) => {
+      if (!framingSprite) return;
+
+      setSavingFrame(true);
+      try {
+        await uploadSprite.mutateAsync({
+          characterId: personaId,
+          expression: framingSprite.expression,
+          image: croppedDataUrl,
+        });
+        toast.success(`Framed ${displayExpression(framingSprite.expression)} sprite.`);
+        setFramingSprite(null);
+      } finally {
+        setSavingFrame(false);
+      }
+    },
+    [displayExpression, framingSprite, personaId, uploadSprite],
+  );
+
+  const handleApplyWandCleanup = useCallback(
+    async (cleanedDataUrl: string) => {
+      if (!wandCleanupSprite) return;
+
+      setSavingWandCleanup(true);
+      try {
+        await uploadSprite.mutateAsync({
+          characterId: personaId,
+          expression: wandCleanupSprite.expression,
+          image: cleanedDataUrl,
+        });
+        toast.success(`Cleaned ${displayExpression(wandCleanupSprite.expression)} sprite.`);
+        setWandCleanupSprite(null);
+      } finally {
+        setSavingWandCleanup(false);
+      }
+    },
+    [displayExpression, personaId, uploadSprite, wandCleanupSprite],
   );
 
   return (
@@ -732,24 +943,82 @@ function PersonaSpritesTab({
               Upload Folder
             </button>
             <button
-              onClick={() => handleExportSprites(visibleSprites)}
-              disabled={exporting || visibleSprites.length === 0}
+              onClick={() => void handleCleanVisibleSprites()}
+              disabled={
+                cleaningSprites ||
+                backgroundCleanupUnavailable ||
+                backgroundRemoverUnavailable ||
+                visibleSprites.length === 0
+              }
               className="flex min-w-0 items-center justify-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-center text-[0.6875rem] font-medium leading-tight text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-40 max-md:flex-1 max-md:basis-[calc(50%-0.25rem)] max-md:px-2.5"
-              title="Download currently visible sprites for external editing"
+              title={
+                backgroundCleanupUnavailable
+                  ? backgroundCleanupReason
+                  : backgroundRemoverUnavailable
+                    ? backgroundRemoverReason
+                    : "Run the local backgroundremover model on the currently visible saved sprites"
+              }
             >
-              <ImageDown size="0.8125rem" />
-              {exporting ? "Exporting..." : `Export ${category === "full-body" ? "Full-body" : "Expressions"}`}
+              {cleaningSprites ? <Loader2 size="0.8125rem" className="animate-spin" /> : <Eraser size="0.8125rem" />}
+              {cleaningSprites ? "Cleaning..." : "Clean Backgrounds"}
             </button>
-            <button
-              onClick={() => handleExportSprites(allSprites)}
-              disabled={exporting || allSprites.length === 0}
-              className="flex min-w-0 items-center justify-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-center text-[0.6875rem] font-medium leading-tight text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-40 max-md:flex-1 max-md:basis-[calc(50%-0.25rem)] max-md:px-2.5"
-              title="Download all sprites across both categories"
-            >
-              <ImageDown size="0.8125rem" />
-              Export All
-            </button>
+            <div className="relative max-md:flex-1 max-md:basis-[calc(50%-0.25rem)]">
+              <button
+                onClick={() => setExportMenuOpen((open) => !open)}
+                disabled={exporting || allSprites.length === 0}
+                className="flex w-full min-w-0 items-center justify-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-center text-[0.6875rem] font-medium leading-tight text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-40 max-md:px-2.5"
+                title="Choose which saved sprites to export"
+              >
+                <ImageDown size="0.8125rem" />
+                {exporting ? "Exporting..." : "Export"}
+              </button>
+              {exportMenuOpen && !exporting && (
+                <div className="absolute right-0 top-[calc(100%+0.35rem)] z-30 min-w-44 rounded-lg border border-[var(--border)] bg-[var(--card)] p-1 text-xs shadow-xl">
+                  <button
+                    onClick={() => {
+                      setExportMenuOpen(false);
+                      void handleExportSprites(visibleSprites, "visible");
+                    }}
+                    disabled={visibleSprites.length === 0}
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[var(--foreground)] transition-colors hover:bg-[var(--secondary)] disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <ImageDown size="0.75rem" />
+                    {category === "full-body" ? "Full-body only" : "Expressions only"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setExportMenuOpen(false);
+                      void handleExportSprites(allSprites, "all");
+                    }}
+                    disabled={allSprites.length === 0}
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[var(--foreground)] transition-colors hover:bg-[var(--secondary)] disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <ImageDown size="0.75rem" />
+                    All sprites
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 rounded-lg bg-[var(--secondary)]/60 px-3 py-2">
+          <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">Cleanup strength</span>
+          <span className="text-[0.625rem] text-[var(--muted-foreground)]">Soft</span>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={savedCleanupStrength}
+            onChange={(e) => setSavedCleanupStrength(Number(e.target.value))}
+            disabled={cleaningSprites}
+            className="min-w-40 flex-1 accent-[var(--primary)] disabled:opacity-50"
+          />
+          <span className="text-[0.625rem] text-[var(--muted-foreground)]">Aggressive</span>
+          <span className="w-8 text-right text-[0.6875rem] tabular-nums text-[var(--muted-foreground)]">
+            {savedCleanupStrength}
+          </span>
         </div>
 
         {folderProgress && (
@@ -758,9 +1027,38 @@ function PersonaSpritesTab({
             Uploading {folderProgress.done}/{folderProgress.total} sprites…
           </div>
         )}
+        {cleaningSprites && (
+          <div className="flex items-center gap-2 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--muted-foreground)]">
+            <Loader2 size="0.75rem" className="animate-spin text-[var(--primary)]" />
+            Running local backgroundremover on saved sprites…
+          </div>
+        )}
+        {lastCleanupBackupId && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--muted-foreground)]">
+            <span>Last cleanup has a restore point.</span>
+            <button
+              onClick={() => void handleRestoreLastCleanup()}
+              disabled={restoringCleanup}
+              className="flex items-center gap-1.5 rounded-md bg-[var(--card)] px-2.5 py-1 text-[0.6875rem] font-medium text-[var(--foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] disabled:opacity-40"
+            >
+              {restoringCleanup ? <Loader2 size="0.75rem" className="animate-spin" /> : <RotateCcw size="0.75rem" />}
+              Undo Cleanup
+            </button>
+          </div>
+        )}
         {spriteGenerationUnavailable && (
           <div className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--muted-foreground)]">
             {spriteGenerationReason}
+          </div>
+        )}
+        {backgroundCleanupUnavailable && !spriteGenerationUnavailable && (
+          <div className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--muted-foreground)]">
+            {backgroundCleanupReason}
+          </div>
+        )}
+        {backgroundRemoverUnavailable && !backgroundCleanupUnavailable && (
+          <div className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--muted-foreground)]">
+            {backgroundRemoverReason}
           </div>
         )}
         <div className="flex gap-2">
@@ -808,6 +1106,26 @@ function PersonaSpritesTab({
       </div>
 
       {/* Sprite grid */}
+      {framingSprite && (
+        <SpriteFrameEditor
+          imageUrl={framingSprite.url}
+          label={displayExpression(framingSprite.expression)}
+          applying={savingFrame}
+          onApply={handleApplySpriteFrame}
+          onClose={() => setFramingSprite(null)}
+        />
+      )}
+
+      {wandCleanupSprite && (
+        <SpriteWandCleanupEditor
+          imageUrl={wandCleanupSprite.url}
+          label={displayExpression(wandCleanupSprite.expression)}
+          applying={savingWandCleanup}
+          onApply={handleApplyWandCleanup}
+          onClose={() => setWandCleanupSprite(null)}
+        />
+      )}
+
       {isLoading ? (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
           {Array.from({ length: 4 }).map((_, i) => (
@@ -821,9 +1139,17 @@ function PersonaSpritesTab({
               key={sprite.expression}
               className="group relative overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)] transition-all hover:border-[var(--primary)]/30 hover:shadow-md"
             >
-              <div className="aspect-[3/4] bg-[var(--secondary)]">
+              <button
+                type="button"
+                onClick={() => setWandCleanupSprite(sprite)}
+                className="group/preview relative block aspect-[3/4] w-full bg-[var(--secondary)]"
+                title="Open wand cleanup"
+              >
                 <img src={sprite.url} alt={sprite.expression} loading="lazy" className="h-full w-full object-contain" />
-              </div>
+                <span className="pointer-events-none absolute right-2 top-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-[var(--card)]/90 text-[var(--primary)] opacity-0 shadow-lg ring-1 ring-[var(--border)] transition-opacity group-hover/preview:opacity-100 max-md:opacity-100">
+                  <Wand2 size="0.875rem" />
+                </span>
+              </button>
               <div className="flex items-center justify-between p-2">
                 <span
                   className="max-w-[10rem] truncate text-[0.6875rem] font-medium capitalize"
@@ -832,6 +1158,13 @@ function PersonaSpritesTab({
                   {displayExpression(sprite.expression)}
                 </span>
                 <div className="flex gap-1 opacity-0 group-hover:opacity-100 max-md:opacity-100 transition-opacity">
+                  <button
+                    onClick={() => setFramingSprite(sprite)}
+                    className="rounded-lg p-1 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+                    title="Frame"
+                  >
+                    <Crop size="0.6875rem" />
+                  </button>
                   <button
                     onClick={() => void downloadSpriteFile(sprite)}
                     className="rounded-lg p-1 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
@@ -847,7 +1180,7 @@ function PersonaSpritesTab({
                     <Upload size="0.6875rem" />
                   </button>
                   <button
-                    onClick={() => handleDelete(sprite.expression)}
+                    onClick={() => setDeleteSpriteRequest(sprite)}
                     className="rounded-lg p-1 text-[var(--muted-foreground)] hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
                     title="Delete"
                   >
@@ -872,12 +1205,66 @@ function PersonaSpritesTab({
         </div>
       )}
 
+      {deleteSpriteRequest && (
+        <Modal
+          open
+          onClose={() => {
+            if (!deletingSprites) setDeleteSpriteRequest(null);
+          }}
+          title="Delete Sprite"
+          width="max-w-sm"
+        >
+          <div className="space-y-4">
+            <p className="text-sm leading-relaxed text-[var(--foreground)]">
+              Delete sprite for "{displayExpression(deleteSpriteRequest.expression)}"?
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              {visibleSprites.length > 1 ? (
+                <button
+                  type="button"
+                  onClick={() => void handleDeleteVisibleSprites()}
+                  disabled={!!deletingSprites}
+                  className="mr-auto inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-2 text-xs font-medium text-[var(--destructive)] ring-1 ring-[var(--destructive)]/30 transition-colors hover:bg-[var(--destructive)]/10 disabled:opacity-50 sm:px-3 sm:text-sm"
+                >
+                  {deletingSprites === "all" ? (
+                    <Loader2 size="0.875rem" className="animate-spin" />
+                  ) : (
+                    <Trash2 size="0.875rem" />
+                  )}
+                  Delete All {category === "full-body" ? "Full-Body" : "Expressions"}
+                </button>
+              ) : null}
+              <div className="ml-auto flex shrink-0 items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDeleteSpriteRequest(null)}
+                  disabled={!!deletingSprites}
+                  className="rounded-lg px-2.5 py-2 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-50 sm:px-3 sm:text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleDeleteSingleSprite()}
+                  disabled={!!deletingSprites}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--destructive)] px-2.5 py-2 text-xs font-medium text-white transition-colors hover:bg-[var(--destructive)]/85 disabled:opacity-50 sm:px-3 sm:text-sm"
+                >
+                  {deletingSprites === "single" && <Loader2 size="0.875rem" className="animate-spin" />}
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        </Modal>
+      )}
+
       {/* Sprite Generation Modal */}
       <SpriteGenerationModal
         open={spriteGenOpen}
         onClose={() => setSpriteGenOpen(false)}
         entityId={personaId}
         initialSpriteType={category === "full-body" ? "full-body" : "expressions"}
+        existingExpressionNames={portraitExpressionNames}
         defaultAppearance={defaultAppearance}
         defaultAvatarUrl={defaultAvatarUrl}
         onSpritesGenerated={() => {
@@ -949,9 +1336,9 @@ function PersonaColorsTab({
               className="text-[0.75rem] font-bold tracking-tight"
               style={
                 formData.nameColor
-                  ? formData.nameColor.startsWith("linear-gradient")
+                  ? formData.nameColor.includes("gradient(")
                     ? {
-                        background: formData.nameColor,
+                        backgroundImage: formData.nameColor,
                         backgroundRepeat: "no-repeat",
                         backgroundSize: "100% 100%",
                         WebkitBackgroundClip: "text",

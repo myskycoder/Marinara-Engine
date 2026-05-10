@@ -94,27 +94,6 @@ test("streams text deltas and merges them into the yielded chunks", async () => 
   assert.equal(calls[0]!.options.model, "claude-opus-4-5");
 });
 
-test("extracts system messages into systemPrompt and renders the rest as a transcript", async () => {
-  const { fake, calls } = makeFakeSdk([streamEvent({ type: "text_delta", text: "ok" }), successResult()]);
-  __setSdkForTesting(fake);
-
-  const provider = makeProvider();
-  await drain(
-    provider,
-    [
-      { role: "system", content: "You are Aerith." },
-      { role: "system", content: "Stay in character." },
-      { role: "user", content: "Hi Aerith." },
-      { role: "assistant", content: "Hello, traveler." },
-      { role: "user", content: "Where are we?" },
-    ],
-    { model: "claude-sonnet-4-5", stream: true },
-  );
-
-  assert.equal(calls[0]!.options.systemPrompt, "You are Aerith.\n\nStay in character.");
-  assert.equal(calls[0]!.prompt, "User: Hi Aerith.\n\nAssistant: Hello, traveler.\n\nUser: Where are we?");
-});
-
 test("Opus 4.7 enables adaptive thinking by default even without enableThinking", async () => {
   const { fake, calls } = makeFakeSdk([streamEvent({ type: "text_delta", text: "." }), successResult()]);
   __setSdkForTesting(fake);

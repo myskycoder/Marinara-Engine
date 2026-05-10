@@ -8,15 +8,31 @@ interface GameStateStore {
   current: GameState | null;
   isVisible: boolean;
   expandedSections: Set<string>;
-  /** Registered by RoleplayHUD — flushes any pending debounced patch immediately. */
+  /** Flushes any pending debounced game-state patch immediately. */
   flushPatch: (() => Promise<void>) | null;
 
   // Actions
   setGameState: (state: GameState | null) => void;
   setVisible: (visible: boolean) => void;
   toggleSection: (section: string) => void;
-  setFlushPatch: (fn: (() => Promise<void>) | null) => void;
+  registerFlushPatch: (id: string, fn: () => Promise<void>) => () => void;
   reset: () => void;
+}
+
+const flushPatchCallbacks = new Map<string, () => Promise<void>>();
+
+function buildFlushPatch() {
+  if (flushPatchCallbacks.size === 0) return null;
+  return async () => {
+    const callbacks = Array.from(flushPatchCallbacks.values());
+    const results = await Promise.allSettled(callbacks.map((callback) => callback()));
+    const failures = results.filter((result) => result.status === "rejected");
+    if (failures.length > 0) {
+      throw new Error(
+        `Failed to flush ${failures.length} game-state patch callback${failures.length === 1 ? "" : "s"}.`,
+      );
+    }
+  };
 }
 
 export const useGameStateStore = create<GameStateStore>((set) => ({
@@ -27,7 +43,14 @@ export const useGameStateStore = create<GameStateStore>((set) => ({
 
   setGameState: (state) => set({ current: state }),
   setVisible: (visible) => set({ isVisible: visible }),
-  setFlushPatch: (fn) => set({ flushPatch: fn }),
+  registerFlushPatch: (id, fn) => {
+    flushPatchCallbacks.set(id, fn);
+    set({ flushPatch: buildFlushPatch() });
+    return () => {
+      flushPatchCallbacks.delete(id);
+      set({ flushPatch: buildFlushPatch() });
+    };
+  },
 
   toggleSection: (section) =>
     set((s) => {
@@ -37,11 +60,13 @@ export const useGameStateStore = create<GameStateStore>((set) => ({
       return { expandedSections: expanded };
     }),
 
-  reset: () =>
+  reset: () => {
+    flushPatchCallbacks.clear();
     set({
       current: null,
       isVisible: true,
       expandedSections: new Set(["location", "characters", "stats"]),
       flushPatch: null,
-    }),
+    });
+  },
 }));

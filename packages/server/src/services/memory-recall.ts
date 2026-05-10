@@ -4,7 +4,7 @@
 // Chunks conversation messages into groups, embeds them, and provides
 // semantic recall: given a query, find the most relevant past
 // conversation fragments from specified chats.
-import { eq, desc, sql, and } from "drizzle-orm";
+import { eq, desc, and, gt, inArray, isNotNull } from "drizzle-orm";
 import type { DB } from "../db/connection.js";
 import { messages, memoryChunks } from "../db/schema/index.js";
 import { newId, now } from "../utils/id-generator.js";
@@ -47,6 +47,38 @@ export interface RecalledMemory {
   lastMessageAt: string;
 }
 
+export interface MemoryRecallEmbeddingSource {
+  label: string;
+  embed(texts: string[]): Promise<number[][] | null>;
+}
+
+export interface MemoryRecallEmbeddingOptions {
+  embeddingSource?: MemoryRecallEmbeddingSource | null;
+  localEmbedder?: (texts: string[]) => Promise<number[][] | null>;
+}
+
+export async function embedMemoryRecallTexts(
+  texts: string[],
+  options: MemoryRecallEmbeddingOptions = {},
+): Promise<number[][]> {
+  const localEmbedder = options.localEmbedder ?? localEmbed;
+  const localEmbeddings = await localEmbedder(texts);
+  if (localEmbeddings) return localEmbeddings;
+
+  if (!options.embeddingSource) {
+    logger.warn("[memory-recall] Local embeddings are unavailable and no embedding connection is configured");
+    return [];
+  }
+
+  const fallbackEmbeddings = await options.embeddingSource.embed(texts);
+  if (fallbackEmbeddings) {
+    logger.debug("[memory-recall] Used configured embedding source %s", options.embeddingSource.label);
+    return fallbackEmbeddings;
+  }
+
+  return [];
+}
+
 /**
  * Chunk any un-chunked messages for a given chat and embed them.
  * Should be called after generation completes (fire-and-forget).
@@ -56,6 +88,7 @@ export async function chunkAndEmbedMessages(
   chatId: string,
   /** Map from role → display name. Used to format "Name: content" lines. */
   nameMap: { userName: string; characterNames: Record<string, string> },
+  options: MemoryRecallEmbeddingOptions = {},
 ): Promise<void> {
   if (isLite) return;
   // Find the last chunk for this chat to know where to start
@@ -71,7 +104,7 @@ export async function chunkAndEmbedMessages(
   // Get messages that haven't been chunked yet
   const conditions = [eq(messages.chatId, chatId)];
   if (after) {
-    conditions.push(sql`${messages.createdAt} > ${after}`);
+    conditions.push(gt(messages.createdAt, after));
   }
   const unchunked = await db
     .select({
@@ -120,7 +153,7 @@ export async function chunkAndEmbedMessages(
 
   // Embed all chunks using local model
   const texts = chunksToCreate.map((c) => c.content);
-  const embeddings = (await localEmbed(texts)) ?? [];
+  const embeddings = await embedMemoryRecallTexts(texts, options);
 
   // Store chunks
   const timestamp = now();
@@ -142,6 +175,24 @@ export async function chunkAndEmbedMessages(
 }
 
 /**
+ * Rebuild all memory-recall chunks for a chat from the current message log.
+ */
+export async function rebuildMemoryChunks(
+  db: DB,
+  chatId: string,
+  nameMap: { userName: string; characterNames: Record<string, string> },
+  options: MemoryRecallEmbeddingOptions = {},
+): Promise<number> {
+  if (isLite) return 0;
+
+  await db.delete(memoryChunks).where(eq(memoryChunks.chatId, chatId));
+  await chunkAndEmbedMessages(db, chatId, nameMap, options);
+
+  const rebuilt = await db.select({ id: memoryChunks.id }).from(memoryChunks).where(eq(memoryChunks.chatId, chatId));
+  return rebuilt.length;
+}
+
+/**
  * Recall relevant conversation memories for a given query.
  * Searches only the specified chat IDs for relevant chunks.
  */
@@ -149,13 +200,13 @@ export async function recallMemories(
   db: DB,
   query: string,
   chatIds: string[],
-  topK: number = DEFAULT_TOP_K,
+  options: MemoryRecallEmbeddingOptions & { topK?: number } = {},
 ): Promise<RecalledMemory[]> {
   if (isLite) return [];
   if (chatIds.length === 0) return [];
 
   // Embed the query using local model
-  const queryEmbeddings = await localEmbed([query]);
+  const queryEmbeddings = await embedMemoryRecallTexts([query], options);
   if (!queryEmbeddings || queryEmbeddings.length === 0) return [];
   const queryEmbedding = queryEmbeddings[0]!;
   if (queryEmbedding.length === 0) return [];
@@ -174,21 +225,26 @@ export async function recallMemories(
       lastMessageAt: memoryChunks.lastMessageAt,
     })
     .from(memoryChunks)
-    .where(
-      sql`${memoryChunks.chatId} IN (${sql.join(
-        matchingChatIds.map((id) => sql`${id}`),
-        sql`, `,
-      )}) AND ${memoryChunks.embedding} IS NOT NULL`,
-    )
-    .orderBy(sql`${memoryChunks.lastMessageAt} DESC`)
+    .where(and(inArray(memoryChunks.chatId, matchingChatIds), isNotNull(memoryChunks.embedding)))
+    .orderBy(desc(memoryChunks.lastMessageAt))
     .limit(MAX_CHUNKS);
 
   if (chunks.length === 0) return [];
+
+  let dimensionMismatchLogged = false;
 
   // Score each chunk by cosine similarity
   const scored = chunks
     .map((chunk) => {
       const embedding: number[] = JSON.parse(chunk.embedding!);
+      if (!dimensionMismatchLogged && embedding.length !== queryEmbedding.length) {
+        dimensionMismatchLogged = true;
+        logger.warn(
+          "[memory-recall] Skipping one or more memory chunks with embedding dimensions that do not match the query vector (%d vs %d). Refresh memories after changing embedding models.",
+          embedding.length,
+          queryEmbedding.length,
+        );
+      }
       return {
         chatId: chunk.chatId,
         content: chunk.content,
@@ -199,7 +255,7 @@ export async function recallMemories(
     })
     .filter((s) => s.similarity >= SIMILARITY_THRESHOLD)
     .sort((a, b) => b.similarity - a.similarity)
-    .slice(0, topK);
+    .slice(0, options.topK ?? DEFAULT_TOP_K);
 
   return scored;
 }

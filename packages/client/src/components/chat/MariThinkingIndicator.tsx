@@ -16,6 +16,8 @@ const PHASE_LABEL: Record<Exclude<MariPhase, "idle">, string> = {
   updating: "Mari is updating your stuff…",
 };
 
+const DOTTOR_SUPPORT_GIF = "/sprites/dottore/dottore_jumping.gif";
+
 /**
  * Visible-while-working signal for Mari's two work phases:
  *
@@ -67,6 +69,7 @@ export const MariThinkingIndicator = memo(function MariThinkingIndicator() {
   const isMariChat = useMemo(() => isMariParticipant(activeChat), [activeChat]);
 
   const [phase, setPhase] = useState<MariPhase>("idle");
+  const [supportGifFailed, setSupportGifFailed] = useState(false);
   const phaseShownAtRef = useRef(0);
   const visibleChatIdRef = useRef<string | null>(null);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -147,6 +150,10 @@ export const MariThinkingIndicator = memo(function MariThinkingIndicator() {
     };
   }, []);
 
+  useEffect(() => {
+    if (phase !== "idle") setSupportGifFailed(false);
+  }, [phase]);
+
   if (phase === "idle") return null;
 
   return (
@@ -155,11 +162,21 @@ export const MariThinkingIndicator = memo(function MariThinkingIndicator() {
       aria-live="polite"
       className="mb-2 flex items-center gap-2 rounded-lg bg-foreground/5 px-3 py-1.5 text-xs text-foreground/60"
     >
-      <span className="flex items-center gap-1" aria-hidden="true">
-        <span className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />
-        <span className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse [animation-delay:200ms]" />
-        <span className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse [animation-delay:400ms]" />
-      </span>
+      {!supportGifFailed ? (
+        <img
+          src={DOTTOR_SUPPORT_GIF}
+          alt=""
+          className="h-9 w-9 shrink-0 object-contain [image-rendering:pixelated]"
+          aria-hidden="true"
+          onError={() => setSupportGifFailed(true)}
+        />
+      ) : (
+        <span className="flex items-center gap-1" aria-hidden="true">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-400" />
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-400 [animation-delay:200ms]" />
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-400 [animation-delay:400ms]" />
+        </span>
+      )}
       <span>{PHASE_LABEL[phase]}</span>
     </div>
   );

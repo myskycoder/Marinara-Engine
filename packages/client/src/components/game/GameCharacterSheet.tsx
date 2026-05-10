@@ -8,6 +8,7 @@ import {
   Info,
   Pencil,
   Plus,
+  RefreshCw,
   Save,
   Shield,
   Sparkles,
@@ -50,6 +51,8 @@ interface GameCharacterSheetProps {
   card: CharacterSheetCard;
   onClose: () => void;
   onSave?: (gameCard: GameCharacterSheetGameCard | undefined) => Promise<void> | void;
+  onRegenerate?: () => Promise<void> | void;
+  isRegenerating?: boolean;
 }
 
 interface GameCardDraft {
@@ -75,6 +78,12 @@ const DEFAULT_ATTRIBUTES = [
   { name: "WIS", value: 10 },
   { name: "CHA", value: 10 },
 ];
+
+// Mirrors server's attributeModifier in skill-check.service.ts: floor((score - 10) / 2).
+function formatAttributeModifier(score: number): string {
+  const mod = Math.floor((score - 10) / 2);
+  return mod >= 0 ? `+${mod}` : `${mod}`;
+}
 
 const FIELD_LABEL_CLASS = "text-[0.6875rem] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]";
 const TEXT_INPUT_CLASS =
@@ -131,7 +140,7 @@ function normalizeDraftAttributes(value: unknown) {
     })
     .filter((entry): entry is { name: string; value: number } => !!entry);
 
-  return entries.length > 0 ? entries : DEFAULT_ATTRIBUTES.map((attr) => ({ ...attr }));
+  return entries;
 }
 
 function createDraft(gameCard?: GameCharacterSheetGameCard): GameCardDraft {
@@ -189,16 +198,15 @@ function normalizeDraft(draft: GameCardDraft): GameCharacterSheetGameCard | unde
     }))
     .filter((attr) => attr.name);
 
-  const rpgStats =
-    draft.rpgStatsEnabled && attributes.length > 0
-      ? {
-          attributes,
-          hp: {
-            value: Math.max(0, draft.hpValue),
-            max: Math.max(1, draft.hpMax),
-          },
-        }
-      : undefined;
+  const rpgStats = draft.rpgStatsEnabled
+    ? {
+        attributes,
+        hp: {
+          value: Math.max(0, draft.hpValue),
+          max: Math.max(1, draft.hpMax),
+        },
+      }
+    : undefined;
 
   const hasContent =
     !!shortDescription ||
@@ -248,7 +256,13 @@ function SectionHeader({ icon, title, className }: { icon: React.ReactNode; titl
   );
 }
 
-export function GameCharacterSheet({ card, onClose, onSave }: GameCharacterSheetProps) {
+export function GameCharacterSheet({
+  card,
+  onClose,
+  onSave,
+  onRegenerate,
+  isRegenerating = false,
+}: GameCharacterSheetProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [draft, setDraft] = useState<GameCardDraft>(() => createDraft(card.gameCard));
@@ -260,10 +274,15 @@ export function GameCharacterSheet({ card, onClose, onSave }: GameCharacterSheet
   }, [card]);
 
   const previewGameCard = isEditing ? normalizeDraft(draft) : normalizeDraft(createDraft(card.gameCard));
-  const hasRpgStats =
+  const hasRpgAttributes =
     previewGameCard?.rpgStats &&
     Array.isArray(previewGameCard.rpgStats.attributes) &&
     previewGameCard.rpgStats.attributes.length > 0;
+  const hasRpgHp =
+    previewGameCard?.rpgStats?.hp &&
+    (Number.isFinite(Number(previewGameCard.rpgStats.hp.value)) ||
+      Number.isFinite(Number(previewGameCard.rpgStats.hp.max)));
+  const hasRpgStats = Boolean(hasRpgAttributes || hasRpgHp);
   const hasPersistentSheetData = hasGameData(previewGameCard) || hasRpgStats;
   const hasAnyData =
     hasPersistentSheetData ||
@@ -358,14 +377,19 @@ export function GameCharacterSheet({ card, onClose, onSave }: GameCharacterSheet
     }
   };
 
+  const handleRegenerate = async () => {
+    if (!onRegenerate || isSaving || isRegenerating) return;
+    await onRegenerate();
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
       <div
         className="relative mx-4 flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        {onSave && (
-          <div className="absolute right-12 top-3 z-10 flex items-center gap-2">
+        {(onSave || onRegenerate) && (
+          <div className="absolute right-12 top-3 z-10 flex flex-wrap items-center justify-end gap-2">
             {isEditing ? (
               <>
                 <button
@@ -385,13 +409,29 @@ export function GameCharacterSheet({ card, onClose, onSave }: GameCharacterSheet
                 </button>
               </>
             ) : (
-              <button
-                onClick={() => setIsEditing(true)}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)]/90 px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)]"
-              >
-                <Pencil size={13} />
-                Edit Sheet
-              </button>
+              <>
+                {onRegenerate && (
+                  <button
+                    onClick={() => void handleRegenerate()}
+                    disabled={isRegenerating || isSaving}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)]/90 px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)] disabled:cursor-wait disabled:opacity-60"
+                    title="Regenerate this sheet from character and current game context"
+                  >
+                    <RefreshCw size={13} className={cn(isRegenerating && "animate-spin")} />
+                    {isRegenerating ? "Regenerating..." : "Regenerate Sheet"}
+                  </button>
+                )}
+                {onSave && (
+                  <button
+                    onClick={() => setIsEditing(true)}
+                    disabled={isRegenerating}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)]/90 px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)] disabled:opacity-60"
+                  >
+                    <Pencil size={13} />
+                    Edit Sheet
+                  </button>
+                )}
+              </>
             )}
           </div>
         )}
@@ -419,7 +459,7 @@ export function GameCharacterSheet({ card, onClose, onSave }: GameCharacterSheet
                 {card.title[0]}
               </div>
             )}
-            <div className="min-w-0 flex-1 pr-28">
+            <div className="min-w-0 flex-1 pr-36 sm:pr-64">
               <h2 className="truncate text-lg font-bold text-[var(--foreground)]">{card.title}</h2>
               {previewGameCard?.class && (
                 <p className="text-xs font-medium text-[var(--primary)]">{previewGameCard.class}</p>
@@ -745,36 +785,48 @@ export function GameCharacterSheet({ card, onClose, onSave }: GameCharacterSheet
                 title="Attributes"
                 className="text-[var(--muted-foreground)]"
               />
-              <div className="mb-3 grid grid-cols-3 gap-2">
-                {previewGameCard.rpgStats.attributes.map((attr) => (
-                  <div
-                    key={attr.name}
-                    className="flex flex-col items-center rounded-lg border border-[var(--border)] bg-[var(--secondary)]/50 px-2 py-1.5"
-                  >
-                    <span className="text-[0.5625rem] font-bold uppercase tracking-widest text-[var(--muted-foreground)]">
-                      {attr.name}
-                    </span>
-                    <span className="text-lg font-bold leading-tight text-[var(--foreground)]">{attr.value}</span>
-                  </div>
-                ))}
-              </div>
-              <div>
-                <div className="mb-0.5 flex items-center justify-between text-xs">
-                  <span className="font-medium text-[var(--foreground)]/80">HP</span>
-                  <span className="font-mono text-[var(--muted-foreground)]">
-                    {previewGameCard.rpgStats.hp.value}/{previewGameCard.rpgStats.hp.max}
-                  </span>
+              {hasRpgAttributes && (
+                <div className="mb-3 grid grid-cols-3 gap-2">
+                  {previewGameCard.rpgStats.attributes.map((attr) => (
+                    <div
+                      key={attr.name}
+                      className="flex flex-col items-center rounded-lg border border-[var(--border)] bg-[var(--secondary)]/50 px-2 py-1.5"
+                    >
+                      <span className="text-[0.5625rem] font-bold uppercase tracking-widest text-[var(--muted-foreground)]">
+                        {attr.name}
+                      </span>
+                      <span className="text-lg font-bold leading-tight text-[var(--foreground)]">{attr.value}</span>
+                      <span className="text-[0.625rem] font-mono leading-none text-[var(--muted-foreground)]">
+                        {formatAttributeModifier(attr.value)}
+                      </span>
+                    </div>
+                  ))}
                 </div>
-                <div className="h-2.5 overflow-hidden rounded-full bg-[var(--secondary)] ring-1 ring-[var(--border)]">
-                  <div
-                    className="h-full rounded-full transition-all"
-                    style={{
-                      width: `${(previewGameCard.rpgStats.hp.value / Math.max(1, previewGameCard.rpgStats.hp.max)) * 100}%`,
-                      background: "#ef4444",
-                    }}
-                  />
-                </div>
-              </div>
+              )}
+              {hasRpgHp &&
+                (() => {
+                  const hpMax = Math.max(1, Number(previewGameCard.rpgStats.hp.max) || 1);
+                  const hpValue = Math.max(0, Math.min(hpMax, Number(previewGameCard.rpgStats.hp.value) || 0));
+                  return (
+                    <div>
+                      <div className="mb-0.5 flex items-center justify-between text-xs">
+                        <span className="font-medium text-[var(--foreground)]/80">HP</span>
+                        <span className="font-mono text-[var(--muted-foreground)]">
+                          {hpValue}/{hpMax}
+                        </span>
+                      </div>
+                      <div className="h-2.5 overflow-hidden rounded-full bg-[var(--secondary)] ring-1 ring-[var(--border)]">
+                        <div
+                          className="h-full rounded-full transition-all"
+                          style={{
+                            width: `${(hpValue / hpMax) * 100}%`,
+                            background: "#ef4444",
+                          }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })()}
             </div>
           )}
 
@@ -888,8 +940,10 @@ export function GameCharacterSheet({ card, onClose, onSave }: GameCharacterSheet
                     key={`${item.name}-${item.location ?? "bag"}`}
                     className="flex items-center justify-between rounded-lg bg-[var(--secondary)] px-2.5 py-1.5 text-xs"
                   >
-                    <div className="flex items-center gap-2">
-                      <span className="text-[var(--foreground)]/80">{item.name}</span>
+                    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+                      <span className="min-w-0 whitespace-normal break-words text-[var(--foreground)]/80 [overflow-wrap:anywhere]">
+                        {item.name}
+                      </span>
                       {item.location && (
                         <span className="rounded bg-[var(--primary)]/10 px-1.5 py-0.5 text-[0.5625rem] text-[var(--muted-foreground)]">
                           {item.location}
