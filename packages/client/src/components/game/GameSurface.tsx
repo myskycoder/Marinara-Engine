@@ -147,6 +147,8 @@ type GameAssetGenerationPayload = {
   npcsNeedingAvatars?: Array<{ id?: string; name: string; description: string }>;
   forceNpcAvatarNames?: string[];
   illustration?: import("@marinara-engine/shared").SceneIllustrationRequest;
+  /** Bypass the per-message manual illustration cooldown (e.g. for explicit "+1" gallery requests). */
+  skipIllustrationCooldown?: boolean;
   debugMode?: boolean;
   imageSizes?: {
     background?: { width: number; height: number };
@@ -2165,6 +2167,7 @@ export function GameSurface({
   const imagePromptReviewResolveRef = useRef<((overrides: GameImagePromptOverride[] | null) => void) | null>(null);
   const [volumePopoverOpen, setVolumePopoverOpen] = useState(false);
   const [retryMenuOpen, setRetryMenuOpen] = useState(false);
+  const [mobileRetryMenuOpen, setMobileRetryMenuOpen] = useState(false);
   /** Bumped after background PNG is overwritten so the browser refetches despite long Cache-Control on game-assets. */
   const [backgroundUrlCacheBust, setBackgroundUrlCacheBust] = useState(0);
   const [regenerateBackgroundPending, setRegenerateBackgroundPending] = useState(false);
@@ -4345,21 +4348,7 @@ export function GameSurface({
       const pendingIllustration = result.generatedIllustration ? null : result.illustration;
 
       if (pendingBg || unresolvedBg || pendingIllustration || npcsNeedingAvatars.length > 0) {
-        const assetPayload: {
-          chatId: string;
-          backgroundTag?: string;
-          locationId?: string;
-          backgroundPrompt?: string;
-          conditions?: {
-            weather?: string | null;
-            timeOfDay?: string | null;
-            season?: "spring" | "summer" | "autumn" | "winter" | null;
-          };
-          placeholderTag?: string;
-          npcsNeedingAvatars?: Array<{ id?: string; name: string; description: string }>;
-          illustration?: import("@marinara-engine/shared").SceneIllustrationRequest;
-          skipIllustrationCooldown?: boolean;
-        } = {
+        const assetPayload: GameAssetGenerationPayload = {
           chatId: activeChatId,
           illustration: pendingIllustration ?? undefined,
           npcsNeedingAvatars: npcsNeedingAvatars.length > 0 ? npcsNeedingAvatars : undefined,

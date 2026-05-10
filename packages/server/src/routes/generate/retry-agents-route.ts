@@ -46,7 +46,7 @@ import {
   resolveLorebookKeeperTarget,
 } from "./lorebook-keeper-utils.js";
 import { sendSseEvent, startSseReply } from "./sse.js";
-import type { GameMap, PresentCharacter } from "@marinara-engine/shared";
+import type { PresentCharacter } from "@marinara-engine/shared";
 import {
   buildDefaultAgentConnectionWarning,
   buildLocalSidecarUnavailableWarning,

@@ -3470,6 +3470,22 @@ export async function generateRoutes(app: FastifyInstance) {
           /* non-fatal */
         }
 
+        const knownReadables: import("../services/game/gm-prompts.js").GameReadablePromptEntry[] = (() => {
+          const journalRaw = (chatMeta.gameJournal as { entries?: Array<Record<string, unknown>> } | undefined) ?? null;
+          const entries = Array.isArray(journalRaw?.entries) ? journalRaw!.entries! : [];
+          const out: import("../services/game/gm-prompts.js").GameReadablePromptEntry[] = [];
+          for (const entry of entries) {
+            const type = typeof entry?.type === "string" ? entry.type : "";
+            const readableType = typeof entry?.readableType === "string" ? entry.readableType : null;
+            if (type !== "note" && !readableType) continue;
+            const title = typeof entry?.title === "string" ? entry.title : "";
+            const content = typeof entry?.content === "string" ? entry.content : "";
+            if (!content.trim()) continue;
+            out.push({ title, content });
+          }
+          return out;
+        })();
+
         const gmCtx: GmPromptContext = {
           gameActiveState: gameActiveState as import("@marinara-engine/shared").GameActiveState,
           storyArc,

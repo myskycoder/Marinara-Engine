@@ -6776,8 +6776,6 @@ export async function gameRoutes(app: FastifyInstance) {
                     ),
                   }));
                 }
-              } else if (!tagExists) {
-                logger.debug('[game/scene-wrap] bg "%s" generation deferred to /game/generate-assets', chosenBg);
               }
             }
 
@@ -7033,9 +7031,9 @@ export async function gameRoutes(app: FastifyInstance) {
       const slug = generatedBackgroundSlug(input.backgroundTag);
       const prompt = await buildBackgroundImagePrompt({
         chatId: input.chatId,
-        locationSlug: slug,
-        sceneDescription: input.backgroundTag.replace(/:/g, " ").replace(/-/g, " "),
-        genre,
+        locationId: slug,
+        conditions: { weather: null, timeOfDay: null, season: null },
+        backgroundPrompt: input.backgroundTag.replace(/:/g, " ").replace(/-/g, " "),
         setting,
         artStyle,
         imgSource,
@@ -7166,14 +7164,25 @@ export async function gameRoutes(app: FastifyInstance) {
         }
       }
 
+      const previewExistingNpcs = (meta.gameNpcs as GameNpc[]) ?? [];
+      const previewIdByKey = new Map<string, string>();
+      for (const n of previewExistingNpcs) {
+        if (n?.name && n?.id) previewIdByKey.set(npcNameKey(n.name), n.id);
+      }
+
       for (const npc of input.npcsNeedingAvatars) {
         const normalizedNpcName = normalizeJournalMatch(npc.name);
         const forceNpcAvatar = forceNpcAvatarNames.has(normalizedNpcName);
         if (!forceNpcAvatar && existingNpcAvatarByName.get(normalizedNpcName)) continue;
         if (!forceNpcAvatar && findCharAvatarFuzzy(npc.name, charAvatarByName)) continue;
 
+        const npcId =
+          npc.id?.trim() ||
+          previewIdByKey.get(npcNameKey(npc.name)) ||
+          slugifyForFs(npc.name, { prefix: "s", hashHex: sha1HexLegacy });
         const prompt = await buildNpcPortraitImagePrompt({
           chatId: input.chatId,
+          npcId,
           npcName: npc.name,
           appearance: npc.description,
           artStyle,
@@ -7316,6 +7325,7 @@ export async function gameRoutes(app: FastifyInstance) {
     const imgComfyWorkflow = imgConn.comfyuiWorkflow || undefined;
     const imgServiceHint = imgConn.imageService || imgSource;
     const imgDefaults = resolveConnectionImageDefaults(imgConn);
+    const promptOverridesStorage = createPromptOverridesStorage(app.db);
 
     const setupCfg = meta.gameSetupConfig as Record<string, unknown> | null;
     const genre = (setupCfg?.genre as string) || "";

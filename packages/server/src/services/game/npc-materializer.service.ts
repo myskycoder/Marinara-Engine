@@ -450,11 +450,19 @@ function startNpcAssetPipeline(args: {
               imgComfyWorkflow: connection.comfyuiWorkflow || undefined,
             });
             if (avatarUrl) {
-              const portraitPrompt = buildNpcPortraitImagePrompt(
-                npc.name,
-                npc.description,
-                args.artStylePrompt || undefined,
-              );
+              const portraitPrompt = await buildNpcPortraitImagePrompt({
+                chatId: args.chatId,
+                npcId: npc.id,
+                npcName: npc.name,
+                appearance: npc.description,
+                artStyle: args.artStylePrompt || undefined,
+                imgSource: connection.imageGenerationSource,
+                imgModel: connection.model || "",
+                imgBaseUrl: connection.baseUrl || "https://image.pollinations.ai",
+                imgApiKey: connection.apiKey || "",
+                imgService: connection.imageService || connection.imageGenerationSource,
+                imgComfyWorkflow: connection.comfyuiWorkflow || undefined,
+              });
               await patchNpcAvatarUrl(args.db, args.chatId, npc.id, avatarUrl, portraitPrompt);
             }
           } catch (err) {
