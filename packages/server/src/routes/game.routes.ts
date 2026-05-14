@@ -6191,6 +6191,14 @@ export async function gameRoutes(app: FastifyInstance) {
       input.connectionId ?? sceneConnId,
       chat.connectionId,
     );
+    if (!conn.apiKey && conn.provider !== "claude_subscription" && conn.provider !== "openai_chatgpt") {
+      throw Object.assign(
+        new Error(
+          `Scene Analyzer connection "${conn.name}" has no API key. Edit it in Settings → Connections, or pick a different connection in Chat Settings → Game.`,
+        ),
+        { statusCode: 400 },
+      );
+    }
     const gameGenerationParameters = resolveStoredGameGenerationParameters(meta, defaultGenerationParameters);
     const enableGen = !!meta.enableSpriteGeneration;
     const imgConnId = (meta.gameImageConnectionId as string) || null;

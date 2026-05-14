@@ -7385,13 +7385,24 @@ export function GameSurface({
   }, [hudWidgets]);
 
   const handleStartGameRequest = useCallback(() => {
-    if (startGame.isPending || startGameRequested || startGameGuardRef.current) return;
+    console.log("[GameSurface] handleStartGameRequest fired", {
+      isPending: startGame.isPending,
+      startGameRequested,
+      guard: startGameGuardRef.current,
+      widgetCount: normalizedWidgets.length,
+      activeChatId,
+    });
+    if (startGame.isPending || startGameRequested || startGameGuardRef.current) {
+      console.warn("[GameSurface] handleStartGameRequest blocked by guard");
+      return;
+    }
     if (normalizedWidgets.length > 0) {
+      console.log("[GameSurface] opening widget prep modal");
       setPrepareInitialWidgetsOpen(true);
       return;
     }
     handleStartGameNow();
-  }, [handleStartGameNow, normalizedWidgets.length, startGame.isPending, startGameRequested]);
+  }, [activeChatId, handleStartGameNow, normalizedWidgets.length, startGame.isPending, startGameRequested]);
 
   useEffect(() => {
     if (combatUiActive || normalizedWidgets.length === 0) {
@@ -7742,6 +7753,18 @@ export function GameSurface({
           </div>
         </div>
         {imagePromptReviewModal}
+        <GameWidgetSessionPrepModal
+          open={prepareInitialWidgetsOpen}
+          widgets={normalizedWidgets}
+          chatId={activeChatId}
+          mode="initial"
+          onClose={() => setPrepareInitialWidgetsOpen(false)}
+          onStartSession={() => {
+            setPrepareInitialWidgetsOpen(false);
+            handleStartGameNow();
+          }}
+          isStartingSession={startGame.isPending || startGameRequested}
+        />
       </>
     );
   }
