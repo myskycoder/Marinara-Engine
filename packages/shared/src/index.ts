@@ -47,6 +47,7 @@ export * from "./constants/model-lists.js"; // also exports IMAGE_GENERATION_SOU
 export * from "./constants/agent-prompts.js";
 export * from "./constants/impersonate.js";
 export * from "./constants/image-generation-defaults.js";
+export * from "./constants/image-model-families.js";
 export * from "./constants/security.js";
 
 // Utils

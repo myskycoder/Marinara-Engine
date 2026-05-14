@@ -281,6 +281,18 @@ Generates NPC portraits, location backgrounds, and inventory imagery via your se
 
 This toggle adds the most cost per turn — one or more image API calls each time the scene changes. If you do enable it, expect a meaningful per-session cost increase compared to running without.
 
+#### Image Prompt Writer (optional)
+
+Rare visual-novel CG illustrations from the player's POV are normally requested by the small Scene Analyzer model — it returns a draft prompt mixed in with audio/widget/segment fields. That draft is fine for cinematic tag-based backends but often misses the conventions of whatever image model you actually configured (booru tags vs. natural language vs. NovelAI v3/v4 syntax vs. short prose for Pollinations, etc.).
+
+Enable the **Image Prompt Writer** agent (Settings → Agents) to insert a dedicated rewrite step before the image call. The agent:
+
+- Detects the target image-model family from your image connection (provider + service + model). Supported families: SDXL/Pony/Illustrious booru tags, SDXL natural language, FLUX, DALL·E, GPT-Image / Nano-Banana, Imagen, NovelAI v3, NovelAI v4, Pollinations, ComfyUI, Stability, AI Horde, generic.
+- Asks the configured LLM (its own connection or, if unset, the chat connection) to rewrite the draft into a model-aware prompt — preserving location, characters, and continuity, but switching to the prompt syntax the target model expects.
+- Falls back silently to the original draft on any failure, so an outage on the rewriter connection never blocks a CG illustration.
+
+The agent is off by default. When enabled, it runs only on the rare turns where Scene Analysis requested a CG illustration — not on every turn.
+
 ## The `game-assets` folder
 
 The engine stores game-related media in `packages/server/data/game-assets/` relative to your install. Subfolders are organized by category:

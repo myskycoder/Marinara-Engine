@@ -184,6 +184,7 @@ export const BUILT_IN_AGENT_IDS = {
   HAPTIC: "haptic",
   CYOA: "cyoa",
   SECRET_PLOT_DRIVER: "secret-plot-driver",
+  IMAGE_PROMPT_WRITER: "image-prompt-writer",
 } as const;
 
 export type AgentCategory = "writer" | "tracker" | "misc";
@@ -317,6 +318,15 @@ export const BUILT_IN_AGENTS: BuiltInAgentMeta[] = [
     name: "Illustrator",
     description: "Generates image prompts for key scenes (requires image generation API).",
     phase: "post_processing",
+    enabledByDefault: false,
+    category: "misc",
+  },
+  {
+    id: "image-prompt-writer",
+    name: "Image Prompt Writer",
+    description:
+      "Rewrites Game-mode CG illustration prompts before they hit the image model, adapting them to the configured image-model family (SDXL/Pony booru tags, Flux/DALL·E natural language, NovelAI v3/v4, Pollinations, ComfyUI, etc.). Runs on demand from the Game-mode pipeline — not on every chat turn.",
+    phase: "parallel",
     enabledByDefault: false,
     category: "misc",
   },
@@ -548,6 +558,7 @@ export const DEFAULT_AGENT_TOOLS: Record<string, string[]> = {
   haptic: [],
   cyoa: [],
   "secret-plot-driver": [],
+  "image-prompt-writer": [],
 };
 
 /** Data shape for a lorebook_update agent result. */

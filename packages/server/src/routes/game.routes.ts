@@ -139,6 +139,7 @@ import {
   buildSceneIllustrationImagePrompt,
 } from "../services/game/game-asset-generation.js";
 import { buildIllustrationContinuity, excerptNarrationForIllustration } from "../services/game/scene-illustration-context.js";
+import { rewriteIllustrationPrompt } from "../services/game/image-prompt-writer.js";
 import {
   regenerateNpcAssets,
   scheduleNpcFullBodyEmotionSet,
@@ -6538,6 +6539,28 @@ export async function gameRoutes(app: FastifyInstance) {
                 season: illustrationSeason,
                 priorBackgroundTag: input.context.currentBackground,
               });
+              const rewrittenIllustrationPrompt = await rewriteIllustrationPrompt({
+                app,
+                chatId: input.chatId,
+                draftPrompt: illustration.prompt,
+                sceneContinuity: illustrationContinuity || null,
+                characters: illustration.characters,
+                characterDescriptions: illustrationAssets.characterDescriptions,
+                reason: illustration.reason ?? null,
+                genre,
+                setting,
+                artStyle,
+                imagePromptInstructions,
+                imageConn: {
+                  provider: imgConn.provider ?? null,
+                  baseUrl: imgConn.baseUrl ?? null,
+                  model: imgModel,
+                  imageGenerationSource: imgConn.imageGenerationSource ?? null,
+                  imageService: imgConn.imageService ?? null,
+                },
+                chatConnectionId: chat.connectionId ?? null,
+                rating: setupCfg?.rating === "nsfw" ? "nsfw" : "sfw",
+              });
               const generatedTag = await generateSceneIllustration({
                 chatId: input.chatId,
                 prompt: illustration.prompt,
@@ -6560,6 +6583,7 @@ export async function gameRoutes(app: FastifyInstance) {
                 imgDefaults,
                 debugLog: debugLogsEnabled ? debugLog : undefined,
                 promptOverridesStorage: createPromptOverridesStorage(app.db),
+                ...(rewrittenIllustrationPrompt ? { promptOverride: rewrittenIllustrationPrompt } : {}),
               });
               if (generatedTag) {
                 await addGeneratedIllustrationToGallery({
@@ -7746,6 +7770,54 @@ export async function gameRoutes(app: FastifyInstance) {
           season: illustrationSeasonGen,
           priorBackgroundTag: input.placeholderTag ?? null,
         });
+        // User-supplied review override always wins. Otherwise let the
+        // image-prompt-writer agent rewrite the sidecar draft for the target
+        // image-model family.
+        let resolvedIllustrationPromptOverride = illustrationPromptOverride;
+        if (resolvedIllustrationPromptOverride?.trim()) {
+          logger.info(
+            "[game/generate-assets] illustration: user-supplied prompt override present — skipping image-prompt-writer",
+          );
+        } else {
+          logger.info(
+            "[game/generate-assets] illustration: requesting image-prompt-writer rewrite (chat=%s, draftChars=%d)",
+            input.chatId,
+            illustration.prompt.length,
+          );
+          const rewritten = await rewriteIllustrationPrompt({
+            app,
+            chatId: input.chatId,
+            draftPrompt: illustration.prompt,
+            sceneContinuity: illustrationContinuityGen || null,
+            characters: illustration.characters,
+            characterDescriptions: illustrationAssets.characterDescriptions,
+            reason: illustration.reason ?? null,
+            genre,
+            setting,
+            artStyle,
+            imagePromptInstructions,
+            imageConn: {
+              provider: imgConn.provider ?? null,
+              baseUrl: imgConn.baseUrl ?? null,
+              model: imgModel,
+              imageGenerationSource: imgConn.imageGenerationSource ?? null,
+              imageService: imgConn.imageService ?? null,
+            },
+            chatConnectionId: chat.connectionId ?? null,
+            rating: setupCfg?.rating === "nsfw" ? "nsfw" : "sfw",
+          });
+          if (rewritten) {
+            resolvedIllustrationPromptOverride = rewritten;
+            logger.info(
+              "[game/generate-assets] illustration: using rewritten prompt (%d chars)",
+              rewritten.length,
+            );
+          } else {
+            logger.info(
+              "[game/generate-assets] illustration: rewrite skipped/failed — falling back to draft prompt",
+            );
+          }
+        }
         const tag = await generateSceneIllustration({
           chatId: input.chatId,
           prompt: illustration.prompt,
@@ -7769,7 +7841,7 @@ export async function gameRoutes(app: FastifyInstance) {
           debugLog: debugLogsEnabled ? debugLog : undefined,
           promptOverridesStorage,
           size: backgroundSize,
-          promptOverride: illustrationPromptOverride,
+          promptOverride: resolvedIllustrationPromptOverride,
         });
 
         if (tag) {

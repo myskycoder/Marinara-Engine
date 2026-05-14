@@ -102,6 +102,29 @@ function applyProviderMaxTokensOverride(provider: BaseLLMProvider, maxTokens: nu
 }
 
 /**
+ * Built-in agent types whose run is triggered on demand from another
+ * pipeline (e.g. the Game-mode image-asset pipeline) rather than as part of
+ * the per-turn agent executor loop. They register themselves as agents so
+ * users can configure a connection / prompt template via the Agent Editor,
+ * but the executor must never invoke them — doing so would waste tokens on
+ * every chat turn for an output nobody consumes here.
+ */
+const ON_DEMAND_AGENT_TYPES = new Set<string>(["image-prompt-writer"]);
+
+function makeSkipped(config: AgentExecConfig, reason: string, startTime: number): AgentResult {
+  return {
+    agentId: config.id,
+    agentType: config.type,
+    type: "context_injection",
+    data: { skipped: true, reason },
+    tokensUsed: 0,
+    durationMs: Date.now() - startTime,
+    success: true,
+    error: null,
+  };
+}
+
+/**
  * Execute a single agent: build prompt → call LLM → parse response.
  * If toolContext is provided, the agent can make tool calls in a loop.
  */
@@ -112,6 +135,13 @@ export async function executeAgent(
   model: string,
   toolContext?: AgentToolContext,
 ): Promise<AgentResult> {
+  if (ON_DEMAND_AGENT_TYPES.has(config.type)) {
+    logger.debug(
+      "[agent] skipping on-demand agent type=%s (invoked from a dedicated pipeline, not the executor)",
+      config.type,
+    );
+    return makeSkipped(config, "on-demand agent invoked outside the executor", Date.now());
+  }
   const auditCtx = deriveAiAuditContext({
     source: "agent",
     agentConfigId: config.id,
@@ -335,6 +365,27 @@ export async function executeAgentBatch(
   model: string,
 ): Promise<AgentResult[]> {
   if (configs.length === 0) return [];
+  // Drop on-demand agent types (e.g. image-prompt-writer) so they never burn
+  // tokens through the per-turn batch — they are invoked from their own
+  // dedicated pipelines (see services/game/image-prompt-writer.ts). We still
+  // return a skipped result for each so callers that expect 1:1 mapping by
+  // agent id can find them.
+  const onDemandConfigs = configs.filter((c) => ON_DEMAND_AGENT_TYPES.has(c.type));
+  if (onDemandConfigs.length > 0) {
+    logger.debug(
+      "[agent-batch] dropping %d on-demand agent(s) from batch: [%s]",
+      onDemandConfigs.length,
+      onDemandConfigs.map((c) => c.type).join(", "),
+    );
+    configs = configs.filter((c) => !ON_DEMAND_AGENT_TYPES.has(c.type));
+    const skippedStart = Date.now();
+    const skippedResults = onDemandConfigs.map((c) =>
+      makeSkipped(c, "on-demand agent invoked outside the executor", skippedStart),
+    );
+    if (configs.length === 0) return skippedResults;
+    const downstream = await executeAgentBatch(configs, context, provider, model);
+    return [...downstream, ...skippedResults];
+  }
   if (configs.length > 1) {
     const auditCtx = deriveAiAuditContext({
       source: "agent_pipeline",

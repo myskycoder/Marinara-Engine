@@ -39,6 +39,7 @@ This file is the release-notes source of truth for Marinara Engine. Reuse these 
 - Conversation settings now include a Commands section for toggling hidden character commands and configuring selfie and schedule command support.
 - Rare Chibi Professor Mari scroll toast easter egg with a matching thank-you response in Professor Mari chats.
 - Active World Info controls in Conversation and Game mode, including mobile access through the overflow menus.
+- Image Prompt Writer agent that rewrites Game-mode VN scene-illustration prompts before they hit the image model, adapting them to the configured image-model family (SDXL/Pony booru tags, Flux/DALL·E natural language, NovelAI v3/v4, Pollinations short prose, ComfyUI workflows, etc.).
 
 ### Changed
 
