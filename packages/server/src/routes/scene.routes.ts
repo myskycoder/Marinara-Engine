@@ -15,6 +15,7 @@ import { createConnectionsStorage } from "../services/storage/connections.storag
 import { createCharactersStorage } from "../services/storage/characters.storage.js";
 import { createGameStateStorage } from "../services/storage/game-state.storage.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
+import { enterAiAuditContext } from "../services/ai-audit/audit-context.js";
 import { stripConversationPromptTimestamps } from "../services/conversation/transcript-sanitize.js";
 import { getCharacterDescriptionWithExtensions } from "../services/prompt/index.js";
 import { DATA_DIR } from "../utils/data-dir.js";
@@ -232,6 +233,7 @@ export async function sceneRoutes(app: FastifyInstance) {
   // stores conversation history as hidden context in metadata.
   app.post<{ Body: SceneCreateRequest }>("/create", async (req, reply) => {
     const { originChatId, initiatorCharId, plan, connectionId } = req.body;
+    enterAiAuditContext({ source: "scene", chatId: originChatId, metadata: { sceneAction: "create" } });
 
     // Validate origin chat
     const originChat = await chats.getById(originChatId);
@@ -330,6 +332,7 @@ export async function sceneRoutes(app: FastifyInstance) {
   // to the origin conversation.
   app.post<{ Body: SceneConcludeRequest }>("/conclude", async (req, reply) => {
     const { sceneChatId, connectionId } = req.body;
+    enterAiAuditContext({ source: "scene", chatId: sceneChatId, metadata: { sceneAction: "conclude" } });
 
     const sceneChat = await chats.getById(sceneChatId);
     if (!sceneChat) return reply.status(404).send({ error: "Scene chat not found" });
@@ -703,6 +706,7 @@ export async function sceneRoutes(app: FastifyInstance) {
   // including system prompt, first message, background, rating, etc.
   app.post<{ Body: ScenePlanRequest }>("/plan", async (req, reply) => {
     const { chatId, prompt, connectionId } = req.body;
+    enterAiAuditContext({ source: "scene", chatId, metadata: { sceneAction: "plan" } });
 
     const chat = await chats.getById(chatId);
     if (!chat) return reply.status(404).send({ error: "Chat not found" });

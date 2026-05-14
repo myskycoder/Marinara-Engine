@@ -7,6 +7,7 @@ import { createConnectionsStorage } from "../services/storage/connections.storag
 import { createPromptsStorage } from "../services/storage/prompts.storage.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
 import { assemblePrompt, type AssemblerInput } from "../services/prompt/index.js";
+import { enterAiAuditContext } from "../services/ai-audit/audit-context.js";
 
 const reviewRequestSchema = z.object({
   presetId: z.string().min(1),
@@ -58,6 +59,7 @@ export async function promptReviewerRoutes(app: FastifyInstance) {
    */
   app.post("/review", async (req, reply) => {
     const input = reviewRequestSchema.parse(req.body);
+    enterAiAuditContext({ source: "prompt_reviewer" });
 
     // Resolve connection
     const conn = await connections.getWithKey(input.connectionId);

@@ -462,6 +462,30 @@ const CREATE_TABLES: string[] = [
     enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
     updated_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS ai_request_logs (
+    id TEXT PRIMARY KEY NOT NULL,
+    created_at TEXT NOT NULL,
+    source TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
+    agent_config_id TEXT,
+    agent_name TEXT,
+    chat_id TEXT,
+    message_id TEXT,
+    status TEXT NOT NULL,
+    error_message TEXT,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    total_tokens INTEGER,
+    cached_prompt_tokens INTEGER,
+    request_payload TEXT NOT NULL DEFAULT '{}',
+    response_payload TEXT NOT NULL DEFAULT '{}',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    request_truncated TEXT NOT NULL DEFAULT 'false',
+    response_truncated TEXT NOT NULL DEFAULT 'false'
+  )`,
 ];
 
 // ── Column migrations (ALTER TABLE for schema evolution) ──
@@ -809,4 +833,13 @@ export async function runMigrations(db: DB) {
   );
   await db.run(sql.raw(`CREATE INDEX IF NOT EXISTS idx_custom_themes_active ON custom_themes(is_active)`));
   await db.run(sql.raw(`CREATE INDEX IF NOT EXISTS idx_chat_presets_mode_active ON chat_presets(mode, is_active)`));
+  await db.run(
+    sql.raw(`CREATE INDEX IF NOT EXISTS idx_ai_request_logs_created_at ON ai_request_logs(created_at DESC)`),
+  );
+  await db.run(sql.raw(`CREATE INDEX IF NOT EXISTS idx_ai_request_logs_source ON ai_request_logs(source)`));
+  await db.run(sql.raw(`CREATE INDEX IF NOT EXISTS idx_ai_request_logs_kind ON ai_request_logs(kind)`));
+  await db.run(
+    sql.raw(`CREATE INDEX IF NOT EXISTS idx_ai_request_logs_agent ON ai_request_logs(agent_config_id)`),
+  );
+  await db.run(sql.raw(`CREATE INDEX IF NOT EXISTS idx_ai_request_logs_chat ON ai_request_logs(chat_id)`));
 }

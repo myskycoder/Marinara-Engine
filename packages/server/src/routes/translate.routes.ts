@@ -8,6 +8,7 @@ import { createLLMProvider } from "../services/llm/provider-registry.js";
 import { PROVIDERS } from "@marinara-engine/shared";
 import { isDeeplxLocalUrlsEnabled } from "../config/runtime-config.js";
 import { safeFetch, validateOutboundUrl } from "../utils/security.js";
+import { enterAiAuditContext } from "../services/ai-audit/audit-context.js";
 
 const GOOGLE_MAX_LENGTH = 5000;
 
@@ -35,6 +36,10 @@ export async function translateRoutes(app: FastifyInstance) {
    */
   app.post("/", async (req, reply) => {
     const input = translateSchema.parse(req.body);
+    enterAiAuditContext({
+      source: "translate",
+      metadata: { translateProvider: input.provider, targetLanguage: input.targetLanguage },
+    });
 
     switch (input.provider) {
       case "ai":

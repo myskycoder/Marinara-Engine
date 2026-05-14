@@ -4,6 +4,7 @@
 import { logger } from "../../lib/logger.js";
 import { isProviderLocalUrlsEnabled } from "../../config/runtime-config.js";
 import { safeFetch } from "../../utils/security.js";
+import { recordAiRequest, applyUsageToAuditInput } from "../ai-audit/audit-logger.js";
 
 /**
  * Shared undici Agent with a 5-minute headers timeout (time to first byte)
@@ -513,7 +514,10 @@ export function sanitizeApiError(raw: string, maxLen = 300): string {
 
 /**
  * Abstract base for all LLM providers.
- * Every provider must implement the `chat` method as an async generator.
+ * Every provider must implement `_doChat()`. Public `chat()` / `chatComplete()`
+ * / `embed()` are concrete on the base and add audit logging via
+ * `recordAiRequest`. Subclasses that need to override completion logic should
+ * override `_doChatComplete()` instead of `chatComplete()`.
  */
 export abstract class BaseLLMProvider {
   constructor(
@@ -523,6 +527,40 @@ export abstract class BaseLLMProvider {
     protected defaultOpenrouterProvider?: string | null,
     protected maxTokensOverride?: number | null,
   ) {}
+
+  /**
+   * Provider identifier used for audit logging. Override in subclasses to
+   * report a specific provider (openai, anthropic, google, ...).
+   */
+  getProviderName(): string {
+    return "unknown";
+  }
+
+  protected sanitizeAuditMessages(messages: ChatMessage[]): ChatMessage[] {
+    return messages.map((m) => ({
+      ...m,
+      images: m.images && m.images.length > 0 ? m.images.map(() => "[image]") : undefined,
+    }));
+  }
+
+  protected sanitizeAuditOptions(options: ChatOptions): Record<string, unknown> {
+    const {
+      onThinking,
+      onToken,
+      onResponseParts,
+      onEncryptedReasoning,
+      onChatCompletionsReasoning,
+      signal,
+      ...rest
+    } = options;
+    void onThinking;
+    void onToken;
+    void onResponseParts;
+    void onEncryptedReasoning;
+    void onChatCompletionsReasoning;
+    void signal;
+    return rest;
+  }
 
   /** Cap output max_tokens to the connection-level override, if one is set. */
   protected applyMaxTokensCap(tokens: number): number {
@@ -561,19 +599,27 @@ export abstract class BaseLLMProvider {
   }
 
   /**
-   * Stream a chat completion. Yields text chunks, optionally returns usage on completion.
+   * Subclass hook: implement the actual streaming chat against the provider.
+   * Yields text chunks, optionally returns usage on completion.
+   *
+   * NOTE: Public for the benefit of delegating providers (e.g. the ChatGPT
+   * provider proxies to an inner OpenAI provider). External callers should
+   * always use {@link chat} so audit logging fires.
    */
-  abstract chat(messages: ChatMessage[], options: ChatOptions): AsyncGenerator<string, LLMUsage | void, unknown>;
+  abstract _doChat(messages: ChatMessage[], options: ChatOptions): AsyncGenerator<string, LLMUsage | void, unknown>;
 
   /**
-   * Non-streaming chat completion with tool-use support.
-   * Default implementation collects from the streaming generator.
-   * If onToken is provided, streams text chunks in real time.
+   * Subclass hook: implement non-streaming chat completion (with tool support).
+   * Default implementation drains the streaming generator and reports no tool
+   * calls. Subclasses that need tool-use should override.
+   *
+   * NOTE: Public for the benefit of delegating providers. External callers
+   * should always use {@link chatComplete} so audit logging fires.
    */
-  async chatComplete(messages: ChatMessage[], options: ChatOptions): Promise<ChatCompletionResult> {
+  async _doChatComplete(messages: ChatMessage[], options: ChatOptions): Promise<ChatCompletionResult> {
     let content = "";
     const useStream = options.stream ?? !!options.onToken;
-    const gen = this.chat(messages, { ...options, stream: useStream });
+    const gen = this._doChat(messages, { ...options, stream: useStream });
     let result = await gen.next();
     while (!result.done) {
       content += result.value;
@@ -587,11 +633,13 @@ export abstract class BaseLLMProvider {
   }
 
   /**
-   * Generate embeddings for one or more texts.
+   * Subclass hook: implement embeddings against the provider.
    * Default implementation calls the OpenAI-compatible /embeddings endpoint.
-   * Override in provider subclasses that use a different API shape.
+   *
+   * NOTE: Public for the benefit of delegating providers. External callers
+   * should always use {@link embed} so audit logging fires.
    */
-  async embed(texts: string[], model: string): Promise<number[][]> {
+  async _doEmbed(texts: string[], model: string): Promise<number[][]> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Authorization: `Bearer ${this.apiKey}`,
@@ -612,6 +660,137 @@ export abstract class BaseLLMProvider {
     }
     const json = await res.json();
     return parseEmbeddingResponse(json);
+  }
+
+  /**
+   * Public streaming chat — wraps `_doChat()` and writes an audit log entry
+   * once the stream finishes (or fails). Yields the same chunks as the inner
+   * generator and returns the same final usage value.
+   */
+  async *chat(messages: ChatMessage[], options: ChatOptions): AsyncGenerator<string, LLMUsage | void, unknown> {
+    const start = Date.now();
+    const collected: string[] = [];
+    let usage: LLMUsage | void = undefined;
+    let finalError: unknown = null;
+    try {
+      const gen = this._doChat(messages, options);
+      let next = await gen.next();
+      while (!next.done) {
+        collected.push(next.value);
+        yield next.value;
+        next = await gen.next();
+      }
+      usage = next.value;
+      return usage;
+    } catch (err) {
+      finalError = err;
+      throw err;
+    } finally {
+      const status = finalError ? "error" : "ok";
+      const errorMessage = finalError instanceof Error ? finalError.message : finalError ? String(finalError) : null;
+      const audit = applyUsageToAuditInput(
+        {
+          kind: "chat" as const,
+          provider: this.getProviderName(),
+          model: options.model,
+          status,
+          errorMessage,
+          durationMs: Date.now() - start,
+          request: {
+            messages: this.sanitizeAuditMessages(messages),
+            options: this.sanitizeAuditOptions(options),
+          },
+          response: {
+            content: collected.join(""),
+            usage,
+            streaming: true,
+          },
+          metadata: { mode: "stream" },
+        },
+        usage || undefined,
+      );
+      recordAiRequest(audit);
+    }
+  }
+
+  /**
+   * Public non-streaming chat completion — wraps `_doChatComplete()` with
+   * auditing.
+   */
+  async chatComplete(messages: ChatMessage[], options: ChatOptions): Promise<ChatCompletionResult> {
+    const start = Date.now();
+    let result: ChatCompletionResult | undefined;
+    let finalError: unknown = null;
+    try {
+      result = await this._doChatComplete(messages, options);
+      return result;
+    } catch (err) {
+      finalError = err;
+      throw err;
+    } finally {
+      const status = finalError ? "error" : "ok";
+      const errorMessage = finalError instanceof Error ? finalError.message : finalError ? String(finalError) : null;
+      const audit = applyUsageToAuditInput(
+        {
+          kind: "chat" as const,
+          provider: this.getProviderName(),
+          model: options.model,
+          status,
+          errorMessage,
+          durationMs: Date.now() - start,
+          request: {
+            messages: this.sanitizeAuditMessages(messages),
+            options: this.sanitizeAuditOptions(options),
+          },
+          response: result
+            ? {
+                content: result.content,
+                toolCalls: result.toolCalls,
+                finishReason: result.finishReason,
+                usage: result.usage,
+              }
+            : undefined,
+          metadata: { mode: options.stream || options.onToken ? "stream" : "complete" },
+        },
+        result?.usage,
+      );
+      recordAiRequest(audit);
+    }
+  }
+
+  /**
+   * Public embeddings call — wraps `_doEmbed()` with auditing.
+   */
+  async embed(texts: string[], model: string): Promise<number[][]> {
+    const start = Date.now();
+    let result: number[][] | undefined;
+    let finalError: unknown = null;
+    try {
+      result = await this._doEmbed(texts, model);
+      return result;
+    } catch (err) {
+      finalError = err;
+      throw err;
+    } finally {
+      const status = finalError ? "error" : "ok";
+      const errorMessage = finalError instanceof Error ? finalError.message : finalError ? String(finalError) : null;
+      recordAiRequest({
+        kind: "embed",
+        provider: this.getProviderName(),
+        model,
+        status,
+        errorMessage,
+        durationMs: Date.now() - start,
+        request: { texts, model, count: texts.length },
+        response: result
+          ? {
+              count: result.length,
+              dims: result[0]?.length ?? 0,
+            }
+          : undefined,
+        metadata: {},
+      });
+    }
   }
 }
 

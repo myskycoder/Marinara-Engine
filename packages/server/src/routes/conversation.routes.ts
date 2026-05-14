@@ -10,6 +10,7 @@ import { createChatsStorage } from "../services/storage/chats.storage.js";
 import { createCharactersStorage } from "../services/storage/characters.storage.js";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
+import { enterAiAuditContext } from "../services/ai-audit/audit-context.js";
 import { PROVIDERS } from "@marinara-engine/shared";
 import type { CharacterData } from "@marinara-engine/shared";
 import {
@@ -184,6 +185,12 @@ export async function conversationRoutes(app: FastifyInstance) {
   const chats = createChatsStorage(app.db);
   const chars = createCharactersStorage(app.db);
   const connections = createConnectionsStorage(app.db);
+
+  app.addHook("preHandler", async (req) => {
+    const body = (req.body as Record<string, unknown> | undefined) ?? {};
+    const chatId = typeof body.chatId === "string" ? body.chatId : null;
+    enterAiAuditContext({ source: "conversation", chatId });
+  });
 
   // ─────────────────────────────────────────────
   // POST /schedule/generate — Generate or refresh weekly schedules

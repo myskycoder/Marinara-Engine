@@ -5,6 +5,7 @@ import type { FastifyInstance } from "fastify";
 import { MODEL_LISTS, createConnectionSchema, inferImageSource } from "@marinara-engine/shared";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
+import { enterAiAuditContext } from "../services/ai-audit/audit-context.js";
 import { fetchOpenAIChatGPTModels, getOpenAIChatGPTAuth } from "../services/llm/openai-chatgpt-auth.js";
 import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
 import { isImageLocalUrlsEnabled, isProviderLocalUrlsEnabled } from "../config/runtime-config.js";
@@ -480,6 +481,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
 
   // ── Test image generation — generates a small fixed test image ──
   app.post<{ Params: { id: string } }>("/:id/test-image", async (req, reply) => {
+    enterAiAuditContext({ source: "connection_test", metadata: { connectionId: req.params.id, kind: "image_test" } });
     const conn = await storage.getWithKey(req.params.id);
     if (!conn) return reply.status(404).send({ error: "Connection not found" });
     if (conn.provider !== "image_generation") {
@@ -621,6 +623,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
 
   // ── Test message — sends "hi" to the model and returns the response ──
   app.post<{ Params: { id: string } }>("/:id/test-message", async (req, reply) => {
+    enterAiAuditContext({ source: "connection_test", metadata: { connectionId: req.params.id } });
     const conn = await storage.getWithKey(req.params.id);
     if (!conn) return reply.status(404).send({ error: "Connection not found" });
 

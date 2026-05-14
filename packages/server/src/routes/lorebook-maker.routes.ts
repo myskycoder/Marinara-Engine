@@ -6,6 +6,7 @@ import { z } from "zod";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
 import { createLorebooksStorage } from "../services/storage/lorebooks.storage.js";
+import { enterAiAuditContext } from "../services/ai-audit/audit-context.js";
 
 const lorebookMakerSchema = z.object({
   prompt: z.string().min(1),
@@ -105,6 +106,7 @@ export async function lorebookMakerRoutes(app: FastifyInstance) {
    */
   app.post("/generate", async (req, reply) => {
     const input = lorebookMakerSchema.parse(req.body);
+    enterAiAuditContext({ source: "lorebook_maker" });
 
     // Resolve connection
     const conn = await connections.getWithKey(input.connectionId);

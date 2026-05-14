@@ -15,6 +15,7 @@ import { createAppSettingsStorage } from "../services/storage/app-settings.stora
 import { encryptApiKey, decryptApiKey } from "../utils/crypto.js";
 import { isTtsLocalUrlsEnabled } from "../config/runtime-config.js";
 import { safeFetch } from "../utils/security.js";
+import { recordAiRequest } from "../services/ai-audit/audit-logger.js";
 
 // OpenAI built-in voices used as fallback when the provider has no /audio/voices endpoint
 const OPENAI_FALLBACK_VOICES = ["alloy", "ash", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer"];
@@ -562,18 +563,54 @@ export async function ttsRoutes(app: FastifyInstance) {
     const { text, speaker, tone, voice } = speakSchema.parse(req.body);
 
     const cfg = await loadConfig(storage);
+    const auditStart = Date.now();
+    let auditStatus: "ok" | "error" = "ok";
+    let auditError: string | null = null;
+    let auditBytes = 0;
+    let auditContentType: string | null = null;
+    let auditModel = "";
+    const reportAudit = () => {
+      recordAiRequest({
+        kind: "tts",
+        provider: cfg.source,
+        model: auditModel || cfg.model || TTS_SOURCE_DEFAULTS[cfg.source].model,
+        source: "tts",
+        status: auditStatus,
+        errorMessage: auditError,
+        durationMs: Date.now() - auditStart,
+        request: {
+          text,
+          speaker,
+          tone,
+          voice: voice ?? cfg.voice,
+          speed: cfg.speed,
+          baseUrl: configuredBaseUrl(cfg),
+        },
+        response: { contentType: auditContentType, audioBytes: auditBytes },
+        metadata: {},
+      });
+    };
 
     if (!cfg.enabled) {
+      auditStatus = "error";
+      auditError = "TTS is not enabled";
+      reportAudit();
       return reply.status(400).send({ error: "TTS is not enabled" });
     }
 
     if (cfg.source === "elevenlabs" && !cfg.apiKey) {
+      auditStatus = "error";
+      auditError = "ElevenLabs API key is not configured";
+      reportAudit();
       return reply.status(400).send({ error: "ElevenLabs API key is not configured" });
     }
 
     const requestVoice = resolveTTSRequestVoice(cfg.voice, voice);
 
     if (cfg.source === "elevenlabs" && !requestVoice) {
+      auditStatus = "error";
+      auditError = "ElevenLabs voice is not selected";
+      reportAudit();
       return reply.status(400).send({ error: "ElevenLabs voice is not selected" });
     }
 
@@ -587,7 +624,11 @@ export async function ttsRoutes(app: FastifyInstance) {
         ? normalizeElevenLabsTtsModelId(configuredModel)
         : configuredModel;
     const normalizedModel = model.toLowerCase();
+    auditModel = model;
     if (cfg.source === "elevenlabs" && !useNanoGptSpeech && ELEVENLABS_NON_TTS_MODELS.has(normalizedModel)) {
+      auditStatus = "error";
+      auditError = `ElevenLabs model "${model}" cannot generate text-to-speech`;
+      reportAudit();
       return reply.status(400).send({
         error: `ElevenLabs model "${model}" cannot generate text-to-speech`,
         detail: `That model is for Text to Voice / voice design. Use "eleven_v3" for Eleven v3 speech, or "eleven_multilingual_v2", "eleven_flash_v2_5", or "eleven_turbo_v2_5" for regular TTS.`,
@@ -668,19 +709,29 @@ export async function ttsRoutes(app: FastifyInstance) {
       const msg =
         err instanceof Error && err.name === "TimeoutError" ? "TTS request timed out" : "TTS provider unreachable";
       req.log.error(err, "TTS provider request failed");
+      auditStatus = "error";
+      auditError = msg;
+      reportAudit();
       return reply.status(502).send({ error: msg });
     }
 
     if (!providerRes.ok) {
       const body = await providerRes.text().catch(() => "");
+      auditStatus = "error";
+      auditError = `TTS provider returned ${providerRes.status}: ${readProviderErrorDetail(body)}`.slice(0, 500);
+      reportAudit();
       return reply
         .status(502)
         .send({ error: `TTS provider returned ${providerRes.status}`, detail: readProviderErrorDetail(body) });
     }
 
     const contentType = providerRes.headers.get("content-type");
+    auditContentType = contentType;
     if (!isAllowedTTSAudioContentType(contentType)) {
       const body = await providerRes.text().catch(() => "");
+      auditStatus = "error";
+      auditError = `Non-audio response: ${contentType ?? "missing"}`;
+      reportAudit();
       return reply.status(502).send({
         error: "TTS provider returned a non-audio response",
         detail: readProviderErrorDetail(body) || `Content-Type: ${contentType || "missing"}`,
@@ -688,6 +739,8 @@ export async function ttsRoutes(app: FastifyInstance) {
     }
 
     const audioBuffer = await providerRes.arrayBuffer();
+    auditBytes = audioBuffer.byteLength;
+    reportAudit();
     reply.header("Content-Type", contentType?.startsWith("audio/") ? contentType : "audio/mpeg");
     reply.header("Content-Length", String(audioBuffer.byteLength));
     return reply.send(Buffer.from(audioBuffer));

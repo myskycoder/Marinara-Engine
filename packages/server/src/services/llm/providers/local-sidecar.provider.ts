@@ -38,23 +38,27 @@ export class LocalSidecarProvider extends BaseLLMProvider {
     };
   }
 
-  async *chat(messages: ChatMessage[], options: ChatOptions): AsyncGenerator<string, LLMUsage | void, unknown> {
+  override getProviderName(): string {
+    return "local-sidecar";
+  }
+
+  override async *_doChat(messages: ChatMessage[], options: ChatOptions): AsyncGenerator<string, LLMUsage | void, unknown> {
     const delegate = await this.createDelegate();
-    return yield* delegate.chat(messages, {
+    return yield* delegate._doChat(messages, {
       ...this.applyRuntimeSettings(options),
       model: this.getRequestModel(),
     });
   }
 
-  async chatComplete(messages: ChatMessage[], options: ChatOptions): Promise<ChatCompletionResult> {
+  override async _doChatComplete(messages: ChatMessage[], options: ChatOptions): Promise<ChatCompletionResult> {
     const delegate = await this.createDelegate();
-    return delegate.chatComplete(messages, {
+    return delegate._doChatComplete(messages, {
       ...this.applyRuntimeSettings(options),
       model: this.getRequestModel(),
     });
   }
 
-  async embed(_texts: string[], _model: string): Promise<number[][]> {
+  override async _doEmbed(_texts: string[], _model: string): Promise<number[][]> {
     throw new Error("The local sidecar does not support embeddings.");
   }
 }

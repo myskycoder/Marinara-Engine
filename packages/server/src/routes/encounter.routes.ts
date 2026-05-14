@@ -9,6 +9,7 @@ import { createGameStateStorage } from "../services/storage/game-state.storage.j
 import { createLorebooksStorage } from "../services/storage/lorebooks.storage.js";
 import { mapSheetAttributesToRPG } from "../services/game/skill-check.service.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
+import { enterAiAuditContext } from "../services/ai-audit/audit-context.js";
 import type { ChatMessage } from "../services/llm/base-provider.js";
 import type {
   EncounterInitRequest,
@@ -522,6 +523,7 @@ export async function encounterRoutes(app: FastifyInstance) {
     if (!chatId || !settings) {
       return reply.status(400).send({ error: "Missing required fields: chatId, settings" });
     }
+    enterAiAuditContext({ source: "encounter", chatId, metadata: { encounterAction: "init" } });
 
     try {
       const chat = await chats.getById(chatId);
@@ -598,6 +600,7 @@ export async function encounterRoutes(app: FastifyInstance) {
     if (!chatId || !action || !combatStats || !settings) {
       return reply.status(400).send({ error: "Missing required fields: chatId, action, combatStats, settings" });
     }
+    enterAiAuditContext({ source: "encounter", chatId, metadata: { encounterAction: "action" } });
 
     try {
       const chat = await chats.getById(chatId);
@@ -693,6 +696,7 @@ export async function encounterRoutes(app: FastifyInstance) {
     if (!chatId || !encounterLog?.length || !combatResult || !settings) {
       return reply.status(400).send({ error: "Missing required fields: chatId, encounterLog, result, settings" });
     }
+    enterAiAuditContext({ source: "encounter", chatId, metadata: { encounterAction: "summary" } });
     if (!validResults.includes(combatResult)) {
       return reply.status(400).send({ error: `Invalid result. Must be one of: ${validResults.join(", ")}` });
     }

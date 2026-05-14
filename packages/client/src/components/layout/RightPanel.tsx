@@ -2,7 +2,7 @@
 // Layout: Right Panel (polished with panel transitions)
 // ──────────────────────────────────────────────
 import { lazy, Suspense, type ComponentType, type LazyExoticComponent, type ReactNode } from "react";
-import { X, Users, BookOpen, FileText, Link, Sparkles, Settings, User, Bot } from "lucide-react";
+import { X, Users, BookOpen, FileText, Link, Sparkles, Settings, User, Bot, ScrollText } from "lucide-react";
 import { useUIStore } from "../../stores/ui.store";
 
 const CharactersPanel = lazy(() =>
@@ -25,6 +25,9 @@ const SettingsPanel = lazy(() =>
 const BotBrowserPanel = lazy(() =>
   import("../panels/BotBrowserPanel").then((module) => ({ default: module.BotBrowserPanel })),
 );
+const AiAuditPanel = lazy(() =>
+  import("../panels/AiAuditPanel").then((module) => ({ default: module.AiAuditPanel })),
+);
 
 const PANEL_CONFIG: Record<string, { title: string; icon: ReactNode; gradient: string }> = {
   "bot-browser": { title: "Browser", icon: <Bot size="0.875rem" />, gradient: "from-cyan-400 to-blue-500" },
@@ -34,6 +37,11 @@ const PANEL_CONFIG: Record<string, { title: string; icon: ReactNode; gradient: s
   connections: { title: "Connections", icon: <Link size="0.875rem" />, gradient: "from-sky-400 to-blue-500" },
   agents: { title: "Agents", icon: <Sparkles size="0.875rem" />, gradient: "from-pink-300 to-purple-400" },
   personas: { title: "Personas", icon: <User size="0.875rem" />, gradient: "from-emerald-400 to-teal-500" },
+  "ai-audit": {
+    title: "AI Audit",
+    icon: <ScrollText size="0.875rem" />,
+    gradient: "from-yellow-400 to-amber-500",
+  },
   settings: { title: "Settings", icon: <Settings size="0.875rem" />, gradient: "from-gray-400 to-gray-500" },
 };
 
@@ -45,6 +53,7 @@ const PANELS: Record<string, LazyExoticComponent<ComponentType>> = {
   connections: ConnectionsPanel,
   agents: AgentsPanel,
   personas: PersonasPanel,
+  "ai-audit": AiAuditPanel,
   settings: SettingsPanel,
 };
 

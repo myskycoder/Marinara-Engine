@@ -65,6 +65,7 @@ import { executeToolCalls, type MetadataPatchInput } from "../services/tools/too
 import { createAgentPipeline, type ResolvedAgent, type AgentInjection } from "../services/agents/agent-pipeline.js";
 import { DATA_DIR } from "../utils/data-dir.js";
 import { executeAgent, normalizeAgentContextSize, resolveAgentResultType } from "../services/agents/agent-executor.js";
+import { enterAiAuditContext } from "../services/ai-audit/audit-context.js";
 import { buildSpriteExpressionChoices, listCharacterSprites } from "../services/game/sprite.service.js";
 import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "../services/llm/local-sidecar.js";
 import {
@@ -648,6 +649,11 @@ export async function generateRoutes(app: FastifyInstance) {
    */
   app.post("/", async (req, reply) => {
     const input = generateRequestSchema.parse(req.body);
+    enterAiAuditContext({
+      source: "main_generate",
+      chatId: input.chatId,
+      metadata: { impersonate: !!input.impersonate },
+    });
     const requestDebug = input.debugMode === true;
     const debugLog = (message: string, ...args: any[]) => {
       logDebugOverride(requestDebug, message, ...args);

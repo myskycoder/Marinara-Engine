@@ -81,6 +81,10 @@ export class OpenAIProvider extends BaseLLMProvider {
     super(baseUrl, apiKey, defaultMaxContext, defaultOpenrouterProvider, maxTokensOverride);
   }
 
+  override getProviderName(): string {
+    return this.providerKind;
+  }
+
   private static async parseJsonBody<T>(response: Response, context: string): Promise<T> {
     const raw = await response.text();
     try {
@@ -625,7 +629,7 @@ export class OpenAIProvider extends BaseLLMProvider {
       });
   }
 
-  async *chat(messages: ChatMessage[], options: ChatOptions): AsyncGenerator<string, LLMUsage | void, unknown> {
+  override async *_doChat(messages: ChatMessage[], options: ChatOptions): AsyncGenerator<string, LLMUsage | void, unknown> {
     const configuredMaxTokens = this.applyMaxTokensCap(options.maxTokens ?? 4096);
     const contextFit = this.fitMessagesToContext(messages, { ...options, maxTokens: configuredMaxTokens });
     messages = contextFit.messages;
@@ -835,7 +839,7 @@ export class OpenAIProvider extends BaseLLMProvider {
   }
 
   /** Non-streaming completion with tool-call support */
-  async chatComplete(messages: ChatMessage[], options: ChatOptions): Promise<ChatCompletionResult> {
+  override async _doChatComplete(messages: ChatMessage[], options: ChatOptions): Promise<ChatCompletionResult> {
     const configuredMaxTokens = this.applyMaxTokensCap(options.maxTokens ?? 4096);
     const contextFit = this.fitMessagesToContext(messages, { ...options, maxTokens: configuredMaxTokens });
     messages = contextFit.messages;

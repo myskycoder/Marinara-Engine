@@ -12,6 +12,7 @@ import {
 } from "@marinara-engine/shared";
 import { isDebugAgentsEnabled } from "../../config/runtime-config.js";
 import { logger } from "../../lib/logger.js";
+import { withAiAuditContext, deriveAiAuditContext } from "../ai-audit/audit-context.js";
 
 const MAX_AGENT_CONTEXT_MESSAGES = 200;
 const EXPRESSION_AGENT_RECENT_CONTEXT_MESSAGES = 2;
@@ -105,6 +106,23 @@ function applyProviderMaxTokensOverride(provider: BaseLLMProvider, maxTokens: nu
  * If toolContext is provided, the agent can make tool calls in a loop.
  */
 export async function executeAgent(
+  config: AgentExecConfig,
+  context: AgentContext,
+  provider: BaseLLMProvider,
+  model: string,
+  toolContext?: AgentToolContext,
+): Promise<AgentResult> {
+  const auditCtx = deriveAiAuditContext({
+    source: "agent",
+    agentConfigId: config.id,
+    agentName: config.name,
+    chatId: context.chatId ?? null,
+    metadata: { agentType: config.type, phase: config.phase },
+  });
+  return withAiAuditContext(auditCtx, () => executeAgentInner(config, context, provider, model, toolContext));
+}
+
+async function executeAgentInner(
   config: AgentExecConfig,
   context: AgentContext,
   provider: BaseLLMProvider,
@@ -311,6 +329,30 @@ async function executeAgentWithTools(
  * Falls back to individual calls if the batch response can't be parsed.
  */
 export async function executeAgentBatch(
+  configs: AgentExecConfig[],
+  context: AgentContext,
+  provider: BaseLLMProvider,
+  model: string,
+): Promise<AgentResult[]> {
+  if (configs.length === 0) return [];
+  if (configs.length > 1) {
+    const auditCtx = deriveAiAuditContext({
+      source: "agent_pipeline",
+      agentConfigId: configs[0]?.id ?? null,
+      agentName: configs[0]?.name ?? null,
+      chatId: context.chatId ?? null,
+      metadata: {
+        batchedAgents: configs.map((c) => ({ id: c.id, type: c.type, name: c.name })),
+      },
+    });
+    return withAiAuditContext(auditCtx, () =>
+      executeAgentBatchInner(configs, context, provider, model),
+    );
+  }
+  return executeAgentBatchInner(configs, context, provider, model);
+}
+
+async function executeAgentBatchInner(
   configs: AgentExecConfig[],
   context: AgentContext,
   provider: BaseLLMProvider,

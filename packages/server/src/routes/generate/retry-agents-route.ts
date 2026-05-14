@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { logger } from "../../lib/logger.js";
+import { enterAiAuditContext } from "../../services/ai-audit/audit-context.js";
 import {
   BUILT_IN_AGENTS,
   BUILT_IN_TOOLS,
@@ -1891,6 +1892,12 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
     if (!chatId || !agentTypes?.length) {
       return reply.status(400).send({ error: "chatId and agentTypes are required" });
     }
+    enterAiAuditContext({
+      source: "agent_pipeline",
+      chatId,
+      messageId: forMessageId ?? null,
+      metadata: { retryAgents: agentTypes, secretPlotRerollMode },
+    });
 
     startSseReply(reply);
 

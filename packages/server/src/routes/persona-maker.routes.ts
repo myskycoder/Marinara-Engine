@@ -5,6 +5,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
+import { enterAiAuditContext } from "../services/ai-audit/audit-context.js";
 
 const personaMakerSchema = z.object({
   prompt: z.string().min(1),
@@ -35,6 +36,7 @@ export async function personaMakerRoutes(app: FastifyInstance) {
    */
   app.post("/generate", async (req, reply) => {
     const input = personaMakerSchema.parse(req.body);
+    enterAiAuditContext({ source: "persona_maker" });
 
     const conn = await connections.getWithKey(input.connectionId);
     if (!conn) {

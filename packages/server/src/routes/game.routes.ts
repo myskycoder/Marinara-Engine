@@ -15,6 +15,7 @@ import { createGameStateStorage } from "../services/storage/game-state.storage.j
 import { createLorebooksStorage } from "../services/storage/lorebooks.storage.js";
 import { createAgentsStorage } from "../services/storage/agents.storage.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
+import { enterAiAuditContext } from "../services/ai-audit/audit-context.js";
 import { extractLeadingThinkingBlocks } from "../services/llm/inline-thinking.js";
 import { fitMessagesToContext, type ChatMessage, type ChatOptions } from "../services/llm/base-provider.js";
 import { isDiceNotation, rollDice } from "../services/game/dice.service.js";
@@ -2758,6 +2759,18 @@ function reconcileJournal(
 // ──────────────────────────────────────────────
 
 export async function gameRoutes(app: FastifyInstance) {
+  app.addHook("preHandler", async (req) => {
+    const body = (req.body as Record<string, unknown> | undefined) ?? {};
+    const params = (req.params as Record<string, unknown> | undefined) ?? {};
+    const chatId =
+      typeof body.chatId === "string"
+        ? body.chatId
+        : typeof params.chatId === "string"
+          ? params.chatId
+          : null;
+    enterAiAuditContext({ source: "game", chatId });
+  });
+
   const buildHydratedGameMeta = async (
     chatId: string,
     baseMeta: Record<string, unknown>,

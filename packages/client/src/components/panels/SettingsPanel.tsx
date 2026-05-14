@@ -12,6 +12,13 @@ import {
 } from "../../stores/ui.store";
 import { cn } from "../../lib/utils";
 import { useExtensions, useCreateExtension, useDeleteExtension, useUpdateExtension } from "../../hooks/use-extensions";
+import {
+  useAiAuditSettings,
+  useUpdateAiAuditSettings,
+  useClearAiAudit,
+  usePruneAiAudit,
+} from "../../hooks/use-ai-audit";
+import { showConfirmDialog } from "../../lib/app-dialogs";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ADMIN_SECRET_STORAGE_KEY, api, getAdminSecretHeader } from "../../lib/api-client";
 import { forceRefreshSpa } from "@/lib/browser-runtime";
@@ -2674,6 +2681,199 @@ function ImportButton({
   );
 }
 
+function AiAuditSettingsSection() {
+  const { data, isLoading } = useAiAuditSettings();
+  const updateMutation = useUpdateAiAuditSettings();
+  const clearMutation = useClearAiAudit();
+  const pruneMutation = usePruneAiAudit();
+  const settings = data?.settings;
+  const defaults = data?.defaults;
+
+  const update = (patch: Partial<NonNullable<typeof settings>>) => {
+    updateMutation.mutate(patch, {
+      onSuccess: () => toast.success("AI Audit: настройки сохранены"),
+      onError: (err) => toast.error(err instanceof Error ? err.message : "Не удалось сохранить"),
+    });
+  };
+
+  const handleClear = async () => {
+    const ok = await showConfirmDialog({
+      title: "Очистить AI Audit?",
+      message: "Все записи будут удалены. Действие необратимо.",
+      confirmLabel: "Очистить",
+      cancelLabel: "Отмена",
+      tone: "destructive",
+    });
+    if (!ok) return;
+    clearMutation.mutate(undefined, {
+      onSuccess: () => toast.success("AI Audit очищен"),
+      onError: (err) => toast.error(err instanceof Error ? err.message : "Не удалось очистить"),
+    });
+  };
+
+  const handlePrune = () => {
+    pruneMutation.mutate(undefined, {
+      onSuccess: (res) =>
+        toast.success(`Очищено ${res.deletedByAge} (по возрасту) + ${res.deletedByCount} (по количеству)`),
+      onError: (err) => toast.error(err instanceof Error ? err.message : "Не удалось"),
+    });
+  };
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg bg-[var(--secondary)]/40 p-2.5 ring-1 ring-[var(--border)]">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5">
+          <ScrollText size="0.75rem" className="text-[var(--muted-foreground)]" />
+          <span className="text-xs font-medium">AI Audit Log</span>
+        </div>
+        {(updateMutation.isPending || clearMutation.isPending || pruneMutation.isPending) && (
+          <Loader2 size="0.75rem" className="animate-spin text-[var(--muted-foreground)]" />
+        )}
+      </div>
+      <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
+        Сохраняет все исходящие AI-запросы (LLM, embeddings, картинки, TTS) с метаданными. Просматривать можно в панели
+        AI Audit.
+      </p>
+
+      {isLoading || !settings || !defaults ? (
+        <div className="flex justify-center py-3">
+          <Loader2 className="animate-spin" size="0.875rem" />
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          <ToggleSetting
+            label="Логировать запросы"
+            help="Главный тумблер. Когда выключено — новые запросы не сохраняются."
+            checked={settings.enabled}
+            onChange={(value) => update({ enabled: value })}
+          />
+          <ToggleSetting
+            label="Сохранять тело запроса"
+            help="Полные сообщения / параметры. Можно отключить, если важна только статистика."
+            checked={settings.logRequestBody}
+            onChange={(value) => update({ logRequestBody: value })}
+          />
+          <ToggleSetting
+            label="Сохранять тело ответа"
+            help="Текст ответа модели. При выключении остаются только метаданные и токены."
+            checked={settings.logResponseBody}
+            onChange={(value) => update({ logResponseBody: value })}
+          />
+
+          <NumericRow
+            label="Макс. записей"
+            description="Лог не превысит это число — старые удаляются."
+            value={settings.maxEntries}
+            min={0}
+            max={1_000_000}
+            step={100}
+            onCommit={(value) => update({ maxEntries: value })}
+            placeholder={String(defaults.maxEntries)}
+          />
+          <NumericRow
+            label="Размер записи (байт)"
+            description="Тело запроса/ответа сверху обрезается, если превышает лимит. 0 — без обрезки."
+            value={settings.maxRecordSize}
+            min={0}
+            max={50 * 1024 * 1024}
+            step={1024}
+            onCommit={(value) => update({ maxRecordSize: value })}
+            placeholder={String(defaults.maxRecordSize)}
+          />
+          <NumericRow
+            label="Хранить дней"
+            description="Записи старше этого порога удаляются раз в час. 0 — без ограничения."
+            value={settings.retentionDays}
+            min={0}
+            max={3650}
+            step={1}
+            onCommit={(value) => update({ retentionDays: value })}
+            placeholder={String(defaults.retentionDays)}
+          />
+
+          <div className="flex flex-wrap gap-2 pt-1">
+            <button
+              onClick={handlePrune}
+              disabled={pruneMutation.isPending}
+              className="flex items-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs font-medium ring-1 ring-[var(--border)] transition-all hover:opacity-90 active:scale-95 disabled:opacity-50"
+            >
+              <RotateCcw size="0.75rem" />
+              Применить лимиты сейчас
+            </button>
+            <button
+              onClick={handleClear}
+              disabled={clearMutation.isPending}
+              className="flex items-center gap-1.5 rounded-lg bg-[var(--destructive)]/10 px-3 py-2 text-xs font-medium text-[var(--destructive)] ring-1 ring-[var(--destructive)]/30 transition-all hover:bg-[var(--destructive)]/15 active:scale-95 disabled:opacity-50"
+            >
+              <Trash2 size="0.75rem" />
+              Очистить весь лог
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NumericRow({
+  label,
+  description,
+  value,
+  onCommit,
+  min,
+  max,
+  step,
+  placeholder,
+}: {
+  label: string;
+  description?: string;
+  value: number;
+  onCommit: (value: number) => void;
+  min: number;
+  max: number;
+  step: number;
+  placeholder?: string;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  const commit = () => {
+    const parsed = Number(draft);
+    if (!Number.isFinite(parsed)) {
+      setDraft(String(value));
+      return;
+    }
+    const clamped = Math.max(min, Math.min(max, Math.floor(parsed)));
+    if (clamped !== value) onCommit(clamped);
+    setDraft(String(clamped));
+  };
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs">{label}</span>
+        <input
+          type="number"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          }}
+          min={min}
+          max={max}
+          step={step}
+          placeholder={placeholder}
+          className="w-32 rounded-lg bg-[var(--background)] px-2 py-1 text-right text-xs outline-none ring-1 ring-[var(--border)] focus:ring-[var(--primary)]"
+        />
+      </div>
+      {description && <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{description}</span>}
+    </div>
+  );
+}
+
 function AdvancedSettings() {
   const messageGrouping = useUIStore((s) => s.messageGrouping);
   const setMessageGrouping = useUIStore((s) => s.setMessageGrouping);
@@ -2971,6 +3171,8 @@ function AdvancedSettings() {
           </button>
         </div>
       </div>
+
+      <AiAuditSettingsSection />
 
       {/* ── Updates ── */}
       <div className="flex flex-col gap-2">

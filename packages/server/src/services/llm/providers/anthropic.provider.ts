@@ -26,7 +26,11 @@ function resolveCacheControlMessageIndex(messages: ChatMessage[], cachingAtDepth
  * Handles Anthropic Claude API (Messages API).
  */
 export class AnthropicProvider extends BaseLLMProvider {
-  async *chat(messages: ChatMessage[], options: ChatOptions): AsyncGenerator<string, LLMUsage | void, unknown> {
+  override getProviderName(): string {
+    return "anthropic";
+  }
+
+  override async *_doChat(messages: ChatMessage[], options: ChatOptions): AsyncGenerator<string, LLMUsage | void, unknown> {
     const configuredMaxTokens = options.maxTokens ?? 4096;
     const contextFit = this.fitMessagesToContext(messages, { ...options, maxTokens: configuredMaxTokens });
     messages = contextFit.messages;

@@ -5,6 +5,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
+import { enterAiAuditContext } from "../services/ai-audit/audit-context.js";
 
 const characterMakerSchema = z.object({
   prompt: z.string().min(1),
@@ -41,6 +42,7 @@ export async function characterMakerRoutes(app: FastifyInstance) {
    */
   app.post("/generate", async (req, reply) => {
     const input = characterMakerSchema.parse(req.body);
+    enterAiAuditContext({ source: "character_maker" });
 
     // Resolve connection
     const conn = await connections.getWithKey(input.connectionId);

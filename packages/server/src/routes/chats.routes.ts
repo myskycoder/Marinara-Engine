@@ -19,6 +19,7 @@ import { createConnectionsStorage } from "../services/storage/connections.storag
 import { createRegexScriptsStorage } from "../services/storage/regex-scripts.storage.js";
 import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "../services/llm/local-sidecar.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
+import { enterAiAuditContext } from "../services/ai-audit/audit-context.js";
 import { generateMissingConversationSummaries } from "../services/conversation/auto-summary.service.js";
 import { rebuildMemoryChunks } from "../services/memory-recall.js";
 import { wrapContent } from "../services/prompt/format-engine.js";
@@ -1695,6 +1696,7 @@ export async function chatsRoutes(app: FastifyInstance) {
   // saves it into chatMetadata.summary, and returns it.
   // Model resolution: chat-summary agent connection → default-for-agents → chat connection.
   app.post<{ Params: { id: string } }>("/:id/generate-summary", async (req, reply) => {
+    enterAiAuditContext({ source: "other", chatId: req.params.id, metadata: { feature: "chat_summary" } });
     const chat = await storage.getById(req.params.id);
     if (!chat) return reply.status(404).send({ error: "Chat not found" });
 

@@ -24,6 +24,7 @@ import {
 } from "@marinara-engine/shared";
 import { isImageLocalUrlsEnabled } from "../../config/runtime-config.js";
 import { normalizeLoopbackUrl, safeFetch, validateOutboundUrl } from "../../utils/security.js";
+import { recordAiRequest } from "../ai-audit/audit-logger.js";
 
 const GALLERY_DIR = join(DATA_DIR, "gallery");
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -122,30 +123,83 @@ export async function generateImage(
       request.allowLocalUrls ?? (await shouldAllowLocalUrlsForImageConnection(normalizedBaseUrl, resolvedSource)),
   };
 
-  switch (resolvedSource) {
-    case "openai":
-      return generateOpenAI(normalizedBaseUrl, apiKey, scopedRequest);
-    case "nanogpt":
-      return generateNanoGPT(normalizedBaseUrl, apiKey, scopedRequest);
-    case "openrouter":
-      return generateOpenRouter(normalizedBaseUrl, apiKey, scopedRequest);
-    case "pollinations":
-      return generatePollinations(scopedRequest);
-    case "stability":
-      return generateStability(normalizedBaseUrl, apiKey, scopedRequest);
-    case "togetherai":
-      return generateTogetherAI(normalizedBaseUrl, apiKey, scopedRequest);
-    case "novelai":
-      return generateNovelAI(normalizedBaseUrl, apiKey, scopedRequest);
-    case "comfyui":
-      return generateComfyUI(normalizedBaseUrl, scopedRequest);
-    case "automatic1111":
-      return generateAutomatic1111(normalizedBaseUrl, scopedRequest);
-    case "gemini_image":
-      return generateViaChatCompletions(normalizedBaseUrl, apiKey, scopedRequest);
-    default:
-      // Fallback: try OpenAI-compatible endpoint
-      return generateOpenAI(normalizedBaseUrl, apiKey, scopedRequest);
+  const start = Date.now();
+  let result: ImageGenResult | undefined;
+  let finalError: unknown = null;
+  try {
+    switch (resolvedSource) {
+      case "openai":
+        result = await generateOpenAI(normalizedBaseUrl, apiKey, scopedRequest);
+        break;
+      case "nanogpt":
+        result = await generateNanoGPT(normalizedBaseUrl, apiKey, scopedRequest);
+        break;
+      case "openrouter":
+        result = await generateOpenRouter(normalizedBaseUrl, apiKey, scopedRequest);
+        break;
+      case "pollinations":
+        result = await generatePollinations(scopedRequest);
+        break;
+      case "stability":
+        result = await generateStability(normalizedBaseUrl, apiKey, scopedRequest);
+        break;
+      case "togetherai":
+        result = await generateTogetherAI(normalizedBaseUrl, apiKey, scopedRequest);
+        break;
+      case "novelai":
+        result = await generateNovelAI(normalizedBaseUrl, apiKey, scopedRequest);
+        break;
+      case "comfyui":
+        result = await generateComfyUI(normalizedBaseUrl, scopedRequest);
+        break;
+      case "automatic1111":
+        result = await generateAutomatic1111(normalizedBaseUrl, scopedRequest);
+        break;
+      case "gemini_image":
+        result = await generateViaChatCompletions(normalizedBaseUrl, apiKey, scopedRequest);
+        break;
+      default:
+        result = await generateOpenAI(normalizedBaseUrl, apiKey, scopedRequest);
+        break;
+    }
+    return result;
+  } catch (err) {
+    finalError = err;
+    throw err;
+  } finally {
+    const status = finalError ? "error" : "ok";
+    const errorMessage = finalError instanceof Error ? finalError.message : finalError ? String(finalError) : null;
+    recordAiRequest({
+      kind: "image",
+      provider: resolvedSource,
+      model: request.model ?? "",
+      source: "image_generation",
+      status,
+      errorMessage,
+      durationMs: Date.now() - start,
+      request: {
+        prompt: request.prompt,
+        negativePrompt: request.negativePrompt,
+        width: request.width,
+        height: request.height,
+        model: request.model,
+        transparentBackground: request.transparentBackground,
+        hasReferenceImage: !!(request.referenceImage || (request.referenceImages && request.referenceImages.length > 0)),
+        referenceImageCount: request.referenceImages?.length ?? (request.referenceImage ? 1 : 0),
+        comfyWorkflowProvided: !!request.comfyWorkflow,
+        baseUrl: normalizedBaseUrl,
+        serviceHint,
+        sourceHint: source,
+      },
+      response: result
+        ? {
+            mimeType: result.mimeType,
+            ext: result.ext,
+            base64Bytes: typeof result.base64 === "string" ? result.base64.length : 0,
+          }
+        : undefined,
+      metadata: { resolvedSource },
+    });
   }
 }
 

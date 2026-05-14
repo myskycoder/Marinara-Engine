@@ -21,7 +21,11 @@ interface GeminiPart {
  * Handles Google Gemini API (generateContent / streamGenerateContent).
  */
 export class GoogleProvider extends BaseLLMProvider {
-  async *chat(messages: ChatMessage[], options: ChatOptions): AsyncGenerator<string, LLMUsage | void, unknown> {
+  override getProviderName(): string {
+    return "google";
+  }
+
+  override async *_doChat(messages: ChatMessage[], options: ChatOptions): AsyncGenerator<string, LLMUsage | void, unknown> {
     const configuredMaxTokens = options.maxTokens ?? 4096;
     const contextFit = this.fitMessagesToContext(messages, { ...options, maxTokens: configuredMaxTokens });
     messages = contextFit.messages;

@@ -35,6 +35,7 @@ import {
 } from "./config/runtime-config.js";
 import { corsDelegate } from "./config/cors-config.js";
 import { sidecarProcessService } from "./services/sidecar/sidecar-process.service.js";
+import { startAiAuditCleanupSchedule, stopAiAuditCleanupSchedule } from "./services/ai-audit/audit-cleanup.js";
 
 const isLite = process.env.MARINARA_LITE === "true" || process.env.MARINARA_LITE === "1";
 const REVALIDATE_FILES = new Set(["index.html"]);
@@ -71,6 +72,11 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
   app.decorate("db", db);
   app.addHook("onClose", async () => {
     try {
+      stopAiAuditCleanupSchedule();
+    } catch (err) {
+      app.log.warn(err, "Failed to stop AI audit cleanup during shutdown");
+    }
+    try {
       await sidecarProcessService.stop();
     } catch (err) {
       app.log.error(err, "Failed to stop sidecar during shutdown");
@@ -101,6 +107,9 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
 
   // ── Recover orphaned gallery images (files on disk without DB records) ──
   await recoverGalleryImages(db);
+
+  // ── AI audit log cleanup (runs once on startup, then hourly) ──
+  startAiAuditCleanupSchedule();
 
   // ── Security headers ──
   app.addHook("onRequest", securityHeadersHook);
