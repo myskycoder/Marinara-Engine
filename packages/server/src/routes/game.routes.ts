@@ -113,6 +113,7 @@ import type {
   GameMap,
   GameNpc,
   GenerationParameters,
+  PresentCharacter,
   SceneIllustrationRequest,
   QuestProgress,
   SessionSummary,
@@ -289,7 +290,29 @@ function collectIllustrationCharacterAssets(opts: {
   charReferenceByName: Map<string, string>;
   charAvatarByName: Map<string, string>;
   charDescriptionByName: Map<string, string>;
-}): { referenceImages: string[]; characterDescriptions: string[] } {
+}): {
+  referenceImages: string[];
+  /**
+   * Image-asset pipeline appearance fallback: only includes characters who do
+   * NOT have an attached reference image (avatar/sprite). Kept for the
+   * existing `generateSceneIllustration` flow which already gets the
+   * reference images directly.
+   */
+  characterDescriptions: string[];
+  /**
+   * Broader name list for the image-prompt-writer agent: union of (sidecar
+   * draft + character-tracker present + NPC card metadata). Useful when the
+   * sidecar's draft only listed a subset of who is actually on-screen.
+   */
+  characterNamesForRewriter: string[];
+  /**
+   * Full appearance descriptions for the image-prompt-writer — collected for
+   * EVERY known character in the broad name list, regardless of whether they
+   * also have a reference image. The rewriter is text-only and needs the
+   * description to emit correct booru tags (hair, eyes, build, etc.).
+   */
+  characterDescriptionsForRewriter: string[];
+} {
   const npcAvatarByName = new Map<string, string>();
   const npcDescriptionByName = new Map<string, string>();
   // `gameNpcs` (persisted metadata) is authoritative; `trackedNpcs` is often a snapshot and can lag after regen.
@@ -306,6 +329,8 @@ function collectIllustrationCharacterAssets(opts: {
     if (name && key && description && !npcDescriptionByName.has(key)) npcDescriptionByName.set(key, description);
   }
 
+  // Existing logic: image-asset pipeline references + appearance fallback.
+  // Sidecar's `illustration.characters` wins when non-empty.
   const requestedNames = (opts.illustration.characters?.length ? opts.illustration.characters : opts.characterNames)
     .map((name) => name.trim())
     .filter(Boolean);
@@ -341,7 +366,144 @@ function collectIllustrationCharacterAssets(opts: {
       characterDescriptions.push(`${name}: ${description}`.slice(0, 300));
     }
   }
-  return { referenceImages: references, characterDescriptions: characterDescriptions.slice(0, 5) };
+
+  // Broader rewriter feed — union of (sidecar + tracker + NPC cards).
+  // Image-prompt-writer is text-only and benefits from descriptions for
+  // EVERY visible character, even those that already have an attached
+  // reference image (the rewriter doesn't see images, only text).
+  const broadNames = Array.from(
+    new Set(
+      [
+        ...(opts.illustration.characters ?? []),
+        ...opts.characterNames,
+        ...opts.gameNpcs.map((npc) => npc.name).filter((n): n is string => !!n),
+      ]
+        .map((name) => name?.trim())
+        .filter((n): n is string => !!n),
+    ),
+  );
+  const broadUniqueNames = Array.from(new Set(broadNames.map((name) => name.toLowerCase())))
+    .map((lowerName) => broadNames.find((name) => name.toLowerCase() === lowerName)!)
+    .slice(0, 8);
+
+  const characterDescriptionsForRewriter: string[] = [];
+  const describedForRewriter = new Set<string>();
+  for (const name of broadUniqueNames) {
+    const description =
+      findCharAvatarFuzzy(name, opts.charDescriptionByName) ?? findCharAvatarFuzzy(name, npcDescriptionByName);
+    const normalizedName = name.toLowerCase();
+    if (description && !describedForRewriter.has(normalizedName)) {
+      describedForRewriter.add(normalizedName);
+      characterDescriptionsForRewriter.push(`${name}: ${description}`.slice(0, 300));
+    }
+  }
+
+  return {
+    referenceImages: references,
+    characterDescriptions: characterDescriptions.slice(0, 5),
+    characterNamesForRewriter: broadUniqueNames,
+    characterDescriptionsForRewriter: characterDescriptionsForRewriter.slice(0, 8),
+  };
+}
+
+/**
+ * Build a compact `<scene_npcs>` text block from the character-tracker's live
+ * state, so the image-prompt-writer can translate mood/outfit/thoughts into
+ * the right pose/expression/clothing tags.
+ *
+ * Output shape (one bullet per known character, missing fields skipped):
+ *   - Rin: mood=sleepy/dazed; appearance=teen girl, short black hair, brown eyes, slim build; outfit=school sportswear, knee-high socks; thoughts=...
+ *   - Kaede: mood=excited; appearance=...; outfit=...
+ *
+ * Returns null when there's nothing usable to emit (empty tracker, no
+ * appearance/outfit data, no NPC cards). Caller passes the result verbatim.
+ */
+function buildScenePresenceBlock(
+  presentCharacters: PresentCharacter[] | null | undefined,
+  gameNpcs: GameNpc[] | null | undefined,
+  focusNames: string[],
+  options: { maxNpcs?: number; maxLineChars?: number; totalCharCap?: number } = {},
+): string | null {
+  const maxNpcs = options.maxNpcs ?? 6;
+  const maxLineChars = options.maxLineChars ?? 360;
+  const totalCharCap = options.totalCharCap ?? 1800;
+
+  const focusLowercase = new Set(focusNames.map((name) => name.trim().toLowerCase()).filter(Boolean));
+  // Build a map of npcCard fallback data keyed by lowercase name.
+  const npcCardByName = new Map<string, GameNpc>();
+  for (const npc of gameNpcs ?? []) {
+    if (npc?.name) npcCardByName.set(npc.name.toLowerCase(), npc);
+  }
+
+  // Order: characters explicitly in the focus list FIRST (sidecar+tracker+cards
+  // union), then any extra tracker entries we have data for.
+  const seenLower = new Set<string>();
+  const orderedNames: string[] = [];
+  for (const name of focusNames) {
+    const trimmed = name.trim();
+    if (!trimmed) continue;
+    const lower = trimmed.toLowerCase();
+    if (seenLower.has(lower)) continue;
+    if (lower === "player" || lower === "{{user}}" || lower === "user") continue;
+    seenLower.add(lower);
+    orderedNames.push(trimmed);
+  }
+  for (const tracker of presentCharacters ?? []) {
+    const trimmed = tracker?.name?.trim();
+    if (!trimmed) continue;
+    const lower = trimmed.toLowerCase();
+    if (seenLower.has(lower)) continue;
+    if (lower === "player" || lower === "{{user}}" || lower === "user") continue;
+    seenLower.add(lower);
+    orderedNames.push(trimmed);
+  }
+
+  if (!orderedNames.length) return null;
+
+  // Index tracker rows for quick lookup.
+  const trackerByName = new Map<string, PresentCharacter>();
+  for (const tracker of presentCharacters ?? []) {
+    if (tracker?.name) trackerByName.set(tracker.name.toLowerCase(), tracker);
+  }
+
+  const stripWhitespace = (value: string) => value.replace(/\s+/g, " ").trim();
+  const clamp = (value: string, max: number) =>
+    value.length > max ? `${value.slice(0, Math.max(0, max - 1))}…` : value;
+
+  const lines: string[] = [];
+  for (const name of orderedNames) {
+    if (lines.length >= maxNpcs) break;
+    const lower = name.toLowerCase();
+    const tracker = trackerByName.get(lower);
+    const card = npcCardByName.get(lower);
+    const inFocus = focusLowercase.has(lower);
+
+    const fields: string[] = [];
+    const mood = stripWhitespace(tracker?.mood ?? "");
+    if (mood) fields.push(`mood=${clamp(mood, 80)}`);
+    const appearance = stripWhitespace(tracker?.appearance ?? card?.description ?? "");
+    if (appearance) fields.push(`appearance=${clamp(appearance, 200)}`);
+    const outfit = stripWhitespace(tracker?.outfit ?? "");
+    if (outfit) fields.push(`outfit=${clamp(outfit, 160)}`);
+    const thoughts = stripWhitespace(tracker?.thoughts ?? "");
+    if (thoughts) fields.push(`thoughts=${clamp(thoughts, 160)}`);
+
+    // Skip characters we have no data for AND are not in the explicit focus
+    // list — they'd be just dead names with no visual cue.
+    if (!fields.length && !inFocus) continue;
+    if (!fields.length) continue;
+
+    const line = `- ${name}: ${fields.join("; ")}`;
+    lines.push(clamp(line, maxLineChars));
+  }
+
+  if (!lines.length) return null;
+
+  let block = lines.join("\n");
+  if (block.length > totalCharCap) {
+    block = `${block.slice(0, totalCharCap - 1)}…`;
+  }
+  return block;
 }
 
 function isIllustrationBgTag(tag: unknown): boolean {
@@ -6539,13 +6701,16 @@ export async function gameRoutes(app: FastifyInstance) {
                 season: illustrationSeason,
                 priorBackgroundTag: input.context.currentBackground,
               });
+              // Scene-wrap path: no live tracker snapshot here, so we feed
+              // the rewriter the broad union of (sidecar + characterNames +
+              // NPC cards) names+descriptions without the <scene_npcs> block.
               const rewrittenIllustrationPrompt = await rewriteIllustrationPrompt({
                 app,
                 chatId: input.chatId,
                 draftPrompt: illustration.prompt,
                 sceneContinuity: illustrationContinuity || null,
-                characters: illustration.characters,
-                characterDescriptions: illustrationAssets.characterDescriptions,
+                characters: illustrationAssets.characterNamesForRewriter,
+                characterDescriptions: illustrationAssets.characterDescriptionsForRewriter,
                 reason: illustration.reason ?? null,
                 genre,
                 setting,
@@ -7733,10 +7898,13 @@ export async function gameRoutes(app: FastifyInstance) {
           }
         }
         const latestStateForIll = await createGameStateStorage(app.db).getLatest(input.chatId);
-        const presentNames = (
-          parseStoredJson<Array<Record<string, unknown>>>(latestStateForIll?.presentCharacters) ?? []
-        )
-          .map((p) => (typeof p.name === "string" ? p.name.trim() : ""))
+        // Parse the live tracker snapshot once so we can extract both names
+        // (for the union below) and the full appearance/mood/outfit fields
+        // (for the <scene_npcs> block sent to the image-prompt-writer).
+        const presentCharactersForIll =
+          parseStoredJson<PresentCharacter[]>(latestStateForIll?.presentCharacters) ?? [];
+        const presentNames = presentCharactersForIll
+          .map((p) => (typeof p?.name === "string" ? p.name.trim() : ""))
           .filter(Boolean);
         const npcMetaNames = ((meta.gameNpcs as GameNpc[]) ?? [])
           .map((n) => n.name?.trim())
@@ -7779,18 +7947,31 @@ export async function gameRoutes(app: FastifyInstance) {
             "[game/generate-assets] illustration: user-supplied prompt override present — skipping image-prompt-writer",
           );
         } else {
+          // Hand the rewriter the BROAD union of names + full appearance text
+          // for everyone we know about (sidecar + tracker + NPC cards), plus
+          // the live <scene_npcs> block. Without this the rewriter only sees
+          // whoever the small sidecar model happened to mention in the draft.
+          const sceneNpcsBlock = buildScenePresenceBlock(
+            presentCharactersForIll,
+            (meta.gameNpcs as GameNpc[]) ?? [],
+            illustrationAssets.characterNamesForRewriter,
+          );
           logger.info(
-            "[game/generate-assets] illustration: requesting image-prompt-writer rewrite (chat=%s, draftChars=%d)",
+            "[game/generate-assets] illustration: requesting image-prompt-writer rewrite (chat=%s, draftChars=%d, names=%d, descs=%d, sceneNpcs=%s)",
             input.chatId,
             illustration.prompt.length,
+            illustrationAssets.characterNamesForRewriter.length,
+            illustrationAssets.characterDescriptionsForRewriter.length,
+            sceneNpcsBlock ? `${sceneNpcsBlock.split("\n").length}lines` : "off",
           );
           const rewritten = await rewriteIllustrationPrompt({
             app,
             chatId: input.chatId,
             draftPrompt: illustration.prompt,
             sceneContinuity: illustrationContinuityGen || null,
-            characters: illustration.characters,
-            characterDescriptions: illustrationAssets.characterDescriptions,
+            characters: illustrationAssets.characterNamesForRewriter,
+            characterDescriptions: illustrationAssets.characterDescriptionsForRewriter,
+            sceneNpcs: sceneNpcsBlock,
             reason: illustration.reason ?? null,
             genre,
             setting,

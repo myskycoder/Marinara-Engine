@@ -45,8 +45,25 @@ export interface RewriteIllustrationPromptRequest {
   sceneContinuity?: string | null;
   /** Visible characters in the planned CG. */
   characters?: string[];
-  /** Per-character appearance lines (reference notes for characters without an attached avatar). */
+  /**
+   * Per-character appearance lines for the rewriter. Unlike the image-asset
+   * pipeline (which only ships descriptions for characters without a reference
+   * image), the rewriter is text-only and needs the appearance text for every
+   * named character so it can emit the correct booru tags
+   * (`long_silver_hair, red_eyes, large_breasts`, ...). Pass full descriptions
+   * here, even for characters that ALSO have an attached reference image.
+   */
   characterDescriptions?: string[];
+  /**
+   * Optional rich live-state block from the character-tracker, joined as a
+   * single string. Format is one bullet per visible NPC with semicolon-joined
+   * fields like:
+   *   - Rin: mood=sleepy/dazed; appearance=teen girl, short black hair...;
+   *     outfit=school sportswear, knee-high socks; thoughts=...
+   * Pasted verbatim into a `<scene_npcs>` block so the rewriter can translate
+   * mood/outfit/thoughts into the right pose/expression/clothing tags.
+   */
+  sceneNpcs?: string | null;
   /** Why the sidecar marked the scene CG-worthy. */
   reason?: string | null;
   /** Game setup hints. */
@@ -226,6 +243,10 @@ function buildUserMessage(req: RewriteIllustrationPromptRequest, familyLabel: st
       req.characterDescriptions.map((line) => `- ${line}`).join("\n"),
       "</appearance_notes>",
     );
+  }
+
+  if (req.sceneNpcs?.trim()) {
+    parts.push("", "<scene_npcs>", req.sceneNpcs.trim(), "</scene_npcs>");
   }
 
   if (req.reason?.trim()) {
