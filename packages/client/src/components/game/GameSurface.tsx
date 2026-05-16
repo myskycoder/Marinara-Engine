@@ -147,6 +147,13 @@ type GameAssetGenerationPayload = {
   npcsNeedingAvatars?: Array<{ id?: string; name: string; description: string }>;
   forceNpcAvatarNames?: string[];
   illustration?: import("@marinara-engine/shared").SceneIllustrationRequest;
+  /**
+   * Override the image connection used for THIS illustration call only.
+   * Backgrounds and NPC avatars keep using `meta.gameImageConnectionId`.
+   * Used by the gallery "+1 SFW / +1 NSFW" buttons to pick a different
+   * image model per click.
+   */
+  illustrationConnectionId?: string;
   /** Bypass the per-message manual illustration cooldown (e.g. for explicit "+1" gallery requests). */
   skipIllustrationCooldown?: boolean;
   debugMode?: boolean;
@@ -4457,93 +4464,120 @@ export function GameSurface({
     [applyGeneratedAssets, runGameAssetGeneration],
   );
 
-  /** Gallery "+1": one extra VN scene illustration from the latest narration (server /game/generate-assets). */
-  const requestManualExtraIllustration = useCallback(async () => {
-    const enableGen = !!chatMeta.enableSpriteGeneration;
-    const imgConn = (chatMeta.gameImageConnectionId as string | undefined) || null;
-    if (!enableGen || !imgConn) {
-      toast.error("Включите генерацию спрайтов и укажите image connection в настройках игры.");
-      return;
-    }
-    if (isStreaming) {
-      toast.error("Дождитесь окончания ответа GM.");
-      return;
-    }
-    if (pendingAssetGeneration) {
-      toast.error("Уже идёт генерация ассетов сцены — подождите.");
-      return;
-    }
-    const excerpt = latestNarrationText.replace(/\s+/g, " ").trim().slice(0, 1000);
-    if (!excerpt) {
-      toast.error("Нет текста последнего хода — сначала нужна реплика GM.");
-      return;
-    }
-    const preamble =
-      "Player-requested VN CG still: exact moment below, first-person view. Match venue, lighting, weather, and visible cast. ";
-    let prompt = `${preamble}\n\n${excerpt}`;
-    if (prompt.length < 40) {
-      prompt = `${preamble}Location: ${gameSnapshot?.location ?? "current"}. ${metaWeather ?? ""} ${metaTime ?? ""}\n\n${excerpt}`.slice(
-        0,
-        1200,
+  /** Gallery "+1": one extra VN scene illustration from the latest narration (server /game/generate-assets).
+   *
+   * The `variant` param picks which image connection to use for THIS call only:
+   *   - "sfw" → `meta.gameImageConnectionId` (the chat's main image model)
+   *   - "nsfw" → `meta.gameImageConnectionIdNsfw` (optional second connection)
+   *
+   * If the chosen connection isn't configured we toast a hint instead of
+   * silently falling back. Backgrounds and NPC avatars are unaffected — the
+   * server only swaps the connection for the illustration step.
+   */
+  const requestManualExtraIllustration = useCallback(
+    async (variant: "sfw" | "nsfw") => {
+      const enableGen = !!chatMeta.enableSpriteGeneration;
+      const sfwConn = (chatMeta.gameImageConnectionId as string | undefined)?.trim() || null;
+      const nsfwConn = (chatMeta.gameImageConnectionIdNsfw as string | undefined)?.trim() || null;
+      const chosenConn = variant === "nsfw" ? nsfwConn : sfwConn;
+      if (!enableGen) {
+        toast.error("Включите генерацию спрайтов в настройках игры.");
+        return;
+      }
+      if (!chosenConn) {
+        toast.error(
+          variant === "nsfw"
+            ? "Настройте NSFW image connection в настройках чата."
+            : "Укажите image connection в настройках игры.",
+        );
+        return;
+      }
+      if (isStreaming) {
+        toast.error("Дождитесь окончания ответа GM.");
+        return;
+      }
+      if (pendingAssetGeneration) {
+        toast.error("Уже идёт генерация ассетов сцены — подождите.");
+        return;
+      }
+      const excerpt = latestNarrationText.replace(/\s+/g, " ").trim().slice(0, 1000);
+      if (!excerpt) {
+        toast.error("Нет текста последнего хода — сначала нужна реплика GM.");
+        return;
+      }
+      const preamble =
+        "Player-requested VN CG still: exact moment below, first-person view. Match venue, lighting, weather, and visible cast. ";
+      let prompt = `${preamble}\n\n${excerpt}`;
+      if (prompt.length < 40) {
+        prompt = `${preamble}Location: ${gameSnapshot?.location ?? "current"}. ${metaWeather ?? ""} ${metaTime ?? ""}\n\n${excerpt}`.slice(
+          0,
+          1200,
+        );
+      }
+      prompt = prompt.slice(0, 1200);
+
+      const seasonRaw = chatMeta.gameCurrentSeason as string | undefined;
+      const season =
+        seasonRaw === "spring" || seasonRaw === "summer" || seasonRaw === "autumn" || seasonRaw === "winter"
+          ? seasonRaw
+          : null;
+
+      const locId = (chatMeta.currentLocationId as string | undefined)?.trim() || undefined;
+
+      const res = await requestAssetGeneration(
+        {
+          chatId: activeChatId,
+          skipIllustrationCooldown: true,
+          illustrationConnectionId: chosenConn,
+          locationId: locId,
+          conditions: {
+            weather: gameSnapshot?.weather ?? metaWeather,
+            timeOfDay: gameSnapshot?.time ?? metaTime,
+            season,
+          },
+          illustration: {
+            prompt,
+            reason:
+              variant === "nsfw"
+                ? "Player requested extra NSFW illustration (+1) from gallery"
+                : "Player requested extra illustration (+1) from gallery",
+            characters: sceneWrapCharacterNames.slice(0, 6),
+            slug: `manual-${variant}-${Date.now().toString(36)}`,
+            segment: 0,
+          },
+        },
+        { softFailure: true },
       );
-    }
-    prompt = prompt.slice(0, 1200);
 
-    const seasonRaw = chatMeta.gameCurrentSeason as string | undefined;
-    const season =
-      seasonRaw === "spring" || seasonRaw === "summer" || seasonRaw === "autumn" || seasonRaw === "winter"
-        ? seasonRaw
-        : null;
-
-    const locId = (chatMeta.currentLocationId as string | undefined)?.trim() || undefined;
-
-    const res = await requestAssetGeneration(
-      {
-        chatId: activeChatId,
-        skipIllustrationCooldown: true,
-        locationId: locId,
-        conditions: {
-          weather: gameSnapshot?.weather ?? metaWeather,
-          timeOfDay: gameSnapshot?.time ?? metaTime,
-          season,
-        },
-        illustration: {
-          prompt,
-          reason: "Player requested extra illustration (+1) from gallery",
-          characters: sceneWrapCharacterNames.slice(0, 6),
-          slug: `manual-${Date.now().toString(36)}`,
-          segment: 0,
-        },
-      },
-      { softFailure: true },
-    );
-
-    if (res?.generatedIllustration) {
-      toast.success("Иллюстрация сгенерирована и добавлена в галерею.", { duration: 3200 });
-    } else if (res) {
-      toast.info("Генерация завершена без новой картинки (лимиты, модель или короткий контекст).", {
-        duration: 4000,
-      });
-    } else {
-      toast.error("Не удалось запросить иллюстрацию. Проверьте соединение и логи сервера.");
-    }
-  }, [
-    activeChatId,
-    chatMeta.currentLocationId,
-    chatMeta.enableSpriteGeneration,
-    chatMeta.gameCurrentSeason,
-    chatMeta.gameImageConnectionId,
-    gameSnapshot?.location,
-    gameSnapshot?.time,
-    gameSnapshot?.weather,
-    isStreaming,
-    latestNarrationText,
-    metaTime,
-    metaWeather,
-    pendingAssetGeneration,
-    requestAssetGeneration,
-    sceneWrapCharacterNames,
-  ]);
+      if (res?.generatedIllustration) {
+        toast.success("Иллюстрация сгенерирована и добавлена в галерею.", { duration: 3200 });
+      } else if (res) {
+        toast.info("Генерация завершена без новой картинки (лимиты, модель или короткий контекст).", {
+          duration: 4000,
+        });
+      } else {
+        toast.error("Не удалось запросить иллюстрацию. Проверьте соединение и логи сервера.");
+      }
+    },
+    [
+      activeChatId,
+      chatMeta.currentLocationId,
+      chatMeta.enableSpriteGeneration,
+      chatMeta.gameCurrentSeason,
+      chatMeta.gameImageConnectionId,
+      chatMeta.gameImageConnectionIdNsfw,
+      gameSnapshot?.location,
+      gameSnapshot?.time,
+      gameSnapshot?.weather,
+      isStreaming,
+      latestNarrationText,
+      metaTime,
+      metaWeather,
+      pendingAssetGeneration,
+      requestAssetGeneration,
+      sceneWrapCharacterNames,
+    ],
+  );
 
   /** Gallery: drop VN CG plate and show last catalog / metadata plate (game mode). */
   const handleClearCgPlate = useCallback(() => {
@@ -9009,7 +9043,8 @@ export function GameSurface({
                 open={galleryOpen}
                 onClose={() => setGalleryOpen(false)}
                 onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
-                onManualImpact={requestManualExtraIllustration}
+                onManualImpactSfw={() => requestManualExtraIllustration("sfw")}
+                onManualImpactNsfw={() => requestManualExtraIllustration("nsfw")}
                 onClearCgPlate={handleClearCgPlate}
               />
 

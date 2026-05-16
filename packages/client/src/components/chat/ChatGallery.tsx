@@ -16,8 +16,10 @@ interface ChatGalleryProps {
   chatId: string;
   /** Manually trigger the Illustrator agent */
   onIllustrate?: () => void;
-  /** Game mode: запросить ещё одну CG-иллюстрацию текущего момента */
-  onManualImpact?: () => void;
+  /** Game mode: запросить ещё одну CG-иллюстрацию текущего момента через SFW image-модель */
+  onManualImpactSfw?: () => void;
+  /** Game mode: запросить ещё одну CG-иллюстрацию текущего момента через NSFW image-модель */
+  onManualImpactNsfw?: () => void;
   /** Game mode: снять CG-подложку и вернуть фон локации */
   onClearCgPlate?: () => void;
 }
@@ -30,7 +32,13 @@ function formatImageMeta(image: ChatImage) {
   return details.join(" | ");
 }
 
-export function ChatGallery({ chatId, onIllustrate, onManualImpact, onClearCgPlate }: ChatGalleryProps) {
+export function ChatGallery({
+  chatId,
+  onIllustrate,
+  onManualImpactSfw,
+  onManualImpactNsfw,
+  onClearCgPlate,
+}: ChatGalleryProps) {
   const { data: images, isLoading } = useGalleryImages(chatId);
   const upload = useUploadGalleryImage(chatId);
   const remove = useDeleteGalleryImage(chatId);
@@ -60,7 +68,7 @@ export function ChatGallery({ chatId, onIllustrate, onManualImpact, onClearCgPla
 
   return (
     <div className="flex flex-col gap-3 p-4">
-      {(onIllustrate || onManualImpact || onClearCgPlate) && (
+      {(onIllustrate || onManualImpactSfw || onManualImpactNsfw || onClearCgPlate) && (
         <div className="flex flex-wrap gap-2">
           {onIllustrate && (
             <button
@@ -72,14 +80,24 @@ export function ChatGallery({ chatId, onIllustrate, onManualImpact, onClearCgPla
               Illustrate
             </button>
           )}
-          {onManualImpact && (
+          {onManualImpactSfw && (
             <button
               type="button"
-              onClick={onManualImpact}
-              title="Дополнительная CG-иллюстрация текущего момента (игровой режим): та же цепочка, что и редкая иллюстрация со сцены"
-              className="flex min-h-[2.75rem] min-w-[2.75rem] shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--muted)]/10 px-3 py-3 text-xs font-semibold tabular-nums text-[var(--foreground)] transition-all hover:bg-[var(--muted)]/20"
+              onClick={onManualImpactSfw}
+              title="Дополнительная CG-иллюстрация текущего момента через SFW image-модель (игровой режим): та же цепочка, что и редкая иллюстрация со сцены"
+              className="flex min-h-[2.75rem] min-w-[3.5rem] shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--muted)]/10 px-3 py-3 text-xs font-semibold tabular-nums text-[var(--foreground)] transition-all hover:bg-[var(--muted)]/20"
             >
-              +1
+              +1 SFW
+            </button>
+          )}
+          {onManualImpactNsfw && (
+            <button
+              type="button"
+              onClick={onManualImpactNsfw}
+              title="Дополнительная CG-иллюстрация текущего момента через NSFW image-модель (игровой режим). Если NSFW image connection не задан в настройках чата — кнопка покажет подсказку."
+              className="flex min-h-[2.75rem] min-w-[3.5rem] shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--destructive)]/10 px-3 py-3 text-xs font-semibold tabular-nums text-[var(--foreground)] transition-all hover:bg-[var(--destructive)]/20"
+            >
+              +1 NSFW
             </button>
           )}
           {onClearCgPlate && (

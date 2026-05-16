@@ -199,8 +199,10 @@ type ChatCommonOverlaysProps = {
   onCloseSceneJournal: () => void;
   /** Manually trigger the Illustrator agent */
   onIllustrate?: () => void;
-  /** Game mode: extra scene illustration from gallery (+1) */
-  onManualImpact?: () => void;
+  /** Game mode: extra scene illustration from gallery via SFW image model (+1 SFW) */
+  onManualImpactSfw?: () => void;
+  /** Game mode: extra scene illustration from gallery via NSFW image model (+1 NSFW) */
+  onManualImpactNsfw?: () => void;
   /** Game mode: clear CG plate from gallery */
   onClearCgPlate?: () => void;
   /** Manually trigger the Scene Painter agent */
@@ -239,7 +241,8 @@ export function ChatCommonOverlays({
   onCloseGallery,
   onCloseSceneJournal,
   onIllustrate,
-  onManualImpact,
+  onManualImpactSfw,
+  onManualImpactNsfw,
   onClearCgPlate,
   onPaintScene,
   onWizardFinish,
@@ -284,7 +287,8 @@ export function ChatCommonOverlays({
               open={galleryOpen}
               onClose={onCloseGallery}
               onIllustrate={onIllustrate}
-              onManualImpact={onManualImpact}
+              onManualImpactSfw={onManualImpactSfw}
+              onManualImpactNsfw={onManualImpactNsfw}
               onClearCgPlate={onClearCgPlate}
             />
           )}

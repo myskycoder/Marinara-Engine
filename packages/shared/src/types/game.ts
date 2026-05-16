@@ -200,8 +200,15 @@ export interface GameSetupConfig {
   sceneConnectionId?: string;
   /** Enable automatic sprite generation for characters using image model */
   enableSpriteGeneration?: boolean;
-  /** Connection ID for image generation (NPC portraits + location backgrounds) */
+  /** Connection ID for image generation (NPC portraits + location backgrounds; SFW illustrations) */
   imageConnectionId?: string;
+  /**
+   * Optional second image connection used only for the NSFW "+1" illustration
+   * button in the chat gallery. When unset, the NSFW button toasts a hint
+   * asking the player to configure it. Backgrounds and NPC avatars always
+   * keep using `imageConnectionId`.
+   */
+  imageConnectionIdNsfw?: string;
   /** Unified art style prompt applied to all generated images (auto-generated at setup) */
   artStylePrompt?: string;
   /** Lorebook IDs to activate for this game */

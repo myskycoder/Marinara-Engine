@@ -7183,6 +7183,13 @@ export async function gameRoutes(app: FastifyInstance) {
         slug: z.string().max(80).optional(),
       })
       .optional(),
+    /**
+     * Override the image connection used for THIS illustration call only.
+     * Backgrounds and NPC avatars keep using `meta.gameImageConnectionId`.
+     * Used by the gallery "+1 SFW / +1 NSFW" buttons to pick a different
+     * image model (e.g. an NSFW-friendly one) per click.
+     */
+    illustrationConnectionId: z.string().min(1).max(120).optional(),
     /** With `illustration`, bypass the automatic per-turn illustration cooldown (player-triggered). */
     skipIllustrationCooldown: z.boolean().optional(),
     imageSizes: imageSizesSchema,
@@ -7271,6 +7278,29 @@ export async function gameRoutes(app: FastifyInstance) {
       const approxTurnNumber = Math.max(1, allMsgs.filter((message) => message.role === "user").length + 1);
       const sessionNumber = currentGameSessionNumber(meta);
       if (isIllustrationAllowed(meta, approxTurnNumber, sessionNumber)) {
+        // Mirror the per-illustration connection override from /generate-assets
+        // so the preview shows the prompt rendered for the model that will
+        // actually run when the user clicks +1 SFW or +1 NSFW.
+        let illImgModel = imgModel;
+        let illImgBaseUrl = imgBaseUrl;
+        let illImgApiKey = imgApiKey;
+        let illImgSource = imgSource;
+        let illImgServiceHint = imgServiceHint;
+        let illImgComfyWorkflow = imgComfyWorkflow;
+        let illImgDefaults = imgDefaults;
+        if (input.illustrationConnectionId && input.illustrationConnectionId !== imgConnId) {
+          const overrideConn = await connections.getWithKey(input.illustrationConnectionId);
+          if (overrideConn) {
+            illImgModel = overrideConn.model || "";
+            illImgBaseUrl = overrideConn.baseUrl || "https://image.pollinations.ai";
+            illImgApiKey = overrideConn.apiKey || "";
+            illImgSource = (overrideConn as any).imageGenerationSource || illImgModel;
+            illImgServiceHint = overrideConn.imageService || illImgSource;
+            illImgComfyWorkflow = overrideConn.comfyuiWorkflow || undefined;
+            illImgDefaults = resolveConnectionImageDefaults(overrideConn);
+          }
+        }
+
         const charStore = createCharactersStorage(app.db);
         const allChars = await charStore.list();
         const charReferenceByName = new Map<string, string>();
@@ -7317,13 +7347,13 @@ export async function gameRoutes(app: FastifyInstance) {
           artStyle,
           imagePromptInstructions,
           referenceImages: illustrationAssets.referenceImages,
-          imgSource,
-          imgModel,
-          imgBaseUrl,
-          imgApiKey,
-          imgService: imgServiceHint,
-          imgComfyWorkflow,
-          imgDefaults,
+          imgSource: illImgSource,
+          imgModel: illImgModel,
+          imgBaseUrl: illImgBaseUrl,
+          imgApiKey: illImgApiKey,
+          imgService: illImgServiceHint,
+          imgComfyWorkflow: illImgComfyWorkflow,
+          imgDefaults: illImgDefaults,
           promptOverridesStorage,
           size: backgroundSize,
         });
@@ -7864,6 +7894,49 @@ export async function gameRoutes(app: FastifyInstance) {
       if (!illustrationAllowed) {
         logger.debug("[game/generate-assets] illustration skipped: cooldown active");
       } else {
+        // Per-illustration connection override (gallery "+1 SFW / +1 NSFW").
+        // Only the illustration call uses this — backgrounds and NPC avatars
+        // continue to use `meta.gameImageConnectionId` so a NSFW model never
+        // bleeds into the location's regular plate.
+        let illImgConn = imgConn;
+        let illImgModel = imgModel;
+        let illImgBaseUrl = imgBaseUrl;
+        let illImgApiKey = imgApiKey;
+        let illImgSource = imgSource;
+        let illImgServiceHint = imgServiceHint;
+        let illImgComfyWorkflow = imgComfyWorkflow;
+        let illImgDefaults = imgDefaults;
+        if (input.illustrationConnectionId && input.illustrationConnectionId !== imgConnId) {
+          const overrideConn = await connections.getWithKey(input.illustrationConnectionId);
+          if (!overrideConn) {
+            logger.warn(
+              "[game/generate-assets] illustration: override connection id=%s not found in DB — falling back to default image connection",
+              input.illustrationConnectionId,
+            );
+            return reply.code(400).send({
+              error: "Illustration image connection not found.",
+              generatedBackground: null,
+              fallbackBackground: null,
+              generatedIllustration: null,
+              generatedNpcAvatars: [],
+            });
+          }
+          illImgConn = overrideConn;
+          illImgModel = overrideConn.model || "";
+          illImgBaseUrl = overrideConn.baseUrl || "https://image.pollinations.ai";
+          illImgApiKey = overrideConn.apiKey || "";
+          illImgSource = (overrideConn as any).imageGenerationSource || illImgModel;
+          illImgServiceHint = overrideConn.imageService || illImgSource;
+          illImgComfyWorkflow = overrideConn.comfyuiWorkflow || undefined;
+          illImgDefaults = resolveConnectionImageDefaults(overrideConn);
+          logger.info(
+            "[game/generate-assets] illustration: using override connection id=%s model=%s (default chat connection id=%s)",
+            input.illustrationConnectionId,
+            illImgModel || "?",
+            imgConnId,
+          );
+        }
+
         const charStore = createCharactersStorage(app.db);
         const allChars = await charStore.list();
         const charReferenceByName = new Map<string, string>();
@@ -7978,11 +8051,11 @@ export async function gameRoutes(app: FastifyInstance) {
             artStyle,
             imagePromptInstructions,
             imageConn: {
-              provider: imgConn.provider ?? null,
-              baseUrl: imgConn.baseUrl ?? null,
-              model: imgModel,
-              imageGenerationSource: imgConn.imageGenerationSource ?? null,
-              imageService: imgConn.imageService ?? null,
+              provider: illImgConn.provider ?? null,
+              baseUrl: illImgConn.baseUrl ?? null,
+              model: illImgModel,
+              imageGenerationSource: illImgConn.imageGenerationSource ?? null,
+              imageService: illImgConn.imageService ?? null,
             },
             chatConnectionId: chat.connectionId ?? null,
             rating: setupCfg?.rating === "nsfw" ? "nsfw" : "sfw",
@@ -8012,13 +8085,13 @@ export async function gameRoutes(app: FastifyInstance) {
           artStyle,
           imagePromptInstructions,
           referenceImages: illustrationAssets.referenceImages,
-          imgSource,
-          imgModel,
-          imgBaseUrl,
-          imgApiKey,
-          imgService: imgServiceHint,
-          imgComfyWorkflow,
-          imgDefaults,
+          imgSource: illImgSource,
+          imgModel: illImgModel,
+          imgBaseUrl: illImgBaseUrl,
+          imgApiKey: illImgApiKey,
+          imgService: illImgServiceHint,
+          imgComfyWorkflow: illImgComfyWorkflow,
+          imgDefaults: illImgDefaults,
           debugLog: debugLogsEnabled ? debugLog : undefined,
           promptOverridesStorage,
           size: backgroundSize,
@@ -8031,7 +8104,7 @@ export async function gameRoutes(app: FastifyInstance) {
             chatId: input.chatId,
             tag,
             illustration,
-            model: imgModel,
+            model: illImgModel,
           });
           generatedIllustration = {
             tag,

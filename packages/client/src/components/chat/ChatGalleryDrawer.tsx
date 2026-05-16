@@ -11,13 +11,23 @@ interface ChatGalleryDrawerProps {
   onClose: () => void;
   /** Manually trigger the Illustrator agent */
   onIllustrate?: () => void;
-  /** Game mode: request one extra VN scene illustration from current narration (+1) */
-  onManualImpact?: () => void;
+  /** Game mode: request one extra VN scene illustration from current narration via SFW image model (+1 SFW) */
+  onManualImpactSfw?: () => void;
+  /** Game mode: request one extra VN scene illustration from current narration via NSFW image model (+1 NSFW) */
+  onManualImpactNsfw?: () => void;
   /** Game mode: remove CG illustration plate and restore location background */
   onClearCgPlate?: () => void;
 }
 
-export function ChatGalleryDrawer({ chat, open, onClose, onIllustrate, onManualImpact, onClearCgPlate }: ChatGalleryDrawerProps) {
+export function ChatGalleryDrawer({
+  chat,
+  open,
+  onClose,
+  onIllustrate,
+  onManualImpactSfw,
+  onManualImpactNsfw,
+  onClearCgPlate,
+}: ChatGalleryDrawerProps) {
   if (!open) return null;
 
   return (
@@ -44,7 +54,8 @@ export function ChatGalleryDrawer({ chat, open, onClose, onIllustrate, onManualI
           <ChatGallery
             chatId={chat.id}
             onIllustrate={onIllustrate}
-            onManualImpact={onManualImpact}
+            onManualImpactSfw={onManualImpactSfw}
+            onManualImpactNsfw={onManualImpactNsfw}
             onClearCgPlate={onClearCgPlate}
           />
         </div>

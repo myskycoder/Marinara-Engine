@@ -4077,21 +4077,46 @@ export function ChatSettingsDrawer({
                     </button>
                     {metadata.enableSpriteGeneration && (
                       <div className="mt-1.5 space-y-2 px-3">
-                        <select
-                          value={(metadata.gameImageConnectionId as string) ?? ""}
-                          onChange={(e) =>
-                            updateMeta.mutate({ id: chat.id, gameImageConnectionId: e.target.value || null })
-                          }
-                          className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)]"
-                        >
-                          <option value="">Select image connection…</option>
-                          {(imageConnectionsList ?? []).map((c: { id: string; name: string; model?: string }) => (
-                            <option key={c.id} value={c.id}>
-                              {c.name}
-                              {c.model ? ` — ${c.model}` : ""}
-                            </option>
-                          ))}
-                        </select>
+                        <label className="flex flex-col gap-1">
+                          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                            SFW image connection (фоны, NPC-аватары, +1 SFW)
+                          </span>
+                          <select
+                            value={(metadata.gameImageConnectionId as string) ?? ""}
+                            onChange={(e) =>
+                              updateMeta.mutate({ id: chat.id, gameImageConnectionId: e.target.value || null })
+                            }
+                            className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)]"
+                          >
+                            <option value="">Select image connection…</option>
+                            {(imageConnectionsList ?? []).map((c: { id: string; name: string; model?: string }) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                                {c.model ? ` — ${c.model}` : ""}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="flex flex-col gap-1">
+                          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                            NSFW image connection (только для кнопки +1 NSFW)
+                          </span>
+                          <select
+                            value={(metadata.gameImageConnectionIdNsfw as string) ?? ""}
+                            onChange={(e) =>
+                              updateMeta.mutate({ id: chat.id, gameImageConnectionIdNsfw: e.target.value || null })
+                            }
+                            className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)]"
+                          >
+                            <option value="">Без NSFW-модели</option>
+                            {(imageConnectionsList ?? []).map((c: { id: string; name: string; model?: string }) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                                {c.model ? ` — ${c.model}` : ""}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
                         <label className="flex flex-col gap-1">
                           <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
                             Scene image instructions
