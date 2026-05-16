@@ -158,6 +158,34 @@ export function useClearAiAudit() {
   });
 }
 
+export type AiAuditExportMode = "last_turn" | "last_turns" | "last_logs";
+
+export interface AiAuditExportInput {
+  mode: AiAuditExportMode;
+  /** Used by `last_turns` (default 5). */
+  turnCount?: number;
+  /** Used by `last_logs` (default 100). */
+  logCount?: number;
+  /** Window in seconds for turn modes (server default 300). */
+  windowSeconds?: number;
+  /** Same filter object the panel feeds to `useAiAuditList`. */
+  filters?: AiAuditFilters;
+}
+
+export function useExportAiAudit() {
+  return useMutation({
+    mutationFn: async (input: AiAuditExportInput) => {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const filenameByMode: Record<AiAuditExportMode, string> = {
+        last_turn: `ai-audit-last-turn-${stamp}.json`,
+        last_turns: `ai-audit-last-${input.turnCount ?? 5}-turns-${stamp}.json`,
+        last_logs: `ai-audit-last-${input.logCount ?? 100}-logs-${stamp}.json`,
+      };
+      await api.downloadPost("/admin/ai-audit/export", input, filenameByMode[input.mode]);
+    },
+  });
+}
+
 export function usePruneAiAudit() {
   const qc = useQueryClient();
   return useMutation({

@@ -3,11 +3,12 @@
 // ──────────────────────────────────────────────
 // Lists every recorded outbound AI call (LLM, embedding, image, TTS) with
 // filters, pagination, and a click-through detail modal.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ChevronLeft,
   ChevronRight,
+  Download,
   Loader2,
   Maximize2,
   Minimize2,
@@ -19,6 +20,8 @@ import {
   useAiAuditList,
   useAiAuditDistinct,
   useClearAiAudit,
+  useExportAiAudit,
+  type AiAuditExportMode,
   type AiAuditFilters,
 } from "../../hooks/use-ai-audit";
 import { AiAuditDetailModal } from "../ai-audit/AiAuditDetailModal";
@@ -81,6 +84,8 @@ export function AiAuditPanel() {
   const [q, setQ] = useState<string>("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const exportBtnRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     if (!isFullscreen) return;
@@ -112,6 +117,38 @@ export function AiAuditPanel() {
   const { data, isLoading, isFetching, refetch } = useAiAuditList(filters);
   const { data: distinct } = useAiAuditDistinct();
   const clearMutation = useClearAiAudit();
+  const exportMutation = useExportAiAudit();
+
+  const exportFilters: AiAuditFilters = useMemo(
+    () => ({
+      source: source || undefined,
+      kind: kind || undefined,
+      provider: provider || undefined,
+      status: status || undefined,
+      q: q || undefined,
+    }),
+    [source, kind, provider, status, q],
+  );
+
+  const hasActiveFilters = !!(source || kind || provider || status || q);
+
+  const handleExport = async (
+    mode: AiAuditExportMode,
+    counts?: { turnCount?: number; logCount?: number },
+  ) => {
+    try {
+      await exportMutation.mutateAsync({
+        mode,
+        turnCount: counts?.turnCount,
+        logCount: counts?.logCount,
+        filters: exportFilters,
+      });
+      toast.success("Лог скачан");
+      setExportOpen(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Не удалось скачать");
+    }
+  };
 
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -216,6 +253,21 @@ export function AiAuditPanel() {
           {isFullscreen ? <Minimize2 size="0.875rem" /> : <Maximize2 size="0.875rem" />}
         </button>
         <button
+          ref={exportBtnRef}
+          onClick={() => setExportOpen((v) => !v)}
+          disabled={exportMutation.isPending}
+          className={`rounded-lg p-1.5 transition-colors hover:bg-[var(--accent)] hover:text-[var(--primary)] active:scale-95 disabled:opacity-40 ${
+            exportOpen ? "bg-[var(--accent)] text-[var(--primary)]" : "text-[var(--muted-foreground)]"
+          }`}
+          title="Скачать логи в JSON"
+        >
+          {exportMutation.isPending ? (
+            <Loader2 size="0.875rem" className="animate-spin" />
+          ) : (
+            <Download size="0.875rem" />
+          )}
+        </button>
+        <button
           onClick={handleClear}
           disabled={total === 0 || clearMutation.isPending}
           className="rounded-lg p-1.5 text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/10 disabled:opacity-40 active:scale-95"
@@ -224,6 +276,15 @@ export function AiAuditPanel() {
           <Trash2 size="0.875rem" />
         </button>
       </div>
+
+      <ExportPopover
+        open={exportOpen}
+        onClose={() => setExportOpen(false)}
+        anchorRef={exportBtnRef}
+        onExport={handleExport}
+        hasActiveFilters={hasActiveFilters}
+        isPending={exportMutation.isPending}
+      />
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         {isLoading ? (
@@ -339,6 +400,156 @@ function FilterSelect({
         </option>
       ))}
     </select>
+  );
+}
+
+interface ExportPopoverProps {
+  open: boolean;
+  onClose: () => void;
+  anchorRef: React.RefObject<HTMLButtonElement | null>;
+  onExport: (
+    mode: AiAuditExportMode,
+    counts?: { turnCount?: number; logCount?: number },
+  ) => void | Promise<void>;
+  hasActiveFilters: boolean;
+  isPending: boolean;
+}
+
+function ExportPopover({
+  open,
+  onClose,
+  anchorRef,
+  onExport,
+  hasActiveFilters,
+  isPending,
+}: ExportPopoverProps) {
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [turnsN, setTurnsN] = useState(5);
+  const [logsN, setLogsN] = useState(100);
+  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open || !anchorRef.current) return;
+    const rect = anchorRef.current.getBoundingClientRect();
+    const pad = 6;
+    // Anchor the popover under the trigger button, right-aligned to it so
+    // it stays inside the panel even on narrow widths.
+    setPos({
+      top: rect.bottom + pad,
+      right: Math.max(8, window.innerWidth - rect.right),
+    });
+  }, [open, anchorRef]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (
+        panelRef.current &&
+        !panelRef.current.contains(e.target as Node) &&
+        anchorRef.current &&
+        !anchorRef.current.contains(e.target as Node)
+      ) {
+        onClose();
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, onClose, anchorRef]);
+
+  if (!open || !pos || typeof document === "undefined") return null;
+
+  const clampTurns = (raw: number) => Math.max(1, Math.min(100, Math.floor(raw) || 1));
+  const clampLogs = (raw: number) => Math.max(1, Math.min(5000, Math.floor(raw) || 1));
+
+  return createPortal(
+    <div
+      ref={panelRef}
+      role="dialog"
+      aria-label="Экспорт AI Audit"
+      style={{ position: "fixed", top: pos.top, right: pos.right, zIndex: 70 }}
+      className="flex w-72 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--card)] p-3 shadow-xl animate-fade-in-up"
+    >
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-[var(--foreground)]">Скачать в JSON</span>
+        <span
+          className={`text-[0.65rem] ${
+            hasActiveFilters ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"
+          }`}
+          title="Учитываются активные фильтры панели"
+        >
+          {hasActiveFilters ? "С фильтрами" : "Без фильтров"}
+        </span>
+      </div>
+
+      <button
+        type="button"
+        disabled={isPending}
+        onClick={() => onExport("last_turn")}
+        className="flex flex-col items-start gap-0.5 rounded-lg border border-[var(--border)]/60 bg-[var(--background)] px-3 py-2 text-left transition-colors hover:border-[var(--primary)] hover:bg-[var(--accent)]/40 disabled:opacity-50"
+      >
+        <span className="text-xs font-medium text-[var(--foreground)]">Последний ход</span>
+        <span className="text-[0.65rem] text-[var(--muted-foreground)]">
+          main_generate + связанные агенты в его окне
+        </span>
+      </button>
+
+      <div className="flex flex-col gap-1.5 rounded-lg border border-[var(--border)]/60 bg-[var(--background)] px-3 py-2">
+        <label className="flex items-center justify-between gap-2">
+          <span className="text-xs font-medium text-[var(--foreground)]">Последние N ходов</span>
+          <input
+            type="number"
+            min={1}
+            max={100}
+            value={turnsN}
+            onChange={(e) => setTurnsN(clampTurns(Number(e.target.value)))}
+            className="w-16 rounded-md border border-[var(--border)]/60 bg-[var(--input)] px-2 py-1 text-right text-xs text-[var(--foreground)] focus:border-[var(--primary)] focus:outline-none"
+          />
+        </label>
+        <button
+          type="button"
+          disabled={isPending}
+          onClick={() => onExport("last_turns", { turnCount: turnsN })}
+          className="self-end rounded-md bg-[var(--primary)] px-2.5 py-1 text-[0.65rem] font-semibold text-[var(--primary-foreground)] transition-colors hover:opacity-90 disabled:opacity-50 active:scale-95"
+        >
+          Скачать
+        </button>
+      </div>
+
+      <div className="flex flex-col gap-1.5 rounded-lg border border-[var(--border)]/60 bg-[var(--background)] px-3 py-2">
+        <label className="flex items-center justify-between gap-2">
+          <span className="text-xs font-medium text-[var(--foreground)]">Последние N логов</span>
+          <input
+            type="number"
+            min={1}
+            max={5000}
+            value={logsN}
+            onChange={(e) => setLogsN(clampLogs(Number(e.target.value)))}
+            className="w-20 rounded-md border border-[var(--border)]/60 bg-[var(--input)] px-2 py-1 text-right text-xs text-[var(--foreground)] focus:border-[var(--primary)] focus:outline-none"
+          />
+        </label>
+        <button
+          type="button"
+          disabled={isPending}
+          onClick={() => onExport("last_logs", { logCount: logsN })}
+          className="self-end rounded-md bg-[var(--primary)] px-2.5 py-1 text-[0.65rem] font-semibold text-[var(--primary-foreground)] transition-colors hover:opacity-90 disabled:opacity-50 active:scale-95"
+        >
+          Скачать
+        </button>
+      </div>
+
+      <p className="text-[0.65rem] leading-snug text-[var(--muted-foreground)]">
+        «Ход» = запись <code className="rounded bg-[var(--accent)]/40 px-1">main_generate</code> и все
+        связанные с ней записи того же чата в окне ±5 минут.
+      </p>
+    </div>,
+    document.body,
   );
 }
 

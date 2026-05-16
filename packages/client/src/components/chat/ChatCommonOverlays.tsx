@@ -199,10 +199,14 @@ type ChatCommonOverlaysProps = {
   onCloseSceneJournal: () => void;
   /** Manually trigger the Illustrator agent */
   onIllustrate?: () => void;
-  /** Game mode: extra scene illustration from gallery via SFW image model (+1 SFW) */
+  /** Game mode: extra scene illustration from gallery via SFW image model (+1 SFW, first-person POV) */
   onManualImpactSfw?: () => void;
-  /** Game mode: extra scene illustration from gallery via NSFW image model (+1 NSFW) */
+  /** Game mode: extra scene illustration from gallery via NSFW image model (+1 NSFW, first-person POV) */
   onManualImpactNsfw?: () => void;
+  /** Game mode: full third-person scene illustration via SFW image model (Full SFW) */
+  onManualImpactSceneSfw?: () => void;
+  /** Game mode: full third-person scene illustration via NSFW image model (Full NSFW) */
+  onManualImpactSceneNsfw?: () => void;
   /** Game mode: clear CG plate from gallery */
   onClearCgPlate?: () => void;
   /** Manually trigger the Scene Painter agent */
@@ -243,6 +247,8 @@ export function ChatCommonOverlays({
   onIllustrate,
   onManualImpactSfw,
   onManualImpactNsfw,
+  onManualImpactSceneSfw,
+  onManualImpactSceneNsfw,
   onClearCgPlate,
   onPaintScene,
   onWizardFinish,
@@ -289,6 +295,8 @@ export function ChatCommonOverlays({
               onIllustrate={onIllustrate}
               onManualImpactSfw={onManualImpactSfw}
               onManualImpactNsfw={onManualImpactNsfw}
+              onManualImpactSceneSfw={onManualImpactSceneSfw}
+              onManualImpactSceneNsfw={onManualImpactSceneNsfw}
               onClearCgPlate={onClearCgPlate}
             />
           )}

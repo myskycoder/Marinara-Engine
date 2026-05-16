@@ -16,10 +16,14 @@ interface ChatGalleryProps {
   chatId: string;
   /** Manually trigger the Illustrator agent */
   onIllustrate?: () => void;
-  /** Game mode: запросить ещё одну CG-иллюстрацию текущего момента через SFW image-модель */
+  /** Game mode: запросить ещё одну CG-иллюстрацию (вид от первого лица) через SFW image-модель */
   onManualImpactSfw?: () => void;
-  /** Game mode: запросить ещё одну CG-иллюстрацию текущего момента через NSFW image-модель */
+  /** Game mode: запросить ещё одну CG-иллюстрацию (вид от первого лица) через NSFW image-модель */
   onManualImpactNsfw?: () => void;
+  /** Game mode: запросить полную CG-иллюстрацию сцены (третье лицо, игрок в кадре) через SFW image-модель */
+  onManualImpactSceneSfw?: () => void;
+  /** Game mode: запросить полную CG-иллюстрацию сцены (третье лицо, игрок в кадре) через NSFW image-модель */
+  onManualImpactSceneNsfw?: () => void;
   /** Game mode: снять CG-подложку и вернуть фон локации */
   onClearCgPlate?: () => void;
 }
@@ -37,6 +41,8 @@ export function ChatGallery({
   onIllustrate,
   onManualImpactSfw,
   onManualImpactNsfw,
+  onManualImpactSceneSfw,
+  onManualImpactSceneNsfw,
   onClearCgPlate,
 }: ChatGalleryProps) {
   const { data: images, isLoading } = useGalleryImages(chatId);
@@ -68,7 +74,12 @@ export function ChatGallery({
 
   return (
     <div className="flex flex-col gap-3 p-4">
-      {(onIllustrate || onManualImpactSfw || onManualImpactNsfw || onClearCgPlate) && (
+      {(onIllustrate ||
+        onManualImpactSfw ||
+        onManualImpactNsfw ||
+        onManualImpactSceneSfw ||
+        onManualImpactSceneNsfw ||
+        onClearCgPlate) && (
         <div className="flex flex-wrap gap-2">
           {onIllustrate && (
             <button
@@ -84,7 +95,7 @@ export function ChatGallery({
             <button
               type="button"
               onClick={onManualImpactSfw}
-              title="Дополнительная CG-иллюстрация текущего момента через SFW image-модель (игровой режим): та же цепочка, что и редкая иллюстрация со сцены"
+              title="Дополнительная CG-иллюстрация текущего момента (вид от первого лица) через SFW image-модель"
               className="flex min-h-[2.75rem] min-w-[3.5rem] shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--muted)]/10 px-3 py-3 text-xs font-semibold tabular-nums text-[var(--foreground)] transition-all hover:bg-[var(--muted)]/20"
             >
               +1 SFW
@@ -94,10 +105,30 @@ export function ChatGallery({
             <button
               type="button"
               onClick={onManualImpactNsfw}
-              title="Дополнительная CG-иллюстрация текущего момента через NSFW image-модель (игровой режим). Если NSFW image connection не задан в настройках чата — кнопка покажет подсказку."
+              title="Дополнительная CG-иллюстрация текущего момента (вид от первого лица) через NSFW image-модель. Если NSFW image connection не задан в настройках чата — кнопка покажет подсказку."
               className="flex min-h-[2.75rem] min-w-[3.5rem] shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--destructive)]/10 px-3 py-3 text-xs font-semibold tabular-nums text-[var(--foreground)] transition-all hover:bg-[var(--destructive)]/20"
             >
               +1 NSFW
+            </button>
+          )}
+          {onManualImpactSceneSfw && (
+            <button
+              type="button"
+              onClick={onManualImpactSceneSfw}
+              title="Полная CG-иллюстрация всей сцены через SFW image-модель (вид от третьего лица, игрок виден в кадре)"
+              className="flex min-h-[2.75rem] min-w-[3.5rem] shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--primary)]/10 px-3 py-3 text-xs font-semibold tabular-nums text-[var(--foreground)] transition-all hover:bg-[var(--primary)]/20"
+            >
+              Full SFW
+            </button>
+          )}
+          {onManualImpactSceneNsfw && (
+            <button
+              type="button"
+              onClick={onManualImpactSceneNsfw}
+              title="Полная CG-иллюстрация всей сцены через NSFW image-модель (вид от третьего лица, игрок виден в кадре). Если NSFW image connection не задан — кнопка покажет подсказку."
+              className="flex min-h-[2.75rem] min-w-[3.5rem] shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--destructive)]/15 px-3 py-3 text-xs font-semibold tabular-nums text-[var(--foreground)] transition-all hover:bg-[var(--destructive)]/25"
+            >
+              Full NSFW
             </button>
           )}
           {onClearCgPlate && (

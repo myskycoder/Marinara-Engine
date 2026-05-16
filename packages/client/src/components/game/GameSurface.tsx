@@ -4475,7 +4475,7 @@ export function GameSurface({
    * server only swaps the connection for the illustration step.
    */
   const requestManualExtraIllustration = useCallback(
-    async (variant: "sfw" | "nsfw") => {
+    async (variant: "sfw" | "nsfw", pov: "first-person" | "scene") => {
       const enableGen = !!chatMeta.enableSpriteGeneration;
       const sfwConn = (chatMeta.gameImageConnectionId as string | undefined)?.trim() || null;
       const nsfwConn = (chatMeta.gameImageConnectionIdNsfw as string | undefined)?.trim() || null;
@@ -4505,8 +4505,16 @@ export function GameSurface({
         toast.error("Нет текста последнего хода — сначала нужна реплика GM.");
         return;
       }
-      const preamble =
-        "Player-requested VN CG still: exact moment below, first-person view. Match venue, lighting, weather, and visible cast. ";
+      // Two preambles, identical pipeline. The rewriter in
+      // `image-prompt-writer.ts` already says "Unless the draft explicitly
+      // says otherwise, the image is from the player's first-person POV" —
+      // so the scene preamble below acts as that explicit override.
+      const preambleFp =
+        "Player-requested VN CG still: exact moment below, first-person view. The player protagonist is NOT visible. Match venue, lighting, weather, and visible cast. ";
+      const preambleScene =
+        "Player-requested VN CG still: third-person wide-shot scene illustration of the exact moment below. The player protagonist IS visible alongside the rest of the cast in frame. Show the full venue, lighting, weather, and every visible character — no first-person POV, no first-person framing tags, no \"hands of the viewer\" or `pov` / `first-person_view` / `viewer_pov` / `from_viewpoint` / `hands_only` tags. ";
+      const preamble = pov === "scene" ? preambleScene : preambleFp;
+
       let prompt = `${preamble}\n\n${excerpt}`;
       if (prompt.length < 40) {
         prompt = `${preamble}Location: ${gameSnapshot?.location ?? "current"}. ${metaWeather ?? ""} ${metaTime ?? ""}\n\n${excerpt}`.slice(
@@ -4524,6 +4532,17 @@ export function GameSurface({
 
       const locId = (chatMeta.currentLocationId as string | undefined)?.trim() || undefined;
 
+      const reason =
+        pov === "scene"
+          ? variant === "nsfw"
+            ? "Player requested full-scene NSFW illustration (Full NSFW) from gallery"
+            : "Player requested full-scene illustration (Full SFW) from gallery"
+          : variant === "nsfw"
+            ? "Player requested extra NSFW illustration (+1) from gallery"
+            : "Player requested extra illustration (+1) from gallery";
+
+      const slug = `manual-${pov === "scene" ? "full" : "fp"}-${variant}-${Date.now().toString(36)}`;
+
       const res = await requestAssetGeneration(
         {
           chatId: activeChatId,
@@ -4537,12 +4556,9 @@ export function GameSurface({
           },
           illustration: {
             prompt,
-            reason:
-              variant === "nsfw"
-                ? "Player requested extra NSFW illustration (+1) from gallery"
-                : "Player requested extra illustration (+1) from gallery",
+            reason,
             characters: sceneWrapCharacterNames.slice(0, 6),
-            slug: `manual-${variant}-${Date.now().toString(36)}`,
+            slug,
             segment: 0,
           },
         },
@@ -9043,8 +9059,10 @@ export function GameSurface({
                 open={galleryOpen}
                 onClose={() => setGalleryOpen(false)}
                 onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
-                onManualImpactSfw={() => requestManualExtraIllustration("sfw")}
-                onManualImpactNsfw={() => requestManualExtraIllustration("nsfw")}
+                onManualImpactSfw={() => requestManualExtraIllustration("sfw", "first-person")}
+                onManualImpactNsfw={() => requestManualExtraIllustration("nsfw", "first-person")}
+                onManualImpactSceneSfw={() => requestManualExtraIllustration("sfw", "scene")}
+                onManualImpactSceneNsfw={() => requestManualExtraIllustration("nsfw", "scene")}
                 onClearCgPlate={handleClearCgPlate}
               />
 

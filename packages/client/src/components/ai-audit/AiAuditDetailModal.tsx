@@ -2,7 +2,7 @@
 // Modal: AI Request Audit — Detail
 // ──────────────────────────────────────────────
 import { useMemo, useState } from "react";
-import { Copy, Loader2, Trash2 } from "lucide-react";
+import { Copy, Download, Loader2, Trash2 } from "lucide-react";
 import { Modal } from "../ui/Modal";
 import { useAiAuditDetail, useDeleteAiAuditEntry } from "../../hooks/use-ai-audit";
 import { copyToClipboard } from "../../lib/utils";
@@ -65,6 +65,26 @@ export function AiAuditDetailModal({ open, entryId, onClose }: Props) {
     const ok = await copyToClipboard(renderedBody);
     if (ok) toast.success("Скопировано");
     else toast.error("Не удалось скопировать");
+  };
+
+  const handleDownload = () => {
+    if (!entry) return;
+    try {
+      const blob = new Blob([JSON.stringify(entry, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ai-audit-${entry.id}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success("Лог скачан");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Не удалось скачать");
+    }
   };
 
   const handleDelete = async () => {
@@ -144,6 +164,13 @@ export function AiAuditDetailModal({ open, entryId, onClose }: Props) {
                   <Copy size="0.75rem" /> Копировать
                 </button>
               )}
+              <button
+                onClick={handleDownload}
+                className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--primary)] active:scale-95"
+                title="Скачать JSON"
+              >
+                <Download size="0.75rem" /> Скачать
+              </button>
               <button
                 onClick={handleDelete}
                 disabled={deleteMutation.isPending}

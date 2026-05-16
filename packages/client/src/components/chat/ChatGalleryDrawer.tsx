@@ -11,10 +11,14 @@ interface ChatGalleryDrawerProps {
   onClose: () => void;
   /** Manually trigger the Illustrator agent */
   onIllustrate?: () => void;
-  /** Game mode: request one extra VN scene illustration from current narration via SFW image model (+1 SFW) */
+  /** Game mode: request one extra VN scene illustration from current narration via SFW image model (+1 SFW, first-person POV) */
   onManualImpactSfw?: () => void;
-  /** Game mode: request one extra VN scene illustration from current narration via NSFW image model (+1 NSFW) */
+  /** Game mode: request one extra VN scene illustration from current narration via NSFW image model (+1 NSFW, first-person POV) */
   onManualImpactNsfw?: () => void;
+  /** Game mode: request a full third-person scene illustration via SFW image model (Full SFW) */
+  onManualImpactSceneSfw?: () => void;
+  /** Game mode: request a full third-person scene illustration via NSFW image model (Full NSFW) */
+  onManualImpactSceneNsfw?: () => void;
   /** Game mode: remove CG illustration plate and restore location background */
   onClearCgPlate?: () => void;
 }
@@ -26,6 +30,8 @@ export function ChatGalleryDrawer({
   onIllustrate,
   onManualImpactSfw,
   onManualImpactNsfw,
+  onManualImpactSceneSfw,
+  onManualImpactSceneNsfw,
   onClearCgPlate,
 }: ChatGalleryDrawerProps) {
   if (!open) return null;
@@ -56,6 +62,8 @@ export function ChatGalleryDrawer({
             onIllustrate={onIllustrate}
             onManualImpactSfw={onManualImpactSfw}
             onManualImpactNsfw={onManualImpactNsfw}
+            onManualImpactSceneSfw={onManualImpactSceneSfw}
+            onManualImpactSceneNsfw={onManualImpactSceneNsfw}
             onClearCgPlate={onClearCgPlate}
           />
         </div>
