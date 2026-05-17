@@ -18,6 +18,7 @@ import {
   enforceMaxActivatedEntries,
   filterRelevantLorebooks,
   resolveAndBudgetActivatedLorebookEntries,
+  resolveAndBudgetActivatedLorebookEntriesWithDiagnostics,
   resolveActivatedLorebookEntryContent,
   resolveBudgetAndRecursivelyActivateLorebookEntries,
   serializeTimingStateMap,
@@ -98,6 +99,7 @@ function makeEntry(overrides: Partial<LorebookEntry> = {}): LorebookEntry {
     dynamicState: {},
     activationConditions: [],
     schedule: null,
+    excludeFromVectorization: false,
     embedding: null,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
@@ -164,6 +166,7 @@ function lorebookEntryRow(id: string) {
     activationConditions: "[]",
     schedule: null,
     preventRecursion: "false",
+    excludeFromVectorization: "false",
     embedding: null,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
@@ -182,6 +185,32 @@ test("macro-expanded lorebook content is budgeted and estimated after expansion"
   assert.deepEqual(budgetedOut, []);
   assert.equal(processed.worldInfoBefore, expandedContent);
   assert.equal(processed.totalTokensEstimate, 20);
+});
+
+test("depth 0 lorebook entries are included for depth injection", () => {
+  const activated: ActivatedEntry[] = [
+    {
+      entry: makeEntry({
+        content: "Depth zero lore",
+        position: 2,
+        depth: 0,
+        role: "system",
+      }),
+      matchedKeys: ["keyword"],
+      injectionOrder: 100,
+    },
+  ];
+
+  const processed = processActivatedEntries(activated, 0);
+
+  assert.deepEqual(processed.depthEntries, [
+    {
+      content: "Depth zero lore",
+      role: "system",
+      depth: 0,
+      order: 100,
+    },
+  ]);
 });
 
 test("lorebook final budgets use resolved variable macro content and roll back skipped side effects", () => {
@@ -422,6 +451,76 @@ test("macro-aware lorebook max-entry selection keeps constants before lower-orde
     selected.map((entry) => entry.entry.id),
     ["constant"],
   );
+});
+
+test("lorebook budget diagnostics report matched entries skipped by per-book caps", () => {
+  const result = resolveAndBudgetActivatedLorebookEntriesWithDiagnostics(
+    [
+      {
+        entry: makeEntry({ id: "included", name: "Included", content: tokenContent(40), order: 10 }),
+        matchedKeys: ["keyword"],
+        injectionOrder: 10,
+      },
+      {
+        entry: makeEntry({ id: "skipped", name: "Skipped", content: tokenContent(30), order: 20 }),
+        matchedKeys: ["keyword"],
+        injectionOrder: 20,
+      },
+    ],
+    new Map([["book-1", makeLorebook({ name: "Tight Lorebook", tokenBudget: 50 })]]),
+    200,
+    10,
+  );
+
+  assert.deepEqual(
+    result.selected.map((entry) => entry.entry.id),
+    ["included"],
+  );
+  assert.deepEqual(result.budgetSkippedEntries, [
+    {
+      id: "skipped",
+      name: "Skipped",
+      lorebookId: "book-1",
+      lorebookName: "Tight Lorebook",
+      matchedKeys: ["keyword"],
+      estimatedTokens: 30,
+      lorebookBudget: 50,
+      lorebookUsedTokens: 40,
+      chatBudget: 200,
+      chatUsedTokens: 40,
+      blockedBy: "lorebook",
+    },
+  ]);
+});
+
+test("lorebook budget diagnostics report matched entries skipped by chat caps", () => {
+  const result = resolveAndBudgetActivatedLorebookEntriesWithDiagnostics(
+    [
+      {
+        entry: makeEntry({ id: "included", name: "Included", content: tokenContent(40), order: 10 }),
+        matchedKeys: ["keyword"],
+        injectionOrder: 10,
+      },
+      {
+        entry: makeEntry({ id: "skipped", name: "Skipped", content: tokenContent(30), order: 20 }),
+        matchedKeys: ["keyword"],
+        injectionOrder: 20,
+      },
+    ],
+    new Map([["book-1", makeLorebook({ name: "Large Lorebook", tokenBudget: 200 })]]),
+    50,
+    10,
+  );
+
+  assert.deepEqual(
+    result.selected.map((entry) => entry.entry.id),
+    ["included"],
+  );
+  assert.deepEqual(
+    result.budgetSkippedEntries.map((entry) => entry.blockedBy),
+    ["chat"],
+  );
+  assert.equal(result.budgetSkippedEntries[0]?.chatBudget, 50);
 });
 
 test("recursive lorebook scans use macro-expanded activated entry content", () => {
@@ -786,6 +885,21 @@ test("entry probability is not re-rolled by semantic fallback after a keyword ma
 
   assert.equal(activated.length, 0);
   assert.equal(rolls, 1);
+});
+
+test("entries excluded from vectorization do not activate through semantic fallback", () => {
+  const entry = makeEntry({
+    keys: ["no-keyword-match"],
+    embedding: [1, 0],
+    excludeFromVectorization: true,
+  });
+
+  const activated = scanForActivatedEntries([{ role: "user", content: "ordinary chat" }], [entry], {
+    chatEmbedding: [1, 0],
+    semanticThreshold: 0.5,
+  });
+
+  assert.equal(activated.length, 0);
 });
 
 test("entry probability allows activation when the roll is below the configured percentage", () => {

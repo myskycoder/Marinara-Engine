@@ -73,15 +73,9 @@ import {
 import { executeToolCalls, type MetadataPatchInput } from "../services/tools/tool-executor.js";
 import { createAgentPipeline, type ResolvedAgent, type AgentInjection } from "../services/agents/agent-pipeline.js";
 import { DATA_DIR } from "../utils/data-dir.js";
-import {
-  executeAgent,
-  formatToolPayloadForLog,
-  normalizeAgentContextSize,
-  resolveAgentResultType,
-} from "../services/agents/agent-executor.js";
+import { executeAgent, normalizeAgentContextSize, resolveAgentResultType } from "../services/agents/agent-executor.js";
 import { buildSpriteExpressionChoices, listCharacterSprites } from "../services/game/sprite.service.js";
 import { generateChatBackground } from "../services/game/game-asset-generation.js";
-import { getAssetManifest } from "../services/game/asset-manifest.service.js";
 import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "../services/llm/local-sidecar.js";
 import {
   parseCharacterCommands,
@@ -807,7 +801,6 @@ export async function generateRoutes(app: FastifyInstance) {
               backstory: snapshotPersona.backstory ?? "",
               appearance: snapshotPersona.appearance ?? "",
               avatarUrl: snapshotPersona.avatarPath || null,
-              avatarCrop: snapshotPersona.avatarCrop || null,
               nameColor: snapshotPersona.nameColor || null,
               dialogueColor: snapshotPersona.dialogueColor || null,
               boxColor: snapshotPersona.boxColor || null,
@@ -1020,14 +1013,14 @@ export async function generateRoutes(app: FastifyInstance) {
         }
       }
 
-      const characterIds: string[] = JSON.parse(chat.characterIds as string);
-
-      // ── Game mode: apply segment edit/delete overlays before regex scripts ──
-      // Users can edit individual narration/dialogue beats in the VN UI.
-      // Apply overlays first so regex scripts also affect corrected beat text.
-      if (chatMode === "game") {
-        applyAllSegmentEdits(mappedMessages, chatMeta as Record<string, unknown>, chatMessages);
+      // Always collapse 3+ consecutive blank lines into a double newline —
+      // these waste tokens and produce messy logs regardless of user regex settings.
+      // Matches pure newlines AND lines that contain only whitespace.
+      for (const msg of mappedMessages) {
+        msg.content = msg.content.replace(/\n([ \t]*\n){2,}/g, "\n\n");
       }
+
+      const characterIds: string[] = JSON.parse(chat.characterIds as string);
 
       // Resolve persona — prefer per-chat personaId, fall back to globally active persona
       // (Game mode skips the fallback — persona must be explicitly selected in the setup wizard)
@@ -1036,6 +1029,14 @@ export async function generateRoutes(app: FastifyInstance) {
       let personaDescription = "";
       let personaFields: { personality?: string; scenario?: string; backstory?: string; appearance?: string } = {};
       const allPersonas = await chars.listPersonas();
+      // ── Game mode: apply segment edit overlays to message content ──
+      // Users can edit individual narration/dialogue segments in the VN UI.
+      // Edits are stored as chat-metadata overlays; apply them so the model
+      // sees the corrected text in its conversation history.
+      if (chatMode === "game") {
+        applyAllSegmentEdits(mappedMessages, chatMeta as Record<string, unknown>, chatMessages);
+      }
+
       const persona =
         (chat.personaId ? allPersonas.find((p: any) => p.id === chat.personaId) : null) ??
         (chatMode !== "game" ? allPersonas.find((p: any) => p.isActive === "true") : null);
@@ -1226,7 +1227,9 @@ export async function generateRoutes(app: FastifyInstance) {
           excludedLorebookIds: gameLorebookScopeExclusions.excludedLorebookIds,
           excludedSourceAgentIds: gameLorebookScopeExclusions.excludedSourceAgentIds,
         });
-        const hasVectorizedEntries = (activeEntries as Array<Record<string, unknown>>).some((e) => e.embedding != null);
+        const hasVectorizedEntries = (activeEntries as Array<Record<string, unknown>>).some(
+          (e) => !e.excludeFromVectorization && e.embedding != null,
+        );
         if (hasVectorizedEntries) {
           // Embed the last ~10 messages as context
           const recentMsgs = mappedMessages
@@ -1952,7 +1955,7 @@ export async function generateRoutes(app: FastifyInstance) {
 
           const commandLines: string[] = [
             `<commands>`,
-            `These are optional hidden commands you may use if you wish to. Only use them when they genuinely fit the conversation:`,
+            `Here are your optional, hidden commands you may use if you wish to, but only when they genuinely fit the conversation:`,
             ``,
             `- [schedule_update: status="online|idle|dnd|offline", activity="activity name", duration="number of hours (e.g., 1h)"] - only if you change your own status/activity, for example, if the user asks you to stop what you're doing or if you decide to change them yourself.`,
             ``,
@@ -2903,16 +2906,16 @@ export async function generateRoutes(app: FastifyInstance) {
         selectorGroupChatMode === "individual" &&
         selectorGroupResponseOrder === "smart";
       if (shouldResolveResponseOrchestratorSelector) {
-        const resolvedResponseOrchestratorAgent = resolvedAgents.find((agent) => agent.type === "response-orchestrator");
+        const resolvedResponseOrchestratorAgent = resolvedAgents.find(
+          (agent) => agent.type === "response-orchestrator",
+        );
         if (resolvedResponseOrchestratorAgent) {
           responseOrchestratorSelectorAgent = resolvedResponseOrchestratorAgent;
         } else {
           const storedResponseOrchestratorConfig = await agentsStore.getByType("response-orchestrator");
           const cfg =
             storedResponseOrchestratorConfig ??
-            (defaultAgentConn
-              ? (BUILT_IN_AGENTS.find((agent) => agent.id === "response-orchestrator") ?? null)
-              : null);
+            (defaultAgentConn ? (BUILT_IN_AGENTS.find((agent) => agent.id === "response-orchestrator") ?? null) : null);
           if (cfg) {
             const settings =
               "settings" in cfg && cfg.settings
@@ -2930,7 +2933,9 @@ export async function generateRoutes(app: FastifyInstance) {
 
             if (effectiveConnectionId === "skip-local-sidecar") {
               responseOrchestratorSelectorUnavailable = true;
-              const alreadyWarned = skippedLocalSidecarAgents.some((agentName) => agentName === "Response Orchestrator");
+              const alreadyWarned = skippedLocalSidecarAgents.some(
+                (agentName) => agentName === "Response Orchestrator",
+              );
               if (!alreadyWarned) {
                 agentConnectionWarnings.push(buildLocalSidecarUnavailableWarning(["Response Orchestrator"]));
               }
@@ -4128,12 +4133,6 @@ export async function generateRoutes(app: FastifyInstance) {
         try {
           const { readdirSync, readFileSync, existsSync } = await import("fs");
           const { join, extname } = await import("path");
-          const availableBackgrounds: Array<{
-            filename: string;
-            originalName?: string | null;
-            tags: string[];
-            source?: "user" | "game_asset";
-          }> = [];
           const bgDir = join(DATA_DIR, "backgrounds");
           if (existsSync(bgDir)) {
             const exts = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"]);
@@ -4150,26 +4149,12 @@ export async function generateRoutes(app: FastifyInstance) {
               }
             }
 
-            availableBackgrounds.push(
-              ...files.map((f: string) => ({
-                filename: f,
-                originalName: meta[f]?.originalName ?? null,
-                tags: meta[f]?.tags ?? [],
-                source: "user" as const,
-              })),
-            );
+            agentContext.memory._availableBackgrounds = files.map((f: string) => ({
+              filename: f,
+              originalName: meta[f]?.originalName ?? null,
+              tags: meta[f]?.tags ?? [],
+            }));
           }
-          availableBackgrounds.push(
-            ...(getAssetManifest().byCategory.backgrounds ?? [])
-              .filter((entry) => !entry.path.startsWith("__user_bg__/"))
-              .map((entry) => ({
-                filename: `gameAsset:${entry.path}`,
-                originalName: entry.tag,
-                tags: entry.subcategory ? [entry.subcategory] : [],
-                source: "game_asset" as const,
-              })),
-          );
-          agentContext.memory._availableBackgrounds = availableBackgrounds;
         } catch {
           /* non-critical */
         }
@@ -6012,22 +5997,6 @@ export async function generateRoutes(app: FastifyInstance) {
 
               if (!result.toolCalls.length) break;
 
-              if (requestDebug || isDebug) {
-                for (const call of result.toolCalls) {
-                  const allowed = chatResolvedToolNames.has(call.function.name);
-                  const args = formatToolPayloadForLog(call.function.arguments, 1_200);
-                  debugLog("[tools] %s%s args=%s", call.function.name, allowed ? "" : " (denied)", args);
-                  if (requestDebug) {
-                    reply.raw.write(
-                      `data: ${JSON.stringify({
-                        type: "tool_call",
-                        data: { name: call.function.name, arguments: args, allowed },
-                      })}\n\n`,
-                    );
-                  }
-                }
-              }
-
               loopMessages.push({
                 role: "assistant",
                 content: result.content ?? "",
@@ -6061,9 +6030,6 @@ export async function generateRoutes(app: FastifyInstance) {
                 .filter((toolResult): toolResult is NonNullable<typeof toolResult> => toolResult != null);
 
               for (const tr of toolResults) {
-                if (requestDebug || isDebug) {
-                  debugLog("[tools] %s result=%s", tr.name, formatToolPayloadForLog(tr.result, 1_200));
-                }
                 reply.raw.write(
                   `data: ${JSON.stringify({
                     type: "tool_result",
@@ -8079,15 +8045,6 @@ export async function generateRoutes(app: FastifyInstance) {
                 const editedText = (edData.editedText as string) ?? "";
                 const changes = (edData.changes as Array<{ description: string }>) ?? [];
                 if (editedText && changes.length > 0) {
-                  const currentMessage = await chats.getMessage(messageId);
-                  if ((currentMessage?.content ?? "") !== currentResponseForRewrite) {
-                    logger.info(
-                      "[generate] Skipping %s rewrite for message %s because the message was edited during post-processing",
-                      textRewriteAgent.name || textRewriteAgent.type,
-                      messageId,
-                    );
-                    break;
-                  }
                   currentResponseForRewrite = editedText;
                   await chats.updateMessageContent(messageId, editedText);
                   reply.raw.write(

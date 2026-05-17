@@ -6051,6 +6051,8 @@ export async function gameRoutes(app: FastifyInstance) {
   const spotifyPlaySchema = z.object({
     chatId: z.string().min(1),
     track: spotifySceneTrackSelectionSchema,
+    deviceId: z.string().min(1).nullable().optional(),
+    mobileDeviceOnly: z.boolean().optional(),
   });
 
   app.post("/spotify/play", async (req, reply) => {
@@ -6065,6 +6067,8 @@ export async function gameRoutes(app: FastifyInstance) {
         storage: agents,
         chatMeta: parseMeta(chat.metadata),
         track: input.track,
+        deviceId: input.deviceId ?? null,
+        mobileDeviceOnly: input.mobileDeviceOnly === true,
       });
     } catch (err) {
       logger.warn(err, "[spotify/game] Failed to play scene music");
