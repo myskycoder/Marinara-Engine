@@ -898,7 +898,11 @@ export async function generateRoutes(app: FastifyInstance) {
               createdAt: message.createdAt as string | null | undefined,
             }));
           }
-          const summaryProvider = createLLMProvider(
+          // Resolve summary connection: chat-summary agent override → default-for-agents → chat connection.
+          // The summary task is a structured side-job that doesn't need the GM's flagship model
+          // (gpt-5.4 etc.) — a cheap fast tracker model (e.g. gemini-2.5-flash) drops the in-turn
+          // delay this update injects from ~20s on gpt-5.4 to ~2-3s, without touching GM quality.
+          let summaryProvider = createLLMProvider(
             conn.provider,
             baseUrl,
             conn.apiKey,
@@ -906,6 +910,38 @@ export async function generateRoutes(app: FastifyInstance) {
             conn.openrouterProvider,
             conn.maxTokensOverride,
           );
+          let summaryModel = conn.model;
+          let summaryConnectionLabel = `chat (${conn.provider}/${conn.model})`;
+          try {
+            const summaryAgentCfg = await agentsStore.getByType("chat-summary");
+            const defaultAgentConn = await connections.getDefaultForAgents();
+            const resolvedSummaryConnId: string | null =
+              (summaryAgentCfg?.connectionId as string | null) ?? defaultAgentConn?.id ?? null;
+            if (resolvedSummaryConnId && resolvedSummaryConnId !== conn.id) {
+              const summaryConn = await connections.getWithKey(resolvedSummaryConnId);
+              const summaryBaseUrl = summaryConn ? resolveBaseUrl(summaryConn) : null;
+              if (summaryConn && summaryBaseUrl) {
+                summaryProvider = createLLMProvider(
+                  summaryConn.provider,
+                  summaryBaseUrl,
+                  summaryConn.apiKey,
+                  summaryConn.maxContext,
+                  summaryConn.openrouterProvider,
+                  summaryConn.maxTokensOverride,
+                );
+                summaryModel = summaryConn.model;
+                summaryConnectionLabel = `${summaryAgentCfg?.connectionId ? "chat-summary agent" : "default-for-agents"} (${summaryConn.provider}/${summaryConn.model})`;
+              } else {
+                logger.warn(
+                  "[generate/game] gameContextSummary: resolved summary connection %s not loadable; falling back to chat connection",
+                  resolvedSummaryConnId,
+                );
+              }
+            }
+          } catch (err) {
+            logger.warn(err, "[generate/game] gameContextSummary connection resolution failed; using chat connection");
+          }
+          logger.info("[generate/game] gameContextSummary using %s", summaryConnectionLabel);
           const limited = await applyGameContextMessageLimit({
             chatId: input.chatId,
             messages: chatMessages,
@@ -913,7 +949,7 @@ export async function generateRoutes(app: FastifyInstance) {
             contextMessageLimit,
             metadata: chatMeta,
             provider: summaryProvider,
-            model: conn.model,
+            model: summaryModel,
             persistSummary: async (summary) => {
               await chats.updateMetadataWithMerge(input.chatId, (current) => {
                 const currentSummary = getStoredGameContextSummary(current);

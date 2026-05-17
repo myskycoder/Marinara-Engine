@@ -193,17 +193,26 @@ function normalizeDirection(direction: DirectionCommand): DirectionCommand | nul
 
 // ── Tag fuzzy-matching ──
 
-/** Score how well a prose description matches an asset tag by keyword overlap. */
-function tagScore(prose: string, tag: string): number {
+/**
+ * Category-aware fuzzy match. The `category` (e.g. "backgrounds") strips its
+ * own name from both prose and tag-parts so it does not pad the score with a
+ * free "everything-matches" point — without this, ANY prose containing the
+ * literal word "background" / "backgrounds" gets a +1 for every candidate tag
+ * (they all start with `backgrounds:`), and ties are broken by the FIRST tag
+ * in iteration order, which is what produced "pool-terrace → vip-corridor"-
+ * style false matches in earlier audits.
+ */
+function tagScore(prose: string, tag: string, category?: string): number {
+  const categoryLower = category?.toLowerCase();
   const words = prose
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, " ")
     .split(/\s+/)
-    .filter((w) => w.length > 2);
+    .filter((w) => w.length > 2 && (!categoryLower || w !== categoryLower));
   const parts = tag
     .toLowerCase()
     .split(/[:\-_]+/)
-    .filter((p) => p.length > 1);
+    .filter((p) => p.length > 1 && (!categoryLower || p !== categoryLower));
 
   let score = 0;
   for (const part of parts) {
@@ -217,13 +226,24 @@ function tagScore(prose: string, tag: string): number {
   return score;
 }
 
-/** Find the best-matching tag for a prose description. */
-function bestMatch(prose: string, tags: string[]): string | null {
+/**
+ * Find the best-matching tag for a prose description. For backgrounds we
+ * require at least two specific-word overlaps so a brand-new location with
+ * only the (now stripped) category prefix in common does not get pinned to
+ * whichever library tag happens to come first in iteration order. Audio
+ * categories (sfx, music, ambient) keep the original ≥1 threshold — single
+ * meaningful words like "tense" / "combat" are useful in the deeper audio
+ * hierarchy and a false-positive there only mis-plays a clip, not the
+ * visually-disruptive whole-plate swap. Mirrors the client-side matcher in
+ * `packages/client/src/lib/asset-fuzzy-match.ts`.
+ */
+function bestMatch(prose: string, tags: string[], category?: string): string | null {
   if (!tags.length) return null;
+  const minOverlap = category === "backgrounds" ? 2 : 1;
   let best: string | null = null;
-  let bestScore = 0;
+  let bestScore = minOverlap - 1;
   for (const tag of tags) {
-    const s = tagScore(prose, tag);
+    const s = tagScore(prose, tag, category);
     if (s > bestScore) {
       bestScore = s;
       best = tag;
@@ -280,7 +300,7 @@ function postProcessSegment(seg: SceneSegmentEffect, ctx: PostProcessContext): S
       if (out.background.startsWith("backgrounds:generated:") && ctx.canGenerateBackgrounds) {
         // Already valid generated format
       } else {
-        const matched = bestMatch(out.background, ctx.availableBackgrounds);
+        const matched = bestMatch(out.background, ctx.availableBackgrounds, "backgrounds");
         if (matched) {
           logger.debug(`[postprocess] seg[${seg.segment}] bg: "${out.background}" → "${matched}"`);
           out.background = matched;
@@ -310,7 +330,7 @@ function postProcessSegment(seg: SceneSegmentEffect, ctx: PostProcessContext): S
       if (ctx.availableSfx.includes(item)) {
         matched.push(item);
       } else {
-        const m = bestMatch(item, ctx.availableSfx);
+        const m = bestMatch(item, ctx.availableSfx, "sfx");
         if (m && !matched.includes(m)) {
           logger.debug(`[postprocess] seg[${seg.segment}] sfx: "${item}" → "${m}"`);
           matched.push(m);
@@ -456,9 +476,13 @@ export function postProcessSceneResult(raw: SceneAnalysis, ctx: PostProcessConte
     if (result.background.startsWith("backgrounds:generated:") && ctx.canGenerateBackgrounds) {
       // Already valid generated format — no change needed
     } else {
-      const matched = bestMatch(result.background, ctx.availableBackgrounds);
+      const matched = bestMatch(result.background, ctx.availableBackgrounds, "backgrounds");
       if (matched) {
-        logger.debug(`[postprocess] bg: "${result.background}" → "${matched}"`);
+        logger.info(
+          '[postprocess] top-level bg fuzzy: "%s" → "%s" (model returned a tag not in BACKGROUND OPTIONS)',
+          result.background,
+          matched,
+        );
         result.background = matched;
       } else if (ctx.canGenerateBackgrounds) {
         // Synthesise a generated-background slug the client can render

@@ -1662,6 +1662,42 @@ function getSceneBackgroundTags(assetKeys: string[]): string[] {
   return result;
 }
 
+/**
+ * Build the background option list for /scene-wrap.
+ *
+ * Chat-scoped plates (`backgrounds:chat:*`) are this chat's persistent cadre and
+ * must NEVER be subject to random sampling — losing one means the analyzer
+ * can't pick the matching plate when the narration arrives at that location
+ * (e.g. narration moves to the lounge but `lounge__clear__night__none` got
+ * sampled out, so the model keeps a stale vip-room plate). Generic stock
+ * (`user:*`, `fantasy:*`, `modern:*`, …) is sampled to keep the total bounded.
+ */
+function buildSceneBackgroundList(assetKeys: string[], cap: number = 50): string[] {
+  const allTags = getSceneBackgroundTags(assetKeys);
+  const chatTags: string[] = [];
+  const otherTags: string[] = [];
+  for (const tag of allTags) {
+    if (tag.startsWith("backgrounds:chat:")) chatTags.push(tag);
+    else otherTags.push(tag);
+  }
+  const otherBudget = Math.max(0, cap - chatTags.length);
+  return [...chatTags, ...sampleTags(otherTags, otherBudget)];
+}
+
+/**
+ * Ensure the active scene plate is always present in the background list sent
+ * to /scene-wrap. Even with `buildSceneBackgroundList` pinning chat-scoped
+ * plates, the current plate could in principle be filed under a different
+ * namespace (a freshly generated `backgrounds:generated:*` not yet promoted to
+ * `backgrounds:chat:*`); this is the final belt-and-suspenders guarantee.
+ */
+function withCurrentBackground(tags: string[], currentBackground: string | null | undefined): string[] {
+  if (!currentBackground) return tags;
+  if (currentBackground.startsWith("backgrounds:illustrations:")) return tags;
+  if (tags.includes(currentBackground)) return tags;
+  return [currentBackground, ...tags];
+}
+
 const RECENT_MUSIC_HISTORY_LIMIT = 8;
 const GAME_START_GENERATION_GUIDE =
   "Begin the game now with the first visible GM VN narration/dialogue segment. This is an invisible startup trigger, not a player action. Do not mention a start command.";
@@ -3756,7 +3792,7 @@ export function GameSurface({
     // Only send assets the LLM actually picks from: backgrounds (capped 50) and SFX (capped 50).
     // Music and ambient are handled by deterministic server-side scoring — not sent.
     const assetKeys = Object.keys(assets ?? {});
-    const bgTags = sampleTags(getSceneBackgroundTags(assetKeys), 50);
+    const bgTags = withCurrentBackground(buildSceneBackgroundList(assetKeys), currentBackground);
     const sfxTags = sampleTags(
       assetKeys.filter((k) => k.startsWith("sfx:")),
       50,
@@ -4906,7 +4942,7 @@ export function GameSurface({
     const assetKeys = Object.keys(assets ?? {});
     const sceneContext = {
       currentState: sceneAnalysisState,
-      availableBackgrounds: sampleTags(getSceneBackgroundTags(assetKeys), 50),
+      availableBackgrounds: withCurrentBackground(buildSceneBackgroundList(assetKeys), currentBackground),
       availableSfx: sampleTags(
         assetKeys.filter((key) => key.startsWith("sfx:")),
         50,
@@ -7355,7 +7391,7 @@ export function GameSurface({
     const tags = parseGmTags(latestAssistantMsg.content);
     const assets = assetManifest?.assets ?? null;
     const assetKeys = Object.keys(assets ?? {});
-    const bgTags = sampleTags(getSceneBackgroundTags(assetKeys), 50);
+    const bgTags = withCurrentBackground(buildSceneBackgroundList(assetKeys), currentBackground);
     const sfxTags = sampleTags(
       assetKeys.filter((k) => k.startsWith("sfx:")),
       50,

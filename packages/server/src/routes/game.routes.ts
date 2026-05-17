@@ -6402,6 +6402,45 @@ export async function gameRoutes(app: FastifyInstance) {
         filteredBackgrounds.length,
       );
     }
+    // Anchor the active scene plate so the analyzer's "keep the same bg" path
+    // round-trips cleanly. Without this, a stale or sampled availableBackgrounds
+    // list lets scene-postprocess.bestMatch() promote a sibling room (e.g.
+    // pool-terrace → vip-corridor) as a "close match" instead of preserving the
+    // current location.
+    const currentBgTag = input.context.currentBackground;
+    if (
+      currentBgTag &&
+      !currentBgTag.startsWith("backgrounds:illustrations:") &&
+      (!currentBgTag.startsWith("backgrounds:chat:") || currentBgTag.startsWith(myChatPrefix)) &&
+      !filteredBackgrounds.includes(currentBgTag)
+    ) {
+      filteredBackgrounds.unshift(currentBgTag);
+      logger.debug("[game/scene-wrap][bg] anchored currentBackground into options: %s", currentBgTag);
+    }
+    // Belt-and-suspenders: pull every chat-scoped plate for THIS chat from the
+    // server-side asset manifest. The client samples to 50, which can drop the
+    // plate for the location narration is moving into — when that happens, the
+    // analyzer has no matching tag to choose and keeps the stale plate. This
+    // ensures all chat-scoped cadres are always offered.
+    try {
+      const serverManifestAssets = getAssetManifest().assets ?? {};
+      let mergedChatBgs = 0;
+      for (const key of Object.keys(serverManifestAssets)) {
+        if (!key.startsWith(myChatPrefix)) continue;
+        if (filteredBackgrounds.includes(key)) continue;
+        filteredBackgrounds.push(key);
+        mergedChatBgs++;
+      }
+      if (mergedChatBgs > 0) {
+        logger.debug(
+          "[game/scene-wrap][bg] merged %d chat-scoped plates from server manifest (now %d total)",
+          mergedChatBgs,
+          filteredBackgrounds.length,
+        );
+      }
+    } catch (err) {
+      logger.warn(err, "[game/scene-wrap][bg] failed to merge server-manifest chat plates");
+    }
 
     const knownLocationIds = Object.keys(
       (meta.locationCatalog as Record<string, LocationCatalogEntry> | undefined) ?? {},
