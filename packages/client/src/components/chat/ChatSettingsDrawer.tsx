@@ -4751,7 +4751,7 @@ export function ChatSettingsDrawer({
                 placeholder="https://discord.com/api/webhooks/..."
                 value={(metadata.discordWebhookUrl as string) ?? ""}
                 onChange={(e) => {
-                  updateMeta.mutate({ id: chat.id, discordWebhookUrl: e.target.value.trim() || undefined });
+                  updateMeta.mutate({ id: chat.id, discordWebhookUrl: e.target.value.trim() });
                 }}
                 className="w-full rounded-lg bg-[var(--secondary)] px-3 py-2.5 text-[0.6875rem] text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]/50 ring-1 ring-transparent focus:ring-[var(--primary)]/40 focus:outline-none transition-all"
               />
