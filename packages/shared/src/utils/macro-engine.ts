@@ -16,6 +16,8 @@ export interface MacroContext {
     appearance?: string;
     scenario?: string;
     example?: string;
+    systemPrompt?: string;
+    postHistoryInstructions?: string;
   }>;
   /** Custom variables from prompt toggle groups */
   variables: Record<string, string>;
@@ -35,6 +37,8 @@ export interface MacroContext {
     appearance?: string;
     scenario?: string;
     example?: string;
+    systemPrompt?: string;
+    postHistoryInstructions?: string;
   };
   /** Active persona card fields used by {{persona}} */
   personaFields?: {
@@ -62,7 +66,7 @@ export interface SupportedMacroDefinition {
 }
 
 const CHARACTER_MACRO_PATTERN =
-  /\{\{(?:char|charName|description|personality|backstory|appearance|scenario|example)\}\}/i;
+  /\{\{(?:char|charName|description|personality|backstory|appearance|scenario|example|charSysInfo|charPostHistory)\}\}/i;
 const MAX_CHARACTER_FIELD_RESOLUTION_DEPTH = 4;
 // Private placeholders used while character macros are deferred.
 // Internal-only and should be resolved before provider requests.
@@ -75,6 +79,8 @@ const DEFERRED_CHARACTER_MACRO_TOKENS = {
   appearance: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}APPEARANCE\x1f`,
   scenario: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}SCENARIO\x1f`,
   example: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}EXAMPLE\x1f`,
+  systemPrompt: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}SYSTEM_PROMPT\x1f`,
+  postHistoryInstructions: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}POST_HISTORY\x1f`,
 } as const;
 
 export type CharacterMacroProfile = NonNullable<MacroContext["characterProfiles"]>[number];
@@ -101,6 +107,12 @@ export const SUPPORTED_MACROS: readonly SupportedMacroDefinition[] = [
   { category: "Character", syntax: "{{appearance}}", description: "Current character appearance" },
   { category: "Character", syntax: "{{scenario}}", description: "Current character scenario" },
   { category: "Character", syntax: "{{example}}", description: "Current character example dialogue" },
+  { category: "Character", syntax: "{{charSysInfo}}", description: "Current character system prompt" },
+  {
+    category: "Character",
+    syntax: "{{charPostHistory}}",
+    description: "Current character post-history instructions",
+  },
   { category: "Context", syntax: "{{input}}", description: "Most recent user message" },
   { category: "Context", syntax: "{{model}}", description: "Current model name" },
   { category: "Context", syntax: "{{chatId}}", description: "Current chat ID" },
@@ -176,7 +188,9 @@ export function resolveCharacterScopedMacros(template: string, profile: Characte
     .replace(/\{\{backstory\}\}/gi, () => resolveCharacterFieldValue(profile, "backstory", depth))
     .replace(/\{\{appearance\}\}/gi, () => resolveCharacterFieldValue(profile, "appearance", depth))
     .replace(/\{\{scenario\}\}/gi, () => resolveCharacterFieldValue(profile, "scenario", depth))
-    .replace(/\{\{example\}\}/gi, () => resolveCharacterFieldValue(profile, "example", depth));
+    .replace(/\{\{example\}\}/gi, () => resolveCharacterFieldValue(profile, "example", depth))
+    .replace(/\{\{charSysInfo\}\}/gi, () => resolveCharacterFieldValue(profile, "systemPrompt", depth))
+    .replace(/\{\{charPostHistory\}\}/gi, () => resolveCharacterFieldValue(profile, "postHistoryInstructions", depth));
 }
 
 export function resolveDeferredCharacterMacros(template: string, profile: CharacterMacroProfile): string {
@@ -200,6 +214,12 @@ export function resolveDeferredCharacterMacros(template: string, profile: Charac
   result = result
     .split(DEFERRED_CHARACTER_MACRO_TOKENS.example)
     .join(resolveCharacterFieldValue(profile, "example", 0));
+  result = result
+    .split(DEFERRED_CHARACTER_MACRO_TOKENS.systemPrompt)
+    .join(resolveCharacterFieldValue(profile, "systemPrompt", 0));
+  result = result
+    .split(DEFERRED_CHARACTER_MACRO_TOKENS.postHistoryInstructions)
+    .join(resolveCharacterFieldValue(profile, "postHistoryInstructions", 0));
   return result;
 }
 
@@ -408,6 +428,7 @@ function pickWeightedRandomChoice(choices: string[]): string {
  *  - {{char}} — current character name
  *  - {{characters}} — comma-separated list of all character names
  *  - {{description}} / {{personality}} / {{backstory}} / {{appearance}} / {{scenario}} / {{example}} — current character card fields
+ *  - {{charSysInfo}} / {{charPostHistory}} — current character instruction fields
  *  - {{date}} — current real date (YYYY-MM-DD)
  *  - {{time}} — current real time (HH:MM)
  *  - {{datetime}} — full ISO datetime string
@@ -476,6 +497,8 @@ export function resolveMacros(template: string, ctx: MacroContext, options: Reso
   result = result.replace(/\{\{appearance\}\}/gi, characterReplacement("appearance"));
   result = result.replace(/\{\{scenario\}\}/gi, characterReplacement("scenario"));
   result = result.replace(/\{\{example\}\}/gi, characterReplacement("example"));
+  result = result.replace(/\{\{charSysInfo\}\}/gi, characterReplacement("systemPrompt"));
+  result = result.replace(/\{\{charPostHistory\}\}/gi, characterReplacement("postHistoryInstructions"));
   result = result.replace(/\{\{input\}\}/gi, ctx.lastInput ?? "");
   result = result.replace(/\{\{model\}\}/gi, ctx.model ?? "");
   result = result.replace(/\{\{chatId\}\}/gi, ctx.chatId ?? "");

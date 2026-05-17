@@ -1379,6 +1379,8 @@ export async function chatsRoutes(app: FastifyInstance) {
                   backstory: charData.extensions?.backstory ?? "",
                   appearance: charData.extensions?.appearance ?? "",
                   example: charData.mes_example ?? "",
+                  systemPrompt: charData.system_prompt ?? "",
+                  postHistoryInstructions: charData.post_history_instructions ?? "",
                 },
               };
               const resolveCharacterMacros = (value: string) => resolveMacros(value, characterMacroContext);

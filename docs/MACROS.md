@@ -10,6 +10,17 @@ Macros use double braces:
 {{random::sunny::rainy::foggy}}
 ```
 
+## Character Fields
+
+Character macros resolve against the current character in single-character chats and against each character when used inside bracketed group blocks in prompt presets. Alongside fields such as `{{description}}`, `{{personality}}`, and `{{example}}`, Marinara also exposes character instruction fields:
+
+```text
+{{charSysInfo}}
+{{charPostHistory}}
+```
+
+Use these when a preset needs to place a character card's system prompt or post-history instructions in a specific section.
+
 ## Random Choices
 
 Use `{{random::A::B::C}}` to choose one option at generation time:
@@ -36,10 +47,10 @@ Add a final `@number` to an option to give it a relative weight:
 
 Weights are relative. In the example above, the total weight is `1.25`:
 
-| Option | Weight | Chance |
-| ------ | ------ | ------ |
-| Common event | `1` | `1 / 1.25 = 80%` |
-| Rare event | `0.25` | `0.25 / 1.25 = 20%` |
+| Option       | Weight | Chance              |
+| ------------ | ------ | ------------------- |
+| Common event | `1`    | `1 / 1.25 = 80%`    |
+| Rare event   | `0.25` | `0.25 / 1.25 = 20%` |
 
 This means decimals can make an option less likely:
 

@@ -3382,6 +3382,8 @@ export async function generateRoutes(app: FastifyInstance) {
             appearance: character.appearance,
             scenario: character.scenario,
             example: character.mesExample,
+            systemPrompt: character.systemPrompt,
+            postHistoryInstructions: character.postHistoryInstructions,
           },
         ]),
       );
@@ -3454,6 +3456,8 @@ export async function generateRoutes(app: FastifyInstance) {
                 backstory: ci.backstory,
                 appearance: ci.appearance,
                 example: ci.mesExample,
+                systemPrompt: ci.systemPrompt,
+                postHistoryInstructions: ci.postHistoryInstructions,
               },
             };
             const resolveCharacterMacros = (value: string) => resolveMacros(value, characterMacroContext);

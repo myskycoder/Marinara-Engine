@@ -962,6 +962,9 @@ export async function registerDryRunRoute(app: FastifyInstance) {
             const personality = typeof data.personality === "string" ? data.personality : "";
             const scenario = typeof data.scenario === "string" ? data.scenario : "";
             const mesExample = typeof data.mes_example === "string" ? data.mes_example : "";
+            const systemPrompt = typeof data.system_prompt === "string" ? data.system_prompt : "";
+            const postHistoryInstructions =
+              typeof data.post_history_instructions === "string" ? data.post_history_instructions : "";
             const extensions =
               data.extensions && typeof data.extensions === "object"
                 ? (data.extensions as Record<string, unknown>)
@@ -977,6 +980,8 @@ export async function registerDryRunRoute(app: FastifyInstance) {
                 appearance: typeof extensions.appearance === "string" ? extensions.appearance : "",
                 scenario,
                 example: mesExample,
+                systemPrompt,
+                postHistoryInstructions,
               },
             };
             const resolveCharacterMacros = (value: string) => resolveMacros(value, characterMacroContext);

@@ -9,6 +9,8 @@ export interface MacroCharacterData {
   appearance?: string;
   scenario?: string;
   example?: string;
+  systemPrompt?: string;
+  postHistoryInstructions?: string;
 }
 
 export interface MacroPersonaData {
@@ -93,6 +95,8 @@ export function parseCharacterMacroData(
       appearance: getString(extensions?.appearance),
       scenario: getString(data.scenario),
       example: getString(data.mes_example),
+      systemPrompt: getString(data.system_prompt),
+      postHistoryInstructions: getString(data.post_history_instructions),
     };
   } catch {
     return { id: raw.id, name: "Unknown" };
@@ -192,6 +196,8 @@ export function buildMessageMacroContext({
           appearance: fallbackCharacter.appearance ?? "",
           scenario: fallbackCharacter.scenario ?? "",
           example: fallbackCharacter.example ?? "",
+          systemPrompt: fallbackCharacter.systemPrompt ?? "",
+          postHistoryInstructions: fallbackCharacter.postHistoryInstructions ?? "",
         }
       : undefined,
     personaFields: persona

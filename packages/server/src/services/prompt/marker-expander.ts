@@ -15,11 +15,7 @@ import type {
 } from "@marinara-engine/shared";
 import { createCharactersStorage } from "../storage/characters.storage.js";
 import { createAgentsStorage } from "../storage/agents.storage.js";
-import {
-  processLorebooks,
-  type LorebookFinalContentResolver,
-  type LorebookScanResult,
-} from "../lorebook/index.js";
+import { processLorebooks, type LorebookFinalContentResolver, type LorebookScanResult } from "../lorebook/index.js";
 import { wrapContent } from "./format-engine.js";
 import { getCharacterDescriptionWithExtensions } from "./character-description-extensions.js";
 import { agentRuns } from "../../db/schema/index.js";
@@ -193,6 +189,8 @@ function characterMacroProfileFromData(data: CharacterData): CharacterMacroProfi
     appearance: data.extensions?.appearance ?? "",
     scenario: data.scenario ?? "",
     example: data.mes_example ?? "",
+    systemPrompt: data.system_prompt ?? "",
+    postHistoryInstructions: data.post_history_instructions ?? "",
   };
 }
 

@@ -107,6 +107,8 @@ export async function resolveCharacterMacroData(db: DB, characterIds: string[]):
       appearance: data.extensions?.appearance ?? "",
       scenario: data.scenario ?? "",
       example: data.mes_example ?? "",
+      systemPrompt: data.system_prompt ?? "",
+      postHistoryInstructions: data.post_history_instructions ?? "",
     };
 
     profiles.push(profile);
@@ -119,6 +121,8 @@ export async function resolveCharacterMacroData(db: DB, characterIds: string[]):
         appearance: profile.appearance,
         scenario: profile.scenario,
         example: profile.example,
+        systemPrompt: profile.systemPrompt,
+        postHistoryInstructions: profile.postHistoryInstructions,
       };
     }
   }
@@ -191,6 +195,8 @@ export async function collectCharacterDepthPromptEntries(
         appearance: data?.extensions?.appearance ?? "",
         scenario: data?.scenario ?? "",
         example: data?.mes_example ?? "",
+        systemPrompt: data?.system_prompt ?? "",
+        postHistoryInstructions: data?.post_history_instructions ?? "",
       },
     });
 
