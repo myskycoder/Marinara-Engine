@@ -31,6 +31,8 @@ export interface Lorebook {
   description: string;
   /** Top-level category this lorebook belongs to */
   category: LorebookCategory;
+  /** Optional picture displayed for this lorebook in the library UI */
+  imagePath: string | null;
   /** Default scan depth for entries that don't override */
   scanDepth: number;
   /** Max output tokens allocated to this lorebook */

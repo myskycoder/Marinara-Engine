@@ -8,6 +8,7 @@ export const lorebooks = sqliteTable("lorebooks", {
   name: text("name").notNull(),
   description: text("description").notNull().default(""),
   category: text("category").notNull().default("uncategorized"),
+  imagePath: text("image_path"),
   scanDepth: integer("scan_depth").notNull().default(2),
   tokenBudget: integer("token_budget").notNull().default(2048),
   recursiveScanning: text("recursive_scanning").notNull().default("false"),

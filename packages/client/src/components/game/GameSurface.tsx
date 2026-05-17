@@ -443,6 +443,22 @@ function parseStoredNarrationProgress(raw: string | null): StoredNarrationProgre
   return null;
 }
 
+function readIntroPresentedFlag(storageKey: string): boolean {
+  try {
+    return localStorage.getItem(storageKey) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function readStoredNarrationProgress(chatId: string): StoredNarrationProgress | null {
+  try {
+    return parseStoredNarrationProgress(localStorage.getItem(`narration-idx:${chatId}`));
+  } catch {
+    return null;
+  }
+}
+
 function normalizeSceneAssetName(value: string): string {
   return value.trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
 }
@@ -2202,7 +2218,14 @@ export function GameSurface({
     () => messages.filter((m) => (m.role === "assistant" || m.role === "narrator") && !!m.content.trim()).length,
     [messages],
   );
-  const [introPresented, setIntroPresented] = useState(false);
+  const latestAssistantMessageIdForIntro = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i]!;
+      if (message.role === "assistant" || message.role === "narrator") return message.id;
+    }
+    return null;
+  }, [messages]);
+  const [introPresented, setIntroPresented] = useState(() => readIntroPresentedFlag(introPresentationStorageKey));
   const npcPortraitUploadInputRef = useRef<HTMLInputElement>(null);
   const [pendingNpcPortraitUploadName, setPendingNpcPortraitUploadName] = useState<string | null>(null);
   const [generatingNpcPortraitNames, setGeneratingNpcPortraitNames] = useState<Set<string>>(() => new Set());
@@ -2231,14 +2254,35 @@ export function GameSurface({
   const effectiveGameVoiceVolume = audioMuted || masterVolume === 0 ? 0 : getEffectiveVolume(masterVolume, ttsVolume);
 
   useEffect(() => {
-    let persisted = false;
-    try {
-      persisted = localStorage.getItem(introPresentationStorageKey) === "1";
-    } catch {
-      persisted = false;
+    let hasAdvancedNarrationProgress = false;
+    if (latestAssistantMessageIdForIntro) {
+      const saved = readStoredNarrationProgress(activeChatId);
+      const savedAdvanced = !!saved && saved.messageId === latestAssistantMessageIdForIntro && saved.index > 0;
+      const serverIdx = chatMeta.gameNarrationIndex;
+      const serverMessageId =
+        typeof chatMeta.gameNarrationMessageId === "string" ? chatMeta.gameNarrationMessageId : null;
+      const serverAdvanced =
+        serverMessageId === latestAssistantMessageIdForIntro &&
+        typeof serverIdx === "number" &&
+        Number.isFinite(serverIdx) &&
+        serverIdx > 0;
+      hasAdvancedNarrationProgress = savedAdvanced || serverAdvanced;
     }
-    setIntroPresented(persisted || assistantTurnCount > 1);
-  }, [introPresentationStorageKey, assistantTurnCount]);
+    setIntroPresented(
+      chatMeta.gameIntroPresented === true ||
+        readIntroPresentedFlag(introPresentationStorageKey) ||
+        hasAdvancedNarrationProgress ||
+        assistantTurnCount > 1,
+    );
+  }, [
+    activeChatId,
+    assistantTurnCount,
+    chatMeta.gameIntroPresented,
+    chatMeta.gameNarrationIndex,
+    chatMeta.gameNarrationMessageId,
+    introPresentationStorageKey,
+    latestAssistantMessageIdForIntro,
+  ]);
 
   useEffect(() => {
     useGameAssetStore
@@ -5605,6 +5649,7 @@ export function GameSurface({
           id: personaId,
           name: personaInfo.name,
           avatarUrl: personaInfo.avatarUrl ?? null,
+          avatarCrop: personaInfo.avatarCrop ?? null,
           nameColor: personaInfo.nameColor,
           dialogueColor: personaInfo.dialogueColor,
           canRemove: false,
@@ -6277,6 +6322,7 @@ export function GameSurface({
         title: personaInfo.name,
         subtitle: "Player Character",
         avatarUrl: personaInfo.avatarUrl ?? null,
+        avatarCrop: personaInfo.avatarCrop ?? null,
         level: sessionNumber,
         status: gameSnapshot?.playerStats?.status || undefined,
         stats: [
@@ -7550,6 +7596,7 @@ export function GameSurface({
                         } catch {
                           /* storage unavailable */
                         }
+                        api.patch(`/chats/${activeChatId}/metadata`, { gameIntroPresented: true }).catch(() => {});
                         setIntroTypewriterDone(false);
                         // Retry any autoplay-blocked audio now that we have a user gesture
                         audioManager.retryPending();
@@ -8246,7 +8293,7 @@ export function GameSurface({
                   // Choice cards slot — rendered inside GameNarration above the narration box
                   const choicesSlot =
                     activeChoices && narrationDone ? (
-                      <div className="pointer-events-auto mb-2 flex justify-center">
+                      <div className="pointer-events-auto mb-2 flex max-h-[clamp(8rem,30svh,14rem)] min-h-0 w-full shrink justify-center overflow-hidden sm:max-h-[clamp(9rem,36svh,20rem)] md:max-h-[min(52dvh,32rem)]">
                         <GameChoiceCards
                           choices={activeChoices}
                           onSelect={handleChoiceSelect}

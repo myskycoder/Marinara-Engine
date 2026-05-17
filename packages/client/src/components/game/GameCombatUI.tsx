@@ -10,7 +10,15 @@
 // - Status effect icons
 // - Victory / defeat overlays
 // ──────────────────────────────────────────────
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import { cn } from "../../lib/utils";
 import { audioManager } from "../../lib/game-audio";
 import { getOrCreateCachedTTSAudioBlob } from "../../lib/tts-audio-cache";
@@ -551,6 +559,39 @@ function normalizeCombatCueName(value?: string): string {
   return (value ?? "").trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
 }
 
+function buildCombatDialogueLineKey(line: PartyDialogueLine): string {
+  return [
+    normalizeCombatCueName(line.character),
+    line.type,
+    normalizeCombatCueName(line.target),
+    line.expression ?? "",
+    line.content.trim(),
+  ].join("\u0001");
+}
+
+function findDialogueCombatant(
+  line: PartyDialogueLine,
+  party: Combatant[],
+  enemies: Combatant[],
+): { combatant: Combatant; side: "player" | "enemy" } | null {
+  const speakerKey = normalizeCombatCueName(line.character);
+  if (!speakerKey) return null;
+
+  const partyMatch = party.find(
+    (combatant) =>
+      normalizeCombatCueName(combatant.name) === speakerKey || normalizeCombatCueName(combatant.id) === speakerKey,
+  );
+  if (partyMatch) return { combatant: partyMatch, side: "player" };
+
+  const enemyMatch = enemies.find(
+    (combatant) =>
+      normalizeCombatCueName(combatant.name) === speakerKey || normalizeCombatCueName(combatant.id) === speakerKey,
+  );
+  if (enemyMatch) return { combatant: enemyMatch, side: "enemy" };
+
+  return null;
+}
+
 function combatCueToPartyLine(cue: CombatDialogueCue): PartyDialogueLine {
   return {
     character: cue.speaker,
@@ -621,6 +662,7 @@ export function GameCombatUI({
   const [combatVoicePlaying, setCombatVoicePlaying] = useState(false);
   const [combatVoicePaused, setCombatVoicePaused] = useState(false);
   const [lastCombatVoiceKeys, setLastCombatVoiceKeys] = useState<string[]>([]);
+  const [dismissedCombatDialogueKeys, setDismissedCombatDialogueKeys] = useState<Set<string>>(() => new Set());
 
   const combatRound = useCombatRound();
   const { data: ttsConfig } = useTTSConfig();
@@ -692,6 +734,55 @@ export function GameCombatUI({
 
     return [...combatDialogue, ...cueLines].filter((line) => line.content.trim() && line.type !== "action");
   }, [animatingActionIndex, combatDialogue, combatDialogueCues, enemies, party, phase, round, roundResult]);
+
+  useEffect(() => {
+    const visibleKeys = new Set(visibleCombatDialogue.map(buildCombatDialogueLineKey));
+    setDismissedCombatDialogueKeys((previous) => {
+      if (previous.size === 0) return previous;
+
+      let changed = false;
+      const next = new Set<string>();
+      for (const key of previous) {
+        if (visibleKeys.has(key)) {
+          next.add(key);
+        } else {
+          changed = true;
+        }
+      }
+
+      return changed ? next : previous;
+    });
+  }, [visibleCombatDialogue]);
+
+  const dismissCombatDialogueLine = useCallback((line: PartyDialogueLine) => {
+    const key = buildCombatDialogueLineKey(line);
+    setDismissedCombatDialogueKeys((previous) => {
+      if (previous.has(key)) return previous;
+      const next = new Set(previous);
+      next.add(key);
+      return next;
+    });
+  }, []);
+
+  const combatDialogueLayout = useMemo(() => {
+    const byCombatantId = new Map<string, PartyDialogueLine[]>();
+    const unanchored: PartyDialogueLine[] = [];
+
+    for (const line of visibleCombatDialogue) {
+      if (dismissedCombatDialogueKeys.has(buildCombatDialogueLineKey(line))) continue;
+
+      const match = findDialogueCombatant(line, party, enemies);
+      if (!match) {
+        unanchored.push(line);
+        continue;
+      }
+
+      const existing = byCombatantId.get(match.combatant.id) ?? [];
+      byCombatantId.set(match.combatant.id, [...existing, line].slice(-2));
+    }
+
+    return { byCombatantId, unanchored: unanchored.slice(-3) };
+  }, [dismissedCombatDialogueKeys, enemies, party, visibleCombatDialogue]);
 
   const voicedCombatSpeakerSet = useMemo(
     () => new Set(voicedCombatSpeakerNames.map(normalizeTTSCharacterName).filter(Boolean)),
@@ -1533,7 +1624,7 @@ export function GameCombatUI({
           </div>
         </div>
 
-        {/* Middle: scene area (animating narration, victory/defeat overlay, dialogue toast) */}
+        {/* Middle: touch battle stage with anchored dialogue bubbles */}
         <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
           {phase === "animating" && roundResult && animatingActionIndex >= 0 && (
             <div className="pointer-events-none absolute inset-x-2 top-2 z-10 rounded-lg border border-white/10 bg-black/75 px-3 py-2 backdrop-blur-md">
@@ -1548,32 +1639,76 @@ export function GameCombatUI({
                 : "Resolving actions..."}
             </div>
           )}
-          {/* Latest dialogue cue floats as a toast */}
-          {visibleCombatDialogue.length > 0 && phase !== "intro" && phase !== "victory" && phase !== "defeat" && (
-            <div className="pointer-events-none absolute inset-x-2 bottom-2 z-10 max-h-[35%] space-y-1 overflow-hidden">
-              {visibleCombatDialogue.slice(-2).map((line, index) => {
-                const isEnemyLine = !voicedCombatSpeakerSet.has(normalizeTTSCharacterName(line.character));
-                return (
-                  <div
-                    key={`mobile-cue-${line.character}-${line.type}-${index}-${line.content.slice(0, 16)}`}
-                    className={cn(
-                      "game-combat-action-bark mx-auto w-fit max-w-full rounded-xl border px-2.5 py-1.5 shadow-lg backdrop-blur-md animate-party-slide-in",
-                      isEnemyLine
-                        ? "border-red-300/20 bg-red-950/60 text-red-50/85"
-                        : "border-sky-300/20 bg-sky-950/60 text-sky-50/90",
-                    )}
-                  >
-                    <div className="flex items-center gap-1">
-                      <span className={cn("text-[0.6rem] font-bold", isEnemyLine ? "text-red-200" : "text-sky-200")}>
-                        {line.character}
-                      </span>
-                    </div>
-                    <p className="mt-0.5 break-words text-xs leading-snug [overflow-wrap:anywhere]">{line.content}</p>
-                  </div>
-                );
-              })}
+
+          <div className="relative z-0 flex min-h-0 flex-1 flex-col justify-between gap-2 overflow-hidden px-2 py-2">
+            <div className="flex min-h-0 flex-1 flex-wrap content-start items-start justify-center gap-1.5 overflow-visible pt-14">
+              {enemies.map((enemy) => (
+                <CombatantCard
+                  key={`stage-${enemy.id}`}
+                  combatant={enemy}
+                  side="enemy"
+                  isTargetable={phase === "target-select" && selectingEnemyTarget}
+                  isActive={turnOrder[0]?.id === enemy.id && phase === "animating"}
+                  onSelect={() => handleTargetSelect(enemy.id)}
+                  damagePopups={damagePopups.filter((p) => p.targetId === enemy.id)}
+                  dialogueLines={combatDialogueLayout.byCombatantId.get(enemy.id)}
+                  onDismissDialogue={dismissCombatDialogueLine}
+                  compact
+                />
+              ))}
             </div>
-          )}
+
+            <div className="flex shrink-0 flex-wrap items-end justify-center gap-1.5 overflow-visible pb-1">
+              {party.map((member, i) => (
+                <CombatantCard
+                  key={`stage-${member.id}`}
+                  combatant={member}
+                  side="player"
+                  isTargetable={phase === "target-select" && selectingAllyTarget}
+                  isActive={
+                    (phase === "player-turn" && i === activePlayerIndex) ||
+                    (turnOrder[0]?.id === member.id && phase === "animating")
+                  }
+                  onSelect={
+                    phase === "target-select" && selectingAllyTarget ? () => handleTargetSelect(member.id) : undefined
+                  }
+                  damagePopups={damagePopups.filter((p) => p.targetId === member.id)}
+                  dialogueLines={combatDialogueLayout.byCombatantId.get(member.id)}
+                  onDismissDialogue={dismissCombatDialogueLine}
+                  compact
+                />
+              ))}
+            </div>
+          </div>
+
+          {combatDialogueLayout.unanchored.length > 0 &&
+            phase !== "intro" &&
+            phase !== "victory" &&
+            phase !== "defeat" && (
+              <div className="pointer-events-none absolute inset-x-2 bottom-2 z-10 max-h-[35%] space-y-1 overflow-hidden">
+                {combatDialogueLayout.unanchored.map((line, index) => {
+                  const isEnemyLine = !voicedCombatSpeakerSet.has(normalizeTTSCharacterName(line.character));
+                  return (
+                    <div
+                      key={`mobile-cue-${line.character}-${line.type}-${index}-${line.content.slice(0, 16)}`}
+                      className={cn(
+                        "game-combat-action-bark mx-auto w-fit max-w-full rounded-xl border px-2.5 py-1.5 shadow-lg backdrop-blur-md animate-party-slide-in",
+                        isEnemyLine
+                          ? "border-red-300/20 bg-red-950/60 text-red-50/85"
+                          : "border-sky-300/20 bg-sky-950/60 text-sky-50/90",
+                      )}
+                    >
+                      <div className="flex items-center gap-1">
+                        <span className={cn("text-[0.6rem] font-bold", isEnemyLine ? "text-red-200" : "text-sky-200")}>
+                          {line.character}
+                        </span>
+                      </div>
+                      <p className="mt-0.5 break-words text-xs leading-snug [overflow-wrap:anywhere]">{line.content}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           {/* Victory / defeat overlays — full-screen on mobile, not buried in the bottom sheet */}
           {phase === "victory" && (
             <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-black/85 px-6 text-center animate-in fade-in duration-500">
@@ -2103,7 +2238,7 @@ export function GameCombatUI({
         )}
 
         {/* ── Enemy area (top section) ── */}
-        <div className="relative flex min-h-0 flex-1 items-start justify-center gap-2 overflow-hidden px-3 pt-20 sm:px-6 sm:pt-20 md:pt-24 lg:gap-4 lg:pt-20 xl:gap-6 xl:pt-6">
+        <div className="relative flex min-h-0 flex-1 flex-wrap content-start items-start justify-center gap-2 overflow-visible px-3 pt-20 sm:px-6 sm:pt-20 md:pt-24 lg:gap-3 lg:pt-20 xl:gap-4 xl:pt-6">
           {enemies.map((enemy) => (
             <CombatantCard
               key={enemy.id}
@@ -2113,12 +2248,14 @@ export function GameCombatUI({
               isActive={turnOrder[0]?.id === enemy.id && phase === "animating"}
               onSelect={() => handleTargetSelect(enemy.id)}
               damagePopups={damagePopups.filter((p) => p.targetId === enemy.id)}
+              dialogueLines={combatDialogueLayout.byCombatantId.get(enemy.id)}
+              onDismissDialogue={dismissCombatDialogueLine}
             />
           ))}
         </div>
 
         {/* ── Party area (bottom section) ── */}
-        <div className="relative flex shrink-0 items-end justify-center gap-2 overflow-hidden px-3 pb-3 sm:px-6 sm:pb-4 lg:gap-4 xl:gap-6">
+        <div className="relative flex shrink-0 flex-wrap items-end justify-center gap-2 overflow-visible px-3 pb-3 sm:px-6 sm:pb-4 lg:gap-3 xl:gap-4">
           {party.map((member, i) => (
             <CombatantCard
               key={member.id}
@@ -2133,18 +2270,29 @@ export function GameCombatUI({
                 phase === "target-select" && selectingAllyTarget ? () => handleTargetSelect(member.id) : undefined
               }
               damagePopups={damagePopups.filter((p) => p.targetId === member.id)}
+              dialogueLines={combatDialogueLayout.byCombatantId.get(member.id)}
+              onDismissDialogue={dismissCombatDialogueLine}
             />
           ))}
         </div>
       </div>
 
-      {visibleCombatDialogue.length > 0 && phase !== "intro" && (
+      {combatDialogueLayout.unanchored.length > 0 && phase !== "intro" && (
         <CombatDialoguePanel
-          lines={visibleCombatDialogue}
+          lines={combatDialogueLayout.unanchored}
           voiceableSpeakers={voicedCombatSpeakerSet}
           voiceControls={combatVoiceControls}
         />
       )}
+
+      {combatDialogueLayout.unanchored.length === 0 &&
+        visibleCombatDialogue.length > 0 &&
+        phase !== "intro" &&
+        combatVoiceControls && (
+          <div className="relative z-30 flex shrink-0 justify-end px-3 pb-1.5 sm:px-4 sm:pb-2">
+            {combatVoiceControls}
+          </div>
+        )}
 
       {combatMechanics.length > 0 && phase !== "intro" && (
         <CombatMechanicsPanel mechanics={combatMechanics} round={round} />
@@ -2692,6 +2840,9 @@ function CombatantCard({
   isActive,
   onSelect,
   damagePopups,
+  dialogueLines,
+  onDismissDialogue,
+  compact = false,
 }: {
   combatant: Combatant;
   side: "player" | "enemy";
@@ -2699,10 +2850,14 @@ function CombatantCard({
   isActive: boolean;
   onSelect?: () => void;
   damagePopups: DamagePopup[];
+  dialogueLines?: PartyDialogueLine[];
+  onDismissDialogue?: (line: PartyDialogueLine) => void;
+  compact?: boolean;
 }) {
   const hpPercent = combatant.maxHp > 0 ? (combatant.hp / combatant.maxHp) * 100 : 0;
   const mpPercent = combatant.maxMp && combatant.maxMp > 0 ? ((combatant.mp ?? 0) / combatant.maxMp) * 100 : null;
   const isKo = combatant.hp <= 0;
+  const canSelect = isTargetable && !isKo && !!onSelect;
 
   const hpColor = hpPercent > 60 ? "bg-emerald-500" : hpPercent > 25 ? "bg-amber-500" : "bg-red-500";
   const hpGlow =
@@ -2720,17 +2875,81 @@ function CombatantCard({
             : "hit"
     : null;
 
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!canSelect) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    onSelect?.();
+  };
+
   return (
-    <button
-      type="button"
-      onClick={onSelect}
-      disabled={!isTargetable || isKo}
+    <div
+      role={canSelect ? "button" : undefined}
+      tabIndex={canSelect ? 0 : undefined}
+      aria-disabled={!canSelect}
+      onClick={canSelect ? onSelect : undefined}
+      onKeyDown={handleKeyDown}
       className={cn(
-        "relative flex flex-col items-center rounded-2xl border border-transparent p-1 text-center transition-all duration-200",
+        "relative flex min-w-0 flex-col items-center rounded-2xl border border-transparent p-1 text-center transition-all duration-200",
+        compact ? "w-[clamp(4.25rem,24vw,5.5rem)]" : "w-[clamp(5rem,11vw,7.5rem)] max-w-[calc((100vw-3rem)/2)]",
         isTargetable && !isKo && "cursor-pointer border-amber-400/35 bg-amber-400/5",
         !isTargetable && "cursor-default",
       )}
     >
+      {dialogueLines && dialogueLines.length > 0 && onDismissDialogue && (
+        <div
+          className={cn(
+            "pointer-events-auto absolute bottom-full left-1/2 z-40 mb-2 flex -translate-x-1/2 flex-col items-center gap-1",
+            compact ? "w-[min(12rem,84vw)]" : "w-[min(15rem,78vw)]",
+          )}
+        >
+          {dialogueLines.slice(-2).map((line, index) => (
+            <button
+              key={`${buildCombatDialogueLineKey(line)}-${index}`}
+              type="button"
+              title="Dismiss dialogue"
+              onClick={(event) => {
+                event.stopPropagation();
+                onDismissDialogue(line);
+              }}
+              className={cn(
+                "game-combat-action-bark w-full rounded-xl border px-2.5 py-1.5 text-left shadow-lg backdrop-blur-md transition-colors animate-party-slide-in hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50",
+                side === "enemy"
+                  ? "border-red-300/25 bg-red-950/70 text-red-50/90"
+                  : "border-sky-300/25 bg-sky-950/70 text-sky-50/90",
+                isShoutedCombatDialogue(line) && "game-combat-action-bark--shout",
+              )}
+              style={{ animationDelay: `${index * 70}ms` }}
+            >
+              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                <span
+                  className={cn(
+                    "truncate text-[0.65rem] font-bold",
+                    side === "enemy" ? "text-red-200" : "text-sky-200",
+                  )}
+                >
+                  {line.character}
+                </span>
+                {line.expression && (
+                  <span className="rounded-full bg-white/10 px-1.5 py-0.5 text-[0.5rem] font-semibold uppercase tracking-wide text-white/55">
+                    {line.expression}
+                  </span>
+                )}
+              </div>
+              <p
+                className={cn(
+                  "mt-0.5 max-h-20 overflow-y-auto break-words text-xs leading-snug [overflow-wrap:anywhere]",
+                  line.type === "thought" && "italic opacity-80",
+                  line.type === "whisper" && "italic",
+                )}
+              >
+                {line.content}
+              </p>
+            </button>
+          ))}
+        </div>
+      )}
+
       {combatant.statusEffects && combatant.statusEffects.length > 0 && (
         <div className="pointer-events-none absolute -top-3 left-1/2 z-10 flex -translate-x-1/2 gap-1">
           {combatant.statusEffects.map((effect, i) => (
@@ -2759,7 +2978,8 @@ function CombatantCard({
       {/* Combatant sprite / avatar area */}
       <div
         className={cn(
-          "relative flex h-16 w-16 items-center justify-center rounded-xl border-2 transition-all duration-200 sm:h-20 sm:w-20 xl:h-24 xl:w-24",
+          "relative flex aspect-square items-center justify-center rounded-xl border-2 transition-all duration-200",
+          compact ? "w-[clamp(3rem,18vw,4.25rem)]" : "w-[clamp(3.75rem,8vw,6rem)]",
           isKo && "grayscale opacity-40",
           isTargetable &&
             !isKo &&
@@ -2778,10 +2998,10 @@ function CombatantCard({
           combatant={combatant}
           imageClassName="h-full w-full rounded-lg object-cover"
           textClassName={cn(
-            "text-xl font-bold sm:text-2xl xl:text-3xl",
+            compact ? "text-lg font-bold" : "text-xl font-bold sm:text-2xl xl:text-3xl",
             side === "enemy" ? "text-red-300/60" : "text-blue-300/60",
           )}
-          emojiClassName="text-2xl leading-none sm:text-3xl xl:text-4xl"
+          emojiClassName={compact ? "text-2xl leading-none" : "text-2xl leading-none sm:text-3xl xl:text-4xl"}
         />
 
         {/* KO overlay */}
@@ -2805,7 +3025,7 @@ function CombatantCard({
       </div>
 
       {/* Name + Level */}
-      <div className="mt-1.5 flex max-w-24 items-center gap-1.5 xl:max-w-28">
+      <div className={cn("mt-1.5 flex min-w-0 items-center gap-1", compact ? "max-w-[5rem]" : "max-w-[7rem]")}>
         <span
           className={cn("truncate text-[0.68rem] font-semibold sm:text-xs", isKo ? "text-white/30" : "text-white/90")}
         >
@@ -2817,7 +3037,7 @@ function CombatantCard({
       </div>
 
       {/* HP bar */}
-      <div className="mt-1 w-20 sm:w-24 xl:w-28">
+      <div className={cn("mt-1", compact ? "w-[clamp(3.75rem,22vw,5rem)]" : "w-[clamp(4.5rem,10vw,7rem)]")}>
         <div className="flex items-center gap-1">
           <Heart size={9} className={cn(isKo ? "text-white/20" : "text-red-400")} />
           <div className={cn("h-2 flex-1 overflow-hidden rounded-full bg-white/10", !isKo && `shadow-sm ${hpGlow}`)}>
@@ -2861,7 +3081,7 @@ function CombatantCard({
           {combatant.elementAura.element}
         </div>
       )}
-    </button>
+    </div>
   );
 }
 

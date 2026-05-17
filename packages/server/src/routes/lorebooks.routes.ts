@@ -2,6 +2,9 @@
 // Routes: Lorebooks
 // ──────────────────────────────────────────────
 import type { FastifyInstance } from "fastify";
+import { existsSync } from "fs";
+import { mkdir, readFile, writeFile } from "fs/promises";
+import { extname, join } from "path";
 import {
   createLorebookSchema,
   updateLorebookSchema,
@@ -28,7 +31,11 @@ import {
 import { createLLMProvider } from "../services/llm/provider-registry.js";
 import type { APIProvider } from "@marinara-engine/shared";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
+import { DATA_DIR } from "../utils/data-dir.js";
+import { assertInsideDir, extensionFromImageMime, isAllowedImageBuffer } from "../utils/security.js";
 import AdmZip from "adm-zip";
+
+const LOREBOOK_IMAGES_DIR = join(DATA_DIR, "lorebooks", "images");
 
 function toSafeExportName(name: string, fallback: string) {
   const sanitized = name
@@ -40,6 +47,28 @@ function toSafeExportName(name: string, fallback: string) {
 
 type ExportFormat = "native" | "compatible";
 type EntryTransferOperation = "copy" | "move";
+
+function parseImageUpload(image: string): { buffer: Buffer; hintedExt: string } {
+  let base64 = image;
+  let hintedExt = "png";
+  if (base64.startsWith("data:")) {
+    const match = base64.match(/^data:image\/([\w.+-]+);base64,/i);
+    if (match?.[1]) {
+      hintedExt = match[1].replace("+xml", "");
+      base64 = base64.slice(base64.indexOf(",") + 1);
+    }
+  }
+  return { buffer: Buffer.from(base64, "base64"), hintedExt };
+}
+
+function getSafeLorebookImagePath(filename: string): string | null {
+  if (!filename || filename.includes("..") || filename.includes("/") || filename.includes("\\")) return null;
+  try {
+    return assertInsideDir(LOREBOOK_IMAGES_DIR, join(LOREBOOK_IMAGES_DIR, filename));
+  } catch {
+    return null;
+  }
+}
 
 function resolveExportFormat(query: unknown, fallback: ExportFormat = "native"): ExportFormat {
   const raw = query && typeof query === "object" ? (query as Record<string, unknown>).format : undefined;
@@ -193,6 +222,20 @@ export async function lorebooksRoutes(app: FastifyInstance) {
     return storage.list();
   });
 
+  app.get<{ Params: { filename: string } }>("/images/file/:filename", async (req, reply) => {
+    const filepath = getSafeLorebookImagePath(req.params.filename);
+    if (!filepath || !existsSync(filepath)) return reply.status(404).send({ error: "Image not found" });
+
+    const buffer = await readFile(filepath);
+    const imageInfo = isAllowedImageBuffer(buffer, extname(req.params.filename));
+    if (!imageInfo) return reply.status(404).send({ error: "Image not found" });
+
+    return reply
+      .header("Content-Type", imageInfo.mimeType)
+      .header("Cache-Control", "public, max-age=31536000, immutable")
+      .send(buffer);
+  });
+
   app.get<{ Params: { id: string } }>("/:id", async (req, reply) => {
     const lb = await storage.getById(req.params.id);
     if (!lb) return reply.status(404).send({ error: "Lorebook not found" });
@@ -216,6 +259,28 @@ export async function lorebooksRoutes(app: FastifyInstance) {
     const updated = await storage.update(req.params.id, input);
     if (!updated) return reply.status(404).send({ error: "Lorebook not found" });
     await syncCharacterBookFromLorebook(app.db, req.params.id);
+    return updated;
+  });
+
+  app.post<{ Params: { id: string } }>("/:id/image", async (req, reply) => {
+    const lorebook = await storage.getById(req.params.id);
+    if (!lorebook) return reply.status(404).send({ error: "Lorebook not found" });
+
+    const body = req.body as { image?: string };
+    if (!body.image) return reply.status(400).send({ error: "No image data provided" });
+
+    const { buffer, hintedExt } = parseImageUpload(body.image);
+    const imageInfo = isAllowedImageBuffer(buffer, `.${hintedExt}`);
+    if (!imageInfo) return reply.status(400).send({ error: "Unsupported or invalid lorebook image" });
+
+    const ext = extensionFromImageMime(imageInfo.mimeType);
+    await mkdir(LOREBOOK_IMAGES_DIR, { recursive: true });
+    const filename = `lorebook-${req.params.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const filepath = assertInsideDir(LOREBOOK_IMAGES_DIR, join(LOREBOOK_IMAGES_DIR, filename));
+    await writeFile(filepath, buffer);
+
+    const updated = await storage.update(req.params.id, { imagePath: `/api/lorebooks/images/file/${filename}` });
+    if (!updated) return reply.status(404).send({ error: "Lorebook not found" });
     return updated;
   });
 

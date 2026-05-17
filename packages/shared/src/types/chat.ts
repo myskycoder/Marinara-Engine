@@ -193,6 +193,8 @@ export interface ChatMetadata {
   gameSessionNumber?: number;
   /** Current session lifecycle status */
   gameSessionStatus?: import("./game.js").GameSessionStatus;
+  /** Whether the first game intro screen has been dismissed for this game chat. */
+  gameIntroPresented?: boolean;
   /** Timestamp for when the current game session was created/started */
   gameCurrentSessionStartedAt?: string;
   /** Current game state (exploration, dialogue, combat, travel_rest) */

@@ -53,6 +53,7 @@ function parseLorebookRow(row: Record<string, unknown>) {
     maxRecursionDepth: typeof row.maxRecursionDepth === "number" ? row.maxRecursionDepth : 3,
     isGlobal: row.isGlobal === "true",
     enabled: row.enabled === "true",
+    imagePath: row.imagePath || null,
     generatedBy: row.generatedBy || null,
     sourceAgentId: row.sourceAgentId || null,
     characterId: characterIds[0] ?? null,
@@ -235,6 +236,7 @@ export function createLorebooksStorage(db: DB) {
           name: input.name,
           description: input.description ?? "",
           category: input.category ?? "uncategorized",
+          imagePath: input.imagePath ?? null,
           scanDepth: input.scanDepth ?? 2,
           tokenBudget: input.tokenBudget ?? 2048,
           recursiveScanning: String(input.recursiveScanning ?? false),
@@ -260,6 +262,7 @@ export function createLorebooksStorage(db: DB) {
       if (input.name !== undefined) updates.name = input.name;
       if (input.description !== undefined) updates.description = input.description;
       if (input.category !== undefined) updates.category = input.category;
+      if (input.imagePath !== undefined) updates.imagePath = input.imagePath;
       if (input.scanDepth !== undefined) updates.scanDepth = input.scanDepth;
       if (input.tokenBudget !== undefined) updates.tokenBudget = input.tokenBudget;
       if (input.recursiveScanning !== undefined) updates.recursiveScanning = String(input.recursiveScanning);

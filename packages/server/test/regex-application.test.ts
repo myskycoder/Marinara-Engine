@@ -23,6 +23,7 @@ test("regex prompt application resolves macros in find, replace, and trim string
       {
         enabled: true,
         placement: ["ai_output"],
+        promptOnly: true,
         findRegex: "{{char}}",
         replaceString: "{{user}}",
         flags: "g",
@@ -45,6 +46,7 @@ test("regex replacement macros resolve once per matched replacement", () => {
       {
         enabled: true,
         placement: ["ai_output"],
+        promptOnly: true,
         findRegex: "{{char}}",
         replaceString: "{{random}}",
         flags: "g",
@@ -73,6 +75,7 @@ test("regex replacement macros can share state across matched replacements", () 
       {
         enabled: true,
         placement: ["ai_output"],
+        promptOnly: true,
         findRegex: "TOKEN",
         replaceString: "[{{incvar::rx_smoke}}/{{getvar::rx_smoke}}]",
         flags: "g",
@@ -84,4 +87,32 @@ test("regex replacement macros can share state across matched replacements", () 
   );
 
   assert.equal(result, "[/1] [/2] [/3]");
+});
+
+test("regex prompt application skips visual-only scripts", () => {
+  const result = applyRegexScriptsToPromptText(
+    "Visible [secret] prompt",
+    [
+      {
+        enabled: true,
+        placement: ["ai_output"],
+        promptOnly: false,
+        findRegex: "\\[secret\\]",
+        replaceString: "[redacted]",
+        flags: "g",
+      },
+      {
+        enabled: true,
+        placement: ["ai_output"],
+        promptOnly: true,
+        findRegex: "prompt",
+        replaceString: "context",
+        flags: "g",
+      },
+    ],
+    "ai_output",
+    0,
+  );
+
+  assert.equal(result, "Visible [secret] context");
 });

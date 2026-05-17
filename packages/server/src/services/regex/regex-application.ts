@@ -12,6 +12,7 @@ type RegexScriptLike = {
   replaceString?: unknown;
   trimStrings?: unknown;
   placement?: unknown;
+  promptOnly?: unknown;
   minDepth?: unknown;
   maxDepth?: unknown;
 };
@@ -28,6 +29,10 @@ type ApplyRegexScriptOptions = {
 };
 
 function isEnabled(value: unknown): boolean {
+  return value === true || value === "true";
+}
+
+function isPromptOnly(value: unknown): boolean {
   return value === true || value === "true";
 }
 
@@ -73,6 +78,7 @@ export function applyRegexScriptsToPromptText(
   let result = text;
   for (const script of scripts) {
     if (!isEnabled(script.enabled)) continue;
+    if (!isPromptOnly(script.promptOnly)) continue;
     if (!parsePlacement(script.placement).includes(placement)) continue;
 
     const minDepth = depthValue(script.minDepth);

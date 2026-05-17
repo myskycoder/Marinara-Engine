@@ -107,6 +107,8 @@ const GAME_TTS_EMOTIONS = [
 type GameTtsEmotion = (typeof GAME_TTS_EMOTIONS)[number];
 
 const GAME_TTS_EMOTION_SET = new Set<string>(GAME_TTS_EMOTIONS);
+const SIDE_VOICE_AUTOPLAY_MAX_FAILURES = 3;
+const SIDE_VOICE_AUTOPLAY_RETRY_DELAY_MS = 350;
 
 const GAME_TTS_EMOTION_ALIASES: Record<string, GameTtsEmotion> = {
   afraid: "scared",
@@ -963,7 +965,10 @@ export function GameNarration({
   const gameVoiceSequenceRef = useRef(0);
   const gameVoiceGenerationTailRef = useRef<Promise<void>>(Promise.resolve());
   const lastAutoPlayedVoiceKeyRef = useRef<string | null>(null);
-  const lastAutoPlayedSideVoiceGroupRef = useRef<string | null>(null);
+  const autoPlayedSideVoiceKeysRef = useRef<Set<string>>(new Set());
+  const sideVoiceAutoPlayFailuresRef = useRef<Map<string, number>>(new Map());
+  const sideVoiceAutoPlayRetryPendingRef = useRef<Set<string>>(new Set());
+  const sideVoiceAutoPlayRetryTimerRef = useRef<number | null>(null);
 
   // Clear edit state when the active segment changes
   useEffect(() => {
@@ -1054,7 +1059,7 @@ export function GameNarration({
       if (c.avatarUrl) setAvatarInfo(c.name, { url: c.avatarUrl, crop: c.avatarCrop });
     }
     if (personaInfo?.name && personaInfo.avatarUrl) {
-      setAvatarInfo(personaInfo.name, { url: personaInfo.avatarUrl });
+      setAvatarInfo(personaInfo.name, { url: personaInfo.avatarUrl, crop: personaInfo.avatarCrop });
     }
     if (speakerAvatarMap) {
       for (const [name, avatarInfo] of speakerAvatarMap) {
@@ -1796,6 +1801,25 @@ export function GameNarration({
       playGameVoiceKeys([key], options),
     [playGameVoiceKeys],
   );
+
+  const clearSideVoiceAutoPlayRetry = useCallback(() => {
+    if (sideVoiceAutoPlayRetryTimerRef.current != null) {
+      window.clearTimeout(sideVoiceAutoPlayRetryTimerRef.current);
+      sideVoiceAutoPlayRetryTimerRef.current = null;
+    }
+    sideVoiceAutoPlayRetryPendingRef.current.clear();
+  }, []);
+
+  const scheduleSideVoiceAutoPlayRetry = useCallback((key: string) => {
+    sideVoiceAutoPlayRetryPendingRef.current.add(key);
+    if (sideVoiceAutoPlayRetryTimerRef.current != null) return;
+
+    sideVoiceAutoPlayRetryTimerRef.current = window.setTimeout(() => {
+      sideVoiceAutoPlayRetryTimerRef.current = null;
+      sideVoiceAutoPlayRetryPendingRef.current.clear();
+      setGameVoiceVersion((version) => version + 1);
+    }, SIDE_VOICE_AUTOPLAY_RETRY_DELAY_MS);
+  }, []);
 
   const pauseGameVoicePlayback = useCallback(() => {
     if (!gameVoiceAudioRef.current || !gameVoicePlayingKey || gameVoicePausedKey === gameVoicePlayingKey) return;
@@ -2712,12 +2736,13 @@ export function GameNarration({
     }
 
     if (activeSideVoiceKeys.length > 0) {
-      const groupKey = activeSideVoiceKeys.join("|");
       const entries = activeSideVoiceKeys.map((key) => gameVoiceCacheRef.current.get(key));
       if (entries.some((entry) => !entry || entry.status === "loading")) return true;
       if (activeSideVoiceKeys.includes(gameVoicePlayingKey ?? "")) return true;
-      const hasPlayableSideVoice = entries.some((entry) => entry?.status === "ready");
-      if (hasPlayableSideVoice && lastAutoPlayedSideVoiceGroupRef.current !== groupKey) return true;
+      const hasUnplayedSideVoice = activeSideVoiceKeys.some(
+        (key, index) => entries[index]?.status === "ready" && !autoPlayedSideVoiceKeysRef.current.has(key),
+      );
+      if (hasUnplayedSideVoice) return true;
     }
 
     return false;
@@ -2725,18 +2750,23 @@ export function GameNarration({
 
   useEffect(() => {
     lastAutoPlayedVoiceKeyRef.current = null;
-    lastAutoPlayedSideVoiceGroupRef.current = null;
+    autoPlayedSideVoiceKeysRef.current.clear();
+    sideVoiceAutoPlayFailuresRef.current.clear();
+    clearSideVoiceAutoPlayRetry();
     stopGameVoicePlayback();
-  }, [activeIndex, activeVoiceKey, stopGameVoicePlayback]);
+  }, [activeIndex, activeVoiceKey, clearSideVoiceAutoPlayRetry, stopGameVoicePlayback]);
 
   useEffect(() => {
     if (gameVoiceEnabled && !isStreaming && !scenePreparing && !directionsActive && !gameVoicePlaybackBlocked) return;
     if (isStreaming || scenePreparing || directionsActive || gameVoicePlaybackBlocked) {
       lastAutoPlayedVoiceKeyRef.current = null;
-      lastAutoPlayedSideVoiceGroupRef.current = null;
+      autoPlayedSideVoiceKeysRef.current.clear();
+      sideVoiceAutoPlayFailuresRef.current.clear();
+      clearSideVoiceAutoPlayRetry();
     }
     stopGameVoicePlayback();
   }, [
+    clearSideVoiceAutoPlayRetry,
     directionsActive,
     gameVoiceEnabled,
     gameVoicePlaybackBlocked,
@@ -2772,9 +2802,7 @@ export function GameNarration({
   useEffect(() => {
     if (!gameVoiceEnabled || activeSideVoiceKeys.length === 0) return;
     if (!doneTyping || isStreaming || scenePreparing || directionsActive || gameVoicePlaybackBlocked) return;
-
-    const sideVoiceGroupKey = activeSideVoiceKeys.join("|");
-    if (lastAutoPlayedSideVoiceGroupRef.current === sideVoiceGroupKey) return;
+    if (activeSideVoiceKeys.includes(gameVoicePlayingKey ?? "")) return;
 
     if (activeVoiceKey) {
       const parentEntry = gameVoiceCacheRef.current.get(activeVoiceKey);
@@ -2786,13 +2814,31 @@ export function GameNarration({
     }
 
     const entries = activeSideVoiceKeys.map((key) => gameVoiceCacheRef.current.get(key));
-    if (entries.some((entry) => !entry || entry.status === "loading")) return;
-
-    const playableKeys = activeSideVoiceKeys.filter((key, index) => entries[index]?.status === "ready");
+    const playableKeys = activeSideVoiceKeys.filter(
+      (key, index) =>
+        entries[index]?.status === "ready" &&
+        !autoPlayedSideVoiceKeysRef.current.has(key) &&
+        !sideVoiceAutoPlayRetryPendingRef.current.has(key) &&
+        (sideVoiceAutoPlayFailuresRef.current.get(key) ?? 0) < SIDE_VOICE_AUTOPLAY_MAX_FAILURES,
+    );
     if (playableKeys.length > 0) {
       playGameVoiceKeys(playableKeys, {
-        onStarted: () => {
-          lastAutoPlayedSideVoiceGroupRef.current = sideVoiceGroupKey;
+        onStarted: (startedKey) => {
+          autoPlayedSideVoiceKeysRef.current.add(startedKey);
+          sideVoiceAutoPlayFailuresRef.current.delete(startedKey);
+          sideVoiceAutoPlayRetryPendingRef.current.delete(startedKey);
+          setGameVoiceVersion((version) => version + 1);
+        },
+        onBlocked: (blockedKey) => {
+          const failures = (sideVoiceAutoPlayFailuresRef.current.get(blockedKey) ?? 0) + 1;
+          sideVoiceAutoPlayFailuresRef.current.set(blockedKey, failures);
+          if (failures < SIDE_VOICE_AUTOPLAY_MAX_FAILURES) {
+            scheduleSideVoiceAutoPlayRetry(blockedKey);
+            return;
+          }
+          sideVoiceAutoPlayRetryPendingRef.current.delete(blockedKey);
+          autoPlayedSideVoiceKeysRef.current.add(blockedKey);
+          setGameVoiceVersion((version) => version + 1);
         },
       });
     }
@@ -2808,12 +2854,14 @@ export function GameNarration({
     isStreaming,
     playGameVoiceKeys,
     scenePreparing,
+    scheduleSideVoiceAutoPlayRetry,
   ]);
 
   useEffect(() => {
     const pendingRequests = gameVoicePendingRef.current;
     const cachedVoices = gameVoiceCacheRef.current;
     return () => {
+      clearSideVoiceAutoPlayRetry();
       stopGameVoicePlayback();
       for (const controller of pendingRequests.values()) {
         controller.abort();
@@ -2826,7 +2874,7 @@ export function GameNarration({
       }
       cachedVoices.clear();
     };
-  }, [stopGameVoicePlayback]);
+  }, [clearSideVoiceAutoPlayRetry, stopGameVoicePlayback]);
 
   useEffect(() => {
     if (!active) return;
@@ -3450,75 +3498,136 @@ export function GameNarration({
 
       <div
         data-tour="game-dialogue"
-        className="relative z-10 mx-auto flex max-h-[calc(100svh-7rem)] min-h-0 w-full max-w-4xl flex-col md:max-h-[calc(100svh-8rem)]"
+        className="relative z-10 mx-auto flex h-full max-h-[calc(100svh-7rem)] min-h-0 w-full max-w-4xl flex-col justify-end md:max-h-[calc(100svh-8rem)]"
       >
-        {useStackedLogDisplay && stackedLogEntries.length > 0 && (
-          <div
-            className="mb-2 rounded-2xl border border-[var(--border)] bg-[var(--card)]/70 p-2 shadow-[0_16px_38px_rgba(0,0,0,0.35)] backdrop-blur-md dark:border-white/10 dark:bg-black/40"
-            data-game-skip-bg-nav="true"
-          >
+        <div className="min-h-0 flex flex-1 flex-col justify-end overflow-hidden">
+          {useStackedLogDisplay && stackedLogEntries.length > 0 && (
             <div
-              ref={stackedLogRef}
-              className="flex max-h-[22svh] min-h-0 flex-col gap-1.5 overflow-y-auto pr-1 sm:max-h-[26svh] md:max-h-[32svh]"
-              onScroll={(e) => {
-                const el = e.currentTarget;
-                setStackedLogPinned(el.scrollHeight - el.scrollTop - el.clientHeight < 32);
-              }}
+              className="mb-2 rounded-2xl border border-[var(--border)] bg-[var(--card)]/70 p-2 shadow-[0_16px_38px_rgba(0,0,0,0.35)] backdrop-blur-md dark:border-white/10 dark:bg-black/40"
+              data-game-skip-bg-nav="true"
             >
-              {stackedLogEntries.map((entry) => (
-                <div key={entry.messageId} className="space-y-1.5">
-                  {entry.segments.map((seg) => renderStackedLogSegment(seg))}
-                </div>
-              ))}
+              <div
+                ref={stackedLogRef}
+                className="flex max-h-[22svh] min-h-0 flex-col gap-1.5 overflow-y-auto pr-1 sm:max-h-[26svh] md:max-h-[32svh]"
+                onScroll={(e) => {
+                  const el = e.currentTarget;
+                  setStackedLogPinned(el.scrollHeight - el.scrollTop - el.clientHeight < 32);
+                }}
+              >
+                {stackedLogEntries.map((entry) => (
+                  <div key={entry.messageId} className="space-y-1.5">
+                    {entry.segments.map((seg) => renderStackedLogSegment(seg))}
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* Side remarks — small floating box shown with the dialogue they follow */}
-        {activeSideLines.length > 0 && doneTyping && (
-          <div className="relative z-20 mb-2 flex max-h-[min(16rem,38vh)] w-full flex-col space-y-1.5 overflow-x-hidden overflow-y-auto pr-1">
-            {activeSideLines.map((line, i) => {
-              const expressionAvatar =
-                line.type === "side" || line.type === "extra"
-                  ? resolveExpressionAvatar(line.character, line.expression)
-                  : null;
-              const charAvatar = expressionAvatar ?? findNamedMapValue(speakerAvatarInfos, line.character) ?? null;
-              const charColor = findNamedMapValue(speakerColors, line.character);
-              const charNameColor = findNamedMapValue(speakerNameColors, line.character);
-              return (
-                <div
-                  key={`${line.character}-side-${i}`}
-                  className="flex w-full justify-end animate-party-slide-in"
-                  style={{ animationDelay: `${i * 80}ms` }}
-                >
-                  <PartyOverlayBox line={line} avatar={charAvatar} color={charColor} nameColor={charNameColor} />
-                </div>
-              );
-            })}
-          </div>
-        )}
+          {/* Side remarks — small floating box shown with the dialogue they follow */}
+          {activeSideLines.length > 0 && doneTyping && (
+            <div className="relative z-20 mb-2 flex max-h-[min(16rem,38vh)] w-full flex-col space-y-1.5 overflow-x-hidden overflow-y-auto pr-1">
+              {activeSideLines.map((line, i) => {
+                const expressionAvatar =
+                  line.type === "side" || line.type === "extra"
+                    ? resolveExpressionAvatar(line.character, line.expression)
+                    : null;
+                const charAvatar = expressionAvatar ?? findNamedMapValue(speakerAvatarInfos, line.character) ?? null;
+                const charColor = findNamedMapValue(speakerColors, line.character);
+                const charNameColor = findNamedMapValue(speakerNameColors, line.character);
+                const sideVoiceKey = active ? getVoiceKeyForSideLine(active, line, i) : null;
+                const voiceEntry = sideVoiceKey ? gameVoiceCacheRef.current.get(sideVoiceKey) : undefined;
+                const voicePaused = gameVoicePausedKey === sideVoiceKey;
+                const voiceActive = gameVoicePlayingKey === sideVoiceKey;
+                const voiceControl =
+                  sideVoiceKey && voiceEntry && voiceEntry.status !== "error" ? (
+                    <span
+                      className="ml-auto inline-flex items-center gap-0.5"
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onPointerUp={(event) => event.stopPropagation()}
+                      onPointerCancel={(event) => event.stopPropagation()}
+                    >
+                      <button
+                        type="button"
+                        onClick={(event) => handleGameVoiceButtonClick(event, sideVoiceKey)}
+                        disabled={voiceEntry.status === "loading"}
+                        className={cn(
+                          "inline-flex h-5 w-5 items-center justify-center rounded-full text-white/55 transition-colors hover:bg-white/10 hover:text-sky-200 disabled:cursor-wait disabled:opacity-60",
+                          voiceActive && "bg-sky-400/15 text-sky-200",
+                        )}
+                        title={
+                          voiceEntry.status === "loading"
+                            ? "Generating voice-over"
+                            : voiceActive
+                              ? voicePaused
+                                ? "Resume voice-over"
+                                : "Pause voice-over"
+                              : "Play voice-over"
+                        }
+                        aria-label={
+                          voiceEntry.status === "loading"
+                            ? "Generating voice-over"
+                            : voiceActive
+                              ? voicePaused
+                                ? "Resume voice-over"
+                                : "Pause voice-over"
+                              : "Play voice-over"
+                        }
+                      >
+                        {voiceEntry.status === "loading" ? (
+                          <Loader2 size={11} className="animate-spin" />
+                        ) : voiceActive ? (
+                          voicePaused ? (
+                            <Play size={11} />
+                          ) : (
+                            <Pause size={11} />
+                          )
+                        ) : (
+                          <Volume2 size={11} />
+                        )}
+                      </button>
+                    </span>
+                  ) : null;
+                return (
+                  <div
+                    key={`${line.character}-side-${i}`}
+                    className="flex w-full justify-end animate-party-slide-in"
+                    style={{ animationDelay: `${i * 80}ms` }}
+                  >
+                    <PartyOverlayBox
+                      line={line}
+                      avatar={charAvatar}
+                      color={charColor}
+                      nameColor={charNameColor}
+                      voiceControl={voiceControl}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
-        {/* Party turn loading indicator — only show as banner when player input isn't the active VN segment */}
-        {partyTurnPending && !scenePreparing && !active?.id?.startsWith("party-chat-input-") && (
-          <div className="mb-2 flex items-center gap-1.5 rounded-xl border border-sky-500/15 bg-sky-500/5 px-3 py-1.5 backdrop-blur-md">
-            <MessageCircle size={12} className="animate-pulse text-sky-300/70" />
-            <span className="text-[0.6875rem] text-sky-200/60">The party is reacting...</span>
-          </div>
-        )}
+          {/* Party turn loading indicator — only show as banner when player input isn't the active VN segment */}
+          {partyTurnPending && !scenePreparing && !active?.id?.startsWith("party-chat-input-") && (
+            <div className="mb-2 flex shrink-0 items-center gap-1.5 rounded-xl border border-sky-500/15 bg-sky-500/5 px-3 py-1.5 backdrop-blur-md">
+              <MessageCircle size={12} className="animate-pulse text-sky-300/70" />
+              <span className="text-[0.6875rem] text-sky-200/60">The party is reacting...</span>
+            </div>
+          )}
 
-        {/* Choice cards from GM — rendered above narration so they don't overlap */}
-        {choicesSlot}
+          {/* Choice cards from GM — rendered above narration so they don't overlap */}
+          {choicesSlot}
 
-        {/* Widget slot — mobile widget icons sit above the narration box */}
-        {widgetSlot}
+          {/* Widget slot — mobile widget icons sit above the narration box */}
+          {widgetSlot}
 
-        {/* Skill check result — shown above the narration box until dismissed */}
-        {skillCheckSlot}
+          {/* Skill check result — shown above the narration box until dismissed */}
+          {skillCheckSlot}
 
-        {/* Dice roll result — shown closest to the narration box until dismissed */}
-        {diceResultSlot}
+          {/* Dice roll result — shown closest to the narration box until dismissed */}
+          {diceResultSlot}
+        </div>
 
-        <div className="rounded-2xl border border-[var(--border)] bg-[var(--card)]/90 p-3 backdrop-blur-md shadow-[0_16px_38px_rgba(0,0,0,0.45)] dark:border-white/15 dark:bg-black/50">
+        <div className="shrink-0 rounded-2xl border border-[var(--border)] bg-[var(--card)]/90 p-3 shadow-[0_16px_38px_rgba(0,0,0,0.45)] backdrop-blur-md dark:border-white/15 dark:bg-black/50">
           {/* Scene preparation gate: wait for effects before showing narration */}
           {scenePreparing && (
             <div className="flex items-center gap-2 py-3">
@@ -4733,11 +4842,13 @@ function PartyOverlayBox({
   avatar,
   color,
   nameColor,
+  voiceControl,
 }: {
   line: PartyDialogueLine;
   avatar: SpeakerAvatarInfo | null;
   color?: string;
   nameColor?: string;
+  voiceControl?: ReactNode;
 }) {
   const styleByType: Record<string, { border: string; bg: string; icon: string; labelColor: string }> = {
     side: { border: "border-white/15", bg: "bg-black/75", icon: "💬", labelColor: "text-white/85" },
@@ -4771,17 +4882,18 @@ function PartyOverlayBox({
         />
       )}
       <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+        <div className="flex min-w-0 items-center gap-1.5">
           <span className="text-[0.5625rem]">{style.icon}</span>
           <span
-            className={cn("text-[0.6875rem] font-semibold", style.labelColor)}
+            className={cn("min-w-0 truncate text-[0.6875rem] font-semibold", style.labelColor)}
             style={nameColorStyle(nameColor ?? color)}
           >
             {line.character}
           </span>
           {line.type === "whisper" && line.target && (
-            <span className="text-[0.5625rem] text-white/40">→ {line.target}</span>
+            <span className="min-w-0 truncate text-[0.5625rem] text-white/40">→ {line.target}</span>
           )}
+          {voiceControl}
         </div>
         <div className="mt-0.5 min-w-0">
           <p

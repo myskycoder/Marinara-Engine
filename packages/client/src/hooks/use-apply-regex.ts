@@ -47,8 +47,12 @@ function applyScripts(
   for (const script of scripts) {
     if (!script.enabledBool) continue;
     if (!script.placements.includes(placement)) continue;
-    // If we're rendering display text and script is prompt-only, skip
-    if (!options?.promptOnly && script.promptOnlyBool) continue;
+    // Prompt context is opt-in. Display context runs visual scripts only.
+    if (options?.promptOnly) {
+      if (!script.promptOnlyBool) continue;
+    } else if (script.promptOnlyBool) {
+      continue;
+    }
 
     // Depth range filtering
     if (options?.depth != null) {
@@ -103,7 +107,7 @@ export function useApplyRegex() {
     [parsedScripts],
   );
 
-  // Applies scripts in prompt context, including scripts marked prompt-only.
+  // Applies scripts in prompt context. Visual scripts are intentionally skipped.
   const applyPromptOnly = useCallback(
     (
       text: string,

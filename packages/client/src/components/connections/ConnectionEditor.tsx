@@ -1834,11 +1834,11 @@ export function ConnectionEditor() {
             </div>
 
             <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-              <strong>Test Connection</strong> verifies your API key works.
+              <strong>Test Connection</strong> verifies your API key against the provider catalog or health endpoint.
               {localProvider !== "image_generation" && (
                 <>
                   {" "}
-                  <strong>Send Test Message</strong> sends "hi" to the model and shows the response.
+                  <strong>Send Test Message</strong> sends "hi" to the selected model endpoint and shows the response.
                 </>
               )}
               {localProvider === "image_generation" && (
@@ -2066,7 +2066,7 @@ function TestResultCard({
         </span>
         <span className="ml-auto text-[0.625rem] text-[var(--muted-foreground)]">{latencyMs}ms</span>
       </div>
-      <div className="mt-1 text-[0.6875rem] text-[var(--foreground)]">{children}</div>
+      <div className="mt-1 whitespace-pre-wrap break-words text-[0.6875rem] text-[var(--foreground)]">{children}</div>
     </div>
   );
 }

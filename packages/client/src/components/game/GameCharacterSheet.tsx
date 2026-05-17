@@ -389,23 +389,25 @@ export function GameCharacterSheet({
         onClick={(e) => e.stopPropagation()}
       >
         {(onSave || onRegenerate) && (
-          <div className="absolute right-12 top-3 z-10 flex flex-wrap items-center justify-end gap-2">
+          <div className="absolute right-11 top-3 z-10 flex max-w-[calc(100%-4rem)] flex-wrap items-center justify-end gap-1 sm:right-12 sm:gap-2">
             {isEditing ? (
               <>
                 <button
                   onClick={handleCancelEdit}
                   disabled={isSaving}
-                  className="rounded-lg border border-[var(--border)] bg-[var(--card)]/90 px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)] disabled:opacity-60"
+                  className="inline-flex h-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--card)]/90 px-2.5 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)] disabled:opacity-60 sm:h-auto sm:px-3 sm:py-1.5"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={() => void handleSave()}
                   disabled={isSaving}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-1.5 text-xs font-semibold text-[var(--primary-foreground)] transition-opacity hover:opacity-90 disabled:opacity-60"
+                  className="inline-flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-lg bg-[var(--primary)] px-2 text-xs font-semibold text-[var(--primary-foreground)] transition-opacity hover:opacity-90 disabled:opacity-60 sm:h-auto sm:min-w-0 sm:px-3 sm:py-1.5"
+                  title={isSaving ? "Saving..." : "Save Sheet"}
+                  aria-label={isSaving ? "Saving sheet" : "Save sheet"}
                 >
                   <Save size={13} />
-                  {isSaving ? "Saving..." : "Save Sheet"}
+                  <span className="hidden sm:inline">{isSaving ? "Saving..." : "Save Sheet"}</span>
                 </button>
               </>
             ) : (
@@ -414,21 +416,24 @@ export function GameCharacterSheet({
                   <button
                     onClick={() => void handleRegenerate()}
                     disabled={isRegenerating || isSaving}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)]/90 px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)] disabled:cursor-wait disabled:opacity-60"
+                    className="inline-flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)]/90 px-2 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)] disabled:cursor-wait disabled:opacity-60 sm:h-auto sm:min-w-0 sm:px-3 sm:py-1.5"
                     title="Regenerate this sheet from character and current game context"
+                    aria-label="Regenerate sheet"
                   >
                     <RefreshCw size={13} className={cn(isRegenerating && "animate-spin")} />
-                    {isRegenerating ? "Regenerating..." : "Regenerate Sheet"}
+                    <span className="hidden sm:inline">{isRegenerating ? "Regenerating..." : "Regenerate Sheet"}</span>
                   </button>
                 )}
                 {onSave && (
                   <button
                     onClick={() => setIsEditing(true)}
                     disabled={isRegenerating}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)]/90 px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)] disabled:opacity-60"
+                    className="inline-flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)]/90 px-2 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)] disabled:opacity-60 sm:h-auto sm:min-w-0 sm:px-3 sm:py-1.5"
+                    title="Edit Sheet"
+                    aria-label="Edit sheet"
                   >
                     <Pencil size={13} />
-                    Edit Sheet
+                    <span className="hidden sm:inline">Edit Sheet</span>
                   </button>
                 )}
               </>
@@ -443,10 +448,10 @@ export function GameCharacterSheet({
           <X size={18} />
         </button>
 
-        <div className="relative border-b border-[var(--border)] bg-[var(--secondary)]/50 px-5 py-4">
-          <div className="flex items-center gap-4">
+        <div className="relative border-b border-[var(--border)] bg-[var(--secondary)]/50 px-4 py-4 sm:px-5">
+          <div className="flex items-center gap-3 sm:gap-4">
             {card.avatarUrl ? (
-              <span className="relative block h-20 w-20 overflow-hidden rounded-xl border-2 border-[var(--border)] shadow-xl">
+              <span className="relative block h-16 w-16 shrink-0 overflow-hidden rounded-xl border-2 border-[var(--border)] shadow-xl sm:h-20 sm:w-20">
                 <img
                   src={card.avatarUrl}
                   alt={card.title}
@@ -455,12 +460,17 @@ export function GameCharacterSheet({
                 />
               </span>
             ) : (
-              <div className="flex h-20 w-20 items-center justify-center rounded-xl border-2 border-[var(--border)] bg-[var(--secondary)] text-2xl font-bold text-[var(--muted-foreground)]">
+              <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-xl border-2 border-[var(--border)] bg-[var(--secondary)] text-xl font-bold text-[var(--muted-foreground)] sm:h-20 sm:w-20 sm:text-2xl">
                 {card.title[0]}
               </div>
             )}
-            <div className="min-w-0 flex-1 pr-36 sm:pr-64">
-              <h2 className="truncate text-lg font-bold text-[var(--foreground)]">{card.title}</h2>
+            <div className="min-w-0 flex-1 pr-20 sm:pr-64">
+              <h2
+                className="scrollbar-hide max-w-full touch-pan-x overflow-x-auto whitespace-nowrap text-lg font-bold text-[var(--foreground)] [-webkit-overflow-scrolling:touch] sm:truncate sm:overflow-hidden"
+                title={card.title}
+              >
+                {card.title}
+              </h2>
               {previewGameCard?.class && (
                 <p className="text-xs font-medium text-[var(--primary)]">{previewGameCard.class}</p>
               )}

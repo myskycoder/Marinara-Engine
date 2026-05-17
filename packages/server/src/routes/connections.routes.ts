@@ -8,7 +8,92 @@ import { createLLMProvider } from "../services/llm/provider-registry.js";
 import { fetchOpenAIChatGPTModels, getOpenAIChatGPTAuth } from "../services/llm/openai-chatgpt-auth.js";
 import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
 import { isImageLocalUrlsEnabled, isProviderLocalUrlsEnabled } from "../config/runtime-config.js";
+import { logDebugOverride } from "../lib/logger.js";
 import { normalizeLoopbackUrl, safeFetch } from "../utils/security.js";
+
+const CONNECTION_TEST_ERROR_PREVIEW_CHARS = 2000;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function readDebugMode(body: unknown): boolean {
+  return isRecord(body) && body.debugMode === true;
+}
+
+function trimProviderError(value: string, maxLen = CONNECTION_TEST_ERROR_PREVIEW_CHARS): string {
+  return value.trim().replace(/\s+/g, " ").slice(0, maxLen);
+}
+
+function providerJsonMessage(json: unknown): string | null {
+  if (!isRecord(json)) return null;
+
+  const nestedError = json.error;
+  const message =
+    (isRecord(nestedError) && typeof nestedError.message === "string" && nestedError.message) ||
+    (typeof nestedError === "string" && nestedError) ||
+    (typeof json.message === "string" && json.message) ||
+    (typeof json.detail === "string" && json.detail) ||
+    null;
+
+  if (!message) return null;
+
+  const markers = [
+    typeof json.type === "string" ? `type: ${json.type}` : null,
+    typeof json.code === "string" && json.code !== json.type ? `code: ${json.code}` : null,
+  ].filter(Boolean);
+
+  return markers.length > 0 ? `${message} (${markers.join(", ")})` : message;
+}
+
+function formatProviderErrorBody(body: string): string {
+  const trimmed = body.trim();
+  if (!trimmed) return "No response body";
+
+  if (/<(?:!doctype|html)\b/i.test(trimmed)) {
+    const titleMatch = trimmed.match(/<title[^>]*>(.*?)<\/title>/i);
+    if (titleMatch?.[1]) return trimProviderError(titleMatch[1]);
+    return trimProviderError(trimmed.replace(/<[^>]+>/g, " "));
+  }
+
+  try {
+    const json = JSON.parse(trimmed) as unknown;
+    const message = providerJsonMessage(json);
+    if (message) return trimProviderError(message);
+  } catch {
+    // Raw text response; fall through to preview.
+  }
+
+  return trimProviderError(trimmed);
+}
+
+function isOpenAICompatibleProvider(provider: string): boolean {
+  return ["openai", "openrouter", "nanogpt", "xai", "mistral", "custom", "cohere"].includes(provider);
+}
+
+function usesResponsesEndpointForTestMessage(provider: string, model: string): boolean {
+  if (!isOpenAICompatibleProvider(provider) || provider === "custom") return false;
+  const normalized = model.toLowerCase();
+  return (
+    normalized.startsWith("gpt-5.5") ||
+    normalized.startsWith("gpt-5.4") ||
+    normalized.startsWith("codex-") ||
+    normalized.endsWith("-codex") ||
+    normalized.endsWith("-codex-max") ||
+    normalized.endsWith("-codex-mini")
+  );
+}
+
+function describeTestMessageTarget(provider: string, baseUrl: string, model: string): string {
+  if (provider === "claude_subscription") return "Claude Agent SDK";
+  if (provider === "openai_chatgpt") return "local ChatGPT session";
+  if (!baseUrl) return "(no base URL)";
+  if (isOpenAICompatibleProvider(provider)) {
+    return `${baseUrl}${usesResponsesEndpointForTestMessage(provider, model) ? "/responses" : "/chat/completions"}`;
+  }
+  if (provider === "anthropic") return `${baseUrl}/messages`;
+  return baseUrl;
+}
 
 function resolveImageGenerationSource(conn: Record<string, unknown>, baseUrl: string): string {
   const explicitSource = typeof conn.imageGenerationSource === "string" ? conn.imageGenerationSource : "";
@@ -149,6 +234,8 @@ export async function connectionsRoutes(app: FastifyInstance) {
     const conn = await storage.getWithKey(req.params.id);
     if (!conn) return reply.status(404).send({ error: "Connection not found" });
 
+    const requestDebug = readDebugMode(req.body);
+    const debugLog = (message: string, ...args: any[]) => logDebugOverride(requestDebug, message, ...args);
     const start = Date.now();
     try {
       // Claude (Subscription) has no HTTP endpoint — verify the local SDK
@@ -230,6 +317,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
 
       const testHeaders =
         conn.provider === "image_generation" && imageSource === "horde" ? hordeHeaders(conn.apiKey) : headers;
+      debugLog("[connections/test] provider=%s model=%s catalogUrl=%s", conn.provider, conn.model ?? "", testUrl);
       const res = await safeFetch(testUrl, {
         headers: testHeaders,
         policy: localUrlPolicyForProvider(conn.provider, imageSource),
@@ -242,14 +330,27 @@ export async function connectionsRoutes(app: FastifyInstance) {
         return { success: true, message: "Connection successful", latencyMs, modelName: conn.model };
       } else {
         const body = await res.text();
+        const detail = formatProviderErrorBody(body);
+        debugLog(
+          "[connections/test] provider=%s catalogUrl=%s returned %d: %s",
+          conn.provider,
+          testUrl,
+          res.status,
+          detail,
+        );
         return {
           success: false,
-          message: `API returned ${res.status}: ${body.slice(0, 200)}`,
+          message: `API returned ${res.status}: ${detail}`,
           latencyMs,
           modelName: null,
         };
       }
     } catch (err) {
+      debugLog(
+        "[connections/test] provider=%s failed: %s",
+        conn.provider,
+        err instanceof Error ? err.message : "Unknown error",
+      );
       return {
         success: false,
         message: `Connection failed: ${err instanceof Error ? err.message : "Unknown error"}`,
@@ -707,7 +808,11 @@ export async function connectionsRoutes(app: FastifyInstance) {
     }
 
     const start = Date.now();
+    const requestDebug = readDebugMode(req.body);
+    const debugLog = (message: string, ...args: any[]) => logDebugOverride(requestDebug, message, ...args);
+    const targetUrl = describeTestMessageTarget(conn.provider, baseUrl, conn.model);
     try {
+      debugLog("[connections/test-message] provider=%s model=%s url=%s", conn.provider, conn.model, targetUrl);
       const provider = createLLMProvider(
         conn.provider,
         baseUrl,
@@ -729,6 +834,12 @@ export async function connectionsRoutes(app: FastifyInstance) {
       }
 
       const latencyMs = Date.now() - start;
+      debugLog(
+        "[connections/test-message] url=%s success in %dms: %s",
+        targetUrl,
+        latencyMs,
+        fullResponse.slice(0, 500),
+      );
       return {
         success: true,
         response: fullResponse.slice(0, 500),
@@ -736,6 +847,13 @@ export async function connectionsRoutes(app: FastifyInstance) {
         model: conn.model,
       };
     } catch (err) {
+      debugLog(
+        "[connections/test-message] provider=%s model=%s url=%s failed: %s",
+        conn.provider,
+        conn.model,
+        targetUrl,
+        err instanceof Error ? err.message : "Unknown error",
+      );
       return {
         success: false,
         response: "",

@@ -105,6 +105,7 @@ const CREATE_TABLES: string[] = [
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     category TEXT NOT NULL DEFAULT 'uncategorized',
+    image_path TEXT,
     scan_depth INTEGER NOT NULL DEFAULT 2,
     token_budget INTEGER NOT NULL DEFAULT 2048,
     recursive_scanning TEXT NOT NULL DEFAULT 'false',
@@ -634,6 +635,11 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
     table: "lorebooks",
     column: "is_global",
     definition: "TEXT NOT NULL DEFAULT 'false'",
+  },
+  {
+    table: "lorebooks",
+    column: "image_path",
+    definition: "TEXT",
   },
   {
     table: "api_connections",

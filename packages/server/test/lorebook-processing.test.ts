@@ -37,6 +37,7 @@ function makeLorebook(overrides: Partial<Lorebook> = {}): Lorebook {
     name: "Lorebook",
     description: "",
     category: "world",
+    imagePath: null,
     scanDepth: 2,
     tokenBudget: 2048,
     recursiveScanning: false,
