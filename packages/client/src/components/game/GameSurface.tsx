@@ -2077,7 +2077,6 @@ export function GameSurface({
   }, [activeChatId, gameSnapshot?.location]);
 
   // Asset store
-  const queryClient = useQueryClient();
   const syncHudWidgetsToChatCache = useCallback(
     (widgets: HudWidget[]) => {
       const detailKey = chatKeys.detail(activeChatId);

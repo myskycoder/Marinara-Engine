@@ -135,7 +135,7 @@ import { executeKnowledgeRouter } from "../services/agents/knowledge-router.js";
 import { extractFileText, getSourceFilePath } from "./knowledge-sources.routes.js";
 import { gameStateSnapshots as gameStateSnapshotsTable } from "../db/schema/index.js";
 import { chats as chatsTable } from "../db/schema/index.js";
-import { eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { PROFESSOR_MARI_ID } from "@marinara-engine/shared";
 import { chunkAndEmbedMessages, embedMemoryRecallTexts, recallMemories } from "../services/memory-recall.js";
 import { resolveMemoryRecallEmbeddingSource } from "../services/memory-recall-embedding.js";
@@ -208,6 +208,7 @@ import {
   addLocationEntry,
   addEventEntry,
   addInventoryEntry,
+  addNpcEntry,
   upsertQuest,
   type Journal,
 } from "../services/game/journal.service.js";
@@ -465,7 +466,7 @@ function isPartyNpcId(id: string): boolean {
   return id.startsWith("npc:");
 }
 import { isInferenceAvailable as isSidecarInferenceAvailable } from "../services/sidecar/sidecar-inference.service.js";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 
 /**
@@ -529,6 +530,27 @@ function rememberKnowledgeRouterActivatedLorebookIds(
   for (const entry of result.budgetSkippedEntries) {
     targetExcludedFromKeywordScan.add(entry.id);
   }
+}
+
+async function resolveLatestGameStateForLorebooks(db: any, chatId: string): Promise<Record<string, unknown> | null> {
+  const latestRows = await db
+    .select()
+    .from(gameStateSnapshotsTable)
+    .where(eq(gameStateSnapshotsTable.chatId, chatId))
+    .orderBy(desc(gameStateSnapshotsTable.createdAt))
+    .limit(1);
+  const latest = latestRows[0];
+  if (latest) return parseGameStateRow(latest as Record<string, unknown>) as unknown as Record<string, unknown>;
+
+  const committedRows = await db
+    .select()
+    .from(gameStateSnapshotsTable)
+    .where(and(eq(gameStateSnapshotsTable.chatId, chatId), eq(gameStateSnapshotsTable.committed, 1)))
+    .orderBy(desc(gameStateSnapshotsTable.createdAt))
+    .limit(1);
+  const committed = committedRows[0];
+  if (committed) return parseGameStateRow(committed as Record<string, unknown>) as unknown as Record<string, unknown>;
+  return null;
 }
 
 /** Read a character's avatar from disk as base64, or return undefined if unavailable. */
@@ -1407,6 +1429,64 @@ export async function generateRoutes(app: FastifyInstance) {
       let runningMessagesForFollowUp = [...mappedMessages];
       let followUpIteration = 0;
       const MAX_FOLLOW_UP_ITERATIONS = 2;
+
+      let finalMessages: Array<{
+        role: "system" | "user" | "assistant";
+        content: string;
+        images?: string[];
+        providerMetadata?: Record<string, unknown>;
+      }> = mappedMessages;
+      let conversationCommandsReminder: string | null = null;
+      const conversationCommandsEnabled = chatMode === "conversation" && chatMeta.characterCommands !== false;
+      let temperature = 1;
+      let maxTokens = 4096;
+      let topP: number | undefined = 1;
+      let topK = 0;
+      let frequencyPenalty = 0;
+      let presencePenalty = 0;
+      let showThoughts = true;
+      let reasoningEffort: "low" | "medium" | "high" | "maximum" | null = null;
+      let verbosity: "low" | "medium" | "high" | null = null;
+      let assistantPrefill = "";
+      let customParameters: Record<string, unknown> = {};
+      let wrapFormat: "xml" | "markdown" | "none" = "xml";
+      const connectionMaxContext = normalizeMaxContext(conn.maxContext);
+      const knownModelContext = normalizeMaxContext(findKnownModel(conn.provider as APIProvider, conn.model)?.context);
+      let effectiveMaxContext = minContextLimit(connectionMaxContext, knownModelContext);
+
+      const gameSpotifyMusicEnabled = chatMode === "game" && chatMeta.gameUseSpotifyMusic === true;
+      const chatEnableAgents = shouldEnableAgentsForGeneration({
+        chatEnableAgents: chatMeta.enableAgents === true,
+        chatMode,
+        impersonate: input.impersonate,
+        impersonateBlockAgents: input.impersonateBlockAgents,
+      });
+      const persistedChatActiveAgentIds: string[] = Array.isArray(chatMeta.activeAgentIds)
+        ? (chatMeta.activeAgentIds as string[])
+        : [];
+      const chatActiveAgentIds: string[] = gameSpotifyMusicEnabled
+        ? persistedChatActiveAgentIds.filter((agentId) => agentId !== "spotify")
+        : persistedChatActiveAgentIds;
+      const chatActiveLorebookIds: string[] = Array.isArray(chatMeta.activeLorebookIds)
+        ? (chatMeta.activeLorebookIds as string[])
+        : [];
+      let presetHandledLorebooks = false;
+      const presetHasLorebookMarker = (sections: Array<{ isMarker: string; markerConfig: string | null }>) =>
+        sections.some((section) => {
+          if (section.isMarker !== "true" || !section.markerConfig) return false;
+          try {
+            const markerType = (JSON.parse(section.markerConfig) as { type?: unknown }).type;
+            return markerType === "lorebook" || markerType === "world_info_before" || markerType === "world_info_after";
+          } catch {
+            return false;
+          }
+        });
+      const manualPromptTargetCharId =
+        (chatMeta.groupResponseOrder as string) === "manual" &&
+        typeof input.forCharacterId === "string" &&
+        characterIds.includes(input.forCharacterId)
+          ? input.forCharacterId
+          : null;
       const promptCharacterIds = manualPromptTargetCharId ? [manualPromptTargetCharId] : characterIds;
       const promptMacroContext = await buildPromptMacroContext({
         db: app.db,
@@ -12857,6 +12937,9 @@ export async function generateRoutes(app: FastifyInstance) {
                       const promptOverridesStorage = createPromptOverridesStorage(app.db);
                       const generatedFilename = await generateChatBackground({
                         chatId: input.chatId,
+                        locationId: locationText.slice(0, 120),
+                        conditions: { weather: null, timeOfDay: null, season: null },
+                        backgroundPrompt: promptText.slice(0, 1000),
                         locationSlug: locationText.slice(0, 120),
                         sceneDescription: promptText.slice(0, 1000),
                         reason:

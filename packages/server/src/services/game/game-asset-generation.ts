@@ -627,6 +627,10 @@ export interface BackgroundGenResult {
 export interface ChatBackgroundGenRequest extends BackgroundGenRequest {
   /** Why the background agent asked for generation. Stored as background metadata. */
   reason?: string;
+  /** Stable slug used to compose the saved filename and originalName label. */
+  locationSlug?: string;
+  /** Narrative description of the scene; falls back to slug when missing. */
+  sceneDescription?: string;
 }
 
 export interface SceneIllustrationGenRequest {
@@ -860,7 +864,9 @@ export async function generateBackground(req: BackgroundGenRequest): Promise<Bac
  * Returns the saved filename on success, or null on failure.
  */
 export async function generateChatBackground(req: ChatBackgroundGenRequest): Promise<string | null> {
-  const baseSlug = safeGeneratedAssetSlug(req.locationSlug || req.sceneDescription.slice(0, 80), { maxBytes: 160 });
+  const baseSlug = safeGeneratedAssetSlug(req.locationSlug || (req.sceneDescription ?? "").slice(0, 80), {
+    maxBytes: 160,
+  });
   if (!baseSlug) return null;
 
   const slug = `generated-${baseSlug}`;

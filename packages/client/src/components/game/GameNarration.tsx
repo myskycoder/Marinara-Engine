@@ -33,7 +33,6 @@ import {
   VolumeX,
   Loader2,
   Wand2,
-  RotateCcw,
 } from "lucide-react";
 import { cn, copyToClipboard, getAvatarCropStyle, type AvatarCrop, type LegacyAvatarCrop } from "../../lib/utils";
 import { findNamedEntry, findNamedMapValue } from "../../lib/game-character-name-match";

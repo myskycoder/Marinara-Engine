@@ -48,7 +48,7 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import { existsSync } from "fs";
 import { join } from "path";
 import { DATA_DIR } from "../utils/data-dir.js";
-import type { ChatMode, GameNpc } from "@marinara-engine/shared";
+import type { ChatMode } from "@marinara-engine/shared";
 import { copyBranchMessagesAndSnapshots } from "../services/chats/branch-chat-copy.service.js";
 import { resolvePresentCharacterAvatars } from "../services/game/npc-avatar-resolver.js";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
