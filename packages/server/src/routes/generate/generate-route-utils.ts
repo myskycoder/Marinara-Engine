@@ -81,6 +81,11 @@ export function isMessageHiddenFromAI(message: { extra?: unknown }): boolean {
   return parseExtra(message.extra).hiddenFromAI === true;
 }
 
+/**
+ * Build the instruction used when regenerating a user-authored message as a swipe.
+ * The original user text is trimmed and wrapped in <original_user_message> tags
+ * so downstream generation can return only replacement user-message text.
+ */
 export function buildUserMessageRegenerationInstruction(message: { content?: unknown }): string {
   const original = typeof message.content === "string" ? message.content.trim() : "";
   return [

@@ -16,6 +16,12 @@ describe("user message regeneration instruction", () => {
     assert.match(instruction, /<original_user_message>\ntry again\n<\/original_user_message>/);
   });
 
+  it("trims original user message whitespace", () => {
+    const instruction = buildUserMessageRegenerationInstruction({ content: "  padded message  " });
+
+    assert.match(instruction, /<original_user_message>\npadded message\n<\/original_user_message>/);
+  });
+
   it("keeps Gemini user-message regeneration as the final user turn while preserving assistant prefill", () => {
     const messages = [{ role: "user" as const, content: "context" }];
 
