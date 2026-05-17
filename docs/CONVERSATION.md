@@ -101,7 +101,7 @@ Conversation Mode supports characters sending you **selfies** — image-generati
 To enable:
 
 1. In the chat settings drawer, set a **Selfie Connection** (an image-generation provider — Stability AI, ComfyUI, AUTOMATIC1111, etc.).
-2. Optionally set a **Selfie Resolution** (default `512x768`).
+2. Optionally set a **Selfie Resolution** (default `896x1152`).
 3. Optionally edit per-character **selfie tags** — appearance prompts the character should always include in their selfies (e.g. specific clothing, settings, art style).
 
 Once configured, characters can send selfies as part of their messages, or you can ask them for one explicitly. Each selfie costs an image-generation API call.

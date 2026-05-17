@@ -729,12 +729,12 @@ export const useUIStore = create<UIState>()(
       gameTextSpeed: 50,
       gameAutoPlayDelay: 3000,
       reviewImagePromptsBeforeSend: false,
-      imageBackgroundWidth: 1024,
-      imageBackgroundHeight: 576,
-      imagePortraitWidth: 512,
-      imagePortraitHeight: 512,
-      imageSelfieWidth: 512,
-      imageSelfieHeight: 768,
+      imageBackgroundWidth: 1280,
+      imageBackgroundHeight: 720,
+      imagePortraitWidth: 1024,
+      imagePortraitHeight: 1024,
+      imageSelfieWidth: 896,
+      imageSelfieHeight: 1152,
 
       messageGrouping: true,
       showTimestamps: false,
@@ -1353,12 +1353,12 @@ export const useUIStore = create<UIState>()(
           if (persisted.reviewImagePromptsBeforeSend === undefined) {
             persisted.reviewImagePromptsBeforeSend = false;
           }
-          if (persisted.imageBackgroundWidth === undefined) persisted.imageBackgroundWidth = 1024;
-          if (persisted.imageBackgroundHeight === undefined) persisted.imageBackgroundHeight = 576;
-          if (persisted.imagePortraitWidth === undefined) persisted.imagePortraitWidth = 512;
-          if (persisted.imagePortraitHeight === undefined) persisted.imagePortraitHeight = 512;
-          if (persisted.imageSelfieWidth === undefined) persisted.imageSelfieWidth = 512;
-          if (persisted.imageSelfieHeight === undefined) persisted.imageSelfieHeight = 768;
+          if (persisted.imageBackgroundWidth === undefined) persisted.imageBackgroundWidth = 1280;
+          if (persisted.imageBackgroundHeight === undefined) persisted.imageBackgroundHeight = 720;
+          if (persisted.imagePortraitWidth === undefined) persisted.imagePortraitWidth = 1024;
+          if (persisted.imagePortraitHeight === undefined) persisted.imagePortraitHeight = 1024;
+          if (persisted.imageSelfieWidth === undefined) persisted.imageSelfieWidth = 896;
+          if (persisted.imageSelfieHeight === undefined) persisted.imageSelfieHeight = 1152;
         }
         // v13 -> v14: add optional custom user activity text for Conversation status.
         if (version <= 13) {

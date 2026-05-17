@@ -16,9 +16,9 @@ const IMAGE_DIMENSION_MIN = 64;
 const IMAGE_DIMENSION_MAX = 4096;
 
 const DEFAULT_IMAGE_GENERATION_SETTINGS: ImageGenerationUserSettings = {
-  background: { width: 1024, height: 576 },
-  portrait: { width: 512, height: 512 },
-  selfie: { width: 512, height: 768 },
+  background: { width: 1280, height: 720 },
+  portrait: { width: 1024, height: 1024 },
+  selfie: { width: 896, height: 1152 },
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {

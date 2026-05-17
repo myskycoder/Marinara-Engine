@@ -301,6 +301,8 @@ export function ChatSettingsDrawer({
   const scheduleGenerationPreferences = useUIStore((s) => s.scheduleGenerationPreferences);
   const setScheduleGenerationPreferences = useUIStore((s) => s.setScheduleGenerationPreferences);
   const roleplaySpriteScale = useUIStore((s) => s.roleplaySpriteScale);
+  const imageSelfieWidth = useUIStore((s) => s.imageSelfieWidth);
+  const imageSelfieHeight = useUIStore((s) => s.imageSelfieHeight);
 
   const { data: allCharacters } = useCharacters();
   const { data: characterGroups } = useCharacterGroups();
@@ -3030,9 +3032,11 @@ export function ChatSettingsDrawer({
                           { label: "512x768", w: 512, h: 768 },
                           { label: "768x768", w: 768, h: 768 },
                           { label: "768x1024", w: 768, h: 1024 },
+                          { label: "896x1152", w: 896, h: 1152 },
                           { label: "1024x1024", w: 1024, h: 1024 },
                         ].map((opt) => {
-                          const current = (metadata.selfieResolution as string) ?? "512x768";
+                          const current =
+                            (metadata.selfieResolution as string) ?? `${imageSelfieWidth}x${imageSelfieHeight}`;
                           const val = `${opt.w}x${opt.h}`;
                           const active = current === val;
                           return (
