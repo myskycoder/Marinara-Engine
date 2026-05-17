@@ -6058,6 +6058,7 @@ function Section({
   const [open, setOpen] = useState(false);
   const toggleOpen = () => setOpen((o) => !o);
   const handleHeaderKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return;
     if (event.key !== "Enter" && event.key !== " ") return;
     event.preventDefault();
     toggleOpen();

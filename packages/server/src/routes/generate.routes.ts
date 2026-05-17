@@ -502,18 +502,20 @@ async function persistLorebookRuntimeState(args: {
 }
 
 function rememberKnowledgeRouterActivatedLorebookIds(
-  target: Set<string>,
+  targetActivated: Set<string>,
+  targetExcludedFromKeywordScan: Set<string>,
   result: {
     activatedEntries: Array<{ id: string; matchedKeys: string[] }>;
     budgetSkippedEntries: Array<{ id: string; matchedKeys: string[] }>;
   },
 ): void {
-  const remember = (entry: { id: string; matchedKeys: string[] }) => {
-    if (entry.matchedKeys.some((key) => key.startsWith("[semantic:"))) return;
-    target.add(entry.id);
-  };
-  result.activatedEntries.forEach(remember);
-  result.budgetSkippedEntries.forEach(remember);
+  for (const entry of result.activatedEntries) {
+    if (!entry.matchedKeys.some((key) => !key.startsWith("[semantic:"))) continue;
+    targetActivated.add(entry.id);
+  }
+  for (const entry of result.budgetSkippedEntries) {
+    targetExcludedFromKeywordScan.add(entry.id);
+  }
 }
 
 /** Read a character's avatar from disk as base64, or return undefined if unavailable. */
@@ -1442,6 +1444,7 @@ export async function generateRoutes(app: FastifyInstance) {
       const _tEmbed = Date.now();
       let chatContextEmbedding: number[] | null = null;
       const knowledgeRouterActivatedLorebookEntryIds = new Set<string>();
+      const knowledgeRouterExcludedLorebookEntryIds = new Set<string>();
       let knowledgeRouterActivationPassCompleted = false;
       try {
         const activeEntries = (await lorebooksStore.listActiveEntries({
@@ -1564,6 +1567,19 @@ export async function generateRoutes(app: FastifyInstance) {
           assembled.lorebookDepthEntriesCount > 0 ||
           !!assembled.updatedEntryStateOverrides ||
           assembled.updatedEntryTimingStates !== undefined;
+        if (assembled.lorebookActivatedEntries || assembled.lorebookBudgetSkippedEntries) {
+          rememberKnowledgeRouterActivatedLorebookIds(
+            knowledgeRouterActivatedLorebookEntryIds,
+            knowledgeRouterExcludedLorebookEntryIds,
+            {
+              activatedEntries: assembled.lorebookActivatedEntries ?? [],
+              budgetSkippedEntries: assembled.lorebookBudgetSkippedEntries ?? [],
+            },
+          );
+          knowledgeRouterActivationPassCompleted = true;
+        } else if (presetHandledLorebooks) {
+          knowledgeRouterActivationPassCompleted = true;
+        }
         finalMessages = assembled.messages;
         temperature = assembled.parameters.temperature;
         maxTokens = assembled.parameters.maxTokens;
@@ -2645,7 +2661,11 @@ export async function generateRoutes(app: FastifyInstance) {
             generationTriggers: lorebookGenerationTriggers,
             resolveContent: resolvePromptMacrosForLorebook,
           });
-          rememberKnowledgeRouterActivatedLorebookIds(knowledgeRouterActivatedLorebookEntryIds, lorebookResult);
+          rememberKnowledgeRouterActivatedLorebookIds(
+            knowledgeRouterActivatedLorebookEntryIds,
+            knowledgeRouterExcludedLorebookEntryIds,
+            lorebookResult,
+          );
           knowledgeRouterActivationPassCompleted = true;
 
           if (lorebookResult.updatedEntryStateOverrides)
@@ -2697,7 +2717,11 @@ export async function generateRoutes(app: FastifyInstance) {
           generationTriggers: lorebookGenerationTriggers,
           resolveContent: resolvePromptMacrosForLorebook,
         });
-        rememberKnowledgeRouterActivatedLorebookIds(knowledgeRouterActivatedLorebookEntryIds, lorebookResult);
+        rememberKnowledgeRouterActivatedLorebookIds(
+          knowledgeRouterActivatedLorebookEntryIds,
+          knowledgeRouterExcludedLorebookEntryIds,
+          lorebookResult,
+        );
         knowledgeRouterActivationPassCompleted = true;
 
         if (lorebookResult.updatedEntryStateOverrides)
@@ -3864,7 +3888,11 @@ export async function generateRoutes(app: FastifyInstance) {
               resolveContent: resolvePromptMacrosForLorebook,
             },
           );
-          rememberKnowledgeRouterActivatedLorebookIds(knowledgeRouterActivatedLorebookEntryIds, lorebookResult);
+          rememberKnowledgeRouterActivatedLorebookIds(
+            knowledgeRouterActivatedLorebookEntryIds,
+            knowledgeRouterExcludedLorebookEntryIds,
+            lorebookResult,
+          );
           knowledgeRouterActivationPassCompleted = true;
 
           if (lorebookResult.updatedEntryStateOverrides)
@@ -4520,7 +4548,14 @@ export async function generateRoutes(app: FastifyInstance) {
       // for routing. The router picks IDs from this list and the selected entries
       // are injected verbatim — no per-entry summarization pass.
       const knowledgeRouterAgent = resolvedAgents.find((a) => a.type === "knowledge-router");
-      const knowledgeRouterActiveCharacterTags = Array.from(new Set(charInfo.flatMap((character) => character.tags)));
+      const promptCharacterIdSet = new Set(promptCharacterIds);
+      const knowledgeRouterActiveCharacterTags = Array.from(
+        new Set(
+          charInfo
+            .filter((character) => promptCharacterIdSet.has(character.id))
+            .flatMap((character) => character.tags),
+        ),
+      );
       let knowledgeRouterEntries: LorebookEntry[] = [];
       let knowledgeRouterActivatedEntries: LorebookEntry[] = [];
       let knowledgeRouterKeywordScanEntries: LorebookEntry[] = [];
@@ -4567,7 +4602,11 @@ export async function generateRoutes(app: FastifyInstance) {
               knowledgeRouterActivatedLorebookEntryIds.has(entry.id),
             );
             knowledgeRouterKeywordScanEntries = knowledgeRouterActivationPassCompleted
-              ? knowledgeRouterEntries.filter((entry) => !knowledgeRouterActivatedLorebookEntryIds.has(entry.id))
+              ? knowledgeRouterEntries.filter(
+                  (entry) =>
+                    !knowledgeRouterActivatedLorebookEntryIds.has(entry.id) &&
+                    !knowledgeRouterExcludedLorebookEntryIds.has(entry.id),
+                )
               : knowledgeRouterEntries;
           }
         } catch (err) {

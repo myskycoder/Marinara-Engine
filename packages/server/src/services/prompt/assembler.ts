@@ -21,6 +21,7 @@ import { wrapContent, wrapGroup } from "./format-engine.js";
 import { expandMarker, type MarkerContext } from "./marker-expander.js";
 import { mergeAdjacentMessages, squashLeadingSystemMessages } from "./merger.js";
 import { injectAtDepth } from "../lorebook/prompt-injector.js";
+import type { LorebookScanResult } from "../lorebook/index.js";
 import {
   buildPromptMacroContext,
   collectCharacterDepthPromptEntries,
@@ -156,6 +157,10 @@ export interface AssemblerOutput {
   updatedEntryStateOverrides?: Record<string, { ephemeral?: number | null; enabled?: boolean }>;
   /** Updated per-chat sticky/cooldown/delay timing state. Caller should persist to chat metadata. */
   updatedEntryTimingStates?: Record<string, LorebookEntryTimingState>;
+  /** Lorebook entries activated while expanding lorebook markers. */
+  lorebookActivatedEntries?: LorebookScanResult["activatedEntries"];
+  /** Lorebook entries matched but excluded by token budgets while expanding lorebook markers. */
+  lorebookBudgetSkippedEntries?: LorebookScanResult["budgetSkippedEntries"];
   /** Agent types whose runtime data was consumed by enabled agent_data sections. */
   runtimeAgentTypesUsed?: string[];
 }
@@ -452,6 +457,12 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
       : {}),
     ...(markerCtx.updatedEntryTimingStates !== undefined
       ? { updatedEntryTimingStates: markerCtx.updatedEntryTimingStates }
+      : {}),
+    ...(markerCtx.lorebookScanResult
+      ? {
+          lorebookActivatedEntries: markerCtx.lorebookScanResult.activatedEntries,
+          lorebookBudgetSkippedEntries: markerCtx.lorebookScanResult.budgetSkippedEntries,
+        }
       : {}),
     ...(runtimeAgentTypesUsed.size > 0 ? { runtimeAgentTypesUsed: Array.from(runtimeAgentTypesUsed) } : {}),
   };

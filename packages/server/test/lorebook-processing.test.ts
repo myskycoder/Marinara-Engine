@@ -22,6 +22,7 @@ import {
   resolveActivatedLorebookEntryContent,
   resolveBudgetAndRecursivelyActivateLorebookEntries,
   serializeTimingStateMap,
+  processLorebooks,
 } from "../src/services/lorebook/index.js";
 import { processActivatedEntries } from "../src/services/lorebook/prompt-injector.js";
 import {
@@ -524,6 +525,60 @@ test("lorebook budget diagnostics report matched entries skipped by chat caps", 
   assert.equal(result.budgetSkippedEntries[0]?.chatBudget, 50);
 });
 
+test("processLorebooks exposes budget-skipped entries in scan results", async () => {
+  const client = createClient({ url: "file::memory:" });
+  const db = drizzle(client) as unknown as DB;
+
+  try {
+    await runMigrations(db);
+
+    await db.insert(lorebooks).values({
+      id: "book-1",
+      name: "World Info",
+      description: "",
+      category: "world",
+      scanDepth: 2,
+      tokenBudget: 2048,
+      recursiveScanning: "false",
+      maxRecursionDepth: 3,
+      characterId: null,
+      personaId: null,
+      chatId: null,
+      isGlobal: "true",
+      enabled: "true",
+      tags: "[]",
+      generatedBy: null,
+      sourceAgentId: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    await db.insert(lorebookEntries).values([
+      dbLorebookEntry("included", {
+        content: tokenContent(40),
+        keys: JSON.stringify(["marker-key"]),
+        order: 10,
+      }),
+      dbLorebookEntry("skipped", {
+        content: tokenContent(30),
+        keys: JSON.stringify(["marker-key"]),
+        order: 20,
+      }),
+    ]);
+
+    const result = await processLorebooks(db, [{ role: "user", content: "marker-key" }], null, {
+      tokenBudget: 50,
+    });
+
+    assert.deepEqual(
+      result.activatedEntries.map((entry) => entry.id),
+      ["included"],
+    );
+    assert.deepEqual(result.budgetSkippedEntries, [{ id: "skipped", matchedKeys: ["marker-key"] }]);
+  } finally {
+    client.close();
+  }
+});
+
 test("recursive lorebook scans use macro-expanded activated entry content", () => {
   const activated = resolveBudgetAndRecursivelyActivateLorebookEntries(
     [{ role: "user", content: "first-key" }],
@@ -680,6 +735,11 @@ test("multiple lorebook markers share one macro side-effect pass per prompt asse
     assert.match(content, /Before 1/);
     assert.match(content, /After 2/);
     assert.doesNotMatch(content, /After 4/);
+    assert.deepEqual(
+      result.lorebookActivatedEntries?.map((entry) => entry.id).sort(),
+      ["after-entry", "before-entry"],
+    );
+    assert.deepEqual(result.lorebookBudgetSkippedEntries, []);
   } finally {
     client.close();
   }

@@ -450,6 +450,66 @@ test("prepareKnowledgeRouterCandidates falls back to filtered entries when seman
   );
 });
 
+test("prepareKnowledgeRouterCandidates fallback preserves activated and keyword candidates first", async () => {
+  const remaining = makeEntry({ id: "remaining", keys: ["unused"], embedding: [1, 0] });
+  const alreadyActivated = makeEntry({ id: "already-activated", keys: ["unused"], embedding: null });
+  const routerOnly = makeEntry({ id: "router-only", keys: ["moon-gate"], embedding: null });
+  const context: AgentContext = {
+    chatId: "chat-1",
+    chatMode: "roleplay",
+    recentMessages: [{ role: "user", content: "The moon-gate opens." }],
+    mainResponse: null,
+    gameState: null,
+    characters: [],
+    persona: null,
+    memory: {},
+    activatedLorebookEntries: null,
+    writableLorebookIds: null,
+    chatSummary: null,
+  };
+
+  const candidates = await prepareKnowledgeRouterCandidates([remaining, alreadyActivated, routerOnly], context, {
+    activatedEntries: [alreadyActivated],
+    keywordScanEntries: [routerOnly],
+    localEmbedder: async () => null,
+  });
+
+  assert.deepEqual(
+    candidates.map((entry) => entry.id),
+    ["already-activated", "router-only", "remaining"],
+  );
+});
+
+test("prepareKnowledgeRouterCandidates fallback handles semantic embedding errors", async () => {
+  const remaining = makeEntry({ id: "remaining", keys: ["unused"], embedding: [1, 0] });
+  const alreadyActivated = makeEntry({ id: "already-activated", keys: ["unused"], embedding: null });
+  const context: AgentContext = {
+    chatId: "chat-1",
+    chatMode: "roleplay",
+    recentMessages: [{ role: "user", content: "hello" }],
+    mainResponse: null,
+    gameState: null,
+    characters: [],
+    persona: null,
+    memory: {},
+    activatedLorebookEntries: null,
+    writableLorebookIds: null,
+    chatSummary: null,
+  };
+
+  const candidates = await prepareKnowledgeRouterCandidates([remaining, alreadyActivated], context, {
+    activatedEntries: [alreadyActivated],
+    localEmbedder: async () => {
+      throw new Error("embedding service unavailable");
+    },
+  });
+
+  assert.deepEqual(
+    candidates.map((entry) => entry.id),
+    ["already-activated", "remaining"],
+  );
+});
+
 test("prepareKnowledgeRouterCandidates falls back when no valid stored vectors can be scored", async () => {
   const entries = [
     makeEntry({ id: "a", keys: ["moon-gate"], embedding: null }),

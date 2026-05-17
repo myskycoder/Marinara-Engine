@@ -919,7 +919,10 @@ export async function processLorebooks(
       content: a.entry.content,
       matchedKeys: a.matchedKeys,
     })),
-    budgetSkippedEntries: [],
+    budgetSkippedEntries: budgetResult.budgetSkippedEntries.map((entry) => ({
+      id: entry.id,
+      matchedKeys: entry.matchedKeys,
+    })),
     ...(updatedOverrides ? { updatedEntryStateOverrides: updatedOverrides } : {}),
     ...(updatedEntryTimingStates ? { updatedEntryTimingStates } : {}),
   };

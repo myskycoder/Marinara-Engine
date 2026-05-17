@@ -211,16 +211,27 @@ export async function prepareKnowledgeRouterCandidates(
     options.activatedEntries && options.keywordScanEntries
       ? buildKeywordActivatedRouterEntries(options.keywordScanEntries, scanMessages, options.scanOptions)
       : [];
+  const fallbackCandidates = mergeKnowledgeRouterCandidates([], [
+    ...activatedEntries,
+    ...keywordScanEntries,
+    ...entries,
+  ]);
   const query = buildKnowledgeRouterQuery(context);
-  const semanticMatches = await semanticShortlistLorebookEntries(entries, query, {
-    topK: normalizePositiveInteger(options.semanticTopK, DEFAULT_SEMANTIC_TOP_K),
-    localEmbedder: options.localEmbedder,
-    embeddingSource: options.embeddingSource,
-  });
+  let semanticMatches: SemanticLorebookMatch[] | null;
+  try {
+    semanticMatches = await semanticShortlistLorebookEntries(entries, query, {
+      topK: normalizePositiveInteger(options.semanticTopK, DEFAULT_SEMANTIC_TOP_K),
+      localEmbedder: options.localEmbedder,
+      embeddingSource: options.embeddingSource,
+    });
+  } catch (err) {
+    logger.warn(err, "[knowledge-router] semantic shortlist failed; using fallback candidates");
+    return fallbackCandidates;
+  }
 
   if (semanticMatches === null) {
     logger.debug("[knowledge-router] semantic shortlist unavailable; using filtered router entries");
-    return entries;
+    return fallbackCandidates;
   }
 
   const candidates = mergeKnowledgeRouterCandidates(semanticMatches, [...activatedEntries, ...keywordScanEntries]);
