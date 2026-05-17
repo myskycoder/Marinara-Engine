@@ -13,6 +13,7 @@ export const apiConnections = sqliteTable("api_connections", {
       "anthropic",
       "claude_subscription",
       "google",
+      "google_vertex",
       "mistral",
       "cohere",
       "openrouter",
@@ -50,8 +51,12 @@ export const apiConnections = sqliteTable("api_connections", {
   comfyuiWorkflow: text("comfyui_workflow"),
   /** Image generation: explicitly selected service ID (e.g. "comfyui", "automatic1111"). Overrides URL inference. */
   imageService: text("image_service"),
+  /** For endpoint-based image services (e.g. RunPod Serverless ComfyUI): the endpoint ID. */
+  imageEndpointId: text("image_endpoint_id"),
   /** Default generation parameters (stored as JSON) for new chats using this connection */
   defaultParameters: text("default_parameters"),
+  /** Optional prompt preset override for roleplay/visual-novel chats using this connection */
+  promptPresetId: text("prompt_preset_id"),
   /** Optional hard cap on max_tokens for the API response (for providers like DeepSeek that have lower limits). */
   maxTokensOverride: integer("max_tokens_override"),
   /** Maximum number of agent LLM jobs Marinara may run at once for this connection. */
@@ -64,6 +69,10 @@ export const apiConnections = sqliteTable("api_connections", {
    * exact model chosen on the connection is what runs.
    */
   claudeFastMode: text("claude_fast_mode").notNull().default("false"),
+  /** Folder this connection belongs to (null = root/unfiled). */
+  folderId: text("folder_id"),
+  /** Manual sort order within a folder (lower = higher). 0 = use default sort. */
+  sortOrder: integer("sort_order").notNull().default(0),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });

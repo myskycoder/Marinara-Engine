@@ -20,7 +20,7 @@ import { seedDefaultConnection } from "./db/seed-connection.js";
 import { seedDefaultBackgrounds } from "./db/seed-backgrounds.js";
 import { seedDefaultGameAssets } from "./db/seed-game-assets.js";
 import { seedDefaultRegexScripts } from "./db/seed-regex.js";
-import { buildAssetManifest } from "./services/game/asset-manifest.service.js";
+import { buildAssetManifest, ensureAssetDirs } from "./services/game/asset-manifest.service.js";
 import { recoverGalleryImages } from "./services/storage/gallery-recovery.js";
 import { APP_VERSION } from "@marinara-engine/shared";
 import { existsSync } from "fs";
@@ -30,12 +30,14 @@ import { getBuildCommit, getBuildLabel } from "./config/build-info.js";
 import {
   getLogLevel,
   getNodeEnv,
+  isRequestLoggingDisabled,
   isFileStorageBackend,
   isAutoCreateDefaultConnectionDisabled,
 } from "./config/runtime-config.js";
 import { corsDelegate } from "./config/cors-config.js";
 import { sidecarProcessService } from "./services/sidecar/sidecar-process.service.js";
 import { startAiAuditCleanupSchedule, stopAiAuditCleanupSchedule } from "./services/ai-audit/audit-cleanup.js";
+import { startServerAutonomousScheduler } from "./services/conversation/server-autonomous-scheduler.service.js";
 
 const isLite = process.env.MARINARA_LITE === "true" || process.env.MARINARA_LITE === "1";
 const REVALIDATE_FILES = new Set(["index.html"]);
@@ -48,6 +50,7 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
       level: getLogLevel(),
       transport: getNodeEnv() !== "production" ? { target: "pino-pretty", options: { colorize: true } } : undefined,
     },
+    disableRequestLogging: isRequestLoggingDisabled,
     bodyLimit: MAX_UPLOAD_BYTES, // Large profile imports can include many base64 avatars.
     ...(https && { https }),
   });
@@ -102,7 +105,8 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
   await seedDefaultBackgrounds();
   await seedDefaultGameAssets();
 
-  // ── Build game asset manifest (scans game-assets + user backgrounds) ──
+  // ── Ensure default asset directories exist, then build manifest ──
+  ensureAssetDirs();
   buildAssetManifest();
 
   // ── Recover orphaned gallery images (files on disk without DB records) ──
@@ -143,6 +147,9 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
 
   // ── Routes ──
   await registerRoutes(app);
+
+  // ── Server-side autonomous conversation scheduler ──
+  startServerAutonomousScheduler(app);
 
   // ── Sidecar bootstrap (background, skipped in lite mode) ──
   if (!isLite) {

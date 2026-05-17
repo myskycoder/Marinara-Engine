@@ -20,6 +20,8 @@ export interface AutonomousCheckResult {
   inactivityMs: number;
 }
 
+export type AutonomousClientPresenceStatus = "active" | "idle" | "dnd";
+
 /** Auto-reset generationInProgress after this many ms (5 minutes) */
 const GENERATION_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -32,6 +34,8 @@ export interface ChatActivityState {
   autonomousMessages: Map<string, { count: number; lastSentAt: number }>;
   /** Timestamp when generation started, or null if not in progress */
   generationInProgressSince: number | null;
+  /** Last status reported by a connected client autonomous poller. */
+  clientPresence?: { status: AutonomousClientPresenceStatus; updatedAt: number };
 }
 
 // ── In-memory activity tracker ──
@@ -144,6 +148,33 @@ export function initializeActivityFromMessages(
   });
 }
 
+export function recordAutonomousClientPresence(
+  chatId: string,
+  status: AutonomousClientPresenceStatus = "active",
+): void {
+  const now = Date.now();
+  const state = activityStates.get(chatId);
+  if (state) {
+    state.clientPresence = { status, updatedAt: now };
+    return;
+  }
+
+  activityStates.set(chatId, {
+    lastUserMessageAt: 0,
+    lastAssistantMessageAt: 0,
+    autonomousMessages: new Map(),
+    generationInProgressSince: null,
+    clientPresence: { status, updatedAt: now },
+  });
+}
+
+export function getRecentAutonomousClientPresence(chatId: string, maxAgeMs: number) {
+  const presence = activityStates.get(chatId)?.clientPresence;
+  if (!presence) return null;
+  if (Date.now() - presence.updatedAt > maxAgeMs) return null;
+  return presence;
+}
+
 /**
  * Check whether any character in a chat should send an autonomous message.
  */
@@ -151,6 +182,7 @@ export function checkAutonomousMessaging(
   chatId: string,
   characterSchedules: Record<string, WeekSchedule>,
   isGroupChat: boolean,
+  opts: { maxFollowups?: number } = {},
 ): AutonomousCheckResult {
   const noTrigger: AutonomousCheckResult = {
     shouldTrigger: false,
@@ -181,7 +213,7 @@ export function checkAutonomousMessaging(
   const eligibleCharacters: Array<{ id: string; priority: number }> = [];
 
   // Maximum autonomous follow-ups before a character stops messaging
-  const MAX_FOLLOWUPS = 3;
+  const maxFollowups = Math.max(1, Math.min(3, Math.floor(opts.maxFollowups ?? 3)));
 
   for (const [charId, schedule] of Object.entries(characterSchedules)) {
     const { status } = getCurrentStatus(schedule);
@@ -199,7 +231,7 @@ export function checkAutonomousMessaging(
     const sentCount = prevAutonomous?.count ?? 0;
 
     // Cap follow-ups — don't spam the user endlessly
-    if (sentCount >= MAX_FOLLOWUPS) continue;
+    if (sentCount >= maxFollowups) continue;
 
     if (sentCount === 0) {
       // First autonomous message — use normal inactivity from user's last message

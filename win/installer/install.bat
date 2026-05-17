@@ -11,14 +11,14 @@ set "NODE_DOWNLOAD_URL=https://nodejs.org/dist/v24.15.0/node-v24.15.0-x64.msi"
 set "NODE_SHA256=feffb8e5cb5ac47f793666636d496ef3e975be82c84c4da5d20e6aa8fa4eb806"
 set "GIT_DOWNLOAD_URL=https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/Git-2.54.0-64-bit.exe"
 set "GIT_SHA256=2b96e7854f0520f0f6b709c21041d9801b1be44d5e1a0d9fa621b2fbc40f1983"
-set "RELEASE_TAG=v1.5.9"
+set "RELEASE_TAG=v1.6.0"
 if not defined MARINARA_RELEASE_COMMIT set "MARINARA_RELEASE_COMMIT="
 set "RELEASE_COMMIT=%MARINARA_RELEASE_COMMIT%"
 
 echo.
 echo  +==========================================+
 echo  ^|   Marinara Engine - Windows Installer     ^|
-echo  ^|   v1.5.9                                  ^|
+echo  ^|   v1.6.0                                  ^|
 
 echo  +==========================================+
 echo.
@@ -32,6 +32,27 @@ set "INSTALL_DIR=%USERPROFILE%\Marinara-Engine"
 set "USER_INPUT="
 set /p "USER_INPUT=  Install location [%INSTALL_DIR%]: "
 if not "%USER_INPUT%"=="" set "INSTALL_DIR=%USER_INPUT%"
+if exist "%INSTALL_DIR%\data\" goto :warn_same_install_dir
+if exist "%INSTALL_DIR%\.git\" goto :warn_same_install_dir
+if exist "%INSTALL_DIR%\start.bat" goto :warn_same_install_dir
+goto :after_same_install_dir_warning
+
+:warn_same_install_dir
+echo.
+echo  [WARN] yo this'll delete your user data
+echo         You are reinstalling Marinara Engine into:
+echo         %INSTALL_DIR%
+echo.
+echo         Back up %INSTALL_DIR%\data first if you want to keep it.
+echo.
+choice /C YN /N /M "  Continue anyway? [Y/N]: "
+if errorlevel 2 (
+    echo.
+    echo  Installation cancelled.
+    goto :eof
+)
+
+:after_same_install_dir_warning
 
 :: -- Check prerequisites --
 echo.

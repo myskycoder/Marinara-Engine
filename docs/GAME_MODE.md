@@ -281,6 +281,8 @@ Generates NPC portraits, location backgrounds, and inventory imagery via your se
 
 This toggle adds the most cost per turn — one or more image API calls each time the scene changes. If you do enable it, expect a meaningful per-session cost increase compared to running without.
 
+Game Mode image generation waits up to 5 minutes by default. Slow providers can be given more time by setting `IMAGE_GEN_TIMEOUT_MS` in `.env`; ComfyUI workflows also use `COMFYUI_GEN_TIMEOUT` (seconds) for the post-queue polling window. Restart Marinara after changing either timeout.
+
 #### Image Prompt Writer (optional)
 
 Rare visual-novel CG illustrations from the player's POV are normally requested by the small Scene Analyzer model — it returns a draft prompt mixed in with audio/widget/segment fields. That draft is fine for cinematic tag-based backends but often misses the conventions of whatever image model you actually configured (booru tags vs. natural language vs. NovelAI v3/v4 syntax vs. short prose for Pollinations, etc.).

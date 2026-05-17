@@ -6,7 +6,7 @@
 // ──────────────────────────────────────────────
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Bug, ChevronDown, ChevronUp, X, CheckCircle2, XCircle, Clock } from "lucide-react";
+import { Bug, ChevronDown, ChevronUp, X, CheckCircle2, XCircle, Clock, Wrench } from "lucide-react";
 import { useAgentStore } from "../../stores/agent.store";
 import { useUIStore } from "../../stores/ui.store";
 import { cn } from "../../lib/utils";
@@ -25,6 +25,7 @@ export function AgentDebugPanel() {
   // Group entries by phase pattern: setup phases and result phases
   const setupEntries = debugLog.filter((e) => e.agents && !e.results);
   const resultEntries = debugLog.filter((e) => e.results);
+  const toolEntries = debugLog.filter((e) => e.toolCall || e.toolResult);
 
   return (
     <motion.div
@@ -140,8 +141,40 @@ export function AgentDebugPanel() {
                 </div>
               ))}
 
+              {/* Tool calls/results */}
+              {toolEntries.map((entry, i) => {
+                const call = entry.toolCall;
+                const result = entry.toolResult;
+                const name = call?.name ?? result?.name ?? "unknown_tool";
+                const payload = call?.arguments ?? result?.result ?? "";
+                const blocked = call?.allowed === false;
+                const failed = result ? !result.success : blocked;
+
+                return (
+                  <div key={`tool-${i}`} className="rounded-md bg-[var(--muted)]/30 p-2">
+                    <div className="mb-1 flex items-center gap-1.5 font-semibold text-violet-400">
+                      <Wrench size="0.75rem" className="shrink-0" />
+                      <span>{call ? "Tool Call" : "Tool Result"}</span>
+                      <span className={cn("truncate font-medium", failed && "text-red-400")}>{name}</span>
+                      {result &&
+                        (result.success ? (
+                          <CheckCircle2 size="0.75rem" className="shrink-0 text-emerald-500" />
+                        ) : (
+                          <XCircle size="0.75rem" className="shrink-0 text-red-500" />
+                        ))}
+                      {blocked && <span className="text-red-400">denied</span>}
+                    </div>
+                    {payload && (
+                      <pre className="max-h-24 overflow-y-auto whitespace-pre-wrap break-words rounded bg-black/10 p-1.5 font-mono text-[0.6875rem] leading-snug text-[var(--muted-foreground)]">
+                        {payload}
+                      </pre>
+                    )}
+                  </div>
+                );
+              })}
+
               {/* Fallback: show lastResults when no debug log entries */}
-              {resultEntries.length === 0 && lastResults.size > 0 && (
+              {resultEntries.length === 0 && toolEntries.length === 0 && lastResults.size > 0 && (
                 <div className="rounded-md bg-[var(--muted)]/30 p-2">
                   <div className="font-semibold text-blue-400 mb-1">Last Agent Results</div>
                   <div className="flex flex-col gap-0.5">

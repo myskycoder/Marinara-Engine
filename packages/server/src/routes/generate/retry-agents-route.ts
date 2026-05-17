@@ -11,7 +11,7 @@ import {
   type GameMap,
 } from "@marinara-engine/shared";
 import { eq } from "drizzle-orm";
-import { buildSpriteExpressionChoices, listCharacterSprites } from "../../services/game/sprite.service.js";
+import { listCharacterSprites } from "../../services/game/sprite.service.js";
 import { DATA_DIR } from "../../utils/data-dir.js";
 import { normalizeAgentMaxParallelJobs, type ResolvedAgent } from "../../services/agents/agent-pipeline.js";
 import { executeAgent, executeAgentBatch, normalizeAgentContextSize } from "../../services/agents/agent-executor.js";
@@ -20,6 +20,7 @@ import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "../../services/llm
 import { createLLMProvider } from "../../services/llm/provider-registry.js";
 import { sidecarModelService } from "../../services/sidecar/sidecar-model.service.js";
 import { resolveSpotifyCredentials } from "../../services/spotify/spotify.service.js";
+import { getAssetManifest } from "../../services/game/asset-manifest.service.js";
 import { createAgentsStorage } from "../../services/storage/agents.storage.js";
 import { createCharactersStorage } from "../../services/storage/characters.storage.js";
 import { createChatsStorage } from "../../services/storage/chats.storage.js";
@@ -37,6 +38,7 @@ import {
   parseGameStateRow,
   preserveTrackerCharacterUiFields,
   resolveBaseUrl,
+  resolveVisibleGameStateAnchor,
 } from "./generate-route-utils.js";
 import {
   buildHistoricalLorebookKeeperContext,
@@ -46,6 +48,7 @@ import {
   persistLorebookKeeperUpdates,
   resolveLorebookKeeperTarget,
 } from "./lorebook-keeper-utils.js";
+import { filterGameInternalAgentIds } from "../../services/lorebook/game-lorebook-scope.js";
 import { sendSseEvent, startSseReply } from "./sse.js";
 import type { PresentCharacter } from "@marinara-engine/shared";
 import {
@@ -55,7 +58,11 @@ import {
   resolveAgentConnectionId,
   type AgentConnectionWarning,
 } from "./agent-connection-guards.js";
-import { validateSpriteExpressionEntries } from "./expression-agent-utils.js";
+import {
+  buildAvailableSpriteCharacter,
+  normalizeSpriteDisplayModes,
+  validateSpriteExpressionEntries,
+} from "./expression-agent-utils.js";
 import {
   normalizeContextInjections,
   normalizeSecretPlotSceneDirections,
@@ -278,25 +285,27 @@ async function buildRetryAgentContext(args: {
     memory: {},
   };
 
-  const lorebookKeeperSettings = getLorebookKeeperSettings(chatMeta);
-  const { writableLorebookIds, targetLorebookId, targetLorebookName } = await resolveLorebookKeeperTarget({
-    lorebooksStore,
-    chatId,
-    characterIds,
-    personaId: personaContext.personaId,
-    activeLorebookIds,
-    preferredTargetLorebookId: lorebookKeeperSettings.targetLorebookId,
-  });
-  agentContext.writableLorebookIds = writableLorebookIds;
-  if (targetLorebookId) {
-    agentContext.memory._lorebookKeeperTargetLorebookId = targetLorebookId;
-  }
-  if (targetLorebookName) {
-    agentContext.memory._lorebookKeeperTargetLorebookName = targetLorebookName;
-  }
-  const existingEntries = await loadLorebookKeeperExistingEntries(lorebooksStore, targetLorebookId);
-  if (existingEntries.length > 0) {
-    agentContext.memory._existingLorebookEntries = existingEntries;
+  if (resolvedAgentTypes.has("lorebook-keeper")) {
+    const lorebookKeeperSettings = getLorebookKeeperSettings(chatMeta);
+    const { writableLorebookIds, targetLorebookId, targetLorebookName } = await resolveLorebookKeeperTarget({
+      lorebooksStore,
+      chatId,
+      characterIds,
+      personaId: personaContext.personaId,
+      activeLorebookIds,
+      preferredTargetLorebookId: lorebookKeeperSettings.targetLorebookId,
+    });
+    agentContext.writableLorebookIds = writableLorebookIds;
+    if (targetLorebookId) {
+      agentContext.memory._lorebookKeeperTargetLorebookId = targetLorebookId;
+    }
+    if (targetLorebookName) {
+      agentContext.memory._lorebookKeeperTargetLorebookName = targetLorebookName;
+    }
+    const existingEntries = await loadLorebookKeeperExistingEntries(lorebooksStore, targetLorebookId);
+    if (existingEntries.length > 0) {
+      agentContext.memory._existingLorebookEntries = existingEntries;
+    }
   }
 
   if (historicalGameStateAnchor) {
@@ -311,7 +320,11 @@ async function buildRetryAgentContext(args: {
       agentContext.gameState = null;
     }
   } else if (useLatestGameStateFallback) {
-    const latestGS = await gameStateStore.getLatestCommitted(chatId);
+    const visibleAnchor = lastAssistant ? resolveVisibleGameStateAnchor([lastAssistant]) : null;
+    const latestGS = await gameStateStore.getForGeneration(chatId, {
+      preferLatestVisible: true,
+      visibleAnchor,
+    });
     if (latestGS) {
       agentContext.gameState = parseGameStateRow(latestGS as Record<string, unknown>);
     }
@@ -330,21 +343,36 @@ async function buildRetryAgentContext(args: {
   // If the expression agent is being retried, load available sprite expressions per character
   if (resolvedAgentTypes.has("expression")) {
     try {
+      const spriteDisplayModes = normalizeSpriteDisplayModes(chatMeta.spriteDisplayModes);
+      const selectedSpriteIds = new Set(
+        Array.isArray(chatMeta.spriteCharacterIds)
+          ? chatMeta.spriteCharacterIds.filter((id): id is string => typeof id === "string")
+          : [],
+      );
+      const restrictToSelectedSprites = selectedSpriteIds.size > 0;
       const perChar: Array<{
         characterId: string;
         characterName: string;
         expressions: string[];
-        expressionChoices: string[];
+        expressionChoices?: string[];
       }> = [];
       for (const char of agentContext.characters) {
+        if (restrictToSelectedSprites && !selectedSpriteIds.has(char.id)) continue;
         const sprites = listCharacterSprites(char.id);
-        if (sprites && sprites.expressions.length > 0) {
-          perChar.push({
-            characterId: char.id,
-            characterName: char.name,
-            expressions: sprites.expressions,
-            expressionChoices: buildSpriteExpressionChoices(sprites.expressions),
-          });
+        if (!sprites) continue;
+        const spriteCharacter = buildAvailableSpriteCharacter(char.id, char.name, sprites, spriteDisplayModes);
+        if (spriteCharacter) perChar.push(spriteCharacter);
+      }
+      if (personaContext.personaId && (!restrictToSelectedSprites || selectedSpriteIds.has(personaContext.personaId))) {
+        const sprites = listCharacterSprites(personaContext.personaId);
+        if (sprites) {
+          const spritePersona = buildAvailableSpriteCharacter(
+            personaContext.personaId,
+            personaContext.personaName,
+            sprites,
+            spriteDisplayModes,
+          );
+          if (spritePersona) perChar.push(spritePersona);
         }
       }
       if (perChar.length > 0) {
@@ -360,6 +388,12 @@ async function buildRetryAgentContext(args: {
     try {
       const { readdirSync, readFileSync, existsSync } = await import("fs");
       const { join, extname } = await import("path");
+      const availableBackgrounds: Array<{
+        filename: string;
+        originalName?: string | null;
+        tags: string[];
+        source?: "user" | "game_asset";
+      }> = [];
       const bgDir = join(DATA_DIR, "backgrounds");
       if (existsSync(bgDir)) {
         const exts = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"]);
@@ -373,13 +407,27 @@ async function buildRetryAgentContext(args: {
             /* */
           }
         }
-        agentContext.memory._availableBackgrounds = files.map((f: string) => ({
-          filename: f,
-          originalName: meta[f]?.originalName ?? null,
-          tags: meta[f]?.tags ?? [],
-        }));
-        agentContext.memory._currentBackground = chatMeta.background ?? null;
+        availableBackgrounds.push(
+          ...files.map((f: string) => ({
+            filename: f,
+            originalName: meta[f]?.originalName ?? null,
+            tags: meta[f]?.tags ?? [],
+            source: "user" as const,
+          })),
+        );
       }
+      availableBackgrounds.push(
+        ...(getAssetManifest().byCategory.backgrounds ?? [])
+          .filter((entry) => !entry.path.startsWith("__user_bg__/"))
+          .map((entry) => ({
+            filename: `gameAsset:${entry.path}`,
+            originalName: entry.tag,
+            tags: entry.subcategory ? [entry.subcategory] : [],
+            source: "game_asset" as const,
+          })),
+      );
+      agentContext.memory._availableBackgrounds = availableBackgrounds;
+      agentContext.memory._currentBackground = chatMeta.background ?? null;
     } catch (err) {
       logger.warn(err, "[retry-agents] Failed to load available backgrounds for retry");
     }
@@ -412,7 +460,7 @@ async function resolveRetryAgents(args: {
   agentsStore: ReturnType<typeof createAgentsStorage>;
 }): Promise<ResolvedRetryAgents> {
   const { agentTypes, chat, conns, agentsStore } = args;
-  const agentTypeSet = new Set(agentTypes);
+  const agentTypeSet = new Set(filterGameInternalAgentIds((chat as any).mode, agentTypes));
   const configs = await agentsStore.list();
   const enabledConfigs = configs.filter((config: any) => agentTypeSet.has(config.type));
   const resolvedTypeSet = new Set(enabledConfigs.map((config: any) => config.type));
@@ -1286,6 +1334,24 @@ async function applyRetryResultEffects(args: {
   const chats = createChatsStorage(app.db);
   const agentsStore = createAgentsStorage(app.db);
   const chatMeta = parseExtra(chat.metadata) as Record<string, unknown>;
+  let currentResponseForRewrite = agentContext.mainResponse;
+  let retryBaseGameStateSnapshotPromise: ReturnType<typeof gameStateStore.getForGeneration> | null = null;
+  const loadRetryBaseGameStateSnapshot = () => {
+    retryBaseGameStateSnapshotPromise ??= gameStateStore.getForGeneration(chatId, {
+      preferLatestVisible: true,
+      visibleAnchor: retryMessageId ? { messageId: retryMessageId, swipeIndex: retrySwipeIndex } : null,
+      excludeMessageId: retryMessageId || null,
+    });
+    return retryBaseGameStateSnapshotPromise;
+  };
+  const loadRetryTargetGameStateSnapshot = async () => {
+    if (!retryMessageId) return loadRetryBaseGameStateSnapshot();
+    const existing = await gameStateStore.getByMessage(retryMessageId, retrySwipeIndex);
+    if (existing) return existing;
+    return gameStateStore.updateByMessage(retryMessageId, retrySwipeIndex, chatId, {}, undefined, {
+      baseSnapshot: await loadRetryBaseGameStateSnapshot(),
+    });
+  };
 
   for (const result of sortedResults) {
     if (result.success && result.type === "text_rewrite" && result.data && typeof result.data === "object") {
@@ -1294,6 +1360,15 @@ async function applyRetryResultEffects(args: {
         const editedText = (rewriteData.editedText as string) ?? "";
         const changes = (rewriteData.changes as Array<{ description: string }>) ?? [];
         if (retryMessageId && editedText && changes.length > 0) {
+          const currentMessage = await chats.getMessage(retryMessageId);
+          if ((currentMessage?.content ?? "") !== currentResponseForRewrite) {
+            logger.info(
+              "[retry-agents] Skipping rewrite for message %s because the message was edited during agent retry",
+              retryMessageId,
+            );
+            break;
+          }
+          currentResponseForRewrite = editedText;
           await chats.updateMessageContent(retryMessageId, editedText);
           sendSseEvent(reply, { type: "text_rewrite", data: { editedText, changes } });
         }
@@ -1312,7 +1387,14 @@ async function applyRetryResultEffects(args: {
         if (gs.weather != null) worldStatePatch.weather = gs.weather as string;
         if (gs.temperature != null) worldStatePatch.temperature = gs.temperature as string;
         if (Object.keys(worldStatePatch).length > 0) {
-          await gameStateStore.updateByMessage(retryMessageId, retrySwipeIndex, chatId, worldStatePatch as any);
+          await gameStateStore.updateByMessage(
+            retryMessageId,
+            retrySwipeIndex,
+            chatId,
+            worldStatePatch as any,
+            undefined,
+            { baseSnapshot: await loadRetryBaseGameStateSnapshot() },
+          );
         }
 
         const nextLocation = typeof worldStatePatch.location === "string" ? worldStatePatch.location : null;
@@ -1349,7 +1431,8 @@ async function applyRetryResultEffects(args: {
           );
           const trimmedText = text.trim();
           if (trimmedText) {
-            const entry = { agentType: result.agentType, text: trimmedText };
+            const agentName = resolvedAgents.find((entry) => entry.resolved.type === result.agentType)?.cfg.name;
+            const entry = { agentType: result.agentType, agentName, text: trimmedText };
             const idx = list.findIndex((e) => e.agentType === result.agentType);
             if (idx >= 0) list[idx] = entry;
             else list.push(entry);
@@ -1379,7 +1462,7 @@ async function applyRetryResultEffects(args: {
           chatId,
           retryMessageId,
         );
-        const previousSnapshot = await gameStateStore.getByMessage(retryMessageId, retrySwipeIndex);
+        const previousSnapshot = await loadRetryTargetGameStateSnapshot();
         let previousCharacters: any[] = [];
         if (previousSnapshot?.presentCharacters) {
           try {
@@ -1393,9 +1476,16 @@ async function applyRetryResultEffects(args: {
           }
         }
         preserveTrackerCharacterUiFields(presentCharacters, previousCharacters);
-        await gameStateStore.updateByMessage(retryMessageId, retrySwipeIndex, chatId, {
-          presentCharacters,
-        });
+        await gameStateStore.updateByMessage(
+          retryMessageId,
+          retrySwipeIndex,
+          chatId,
+          {
+            presentCharacters,
+          },
+          undefined,
+          { baseSnapshot: await loadRetryBaseGameStateSnapshot() },
+        );
         sendSseEvent(reply, { type: "game_state_patch", data: { presentCharacters } });
 
         const trackerAgent = resolvedAgents.find((entry) => entry.resolved.type === "character-tracker");
@@ -1437,9 +1527,7 @@ async function applyRetryResultEffects(args: {
         const bars = (psData.stats as any[]) ?? [];
         const status = (psData.status as string) ?? "";
         const inventory = (psData.inventory as any[]) ?? [];
-        const latest =
-          (await gameStateStore.getByMessage(retryMessageId, retrySwipeIndex)) ??
-          (await gameStateStore.getLatest(chatId));
+        const latest = await loadRetryTargetGameStateSnapshot();
         if (latest) {
           const updates: Record<string, unknown> = {};
           if (bars.length > 0) updates.personaStats = JSON.stringify(bars);
@@ -1538,9 +1626,7 @@ async function applyRetryResultEffects(args: {
           JSON.stringify(qData).slice(0, 500),
         );
         if (updates.length > 0) {
-          const snap =
-            (await gameStateStore.getByMessage(retryMessageId, retrySwipeIndex)) ??
-            (await gameStateStore.getLatest(chatId));
+          const snap = await loadRetryTargetGameStateSnapshot();
           const existingPS = snap?.playerStats
             ? typeof snap.playerStats === "string"
               ? JSON.parse(snap.playerStats)
@@ -1628,9 +1714,7 @@ async function applyRetryResultEffects(args: {
         const ctData = result.data as Record<string, unknown>;
         const fields = (ctData.fields as any[]) ?? [];
         if (fields.length > 0) {
-          const snap =
-            (await gameStateStore.getByMessage(retryMessageId, retrySwipeIndex)) ??
-            (await gameStateStore.getLatest(chatId));
+          const snap = await loadRetryTargetGameStateSnapshot();
           if (snap) {
             const existingPS = snap.playerStats
               ? typeof snap.playerStats === "string"
@@ -1652,6 +1736,9 @@ async function applyRetryResultEffects(args: {
 
     // ── ILLUSTRATOR: generate image from agent prompt ──
     if (result.success && result.type === "image_prompt" && result.data && typeof result.data === "object") {
+      const illustratorFailureName =
+        resolvedAgents.find((a) => a.resolved.id === result.agentId || a.resolved.type === "illustrator")?.cfg.name ??
+        "Illustrator";
       try {
         const illData = result.data as Record<string, unknown>;
         const shouldGenerate = illData.shouldGenerate === true;
@@ -1664,7 +1751,12 @@ async function applyRetryResultEffects(args: {
           const illustratorAgent = resolvedAgents.find(
             (a) => a.resolved.id === result.agentId || a.resolved.type === "illustrator",
           );
-          let imgConnId = (illustratorAgent?.resolved.settings?.imageConnectionId as string) ?? null;
+          const rawImagePositivePrompt = illustratorAgent?.resolved.settings?.imagePositivePrompt;
+          const rawSavedNegativePrompt = illustratorAgent?.resolved.settings?.imageNegativePrompt;
+          const imagePositivePrompt = typeof rawImagePositivePrompt === "string" ? rawImagePositivePrompt.trim() : "";
+          const savedNegativePrompt = typeof rawSavedNegativePrompt === "string" ? rawSavedNegativePrompt.trim() : "";
+          const configuredImgConnId = illustratorAgent?.resolved.settings?.imageConnectionId;
+          let imgConnId = typeof configuredImgConnId === "string" ? configuredImgConnId.trim() : null;
           if (!imgConnId) {
             const defaultImageConn = (await conns.list()).find(
               (c) =>
@@ -1674,6 +1766,9 @@ async function applyRetryResultEffects(args: {
           }
           if (imgConnId) {
             const imgConnFull = await conns.getWithKey(imgConnId);
+            if (!imgConnFull) {
+              throw new Error("Cannot resolve Illustrator image generation connection");
+            }
             if (imgConnFull) {
               const { generateImage, saveImageToDisk } = await import("../../services/image/image-generation.js");
               const { createGalleryStorage } = await import("../../services/storage/gallery.storage.js");
@@ -1703,6 +1798,10 @@ async function applyRetryResultEffects(args: {
               }
 
               let fullPrompt = style ? `${style}, ${imagePrompt}` : imagePrompt;
+              if (imagePositivePrompt) {
+                fullPrompt = `${fullPrompt}, ${imagePositivePrompt}`;
+              }
+              const finalNegativePrompt = [negativePrompt, savedNegativePrompt].filter(Boolean).join(", ");
 
               // Collect character avatar references when enabled
               const useAvatarRefs = illustratorAgent?.resolved.settings?.useAvatarReferences === true;
@@ -1756,10 +1855,11 @@ async function applyRetryResultEffects(args: {
 
               const imageResult = await generateImage(imgModel, imgBaseUrl, imgApiKey, imgServiceHint, {
                 prompt: fullPrompt,
-                negativePrompt: negativePrompt || undefined,
+                negativePrompt: finalNegativePrompt || undefined,
                 model: imgModel,
                 width: imgWidth,
                 height: imgHeight,
+                imageEndpointId: imgConnFull.imageEndpointId || undefined,
                 comfyWorkflow: (imgConnFull as any).comfyuiWorkflow || undefined,
                 imageDefaults,
                 referenceImage,
@@ -1828,6 +1928,19 @@ async function applyRetryResultEffects(args: {
                 (illData.reason as string | undefined)?.slice(0, 80) ?? imagePrompt.slice(0, 80),
               );
             }
+          } else {
+            logger.warn(
+              "[retry-agents] Illustrator wants to generate but no image generation connection is configured",
+            );
+            sendSseEvent(reply, {
+              type: "agent_error",
+              data: {
+                agentType: "illustrator",
+                agentName: illustratorFailureName,
+                error:
+                  "No image generation connection set on the Illustrator agent, and no default Illustrator image connection is configured. Go to Settings -> Connections and mark an image generation connection as the default for Illustrator, or assign one directly in Settings -> Agents -> Illustrator.",
+              },
+            });
           }
         }
       } catch (illErr) {
@@ -1836,6 +1949,7 @@ async function applyRetryResultEffects(args: {
           type: "agent_error",
           data: {
             agentType: "illustrator",
+            agentName: illustratorFailureName,
             error: illErr instanceof Error ? illErr.message : "Image generation failed",
           },
         });
@@ -1941,7 +2055,8 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
         };
       }
 
-      const supportsHiddenFromAI = chat.mode === "roleplay" || chat.mode === "visual_novel";
+      const supportsHiddenFromAI =
+        chat.mode === "conversation" || chat.mode === "roleplay" || chat.mode === "visual_novel";
       if (supportsHiddenFromAI) {
         recentMessages = recentMessages.filter((message: any) => !isMessageHiddenFromAI(message));
         if (preGenerationRecentMessages) {

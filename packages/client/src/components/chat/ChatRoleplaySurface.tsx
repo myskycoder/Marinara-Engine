@@ -7,10 +7,16 @@ import {
   useRef,
   useState,
   type ComponentProps,
+  type CSSProperties,
   type ReactNode,
   type RefObject,
 } from "react";
-import { type SceneForkMode, type SpritePlacement, type SpriteSide } from "@marinara-engine/shared";
+import {
+  type ChatSummaryEntry,
+  type SceneForkMode,
+  type SpritePlacement,
+  type SpriteSide,
+} from "@marinara-engine/shared";
 import {
   FolderOpen,
   Image,
@@ -26,7 +32,7 @@ import {
   FlipHorizontal2,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
-import { getChatDisplayName } from "../../lib/chat-display";
+import { getConnectedChatDisplayName } from "../../lib/chat-display";
 import { useUIStore } from "../../stores/ui.store";
 import { useChatStore } from "../../stores/chat.store";
 import { useGameStateStore } from "../../stores/game-state.store";
@@ -37,6 +43,7 @@ import { ChatBranchSelector } from "./ChatBranchSelector";
 import { EndSceneBar } from "./SceneBanner";
 import { ChatCommonOverlays } from "./ChatCommonOverlays";
 import { ActiveWorldInfoButton } from "./ActiveWorldInfoButton";
+import type { SpriteDisplayMode } from "./sprite-display-modes";
 import type {
   CharacterMap,
   MessageSelectionToggle,
@@ -98,17 +105,34 @@ function WeatherEffectsConnected() {
   );
 }
 
-function CrossfadeBackground({ url, className }: { url: string | null; className?: string }) {
+function getBackgroundBlurStyle(blurPx: number): Pick<CSSProperties, "filter" | "transform"> {
+  if (blurPx <= 0) return {};
+  return {
+    filter: `blur(${blurPx}px)`,
+    transform: `scale(${Math.min(1.08, 1 + blurPx * 0.0025)})`,
+  };
+}
+
+function CrossfadeBackground({
+  url,
+  className,
+  blurPx = 0,
+}: {
+  url: string | null;
+  className?: string;
+  blurPx?: number;
+}) {
   const [bgA, setBgA] = useState<string | null>(url);
   const [bgB, setBgB] = useState<string | null>(null);
   const [aActive, setAActive] = useState(true);
   const activeSlot = useRef<"a" | "b">("a");
+  const backgroundBlurStyle = getBackgroundBlurStyle(blurPx);
 
   useEffect(() => {
     const currentUrl = activeSlot.current === "a" ? bgA : bgB;
     if (url === currentUrl) return;
 
-    if (url && url.startsWith("/api/backgrounds/")) {
+    if (url && (url.startsWith("/api/backgrounds/") || url.startsWith("/api/game-assets/"))) {
       fetch(url, { method: "HEAD" })
         .then((res) => {
           if (res.ok) {
@@ -146,14 +170,24 @@ function CrossfadeBackground({ url, className }: { url: string | null; className
           "mari-background absolute inset-0 bg-cover bg-center bg-no-repeat transition-opacity duration-700 ease-in-out",
           className,
         )}
-        style={{ backgroundImage: bgA ? `url(${bgA})` : "none", opacity: aActive ? 1 : 0 }}
+        style={{
+          backgroundImage: bgA ? `url(${bgA})` : "none",
+          opacity: aActive ? 1 : 0,
+          transition: "opacity 700ms ease-in-out, filter 180ms ease-out, transform 180ms ease-out",
+          ...backgroundBlurStyle,
+        }}
       />
       <div
         className={cn(
           "mari-background absolute inset-0 bg-cover bg-center bg-no-repeat transition-opacity duration-700 ease-in-out",
           className,
         )}
-        style={{ backgroundImage: bgB ? `url(${bgB})` : "none", opacity: aActive ? 0 : 1 }}
+        style={{
+          backgroundImage: bgB ? `url(${bgB})` : "none",
+          opacity: aActive ? 0 : 1,
+          transition: "opacity 700ms ease-in-out, filter 180ms ease-out, transform 180ms ease-out",
+          ...backgroundBlurStyle,
+        }}
       />
     </>
   );
@@ -324,13 +358,19 @@ function ToolbarMenu({ children }: { children: ReactNode }) {
 function SummaryButton({
   chatId,
   summary,
+  summaryEntries,
   summaryContextSize,
-  onContextSizeChange,
+  summaryPromptTemplates,
+  activeSummaryPromptTemplateId,
+  totalMessageCount,
 }: {
   chatId: string | null;
   summary: string | null;
+  summaryEntries?: ChatSummaryEntry[];
   summaryContextSize: number;
-  onContextSizeChange: (size: number) => void;
+  summaryPromptTemplates?: ComponentProps<typeof SummaryPopover>["promptTemplates"];
+  activeSummaryPromptTemplateId?: string | null;
+  totalMessageCount: number;
 }) {
   const [open, setOpen] = useState(false);
   const compact = useUIStore((s) => s.centerCompact);
@@ -359,8 +399,11 @@ function SummaryButton({
           <SummaryPopover
             chatId={chatId}
             summary={summary}
+            summaryEntries={summaryEntries}
             contextSize={summaryContextSize}
-            onContextSizeChange={onContextSizeChange}
+            promptTemplates={summaryPromptTemplates}
+            activePromptTemplateId={activeSummaryPromptTemplateId}
+            totalMessageCount={totalMessageCount}
             onClose={() => setOpen(false)}
           />
         </Suspense>
@@ -482,6 +525,7 @@ type RoleplaySurfaceProps = {
   encounterActive: boolean;
   spritePosition: SpriteSide;
   spriteCharacterIds: string[];
+  spriteDisplayModes: SpriteDisplayMode[];
   spriteExpressions: Record<string, string>;
   spritePlacements: Record<string, SpritePlacement>;
   spriteScale: number;
@@ -531,7 +575,6 @@ type RoleplaySurfaceProps = {
   onCloneSceneFromHere?: (messageId: string) => void;
   isCloneSceneFromHereDisabled?: boolean;
   onToggleSelectMessage: (toggle: MessageSelectionToggle) => void;
-  onSummaryContextSizeChange: (size: number) => void;
   onRerunTrackers: () => void;
   onRerunSingleTracker: (agentType: string) => void;
   onRetryFailedAgents?: () => void;
@@ -585,6 +628,7 @@ export function ChatRoleplaySurface({
   encounterActive,
   spritePosition,
   spriteCharacterIds,
+  spriteDisplayModes,
   spriteExpressions,
   spritePlacements,
   spriteScale,
@@ -634,7 +678,6 @@ export function ChatRoleplaySurface({
   onCloneSceneFromHere,
   isCloneSceneFromHereDisabled,
   onToggleSelectMessage,
-  onSummaryContextSizeChange,
   onRerunTrackers,
   onRerunSingleTracker,
   onRetryFailedAgents,
@@ -673,10 +716,11 @@ export function ChatRoleplaySurface({
   isGrouped,
 }: RoleplaySurfaceProps) {
   const linkedChatName = chat?.connectedChatId
-    ? getChatDisplayName(allChats?.find((c) => c.id === chat.connectedChatId))
+    ? getConnectedChatDisplayName(allChats?.find((c) => c.id === chat.connectedChatId))
     : undefined;
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const rightPanelOpen = useUIStore((s) => s.rightPanelOpen);
+  const chatBackgroundBlur = useUIStore((s) => s.chatBackgroundBlur);
   const hideEchoChamberOnMobile =
     sidebarOpen ||
     rightPanelOpen ||
@@ -689,7 +733,7 @@ export function ChatRoleplaySurface({
   return (
     <div data-component="ChatArea.Roleplay" className="flex flex-1 overflow-hidden">
       <div className="rpg-chat-area mari-chat-area relative flex flex-1 flex-col overflow-hidden">
-        <CrossfadeBackground url={chatBackground} />
+        <CrossfadeBackground url={chatBackground} blurPx={chatBackgroundBlur} />
         <div className="rpg-overlay absolute inset-0" />
         <div className="rpg-vignette pointer-events-none absolute inset-0" />
         {weatherEffects && <WeatherEffectsConnected />}
@@ -699,6 +743,7 @@ export function ChatRoleplaySurface({
               characterIds={spriteCharacterIds}
               messages={msgPayload}
               side={spritePosition}
+              spriteDisplayModes={spriteDisplayModes}
               spriteExpressions={spriteExpressions}
               spritePlacements={spritePlacements}
               editing={spriteArrangeMode}
@@ -753,8 +798,19 @@ export function ChatRoleplaySurface({
                     <SummaryButton
                       chatId={chat?.id ?? null}
                       summary={chatMeta.summary ?? null}
+                      summaryEntries={
+                        Array.isArray(chatMeta.summaryEntries) ? (chatMeta.summaryEntries as ChatSummaryEntry[]) : []
+                      }
                       summaryContextSize={summaryContextSize}
-                      onContextSizeChange={onSummaryContextSizeChange}
+                      summaryPromptTemplates={
+                        Array.isArray(chatMeta.summaryPromptTemplates) ? chatMeta.summaryPromptTemplates : []
+                      }
+                      activeSummaryPromptTemplateId={
+                        typeof chatMeta.activeSummaryPromptTemplateId === "string"
+                          ? chatMeta.activeSummaryPromptTemplateId
+                          : null
+                      }
+                      totalMessageCount={totalMessageCount}
                     />
                     <ActiveWorldInfoButton chatId={chat?.id ?? null} />
                     <AuthorNotesButton chatId={chat?.id ?? null} chatMeta={chatMeta} />
@@ -844,8 +900,21 @@ export function ChatRoleplaySurface({
                         <SummaryButton
                           chatId={chat?.id ?? null}
                           summary={chatMeta.summary ?? null}
+                          summaryEntries={
+                            Array.isArray(chatMeta.summaryEntries)
+                              ? (chatMeta.summaryEntries as ChatSummaryEntry[])
+                              : []
+                          }
                           summaryContextSize={summaryContextSize}
-                          onContextSizeChange={onSummaryContextSizeChange}
+                          summaryPromptTemplates={
+                            Array.isArray(chatMeta.summaryPromptTemplates) ? chatMeta.summaryPromptTemplates : []
+                          }
+                          activeSummaryPromptTemplateId={
+                            typeof chatMeta.activeSummaryPromptTemplateId === "string"
+                              ? chatMeta.activeSummaryPromptTemplateId
+                              : null
+                          }
+                          totalMessageCount={totalMessageCount}
                         />
                         <ActiveWorldInfoButton chatId={chat?.id ?? null} />
                         <AuthorNotesButton chatId={chat?.id ?? null} chatMeta={chatMeta} />
@@ -907,8 +976,19 @@ export function ChatRoleplaySurface({
                       <SummaryButton
                         chatId={chat?.id ?? null}
                         summary={chatMeta.summary ?? null}
+                        summaryEntries={
+                          Array.isArray(chatMeta.summaryEntries) ? (chatMeta.summaryEntries as ChatSummaryEntry[]) : []
+                        }
                         summaryContextSize={summaryContextSize}
-                        onContextSizeChange={onSummaryContextSizeChange}
+                        summaryPromptTemplates={
+                          Array.isArray(chatMeta.summaryPromptTemplates) ? chatMeta.summaryPromptTemplates : []
+                        }
+                        activeSummaryPromptTemplateId={
+                          typeof chatMeta.activeSummaryPromptTemplateId === "string"
+                            ? chatMeta.activeSummaryPromptTemplateId
+                            : null
+                        }
+                        totalMessageCount={totalMessageCount}
                       />
                       <ActiveWorldInfoButton chatId={chat?.id ?? null} />
                       <AuthorNotesButton chatId={chat?.id ?? null} chatMeta={chatMeta} />

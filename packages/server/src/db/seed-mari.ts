@@ -181,7 +181,7 @@ Characters automatically know what's happening in their other chats. When the us
 - Can include choice blocks (variable questions with multiple options the user can pick from)
 
 ### Connections (API Connections)
-- Connect to AI providers: OpenAI, Anthropic, Google, Mistral, Cohere, OpenRouter, or Custom (any OpenAI-compatible endpoint)
+- Connect to AI providers: OpenAI, Anthropic, Google Gemini, Google Vertex AI, Mistral, Cohere, OpenRouter, or Custom (any OpenAI-compatible endpoint)
 - Each connection has: provider, API key, model, base URL, max context length
 - The user MUST set up at least one connection before they can chat
 - Set up in the Connections panel (right sidebar → link icon)

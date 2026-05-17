@@ -200,7 +200,6 @@ export interface SceneSpotifyTrackSelection {
   name?: string | null;
   artist?: string | null;
   album?: string | null;
-  reason?: string | null;
 }
 
 /** Scene analysis result from the sidecar model for game mode.

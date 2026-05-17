@@ -138,7 +138,7 @@ export function ExpressionPanel({ characterIds, messages, characterMap, isRolepl
                 )}
               >
                 {info?.avatarUrl ? (
-                  <span className="block h-4 w-4 shrink-0 overflow-hidden rounded-full">
+                  <span className="relative block h-4 w-4 shrink-0 overflow-hidden rounded-full">
                     <img
                       src={info.avatarUrl}
                       alt=""
@@ -224,7 +224,7 @@ function ExpressionSprite({
         {info?.avatarUrl ? (
           <div
             className={cn(
-              "h-32 w-32 overflow-hidden rounded-2xl shadow-lg",
+              "relative h-32 w-32 overflow-hidden rounded-2xl shadow-lg",
               isRoleplay ? "ring-2 ring-white/10" : "ring-2 ring-[var(--border)]",
             )}
           >

@@ -8,6 +8,7 @@ export const lorebooks = sqliteTable("lorebooks", {
   name: text("name").notNull(),
   description: text("description").notNull().default(""),
   category: text("category").notNull().default("uncategorized"),
+  imagePath: text("image_path"),
   scanDepth: integer("scan_depth").notNull().default(2),
   tokenBudget: integer("token_budget").notNull().default(2048),
   recursiveScanning: text("recursive_scanning").notNull().default("false"),
@@ -158,6 +159,9 @@ export const lorebookEntries = sqliteTable("lorebook_entries", {
 
   /** When true, this entry's content won't trigger further entries during recursive scanning */
   preventRecursion: text("prevent_recursion").notNull().default("false"),
+
+  /** When true, bulk vectorization skips this entry and semantic matching ignores stored vectors */
+  excludeFromVectorization: text("exclude_from_vectorization").notNull().default("false"),
 
   /** Pre-computed embedding vector (JSON array of floats) for semantic matching */
   embedding: text("embedding"),

@@ -1,9 +1,13 @@
 import type { ChatCompletionResult, ChatMessage, ChatOptions, LLMUsage } from "../base-provider.js";
-import { BaseLLMProvider } from "../base-provider.js";
+import { BaseLLMProvider, llmFetch, parseEmbeddingResponse, sanitizeApiError } from "../base-provider.js";
 import { OpenAIProvider } from "./openai.provider.js";
 import { sidecarModelService } from "../../sidecar/sidecar-model.service.js";
 import { sidecarProcessService } from "../../sidecar/sidecar-process.service.js";
 import { resolveSidecarRequestModel } from "../../sidecar/sidecar-request-model.js";
+
+function isNotFoundError(error: unknown): boolean {
+  return error instanceof Error && /\(404\)|\b404\b/.test(error.message);
+}
 
 export class LocalSidecarProvider extends BaseLLMProvider {
   constructor() {
@@ -58,7 +62,68 @@ export class LocalSidecarProvider extends BaseLLMProvider {
     });
   }
 
-  override async _doEmbed(_texts: string[], _model: string): Promise<number[][]> {
-    throw new Error("The local sidecar does not support embeddings.");
+  override async _doEmbed(texts: string[], _model: string): Promise<number[][]> {
+    const baseUrl = await sidecarProcessService.ensureReady({ forceStart: true });
+    const requestModel = this.getRequestModel();
+
+    try {
+      return await this.requestOpenAIEmbeddings(baseUrl, texts, requestModel);
+    } catch (error) {
+      if (!isNotFoundError(error)) throw error;
+      return this.requestLegacyEmbeddings(baseUrl, texts);
+    }
+  }
+
+  private async requestOpenAIEmbeddings(baseUrl: string, texts: string[], model: string): Promise<number[][]> {
+    const response = await llmFetch(`${baseUrl}/v1/embeddings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: texts, model }),
+      signal: AbortSignal.timeout(60_000),
+      bufferResponse: true,
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`Local sidecar embedding request failed (${response.status}): ${sanitizeApiError(body)}`);
+    }
+    return parseEmbeddingResponse(await response.json());
+  }
+
+  private async requestLegacyEmbeddings(baseUrl: string, texts: string[]): Promise<number[][]> {
+    const embeddings: number[][] = [];
+    for (const text of texts) {
+      const response = await llmFetch(`${baseUrl}/embedding`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: text }),
+        signal: AbortSignal.timeout(60_000),
+        bufferResponse: true,
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new Error(
+          `Local sidecar legacy embedding request failed (${response.status}): ${sanitizeApiError(body)}`,
+        );
+      }
+      const json = await response.json();
+      const embedding = this.parseLegacyEmbeddingResponse(json);
+      embeddings.push(embedding);
+    }
+    return embeddings;
+  }
+
+  private parseLegacyEmbeddingResponse(json: unknown): number[] {
+    if (
+      json &&
+      typeof json === "object" &&
+      !Array.isArray(json) &&
+      Array.isArray((json as { embedding?: unknown }).embedding)
+    ) {
+      return (json as { embedding: number[] }).embedding;
+    }
+    const parsed = parseEmbeddingResponse(json);
+    const embedding = parsed[0];
+    if (!embedding) throw new Error("Local sidecar legacy embedding response did not include an embedding.");
+    return embedding;
   }
 }

@@ -3,7 +3,7 @@
 // ──────────────────────────────────────────────
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Users, Send, ChevronLeft, ChevronRight, Swords, Heart, Sparkles } from "lucide-react";
-import { cn, getAvatarCropStyle } from "../../lib/utils";
+import { cn, getAvatarCropStyle, type AvatarCropValue } from "../../lib/utils";
 import { AnimatedText } from "./AnimatedText";
 
 interface PartyChatMessage {
@@ -25,7 +25,7 @@ interface GamePartySidebarProps {
     id: string;
     name: string;
     avatarUrl?: string | null;
-    avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null;
+    avatarCrop?: AvatarCropValue | null;
     nameColor?: string;
     dialogueColor?: string;
   }>;
@@ -38,7 +38,7 @@ interface GamePartySidebarProps {
       status?: string;
       level?: number;
       avatarUrl?: string | null;
-      avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null;
+      avatarCrop?: AvatarCropValue | null;
       stats?: Array<{ name: string; value: number; max?: number; color?: string }>;
       inventory?: Array<{ name: string; quantity?: number; location?: string }>;
       customFields?: Record<string, string>;
@@ -137,7 +137,7 @@ export function GamePartySidebar({
                   title={m.name}
                 >
                   {m.avatarUrl ? (
-                    <span className="block h-8 w-8 overflow-hidden rounded-full">
+                    <span className="relative block h-8 w-8 overflow-hidden rounded-full">
                       <img
                         src={m.avatarUrl}
                         alt={m.name}
@@ -166,7 +166,7 @@ export function GamePartySidebar({
                 <div className="relative border-b border-amber-500/15 bg-gradient-to-r from-amber-900/20 via-amber-800/10 to-amber-900/20 px-2.5 py-2">
                   <div className="flex items-center gap-2">
                     {selectedCard.avatarUrl ? (
-                      <span className="block h-10 w-10 shrink-0 overflow-hidden rounded-md border border-amber-500/25 shadow-md">
+                      <span className="relative block h-10 w-10 shrink-0 overflow-hidden rounded-md border border-amber-500/25 shadow-md">
                         <img
                           src={selectedCard.avatarUrl}
                           alt={selectedCard.title}
@@ -313,7 +313,7 @@ export function GamePartySidebar({
                 return (
                   <div key={msg.id} className="flex items-start gap-1.5 text-xs">
                     {msg.characterAvatar ? (
-                      <span className="mt-0.5 block h-5 w-5 shrink-0 overflow-hidden rounded-full">
+                      <span className="relative mt-0.5 block h-5 w-5 shrink-0 overflow-hidden rounded-full">
                         <img
                           src={msg.characterAvatar}
                           alt=""

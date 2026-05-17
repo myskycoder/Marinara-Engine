@@ -53,6 +53,7 @@ function parseLorebookRow(row: Record<string, unknown>) {
     maxRecursionDepth: typeof row.maxRecursionDepth === "number" ? row.maxRecursionDepth : 3,
     isGlobal: row.isGlobal === "true",
     enabled: row.enabled === "true",
+    imagePath: row.imagePath || null,
     generatedBy: row.generatedBy || null,
     sourceAgentId: row.sourceAgentId || null,
     characterId: characterIds[0] ?? null,
@@ -86,6 +87,7 @@ function parseEntryRow(row: Record<string, unknown>) {
     useRegex: row.useRegex === "true",
     locked: row.locked === "true",
     preventRecursion: row.preventRecursion === "true",
+    excludeFromVectorization: row.excludeFromVectorization === "true",
     folderId: (row.folderId as string | null | undefined) ?? null,
     keys: parseStringArray(row.keys),
     secondaryKeys: parseStringArray(row.secondaryKeys),
@@ -234,6 +236,7 @@ export function createLorebooksStorage(db: DB) {
           name: input.name,
           description: input.description ?? "",
           category: input.category ?? "uncategorized",
+          imagePath: input.imagePath ?? null,
           scanDepth: input.scanDepth ?? 2,
           tokenBudget: input.tokenBudget ?? 2048,
           recursiveScanning: String(input.recursiveScanning ?? false),
@@ -259,6 +262,7 @@ export function createLorebooksStorage(db: DB) {
       if (input.name !== undefined) updates.name = input.name;
       if (input.description !== undefined) updates.description = input.description;
       if (input.category !== undefined) updates.category = input.category;
+      if (input.imagePath !== undefined) updates.imagePath = input.imagePath;
       if (input.scanDepth !== undefined) updates.scanDepth = input.scanDepth;
       if (input.tokenBudget !== undefined) updates.tokenBudget = input.tokenBudget;
       if (input.recursiveScanning !== undefined) updates.recursiveScanning = String(input.recursiveScanning);
@@ -342,6 +346,8 @@ export function createLorebooksStorage(db: DB) {
       characterIds?: string[];
       personaId?: string | null;
       chatId?: string;
+      excludedLorebookIds?: string[];
+      excludedSourceAgentIds?: string[];
     }) {
       const enabledBookRows = await db.select().from(lorebooks).where(eq(lorebooks.enabled, "true"));
       const enabledBooks = (await hydrateLorebookRows(db, enabledBookRows)) as unknown as Array<{
@@ -352,11 +358,16 @@ export function createLorebooksStorage(db: DB) {
         personaId?: string | null;
         personaIds?: string[];
         chatId?: string | null;
+        sourceAgentId?: string | null;
       }>;
 
       let relevantBooks = enabledBooks;
       if (filters) {
+        const excludedLorebookIds = new Set(filters.excludedLorebookIds ?? []);
+        const excludedSourceAgentIds = new Set(filters.excludedSourceAgentIds ?? []);
         relevantBooks = enabledBooks.filter((b) => {
+          if (excludedLorebookIds.has(b.id)) return false;
+          if (b.sourceAgentId && excludedSourceAgentIds.has(b.sourceAgentId)) return false;
           // Globally active lorebooks bypass all scope filters
           if (b.isGlobal) return true;
           // Explicitly added to this chat
@@ -461,6 +472,7 @@ export function createLorebooksStorage(db: DB) {
         schedule: input.schedule ? JSON.stringify(input.schedule) : null,
         locked: String(input.locked ?? false),
         preventRecursion: String(input.preventRecursion ?? false),
+        excludeFromVectorization: String(input.excludeFromVectorization ?? false),
         createdAt: timestamp,
         updatedAt: timestamp,
       });
@@ -473,7 +485,8 @@ export function createLorebooksStorage(db: DB) {
         input.name !== undefined ||
         input.content !== undefined ||
         input.keys !== undefined ||
-        input.secondaryKeys !== undefined;
+        input.secondaryKeys !== undefined ||
+        input.excludeFromVectorization === true;
       if (input.name !== undefined) updates.name = input.name;
       if (input.content !== undefined) updates.content = input.content;
       if (input.description !== undefined) updates.description = input.description;
@@ -541,6 +554,8 @@ export function createLorebooksStorage(db: DB) {
       if (input.schedule !== undefined) updates.schedule = input.schedule ? JSON.stringify(input.schedule) : null;
       if (input.locked !== undefined) updates.locked = String(input.locked);
       if (input.preventRecursion !== undefined) updates.preventRecursion = String(input.preventRecursion);
+      if (input.excludeFromVectorization !== undefined)
+        updates.excludeFromVectorization = String(input.excludeFromVectorization);
       if (shouldClearEmbedding) updates.embedding = null;
 
       await db.update(lorebookEntries).set(updates).where(eq(lorebookEntries.id, id));

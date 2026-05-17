@@ -14,14 +14,60 @@ import type {
   WrapFormat,
   GenerationParameters,
   LorebookEntryTimingState,
+  MacroContext,
+  ResolveMacroOptions,
 } from "@marinara-engine/shared";
 import { resolveMacros } from "@marinara-engine/shared";
-import type { MacroContext } from "@marinara-engine/shared";
 import { wrapContent, wrapGroup } from "./format-engine.js";
 import { expandMarker, type MarkerContext } from "./marker-expander.js";
 import { mergeAdjacentMessages, squashLeadingSystemMessages } from "./merger.js";
 import { injectAtDepth } from "../lorebook/prompt-injector.js";
-import { buildPromptMacroContext, collectCharacterDepthPromptEntries } from "./macro-context.js";
+import type { LorebookScanResult } from "../lorebook/index.js";
+import {
+  buildPromptMacroContext,
+  collectCharacterDepthPromptEntries,
+  resolveMacrosWithVariableSnapshot,
+} from "./macro-context.js";
+
+interface RuntimeAgentData {
+  text: string;
+  startToken?: string;
+  endToken?: string;
+}
+
+interface ChoiceOptionValue {
+  value: string;
+}
+
+function parseChoiceOptions(options: string): ChoiceOptionValue[] {
+  try {
+    const parsed = JSON.parse(options) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((option) =>
+      option && typeof option === "object" && typeof (option as { value?: unknown }).value === "string"
+        ? [{ value: (option as { value: string }).value }]
+        : [],
+    );
+  } catch {
+    return [];
+  }
+}
+
+function sanitizeChoiceSelection(
+  selected: string | string[] | undefined,
+  options: ChoiceOptionValue[],
+  isMulti: boolean,
+): string | string[] | undefined {
+  if (selected === undefined) return undefined;
+  const validValues = new Set(options.map((option) => option.value));
+  const candidates = Array.isArray(selected) ? selected : [selected];
+
+  if (isMulti) {
+    return candidates.filter((value, index) => validValues.has(value) && candidates.indexOf(value) === index);
+  }
+
+  return candidates.find((value) => validValues.has(value));
+}
 
 // ═══════════════════════════════════════════════
 //  Public Interface
@@ -98,6 +144,8 @@ export interface AssemblerInput {
   personaStats?: any;
   /** Chat messages from the DB (user + assistant + narrator etc.) */
   chatMessages: ChatMLMessage[];
+  /** Optional scan-only messages for lorebook matching. Keeps synthetic guidance out of chat history. */
+  lorebookScanMessages?: ChatMLMessage[];
   /** Current chat summary text (if any) */
   chatSummary?: string | null;
   /** Whether agents are enabled for this chat */
@@ -106,6 +154,10 @@ export interface AssemblerInput {
   activeAgentIds?: string[];
   /** Per-chat list of manually activated lorebook IDs from chat settings */
   activeLorebookIds?: string[];
+  /** Lorebook IDs that should be excluded even if otherwise scoped to the chat. */
+  excludedLorebookIds?: string[];
+  /** Source agent IDs whose generated lorebooks should be excluded from scanning. */
+  excludedLorebookSourceAgentIds?: string[];
   /** When true, lorebook markers expand to empty content without scanning global or scoped lorebooks. */
   disableLorebooks?: boolean;
   /** Pre-computed embedding of chat context for semantic lorebook matching. */
@@ -124,6 +176,10 @@ export interface AssemblerInput {
   previewOnly?: boolean;
   /** When set, replaces individual character scenario fields with this group scenario. */
   groupScenarioOverrideText?: string | null;
+  /** Per-generation agent data keyed by agent type. Used when an agent section must consume fresh output. */
+  runtimeAgentData?: Record<string, string | RuntimeAgentData>;
+  /** Preserve character-scoped macros for a later known-speaker finalization pass. */
+  deferCharacterMacros?: boolean;
 }
 
 /** Output of the assembler. */
@@ -138,6 +194,12 @@ export interface AssemblerOutput {
   updatedEntryStateOverrides?: Record<string, { ephemeral?: number | null; enabled?: boolean }>;
   /** Updated per-chat sticky/cooldown/delay timing state. Caller should persist to chat metadata. */
   updatedEntryTimingStates?: Record<string, LorebookEntryTimingState>;
+  /** Lorebook entries activated while expanding lorebook markers. */
+  lorebookActivatedEntries?: LorebookScanResult["activatedEntries"];
+  /** Lorebook entries matched but excluded by token budgets while expanding lorebook markers. */
+  lorebookBudgetSkippedEntries?: LorebookScanResult["budgetSkippedEntries"];
+  /** Agent types whose runtime data was consumed by enabled agent_data sections. */
+  runtimeAgentTypesUsed?: string[];
 }
 
 // ═══════════════════════════════════════════════
@@ -150,6 +212,14 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
   const sectionOrder = JSON.parse(input.preset.sectionOrder) as string[];
   const groupOrder = JSON.parse(input.preset.groupOrder) as string[];
   const variableValues = JSON.parse(input.preset.variableValues) as Record<string, string>;
+  // Preset text can safely delay all character macros until the responder is known.
+  // Lorebook content only delays names so field macros keep the same budgeting behavior.
+  const deferAllMacroOptions: ResolveMacroOptions | undefined = input.deferCharacterMacros
+    ? { deferCharacterMacros: "all" }
+    : undefined;
+  const deferNameMacroOptions: ResolveMacroOptions | undefined = input.deferCharacterMacros
+    ? { deferCharacterMacros: "names" }
+    : undefined;
 
   // Build lookup maps
   const sectionMap = new Map(input.sections.map((s) => [s.id, s]));
@@ -161,19 +231,15 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
     const isMulti = cb.multiSelect === "true";
     const isRandom = cb.randomPick === "true";
     const separator = cb.separator || ", ";
-    const selected = input.chatChoices[cb.variableName];
+    const opts = parseChoiceOptions(cb.options);
+    const selected = sanitizeChoiceSelection(input.chatChoices[cb.variableName], opts, isMulti);
 
     if (selected !== undefined) {
       if (isMulti && Array.isArray(selected)) {
         // Multi-select: either random-pick one or join all
         if (selected.length === 0) {
           // Fallback to first option
-          try {
-            const opts = JSON.parse(cb.options) as Array<{ value: string }>;
-            if (opts.length > 0 && opts[0]) variableValues[cb.variableName] = opts[0].value;
-          } catch {
-            /* empty */
-          }
+          if (opts.length > 0 && opts[0]) variableValues[cb.variableName] = opts[0].value;
         } else if (isRandom) {
           // Random pick: select one at random each generation
           variableValues[cb.variableName] = selected[Math.floor(Math.random() * selected.length)] ?? "";
@@ -187,15 +253,9 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
       }
     } else {
       // Default to first option's value if no selection yet
-      try {
-        const opts = JSON.parse(cb.options) as Array<{ value: string }>;
-        if (opts.length > 0 && opts[0]) variableValues[cb.variableName] = opts[0].value;
-      } catch {
-        /* empty */
-      }
+      if (opts.length > 0 && opts[0]) variableValues[cb.variableName] = opts[0].value;
     }
   }
-
   // Build macro context (character names and primary card fields resolved from IDs)
   const macroCtx = await buildPromptMacroContext({
     db: input.db,
@@ -211,7 +271,7 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
 
   // Resolve macros inside variable values themselves (e.g. {{user}} in a choice value)
   for (const key of Object.keys(variableValues)) {
-    variableValues[key] = resolveMacros(variableValues[key]!, macroCtx);
+    variableValues[key] = resolveMacros(variableValues[key]!, macroCtx, deferAllMacroOptions);
   }
 
   // Build marker context
@@ -225,11 +285,14 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
     personaFields: input.personaFields,
     personaStats: input.personaStats,
     chatMessages: input.chatMessages,
+    lorebookScanMessages: input.lorebookScanMessages,
     chatSummary: input.chatSummary ?? null,
     wrapFormat,
     enableAgents: input.enableAgents ?? true,
     activeAgentIds: input.activeAgentIds ?? [],
     activeLorebookIds: input.activeLorebookIds ?? [],
+    excludedLorebookIds: input.excludedLorebookIds ?? [],
+    excludedLorebookSourceAgentIds: input.excludedLorebookSourceAgentIds ?? [],
     disableLorebooks: input.disableLorebooks === true,
     chatEmbedding: input.chatEmbedding ?? null,
     entryStateOverrides: input.entryStateOverrides,
@@ -238,6 +301,7 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
     gameState: input.gameState ?? null,
     generationTriggers: input.generationTriggers ?? ["chat"],
     previewOnly: input.previewOnly === true,
+    resolveLorebookContent: (value) => resolveMacrosWithVariableSnapshot(value, macroCtx, deferNameMacroOptions),
     groupScenarioOverrideText: input.groupScenarioOverrideText ?? null,
   };
 
@@ -247,6 +311,7 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
   const depthSections: ResolvedSection[] = [];
   let lorebookDepthEntriesCount = 0;
   let hasChatSummaryMarker = false;
+  const runtimeAgentTypesUsed = new Set<string>();
 
   for (const sectionId of sectionOrder) {
     const section = sectionMap.get(sectionId);
@@ -272,7 +337,10 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
     const resolved = await resolveSection(section, {
       macroCtx,
       markerCtx,
+      macroOptions: deferAllMacroOptions,
       wrapFormat,
+      runtimeAgentData: input.runtimeAgentData ?? {},
+      runtimeAgentTypesUsed,
     });
 
     if (!resolved) continue;
@@ -377,12 +445,7 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
   }
 
   if (markerCtx.lorebookDepthEntries && markerCtx.lorebookDepthEntries.length > 0) {
-    allDepthEntries.push(
-      markerCtx.lorebookDepthEntries.map((entry) => ({
-        ...entry,
-        content: resolveMacros(entry.content, macroCtx),
-      })),
-    );
+    allDepthEntries.push(markerCtx.lorebookDepthEntries);
   }
 
   const characterDepthEntries = await collectCharacterDepthPromptEntries(input.db, input.characterIds, macroCtx);
@@ -431,6 +494,13 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
     ...(markerCtx.updatedEntryTimingStates !== undefined
       ? { updatedEntryTimingStates: markerCtx.updatedEntryTimingStates }
       : {}),
+    ...(markerCtx.lorebookScanResult
+      ? {
+          lorebookActivatedEntries: markerCtx.lorebookScanResult.activatedEntries,
+          lorebookBudgetSkippedEntries: markerCtx.lorebookScanResult.budgetSkippedEntries,
+        }
+      : {}),
+    ...(runtimeAgentTypesUsed.size > 0 ? { runtimeAgentTypesUsed: Array.from(runtimeAgentTypesUsed) } : {}),
   };
 }
 
@@ -450,7 +520,10 @@ interface ResolvedSection {
 interface ResolveSectionCtx {
   macroCtx: MacroContext;
   markerCtx: MarkerContext;
+  macroOptions?: ResolveMacroOptions;
   wrapFormat: WrapFormat;
+  runtimeAgentData: Record<string, string | RuntimeAgentData>;
+  runtimeAgentTypesUsed: Set<string>;
 }
 
 // ═══════════════════════════════════════════════
@@ -464,11 +537,34 @@ async function resolveSection(
   const role = section.role as "system" | "user" | "assistant";
 
   let content = section.content;
+  let contentMacrosResolved = false;
+  let macroOptions = ctx.macroOptions;
+  let runtimeAgentText = "";
+  let runtimeAgentStartToken: string | undefined;
+  let runtimeAgentEndToken: string | undefined;
 
   // Handle marker sections
   if (section.isMarker === "true" && section.markerConfig) {
     const markerConfig = JSON.parse(section.markerConfig) as MarkerConfig;
-    const expanded = await expandMarker(markerConfig, ctx.markerCtx);
+    const runtimeAgentType =
+      markerConfig.type === "agent_data" && markerConfig.agentType ? markerConfig.agentType : null;
+    const runtimeAgentData = runtimeAgentType !== null ? ctx.runtimeAgentData[runtimeAgentType] : undefined;
+    const normalizedRuntimeAgentData: RuntimeAgentData =
+      typeof runtimeAgentData === "string"
+        ? { text: runtimeAgentData }
+        : {
+            text: runtimeAgentData?.text ?? "",
+            startToken: runtimeAgentData?.startToken,
+            endToken: runtimeAgentData?.endToken,
+          };
+    runtimeAgentText = normalizedRuntimeAgentData.text;
+    runtimeAgentStartToken = normalizedRuntimeAgentData.startToken;
+    runtimeAgentEndToken = normalizedRuntimeAgentData.endToken;
+    const hasRuntimeAgentData =
+      runtimeAgentType !== null && Object.prototype.hasOwnProperty.call(ctx.runtimeAgentData, runtimeAgentType);
+    const expanded = hasRuntimeAgentData
+      ? { content: runtimeAgentText }
+      : await expandMarker(markerConfig, ctx.markerCtx);
 
     // Chat history marker returns multiple messages
     if (markerConfig.type === "chat_history" && expanded.messages) {
@@ -491,28 +587,47 @@ async function resolveSection(
       const agentType = markerConfig.agentType ?? "";
       ctx.macroCtx.agentData = {
         ...ctx.macroCtx.agentData,
-        [agentType]: expanded.content,
+        [agentType]: hasRuntimeAgentData ? runtimeAgentText : expanded.content,
       };
+      if (hasRuntimeAgentData) {
+        ctx.runtimeAgentTypesUsed.add(agentType);
+      }
       content = section.content;
     } else {
       // Other markers return content to be wrapped
       content = expanded.content;
+      contentMacrosResolved =
+        markerConfig.type === "world_info_before" ||
+        markerConfig.type === "world_info_after" ||
+        markerConfig.type === "lorebook";
+      if (contentMacrosResolved) {
+        macroOptions = undefined;
+      }
       if (!content.trim()) return null;
     }
   }
 
   // Resolve macros
-  content = resolveMacros(content, ctx.macroCtx);
+  content = contentMacrosResolved ? content : resolveMacros(content, ctx.macroCtx, macroOptions);
   if (!content.trim()) return null;
+  const shouldWrapRuntimeAgentSection = Boolean(
+    runtimeAgentStartToken &&
+    runtimeAgentEndToken &&
+    runtimeAgentText.trim().length > 0 &&
+    content.includes(runtimeAgentText),
+  );
 
   // Auto-wrap in the preset's format
   const wrapped = wrapContent(content, section.name, ctx.wrapFormat);
+  const messageContent = shouldWrapRuntimeAgentSection
+    ? `${runtimeAgentStartToken}${wrapped || content}${runtimeAgentEndToken}`
+    : wrapped || content;
 
   return {
     id: section.id,
     groupId: section.groupId,
     role,
-    messages: [{ role, content: wrapped || content, contextKind: "prompt" }],
+    messages: [{ role, content: messageContent, contextKind: "prompt" }],
     depth: section.injectionDepth,
   };
 }

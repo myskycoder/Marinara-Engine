@@ -1,6 +1,7 @@
 // ──────────────────────────────────────────────
 // LLM Provider — Google Gemini
 // ──────────────────────────────────────────────
+import { createHash, createSign } from "crypto";
 import {
   BaseLLMProvider,
   llmFetch,
@@ -9,6 +10,7 @@ import {
   type ChatOptions,
   type LLMUsage,
 } from "../base-provider.js";
+import { decodePossiblyCompressedBody } from "../../../utils/security.js";
 
 /** A single Gemini response part (text, thought summary, or signature-only). */
 interface GeminiPart {
@@ -17,12 +19,133 @@ interface GeminiPart {
   thoughtSignature?: string;
 }
 
+type GoogleProviderKind = "google" | "google_vertex";
+
+interface GoogleServiceAccountKey {
+  client_email?: string;
+  private_key?: string;
+  token_uri?: string;
+}
+
+const GOOGLE_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
+const serviceAccountTokenCache = new Map<string, { accessToken: string; expiresAtMs: number }>();
+
+function base64UrlJson(value: unknown): string {
+  return Buffer.from(JSON.stringify(value)).toString("base64url");
+}
+
+function parseServiceAccountKey(value: string): GoogleServiceAccountKey | null {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as GoogleServiceAccountKey;
+    return parsed?.client_email && parsed?.private_key ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function looksLikeBearerToken(value: string): boolean {
+  return value.startsWith("ya29.") || /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value);
+}
+
+async function fetchServiceAccountAccessToken(serviceAccount: GoogleServiceAccountKey): Promise<string> {
+  const clientEmail = serviceAccount.client_email!;
+  const privateKey = serviceAccount.private_key!.replace(/\\n/g, "\n");
+  const tokenUri = serviceAccount.token_uri || "https://oauth2.googleapis.com/token";
+  const cacheKey = createHash("sha256").update(`${clientEmail}:${privateKey}:${tokenUri}`).digest("hex");
+  const cached = serviceAccountTokenCache.get(cacheKey);
+  if (cached && cached.expiresAtMs - Date.now() > 60_000) return cached.accessToken;
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const header = base64UrlJson({ alg: "RS256", typ: "JWT" });
+  const claimSet = base64UrlJson({
+    iss: clientEmail,
+    scope: GOOGLE_CLOUD_PLATFORM_SCOPE,
+    aud: tokenUri,
+    exp: nowSeconds + 3600,
+    iat: nowSeconds,
+  });
+  const unsignedJwt = `${header}.${claimSet}`;
+  const signature = createSign("RSA-SHA256").update(unsignedJwt).sign(privateKey, "base64url");
+  const assertion = `${unsignedJwt}.${signature}`;
+
+  const response = await llmFetch(tokenUri, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion,
+    }),
+    bufferResponse: true,
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Google service account auth failed ${response.status}: ${sanitizeApiError(await response.text())}`,
+    );
+  }
+
+  const json = (await response.json()) as { access_token?: string; expires_in?: number };
+  if (!json.access_token) {
+    throw new Error("Google service account auth failed: missing access_token");
+  }
+
+  const expiresInMs = Math.max(60, json.expires_in ?? 3600) * 1000;
+  serviceAccountTokenCache.set(cacheKey, {
+    accessToken: json.access_token,
+    expiresAtMs: Date.now() + expiresInMs,
+  });
+  return json.access_token;
+}
+
+export async function googleAuthHeadersForVertex(apiKey: string): Promise<Record<string, string>> {
+  const credential = apiKey.trim();
+  if (!credential) return {};
+
+  const serviceAccount = parseServiceAccountKey(credential);
+  if (serviceAccount) {
+    return { Authorization: `Bearer ${await fetchServiceAccountAccessToken(serviceAccount)}` };
+  }
+
+  if (looksLikeBearerToken(credential)) {
+    return { Authorization: `Bearer ${credential}` };
+  }
+
+  return { "x-goog-api-key": credential };
+}
+
+export function buildGoogleVertexModelUrl(
+  baseUrl: string,
+  model: string,
+  endpoint: "generateContent" | "streamGenerateContent" | "models",
+): string {
+  const base = baseUrl
+    .replace(/\/+$/, "")
+    .replace(/\/publishers\/google\/models(?:\/[^/:]+(?::(?:generateContent|streamGenerateContent))?)?$/i, "");
+  if (endpoint === "models") {
+    return `${base}/publishers/google/models`;
+  }
+  return `${base}/publishers/google/models/${model}:${endpoint}`;
+}
+
 /**
  * Handles Google Gemini API (generateContent / streamGenerateContent).
  */
 export class GoogleProvider extends BaseLLMProvider {
+  constructor(
+    baseUrl: string,
+    apiKey: string,
+    defaultMaxContext?: number,
+    defaultOpenrouterProvider?: string | null,
+    maxTokensOverride?: number | null,
+    private readonly providerKind: GoogleProviderKind = "google",
+  ) {
+    super(baseUrl, apiKey, defaultMaxContext, defaultOpenrouterProvider, maxTokensOverride);
+  }
+
   override getProviderName(): string {
-    return "google";
+    return this.providerKind;
   }
 
   override async *_doChat(messages: ChatMessage[], options: ChatOptions): AsyncGenerator<string, LLMUsage | void, unknown> {
@@ -61,14 +184,17 @@ export class GoogleProvider extends BaseLLMProvider {
     // Ensure the base URL includes the /v1beta path segment required by the Gemini API.
     // Proxies like api.linkapi.ai need this appended (SillyTavern does it automatically).
     let base = this.baseUrl.replace(/\/+$/, "");
-    if (!/\/v\d/.test(base)) base += "/v1beta";
+    if (this.providerKind === "google" && !/\/v\d/.test(base)) base += "/v1beta";
 
     // When thinking is enabled, force non-streaming (generateContent) because
     // proxies like linkapi.ai strip thought parts from SSE streams but return
     // them in non-streaming responses. Text is still yielded so SSE works.
     const useStreaming = options.stream && !thinkingConfig;
     const endpoint = useStreaming ? "streamGenerateContent" : "generateContent";
-    const url = `${base}/models/${model}:${endpoint}${useStreaming ? "?alt=sse" : ""}`;
+    const url =
+      this.providerKind === "google_vertex"
+        ? `${buildGoogleVertexModelUrl(base, model, endpoint)}${useStreaming ? "?alt=sse" : ""}`
+        : `${base}/models/${model}:${endpoint}${useStreaming ? "?alt=sse" : ""}`;
 
     // Convert to Gemini format — filter out empty-content messages
     const systemMessages = messages.filter((m) => m.role === "system" && m.content?.trim());
@@ -125,24 +251,34 @@ export class GoogleProvider extends BaseLLMProvider {
 
     this.applyCustomParameters(body, options);
 
+    const authHeaders =
+      this.providerKind === "google_vertex"
+        ? await googleAuthHeadersForVertex(this.apiKey)
+        : { "x-goog-api-key": this.apiKey };
+
     const response = await llmFetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-goog-api-key": this.apiKey,
+        ...authHeaders,
       },
       body: JSON.stringify(body),
       ...(options.signal ? { signal: options.signal } : {}),
     });
 
+    async function readDecodedText() {
+      return decodePossiblyCompressedBody(Buffer.from(await response.arrayBuffer())).toString("utf8");
+    }
+
     if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Gemini API error ${response.status}: ${sanitizeApiError(errorText)}`);
+      const errorText = await readDecodedText();
+      const label = this.providerKind === "google_vertex" ? "Vertex AI Gemini API" : "Gemini API";
+      throw new Error(`${label} error ${response.status}: ${sanitizeApiError(errorText)}`);
     }
 
     // ── Non-streaming path (also used when thinking is enabled) ──
     if (!useStreaming) {
-      const json = (await response.json()) as {
+      const json = JSON.parse(await readDecodedText()) as {
         candidates?: Array<{
           content: { parts: GeminiPart[] };
         }>;

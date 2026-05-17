@@ -137,6 +137,8 @@ BYPASS_AUTH_DOCKER=true      # trusts 172.16.0.0/12 (Docker bridge)
 - **Your non-Docker LAN uses `172.16.x.x` / `172.20.x.x` addresses.** `BYPASS_AUTH_DOCKER=true` trusts the entire `172.16.0.0/12` block; non-Docker callers in that range would also bypass auth. Set `BYPASS_AUTH_DOCKER=false` and add the specific containers to `IP_ALLOWLIST` instead.
 - **You genuinely want a password from your Tailnet / containers too** — set the corresponding flag to `false`.
 
+If Marinara is behind a Docker reverse proxy or tunnel container on the default Docker bridge (`172.16.0.0/12`) and you expect Marinara's own Basic Auth/IP allowlist to protect forwarded clients, set `REQUIRE_AUTH_FOR_DOCKER_PROXY=true`. That setup can be valid; just choose one auth boundary: the proxy enforces access, or Marinara does. **Scope:** this flag only matches the same CIDR `BYPASS_AUTH_DOCKER` trusts. Proxies on Docker Swarm overlays, Kubernetes pod networks, or docker-compose user-defined networks with non-`172.16/12` IPAM present a different source IP and won't be affected — gate those by setting `BASIC_AUTH_USER`/`BASIC_AUTH_PASS` with `ALLOW_UNAUTHENTICATED_PRIVATE_NETWORK=false`, or by adding the specific proxy IP to `IP_ALLOWLIST`.
+
 The server logs an `[auth-bypass]` warning the first time a request actually exercises one of these flags, so you can confirm in the log when the bypass goes live.
 
 ## Serving over HTTPS
@@ -150,9 +152,9 @@ For sensitive deployments, consider Tailscale or Cloudflare Access — they avoi
 
 ## When a restart is required
 
-The server watches `.env` for changes and applies most updates within a couple of seconds — no restart needed. That includes `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` / `BASIC_AUTH_REALM`, `IP_ALLOWLIST` / `IP_ALLOWLIST_ENABLED`, `ALLOW_UNAUTHENTICATED_PRIVATE_NETWORK`, `ALLOW_UNAUTHENTICATED_REMOTE`, `TRUSTED_PRIVATE_NETWORKS`, `ADMIN_SECRET`, `CSRF_TRUSTED_ORIGINS`, `LOG_LEVEL`, and the various `*_LOCAL_URLS_ENABLED` / privileged-feature flags.
+The server watches `.env` for changes and applies most updates within a couple of seconds — no restart needed. That includes `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` / `BASIC_AUTH_REALM`, `IP_ALLOWLIST` / `IP_ALLOWLIST_ENABLED`, `ALLOW_UNAUTHENTICATED_PRIVATE_NETWORK`, `ALLOW_UNAUTHENTICATED_REMOTE`, `TRUSTED_PRIVATE_NETWORKS`, `BYPASS_AUTH_*`, `REQUIRE_AUTH_FOR_DOCKER_PROXY`, `ADMIN_SECRET`, `CSRF_TRUSTED_ORIGINS`, `LOG_LEVEL`, `LOG_PRESET`, `LOG_DISABLE_REQUEST_LOGGING`, and the various `*_LOCAL_URLS_ENABLED` / privileged-feature flags.
 
-Changes to these still need a restart because they're bound at startup: `PORT`, `HOST`, `SSL_CERT`, `SSL_KEY`, `DATA_DIR`, `STORAGE_BACKEND`, `FILE_STORAGE_DIR`, `DATABASE_URL`, `ENCRYPTION_KEY`, `TZ`, `AUTO_OPEN_BROWSER`, `AUTO_CREATE_DEFAULT_CONNECTION`. The server logs a warning when one of these changes so you don't wonder why it didn't take effect. (Note: `CORS_ORIGINS` _is_ hot-reloadable for adding/removing origins; only switching between an explicit list and `*` still needs a restart.)
+Changes to these still need a restart because they're bound at startup: `PORT`, `HOST`, `SSL_CERT`, `SSL_KEY`, `DATA_DIR`, `STORAGE_BACKEND`, `FILE_STORAGE_DIR`, `DATABASE_URL`, `ENCRYPTION_KEY`, `TZ`, `AUTO_OPEN_BROWSER`, `AUTO_CREATE_DEFAULT_CONNECTION`, `IMAGE_GEN_TIMEOUT_MS`, `COMFYUI_GEN_TIMEOUT`. The server logs a warning when one of these changes so you don't wonder why it didn't take effect. (Note: `CORS_ORIGINS` _is_ hot-reloadable for adding/removing origins; only switching between an explicit list and `*` still needs a restart.)
 
 ## Verifying it works
 
@@ -175,7 +177,7 @@ Different error than 403?
 - **Connection refused / timeout** — the server isn't bound to a reachable interface. Set `HOST=0.0.0.0` in `.env`.
 - **404 / wrong page** — you're hitting the wrong port. Default is `7860`; check `PORT` in `.env`.
 - **CORS error in the browser console** — Marinara's server log will show a `[cors]` line with the rejected origin and the exact `CORS_ORIGINS=…` line to add to `.env`. Adding it takes effect within ~2s — no restart needed.
-- **`{"error": "Origin '…' is not in the trusted list (CSRF_TRUSTED_ORIGINS)."}`** — copy the offending origin into `CSRF_TRUSTED_ORIGINS` in `.env` (the error body's `hint` field has the exact line). No restart needed.
+- **`{"code": "CSRF_ORIGIN_NOT_TRUSTED", "error": "Origin '…' is not in the trusted list (CSRF_TRUSTED_ORIGINS)."}`** — Marinara also pops a "Save blocked: origin not trusted" toast in the UI so saves can't silently fail. Loopback, LAN, Tailscale (100.64.0.0/10), and Docker bridge (172.16.0.0/12) IP-literal origins are auto-trusted; public IPs and DNS names need to be listed explicitly. Multiple origins are comma-separated, e.g. `CSRF_TRUSTED_ORIGINS=http://203.0.113.10:7831,https://chat.example.com,http://box.tailnet.ts.net:7860`. The error body's `hint` field has the exact line. No restart needed. Marinara also logs the active auto-trust scope on startup under `[csrf] Auto-trusted …`.
 - **`Refused to fetch http://… : '…' is in a private, loopback, metadata, or reserved IP range.`** — Marinara is refusing to call your local LLM provider for SSRF safety. The error message names the exact env var to set (`PROVIDER_LOCAL_URLS_ENABLED` for LLMs, `IMAGE_LOCAL_URLS_ENABLED` for image generation, etc.). Setting it takes effect on the next request.
 
 The full troubleshooting page is at [docs/TROUBLESHOOTING.md](TROUBLESHOOTING.md).

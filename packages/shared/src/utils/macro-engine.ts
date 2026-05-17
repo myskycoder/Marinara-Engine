@@ -16,6 +16,8 @@ export interface MacroContext {
     appearance?: string;
     scenario?: string;
     example?: string;
+    systemPrompt?: string;
+    postHistoryInstructions?: string;
   }>;
   /** Custom variables from prompt toggle groups */
   variables: Record<string, string>;
@@ -35,6 +37,8 @@ export interface MacroContext {
     appearance?: string;
     scenario?: string;
     example?: string;
+    systemPrompt?: string;
+    postHistoryInstructions?: string;
   };
   /** Active persona card fields used by {{persona}} */
   personaFields?: {
@@ -48,6 +52,11 @@ export interface MacroContext {
 
 export interface ResolveMacroOptions {
   trimResult?: boolean;
+  /**
+   * Preserve character macros as internal tokens for a later known-speaker pass.
+   * "names" delays only {{char}}/{{charName}}; "all" also delays character field macros.
+   */
+  deferCharacterMacros?: "names" | "all";
 }
 
 export interface SupportedMacroDefinition {
@@ -57,7 +66,29 @@ export interface SupportedMacroDefinition {
 }
 
 const CHARACTER_MACRO_PATTERN =
-  /\{\{(?:char|charName|description|personality|backstory|appearance|scenario|example)\}\}/i;
+  /\{\{(?:char|charName|description|personality|backstory|appearance|scenario|example|charSysInfo|charPostHistory)\}\}/i;
+const MAX_CHARACTER_FIELD_RESOLUTION_DEPTH = 4;
+// Private placeholders used while character macros are deferred.
+// Internal-only and should be resolved before provider requests.
+const DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX = "\x1eMARINARA_DEFERRED_CHARACTER_";
+const DEFERRED_CHARACTER_MACRO_TOKENS = {
+  char: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}CHAR\x1f`,
+  description: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}DESCRIPTION\x1f`,
+  personality: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}PERSONALITY\x1f`,
+  backstory: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}BACKSTORY\x1f`,
+  appearance: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}APPEARANCE\x1f`,
+  scenario: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}SCENARIO\x1f`,
+  example: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}EXAMPLE\x1f`,
+  systemPrompt: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}SYSTEM_PROMPT\x1f`,
+  postHistoryInstructions: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}POST_HISTORY\x1f`,
+} as const;
+
+export type CharacterMacroProfile = NonNullable<MacroContext["characterProfiles"]>[number];
+type CharacterFieldMacroName = Exclude<keyof typeof DEFERRED_CHARACTER_MACRO_TOKENS, "char">;
+
+export function hasDeferredCharacterMacros(template: string): boolean {
+  return template.includes(DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX);
+}
 
 export const SUPPORTED_MACROS: readonly SupportedMacroDefinition[] = [
   { category: "Identity", syntax: "{{user}}", description: "Current user or persona name" },
@@ -76,6 +107,12 @@ export const SUPPORTED_MACROS: readonly SupportedMacroDefinition[] = [
   { category: "Character", syntax: "{{appearance}}", description: "Current character appearance" },
   { category: "Character", syntax: "{{scenario}}", description: "Current character scenario" },
   { category: "Character", syntax: "{{example}}", description: "Current character example dialogue" },
+  { category: "Character", syntax: "{{charSysInfo}}", description: "Current character system prompt" },
+  {
+    category: "Character",
+    syntax: "{{charPostHistory}}",
+    description: "Current character post-history instructions",
+  },
   { category: "Context", syntax: "{{input}}", description: "Most recent user message" },
   { category: "Context", syntax: "{{model}}", description: "Current model name" },
   { category: "Context", syntax: "{{chatId}}", description: "Current chat ID" },
@@ -87,6 +124,11 @@ export const SUPPORTED_MACROS: readonly SupportedMacroDefinition[] = [
   { category: "Random", syntax: "{{random}}", description: "Random number from 0 to 100" },
   { category: "Random", syntax: "{{random:X:Y}}", description: "Random number between X and Y" },
   { category: "Random", syntax: "{{random::A::B::C}}", description: "Randomly choose one of the provided options" },
+  {
+    category: "Random",
+    syntax: "{{random::A@2::B@0.5}}",
+    description: "Weighted random choice; weights are relative and may be decimals",
+  },
   { category: "Random", syntax: "{{roll:XdY}}", description: "Dice roll total such as 2d6" },
   { category: "Variables", syntax: "{{getvar::name}}", description: "Read a dynamic variable" },
   { category: "Variables", syntax: "{{setvar::name::value}}", description: "Set a dynamic variable" },
@@ -123,18 +165,62 @@ export const SUPPORTED_MACROS: readonly SupportedMacroDefinition[] = [
   },
 ];
 
-function resolveCharacterScopedMacros(
-  template: string,
-  profile: NonNullable<MacroContext["characterProfiles"]>[number],
+function getCharacterFieldValue(profile: CharacterMacroProfile, field: CharacterFieldMacroName): string {
+  return profile[field] ?? "";
+}
+
+function resolveCharacterFieldValue(
+  profile: CharacterMacroProfile,
+  field: CharacterFieldMacroName,
+  depth: number,
 ): string {
+  const value = getCharacterFieldValue(profile, field);
+  if (!value) return "";
+  if (depth >= MAX_CHARACTER_FIELD_RESOLUTION_DEPTH) return "";
+  return resolveCharacterScopedMacros(value, profile, depth + 1);
+}
+
+export function resolveCharacterScopedMacros(template: string, profile: CharacterMacroProfile, depth = 0): string {
   return template
     .replace(/\{\{char(?:Name)?\}\}/gi, profile.name)
-    .replace(/\{\{description\}\}/gi, profile.description ?? "")
-    .replace(/\{\{personality\}\}/gi, profile.personality ?? "")
-    .replace(/\{\{backstory\}\}/gi, profile.backstory ?? "")
-    .replace(/\{\{appearance\}\}/gi, profile.appearance ?? "")
-    .replace(/\{\{scenario\}\}/gi, profile.scenario ?? "")
-    .replace(/\{\{example\}\}/gi, profile.example ?? "");
+    .replace(/\{\{description\}\}/gi, () => resolveCharacterFieldValue(profile, "description", depth))
+    .replace(/\{\{personality\}\}/gi, () => resolveCharacterFieldValue(profile, "personality", depth))
+    .replace(/\{\{backstory\}\}/gi, () => resolveCharacterFieldValue(profile, "backstory", depth))
+    .replace(/\{\{appearance\}\}/gi, () => resolveCharacterFieldValue(profile, "appearance", depth))
+    .replace(/\{\{scenario\}\}/gi, () => resolveCharacterFieldValue(profile, "scenario", depth))
+    .replace(/\{\{example\}\}/gi, () => resolveCharacterFieldValue(profile, "example", depth))
+    .replace(/\{\{charSysInfo\}\}/gi, () => resolveCharacterFieldValue(profile, "systemPrompt", depth))
+    .replace(/\{\{charPostHistory\}\}/gi, () => resolveCharacterFieldValue(profile, "postHistoryInstructions", depth));
+}
+
+export function resolveDeferredCharacterMacros(template: string, profile: CharacterMacroProfile): string {
+  if (!template.includes(DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX)) return template;
+  let result = template.split(DEFERRED_CHARACTER_MACRO_TOKENS.char).join(profile.name);
+  result = result
+    .split(DEFERRED_CHARACTER_MACRO_TOKENS.description)
+    .join(resolveCharacterFieldValue(profile, "description", 0));
+  result = result
+    .split(DEFERRED_CHARACTER_MACRO_TOKENS.personality)
+    .join(resolveCharacterFieldValue(profile, "personality", 0));
+  result = result
+    .split(DEFERRED_CHARACTER_MACRO_TOKENS.backstory)
+    .join(resolveCharacterFieldValue(profile, "backstory", 0));
+  result = result
+    .split(DEFERRED_CHARACTER_MACRO_TOKENS.appearance)
+    .join(resolveCharacterFieldValue(profile, "appearance", 0));
+  result = result
+    .split(DEFERRED_CHARACTER_MACRO_TOKENS.scenario)
+    .join(resolveCharacterFieldValue(profile, "scenario", 0));
+  result = result
+    .split(DEFERRED_CHARACTER_MACRO_TOKENS.example)
+    .join(resolveCharacterFieldValue(profile, "example", 0));
+  result = result
+    .split(DEFERRED_CHARACTER_MACRO_TOKENS.systemPrompt)
+    .join(resolveCharacterFieldValue(profile, "systemPrompt", 0));
+  result = result
+    .split(DEFERRED_CHARACTER_MACRO_TOKENS.postHistoryInstructions)
+    .join(resolveCharacterFieldValue(profile, "postHistoryInstructions", 0));
+  return result;
 }
 
 function expandBracketedCharacterBlocks(template: string, ctx: MacroContext): string {
@@ -184,6 +270,155 @@ function expandBracketedCharacterBlocks(template: string, ctx: MacroContext): st
   return changed ? expandedLines.join("\n") : template;
 }
 
+function findBalancedMacroEnd(input: string, start: number): number {
+  let depth = 0;
+
+  for (let index = start; index < input.length - 1; index++) {
+    if (input[index] === "{" && input[index + 1] === "{") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+
+    if (input[index] === "}" && input[index + 1] === "}") {
+      depth -= 1;
+      index += 1;
+      if (depth === 0) return index + 1;
+    }
+  }
+
+  return -1;
+}
+
+function replaceBalancedMacros(
+  input: string,
+  replacer: (body: string, original: string) => string | undefined,
+): string {
+  let result = "";
+  let index = 0;
+
+  while (index < input.length) {
+    const start = input.indexOf("{{", index);
+    if (start === -1) {
+      result += input.slice(index);
+      break;
+    }
+
+    result += input.slice(index, start);
+
+    const end = findBalancedMacroEnd(input, start);
+    if (end === -1) {
+      result += input.slice(start);
+      break;
+    }
+
+    const original = input.slice(start, end);
+    const body = input.slice(start + 2, end - 2);
+    const replacement = replacer(body, original);
+
+    if (replacement !== undefined) {
+      result += replacement;
+      index = end;
+    } else {
+      result += "{{";
+      index = start + 2;
+    }
+  }
+
+  return result;
+}
+
+function splitTopLevelDoubleColon(input: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let depth = 0;
+
+  for (let index = 0; index < input.length; index++) {
+    if (input[index] === "{" && input[index + 1] === "{") {
+      depth += 1;
+      current += "{{";
+      index += 1;
+      continue;
+    }
+
+    if (input[index] === "}" && input[index + 1] === "}" && depth > 0) {
+      depth -= 1;
+      current += "}}";
+      index += 1;
+      continue;
+    }
+
+    if (depth === 0 && input[index] === ":" && input[index + 1] === ":") {
+      parts.push(current);
+      current = "";
+      index += 1;
+      continue;
+    }
+
+    current += input[index];
+  }
+
+  parts.push(current);
+  return parts;
+}
+
+function findTopLevelWeightMarker(input: string): number {
+  let depth = 0;
+  let markerIndex = -1;
+
+  for (let index = 0; index < input.length; index++) {
+    if (input[index] === "{" && input[index + 1] === "{") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+
+    if (input[index] === "}" && input[index + 1] === "}" && depth > 0) {
+      depth -= 1;
+      index += 1;
+      continue;
+    }
+
+    if (depth === 0 && input[index] === "@") {
+      markerIndex = index;
+    }
+  }
+
+  return markerIndex;
+}
+
+function parseWeightedRandomChoice(choice: string): { text: string; weight: number } {
+  const markerIndex = findTopLevelWeightMarker(choice);
+  if (markerIndex === -1) return { text: choice, weight: 1 };
+
+  const weightText = choice.slice(markerIndex + 1).trim();
+  if (!/^(?:\d+|\d*\.\d+)$/.test(weightText)) {
+    return { text: choice, weight: 1 };
+  }
+
+  const weight = Number(weightText);
+  if (!Number.isFinite(weight) || weight < 0) {
+    return { text: choice, weight: 1 };
+  }
+
+  return { text: choice.slice(0, markerIndex).trim(), weight };
+}
+
+function pickWeightedRandomChoice(choices: string[]): string {
+  const weightedChoices = choices.map(parseWeightedRandomChoice).filter((choice) => choice.text.length > 0);
+  const totalWeight = weightedChoices.reduce((total, choice) => total + choice.weight, 0);
+
+  if (totalWeight <= 0) return "";
+
+  let roll = Math.random() * totalWeight;
+  for (const choice of weightedChoices) {
+    roll -= choice.weight;
+    if (roll < 0) return choice.text;
+  }
+
+  return weightedChoices.at(-1)?.text ?? "";
+}
+
 /**
  * Replace macros in a prompt string with their values.
  *
@@ -193,6 +428,7 @@ function expandBracketedCharacterBlocks(template: string, ctx: MacroContext): st
  *  - {{char}} — current character name
  *  - {{characters}} — comma-separated list of all character names
  *  - {{description}} / {{personality}} / {{backstory}} / {{appearance}} / {{scenario}} / {{example}} — current character card fields
+ *  - {{charSysInfo}} / {{charPostHistory}} — current character instruction fields
  *  - {{date}} — current real date (YYYY-MM-DD)
  *  - {{time}} — current real time (HH:MM)
  *  - {{datetime}} — full ISO datetime string
@@ -201,6 +437,7 @@ function expandBracketedCharacterBlocks(template: string, ctx: MacroContext): st
  *  - {{random}} — random number 0-100
  *  - {{random:X:Y}} — random number X-Y
  *  - {{random::A::B::C}} — random choice from A, B, C
+ *  - {{random::A@2::B@0.5}} — weighted random choice; weights are relative
  *  - {{roll:XdY}} — dice roll (e.g. {{roll:2d6}})
  *  - {{getvar::name}} — read a dynamic variable
  *  - {{setvar::name::value}} — set a variable
@@ -230,6 +467,14 @@ export function resolveMacros(template: string, ctx: MacroContext, options: Reso
   ]
     .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
     .join("\n");
+  const deferCharacterMacros = options.deferCharacterMacros;
+  const characterReplacement = (field: keyof typeof DEFERRED_CHARACTER_MACRO_TOKENS): string => {
+    if (deferCharacterMacros === "all" || (deferCharacterMacros === "names" && field === "char")) {
+      return DEFERRED_CHARACTER_MACRO_TOKENS[field];
+    }
+    if (field === "char") return ctx.char;
+    return ctx.characterFields?.[field] ?? "";
+  };
 
   // ── Comments — strip first so they don't interfere ──
   result = result.replace(/\{\{\/\/[^}]*\}\}/g, "");
@@ -244,14 +489,16 @@ export function resolveMacros(template: string, ctx: MacroContext, options: Reso
   // ── Static substitutions ──
   result = result.replace(/\{\{user(?:Name)?\}\}/gi, ctx.user);
   result = result.replace(/\{\{persona\}\}/gi, personaText);
-  result = result.replace(/\{\{char(?:Name)?\}\}/gi, ctx.char);
+  result = result.replace(/\{\{char(?:Name)?\}\}/gi, characterReplacement("char"));
   result = result.replace(/\{\{characters\}\}/gi, ctx.characters.join(", "));
-  result = result.replace(/\{\{description\}\}/gi, ctx.characterFields?.description ?? "");
-  result = result.replace(/\{\{personality\}\}/gi, ctx.characterFields?.personality ?? "");
-  result = result.replace(/\{\{backstory\}\}/gi, ctx.characterFields?.backstory ?? "");
-  result = result.replace(/\{\{appearance\}\}/gi, ctx.characterFields?.appearance ?? "");
-  result = result.replace(/\{\{scenario\}\}/gi, ctx.characterFields?.scenario ?? "");
-  result = result.replace(/\{\{example\}\}/gi, ctx.characterFields?.example ?? "");
+  result = result.replace(/\{\{description\}\}/gi, characterReplacement("description"));
+  result = result.replace(/\{\{personality\}\}/gi, characterReplacement("personality"));
+  result = result.replace(/\{\{backstory\}\}/gi, characterReplacement("backstory"));
+  result = result.replace(/\{\{appearance\}\}/gi, characterReplacement("appearance"));
+  result = result.replace(/\{\{scenario\}\}/gi, characterReplacement("scenario"));
+  result = result.replace(/\{\{example\}\}/gi, characterReplacement("example"));
+  result = result.replace(/\{\{charSysInfo\}\}/gi, characterReplacement("systemPrompt"));
+  result = result.replace(/\{\{charPostHistory\}\}/gi, characterReplacement("postHistoryInstructions"));
   result = result.replace(/\{\{input\}\}/gi, ctx.lastInput ?? "");
   result = result.replace(/\{\{model\}\}/gi, ctx.model ?? "");
   result = result.replace(/\{\{chatId\}\}/gi, ctx.chatId ?? "");
@@ -271,13 +518,16 @@ export function resolveMacros(template: string, ctx: MacroContext, options: Reso
 
   // ── Random values ──
   result = result.replace(/\{\{random\}\}/gi, () => String(Math.floor(Math.random() * 101)));
-  result = result.replace(/\{\{random::([^}]*)\}\}/gi, (_, body) => {
-    const choices = String(body)
-      .split("::")
+  result = replaceBalancedMacros(result, (body) => {
+    const match = body.match(/^random::([\s\S]*)$/i);
+    if (!match) return undefined;
+
+    const choices = splitTopLevelDoubleColon(match[1] ?? "")
       .map((choice) => choice.trim())
       .filter(Boolean);
     if (choices.length === 0) return "";
-    return choices[Math.floor(Math.random() * choices.length)] ?? "";
+    const choice = pickWeightedRandomChoice(choices);
+    return resolveMacros(choice, ctx, { ...options, trimResult: false });
   });
   result = result.replace(/\{\{random:(\d+):(\d+)\}\}/gi, (_, min, max) => {
     const lo = parseInt(min, 10);
@@ -295,31 +545,33 @@ export function resolveMacros(template: string, ctx: MacroContext, options: Reso
   });
 
   // ── Variable operations — resolve left-to-right so lorebook entries can set values for later entries. ──
-  result = result.replace(
-    /\{\{(?:(getvar|incvar|decvar)::([\w.-]+)|(setvar|addvar)::([\w.-]+)::([^}]*))\}\}/gi,
-    (_, readOp, readName, writeOp, writeName, val) => {
-      const op = String(readOp ?? writeOp).toLowerCase();
-      const name = String(readName ?? writeName);
-      switch (op) {
-        case "getvar":
-          return ctx.variables[name] ?? "";
-        case "setvar":
-          ctx.variables[name] = val ?? "";
-          return "";
-        case "addvar":
-          ctx.variables[name] = (ctx.variables[name] ?? "") + (val ?? "");
-          return "";
-        case "incvar":
-          ctx.variables[name] = String((parseInt(ctx.variables[name] ?? "0", 10) || 0) + 1);
-          return "";
-        case "decvar":
-          ctx.variables[name] = String((parseInt(ctx.variables[name] ?? "0", 10) || 0) - 1);
-          return "";
-        default:
-          return "";
-      }
-    },
-  );
+  result = replaceBalancedMacros(result, (body) => {
+    const readMatch = body.match(/^(getvar|incvar|decvar)::([\w.-]+)$/i);
+    const writeMatch = body.match(/^(setvar|addvar)::([\w.-]+)::([\s\S]*)$/i);
+    const op = String(readMatch?.[1] ?? writeMatch?.[1] ?? "").toLowerCase();
+    const name = readMatch?.[2] ?? writeMatch?.[2];
+    if (!op || !name) return undefined;
+
+    switch (op) {
+      case "getvar":
+        return ctx.variables[name] ?? "";
+      case "setvar":
+        ctx.variables[name] = resolveMacros(writeMatch?.[3] ?? "", ctx, { ...options, trimResult: false });
+        return "";
+      case "addvar":
+        ctx.variables[name] =
+          (ctx.variables[name] ?? "") + resolveMacros(writeMatch?.[3] ?? "", ctx, { ...options, trimResult: false });
+        return "";
+      case "incvar":
+        ctx.variables[name] = String((parseInt(ctx.variables[name] ?? "0", 10) || 0) + 1);
+        return "";
+      case "decvar":
+        ctx.variables[name] = String((parseInt(ctx.variables[name] ?? "0", 10) || 0) - 1);
+        return "";
+      default:
+        return "";
+    }
+  });
 
   // ── Case transforms ──
   result = result.replace(/\{\{uppercase\}\}([\s\S]*?)\{\{\/uppercase\}\}/gi, (_, inner) =>

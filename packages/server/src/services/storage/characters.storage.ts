@@ -236,10 +236,12 @@ export function createCharactersStorage(db: DB) {
         nameColor?: string;
         dialogueColor?: string;
         boxColor?: string;
+        trackerCardColors?: string;
         personaStats?: string;
         altDescriptions?: string;
         tags?: string;
         savedStatusOptions?: string;
+        avatarCrop?: string;
       },
       timestampOverrides?: TimestampOverrides | null,
     ) {
@@ -255,10 +257,12 @@ export function createCharactersStorage(db: DB) {
         backstory: extra?.backstory ?? "",
         appearance: extra?.appearance ?? "",
         avatarPath: avatarPath ?? null,
+        avatarCrop: extra?.avatarCrop ?? "",
         isActive: "false",
         nameColor: extra?.nameColor ?? "",
         dialogueColor: extra?.dialogueColor ?? "",
         boxColor: extra?.boxColor ?? "",
+        trackerCardColors: extra?.trackerCardColors ?? '{"mode":"chat"}',
         personaStats: extra?.personaStats ?? "",
         altDescriptions: extra?.altDescriptions ?? "[]",
         tags: extra?.tags ?? "[]",
@@ -295,10 +299,12 @@ export function createCharactersStorage(db: DB) {
         backstory: source.backstory ?? "",
         appearance: source.appearance ?? "",
         avatarPath: source.avatarPath,
+        avatarCrop: source.avatarCrop ?? "",
         isActive: "false",
         nameColor: source.nameColor ?? "",
         dialogueColor: source.dialogueColor ?? "",
         boxColor: source.boxColor ?? "",
+        trackerCardColors: source.trackerCardColors ?? '{"mode":"chat"}',
         personaStats: source.personaStats ?? "",
         altDescriptions: source.altDescriptions ?? "[]",
         tags: source.tags ?? "[]",
@@ -320,9 +326,11 @@ export function createCharactersStorage(db: DB) {
         backstory?: string;
         appearance?: string;
         avatarPath?: string;
+        avatarCrop?: string;
         nameColor?: string;
         dialogueColor?: string;
         boxColor?: string;
+        trackerCardColors?: string;
         personaStats?: string;
         altDescriptions?: string;
         tags?: string;
@@ -338,9 +346,11 @@ export function createCharactersStorage(db: DB) {
       if (updates.backstory !== undefined) sets.backstory = updates.backstory;
       if (updates.appearance !== undefined) sets.appearance = updates.appearance;
       if (updates.avatarPath !== undefined) sets.avatarPath = updates.avatarPath;
+      if (updates.avatarCrop !== undefined) sets.avatarCrop = updates.avatarCrop;
       if (updates.nameColor !== undefined) sets.nameColor = updates.nameColor;
       if (updates.dialogueColor !== undefined) sets.dialogueColor = updates.dialogueColor;
       if (updates.boxColor !== undefined) sets.boxColor = updates.boxColor;
+      if (updates.trackerCardColors !== undefined) sets.trackerCardColors = updates.trackerCardColors;
       if (updates.personaStats !== undefined) sets.personaStats = updates.personaStats;
       if (updates.altDescriptions !== undefined) sets.altDescriptions = updates.altDescriptions;
       if (updates.tags !== undefined) sets.tags = updates.tags;

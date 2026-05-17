@@ -1,7 +1,7 @@
 // ──────────────────────────────────────────────
 // .env hot-reload watcher
 // ──────────────────────────────────────────────
-// Polls the monorepo-root .env file and re-applies changes to process.env
+// Polls the active runtime .env file and re-applies changes to process.env
 // without requiring a server restart. Most security middleware (basic-auth,
 // IP allowlist, CSRF, admin secret, etc.) reads via getter functions in
 // runtime-config.ts, so updates take effect on the next request.
@@ -12,7 +12,7 @@
 
 import { existsSync, statSync, watchFile, unwatchFile } from "node:fs";
 import { logger } from "../lib/logger.js";
-import { getEnvFilePath, reloadRuntimeEnv, type EnvReloadResult } from "./runtime-config.js";
+import { getEnvFilePath, getLogLevel, reloadRuntimeEnv, type EnvReloadResult } from "./runtime-config.js";
 
 // Keys whose values are bound at process / app startup and won't take effect
 // without a full restart, even though we propagate them to process.env.
@@ -33,11 +33,14 @@ const RESTART_REQUIRED_KEYS = new Set<string>([
   "FILE_STORAGE_DIR",
   "DATABASE_URL",
   "DATABASE_DRIVER",
+  "MARINARA_ENV_FILE",
   "ENCRYPTION_KEY",
   "TZ",
   "AUTO_OPEN_BROWSER",
   "AUTO_CREATE_DEFAULT_CONNECTION",
   "NODE_ENV",
+  "IMAGE_GEN_TIMEOUT_MS",
+  "COMFYUI_GEN_TIMEOUT",
 ]);
 
 // Keys whose values must be masked when logged.
@@ -57,10 +60,13 @@ function describeKey(key: string): string {
 }
 
 function applyLogLevel(diff: EnvReloadResult) {
-  if (!diff.updated.includes("LOG_LEVEL") && !diff.added.includes("LOG_LEVEL") && !diff.removed.includes("LOG_LEVEL")) {
+  const watchedKeys = ["LOG_LEVEL", "LOG_PRESET"];
+  if (
+    !watchedKeys.some((key) => diff.updated.includes(key) || diff.added.includes(key) || diff.removed.includes(key))
+  ) {
     return;
   }
-  const next = (process.env.LOG_LEVEL ?? "warn").trim() || "warn";
+  const next = getLogLevel();
   try {
     logger.level = next;
   } catch (err) {

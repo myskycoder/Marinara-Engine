@@ -1,6 +1,16 @@
 // Game: Inventory Panel
 import { useState, useCallback, useEffect } from "react";
-import { Check, ChevronLeft, ChevronRight, Package, Plus, Trash2, Wand2, X } from "lucide-react";
+import {
+  DndContext,
+  type DragEndEvent,
+  MouseSensor,
+  TouchSensor,
+  useDraggable,
+  useDroppable,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import { Check, ChevronLeft, ChevronRight, Minus, Package, Plus, Wand2, X } from "lucide-react";
 import { cn } from "../../lib/utils";
 
 export interface InventoryItem {
@@ -19,7 +29,11 @@ interface GameInventoryProps {
   /** Called when the user wants to rename an item */
   onRenameItem?: (currentName: string, nextName: string) => Promise<string | null> | string | null;
   /** Called when the user wants to manually remove one unit of an item */
-  onRemoveItem?: (itemName: string) => void;
+  onRemoveItem?: (itemName: string) => void | Promise<void>;
+  /** Called when the user wants to manually add one unit of an item */
+  onIncrementItem?: (itemName: string) => void | Promise<void>;
+  /** Called when the user drags one item onto another to swap their positions */
+  onReorderItem?: (fromIndex: number, toIndex: number) => void | Promise<void>;
   /** Whether the player can interact (input phase) */
   canInteract?: boolean;
 }
@@ -34,13 +48,23 @@ export function GameInventory({
   onUseItem,
   onRenameItem,
   onRemoveItem,
+  onIncrementItem,
+  onReorderItem,
   canInteract,
 }: GameInventoryProps) {
   const [selectedItem, setSelectedItem] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [renamePending, setRenamePending] = useState(false);
   const [addPending, setAddPending] = useState(false);
+  const [amountPending, setAmountPending] = useState<"increment" | "decrement" | null>(null);
   const [pageIndex, setPageIndex] = useState(0);
+
+  // Mouse: 4px distance threshold so quick clicks still select.
+  // Touch: 200ms hold within 5px so swipe-to-scroll still works on mobile.
+  const sensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
+  );
 
   const handleItemClick = useCallback(
     (item: InventoryItem) => {
@@ -125,6 +149,46 @@ export function GameInventory({
     }
   }, [items.length, onAddItem]);
 
+  const handleIncrement = useCallback(
+    async (itemName: string) => {
+      if (!onIncrementItem) return;
+
+      setAmountPending("increment");
+      try {
+        await onIncrementItem(itemName);
+      } finally {
+        setAmountPending(null);
+      }
+    },
+    [onIncrementItem],
+  );
+
+  const handleDecrement = useCallback(
+    async (itemName: string) => {
+      if (!onRemoveItem) return;
+
+      setAmountPending("decrement");
+      try {
+        await onRemoveItem(itemName);
+      } finally {
+        setAmountPending(null);
+      }
+    },
+    [onRemoveItem],
+  );
+
+  const handleDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      if (!onReorderItem) return;
+      const fromIndex = event.active.data.current?.index;
+      const toIndex = event.over?.data.current?.index;
+      if (typeof fromIndex !== "number" || typeof toIndex !== "number") return;
+      if (fromIndex === toIndex) return;
+      void onReorderItem(fromIndex, toIndex);
+    },
+    [onReorderItem],
+  );
+
   if (!open) return null;
 
   const slots: Array<InventoryItem | null> = [];
@@ -179,45 +243,23 @@ export function GameInventory({
                   </button>
                 </div>
               )}
-              <div className="grid grid-cols-5 gap-1.5">
-                {slots.map((item, i) => (
-                  <button
-                    key={`slot-${pageStart + i}`}
-                    onClick={() => item && handleItemClick(item)}
-                    disabled={!item}
-                    title={item ? (item.quantity > 1 ? `${item.name} ×${item.quantity}` : item.name) : undefined}
-                    aria-label={item ? (item.quantity > 1 ? `${item.name} x${item.quantity}` : item.name) : undefined}
-                    className={cn(
-                      "group relative flex aspect-square flex-col items-center justify-center overflow-hidden rounded border transition-all",
-                      item
-                        ? selectedItem === item.name
-                          ? "border-amber-500/50 bg-amber-500/10 shadow-[inset_0_0_12px_rgba(245,158,11,0.08)]"
-                          : "border-white/8 bg-white/[0.03] hover:border-white/15 hover:bg-white/[0.06]"
-                        : "cursor-default border-white/5 bg-white/[0.015]",
-                    )}
-                  >
-                    {item && (
-                      <>
-                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded bg-gradient-to-b from-white/8 to-white/[0.02] text-sm font-bold text-amber-400/80 ring-1 ring-white/8">
-                          {item.name.charAt(0).toUpperCase()}
-                        </div>
-                        <div className="mt-1 flex w-full min-w-0 flex-1 flex-col items-center justify-center px-1">
-                          <div className="flex min-w-0 flex-col items-center gap-0.5">
-                            <span className="w-full whitespace-normal break-words text-center text-[0.58rem] font-medium leading-tight text-white/80 [overflow-wrap:anywhere]">
-                              {item.name}
-                            </span>
-                            {item.quantity > 1 && (
-                              <span className="shrink-0 rounded bg-white/15 px-1.5 py-0.5 text-[0.55rem] font-semibold tabular-nums text-white/80">
-                                x{item.quantity}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </>
-                    )}
-                  </button>
-                ))}
-              </div>
+              <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
+                <div className="grid grid-cols-5 gap-1.5">
+                  {slots.map((item, i) => {
+                    const globalIndex = pageStart + i;
+                    return (
+                      <InventorySlot
+                        key={`slot-${globalIndex}`}
+                        item={item}
+                        globalIndex={globalIndex}
+                        selected={Boolean(item && selectedItem === item.name)}
+                        reorderEnabled={Boolean(onReorderItem)}
+                        onClick={() => item && handleItemClick(item)}
+                      />
+                    );
+                  })}
+                </div>
+              </DndContext>
             </>
           ) : (
             <div className="flex min-h-40 flex-col items-center justify-center rounded border border-dashed border-white/10 bg-white/[0.02] px-4 text-center">
@@ -279,6 +321,44 @@ export function GameInventory({
                   Add
                 </button>
               )}
+              {selectedInventoryItem && (onRemoveItem || onIncrementItem) && (
+                <div
+                  className="flex h-7 shrink-0 items-center overflow-hidden rounded border border-white/8 bg-white/[0.03]"
+                  aria-label={`${selectedInventoryItem.name} amount controls`}
+                >
+                  {onRemoveItem && (
+                    <button
+                      type="button"
+                      onClick={() => void handleDecrement(selectedInventoryItem.name)}
+                      disabled={amountPending !== null}
+                      className="flex h-full w-7 items-center justify-center text-white/65 transition-colors hover:bg-white/[0.07] hover:text-white/90 disabled:cursor-not-allowed disabled:opacity-40"
+                      aria-label={
+                        selectedInventoryItem.quantity > 1
+                          ? `Decrease ${selectedInventoryItem.name} amount`
+                          : `Delete ${selectedInventoryItem.name}`
+                      }
+                      title={selectedInventoryItem.quantity > 1 ? "Decrease amount" : "Delete item"}
+                    >
+                      <Minus size={12} />
+                    </button>
+                  )}
+                  <span className="min-w-8 border-x border-white/8 px-2 text-center text-[0.7rem] font-semibold tabular-nums text-white/80">
+                    {selectedInventoryItem.quantity}
+                  </span>
+                  {onIncrementItem && (
+                    <button
+                      type="button"
+                      onClick={() => void handleIncrement(selectedInventoryItem.name)}
+                      disabled={amountPending !== null}
+                      className="flex h-full w-7 items-center justify-center text-white/65 transition-colors hover:bg-white/[0.07] hover:text-white/90 disabled:cursor-not-allowed disabled:opacity-40"
+                      aria-label={`Increase ${selectedInventoryItem.name} amount`}
+                      title="Increase amount"
+                    >
+                      <Plus size={12} />
+                    </button>
+                  )}
+                </div>
+              )}
               {selectedItem && canInteract && onUseItem && (
                 <button
                   onClick={() => handleUse(selectedItem)}
@@ -289,18 +369,87 @@ export function GameInventory({
                 </button>
               )}
             </div>
-            {onRemoveItem && selectedInventoryItem && (
-              <button
-                onClick={() => onRemoveItem(selectedInventoryItem.name)}
-                className="mt-1.5 flex w-full items-center justify-center gap-1 rounded border border-rose-500/20 bg-rose-500/10 py-1.5 text-[0.7rem] font-semibold text-rose-300 transition-colors hover:bg-rose-500/15"
-              >
-                <Trash2 size={12} />
-                {selectedInventoryItem.quantity > 1 ? "Remove 1" : "Delete"}
-              </button>
-            )}
           </div>
         )}
       </div>
     </div>
+  );
+}
+
+interface InventorySlotProps {
+  item: InventoryItem | null;
+  globalIndex: number;
+  selected: boolean;
+  reorderEnabled: boolean;
+  onClick: () => void;
+}
+
+function InventorySlot({ item, globalIndex, selected, reorderEnabled, onClick }: InventorySlotProps) {
+  const enabled = reorderEnabled && Boolean(item);
+  const slotData = { index: globalIndex };
+  const {
+    setNodeRef: setDragRef,
+    attributes,
+    listeners,
+    isDragging,
+  } = useDraggable({ id: `slot-drag-${globalIndex}`, data: slotData, disabled: !enabled });
+  const { setNodeRef: setDropRef, isOver } = useDroppable({
+    id: `slot-drop-${globalIndex}`,
+    data: slotData,
+    disabled: !enabled,
+  });
+  const setRefs = useCallback(
+    (node: HTMLButtonElement | null) => {
+      setDragRef(node);
+      setDropRef(node);
+    },
+    [setDragRef, setDropRef],
+  );
+
+  return (
+    <button
+      ref={setRefs}
+      {...attributes}
+      {...listeners}
+      onClick={onClick}
+      disabled={!item}
+      title={item ? (item.quantity > 1 ? `${item.name} ×${item.quantity}` : item.name) : undefined}
+      aria-label={item ? (item.quantity > 1 ? `${item.name} x${item.quantity}` : item.name) : undefined}
+      aria-pressed={enabled ? isDragging : undefined}
+      className={cn(
+        "group relative flex aspect-square flex-col items-center justify-center overflow-hidden rounded border transition-all",
+        // touch-action: none lets the TouchSensor activate without browser scroll-gestures stealing the touch.
+        // Scrolling the inventory panel is still possible by touching the modal background / pagination row.
+        enabled && "touch-none",
+        item
+          ? selected
+            ? "border-amber-500/50 bg-amber-500/10 shadow-[inset_0_0_12px_rgba(245,158,11,0.08)]"
+            : "border-white/8 bg-white/[0.03] hover:border-white/15 hover:bg-white/[0.06]"
+          : "cursor-default border-white/5 bg-white/[0.015]",
+        enabled && "cursor-grab active:cursor-grabbing",
+        isDragging && "opacity-40",
+        isOver && !isDragging && "border-amber-400/70 ring-2 ring-amber-400/60",
+      )}
+    >
+      {item && (
+        <>
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded bg-gradient-to-b from-white/8 to-white/[0.02] text-sm font-bold text-amber-400/80 ring-1 ring-white/8">
+            {item.name.charAt(0).toUpperCase()}
+          </div>
+          <div className="mt-1 flex min-h-0 w-full min-w-0 flex-1 flex-col items-center justify-center px-1">
+            <div className="flex max-h-full min-h-0 w-full min-w-0 flex-col items-center gap-0.5 overflow-hidden max-md:overflow-y-auto max-md:overscroll-contain max-md:touch-pan-y">
+              <span className="block w-full whitespace-normal break-words text-center text-[0.58rem] font-medium leading-tight text-white/80 [overflow-wrap:anywhere]">
+                {item.name}
+              </span>
+              {item.quantity > 1 && (
+                <span className="shrink-0 rounded bg-white/15 px-1.5 py-0.5 text-[0.55rem] font-semibold tabular-nums text-white/80">
+                  x{item.quantity}
+                </span>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </button>
   );
 }

@@ -16,6 +16,7 @@ import {
 import type { ExportEnvelope } from "@marinara-engine/shared";
 import { createPromptsStorage } from "../services/storage/prompts.storage.js";
 import { assemblePrompt, type AssemblerInput } from "../services/prompt/index.js";
+import { resolveGameLorebookScopeExclusions } from "../services/lorebook/game-lorebook-scope.js";
 import { createChatsStorage } from "../services/storage/chats.storage.js";
 import { createCharactersStorage } from "../services/storage/characters.storage.js";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
@@ -290,6 +291,7 @@ export async function promptsRoutes(app: FastifyInstance) {
     } catch {
       chatMeta = {};
     }
+    const lorebookScopeExclusions = resolveGameLorebookScopeExclusions(chat.mode, chatMeta);
     const mappedMessages = chatMessages.map((m: any) => ({
       role: m.role === "narrator" ? ("system" as const) : (m.role as "user" | "assistant" | "system"),
       content: m.content as string,
@@ -339,6 +341,8 @@ export async function promptsRoutes(app: FastifyInstance) {
       personaFields,
       chatMessages: mappedMessages,
       activeLorebookIds: Array.isArray(chatMeta.activeLorebookIds) ? (chatMeta.activeLorebookIds as string[]) : [],
+      excludedLorebookIds: lorebookScopeExclusions.excludedLorebookIds,
+      excludedLorebookSourceAgentIds: lorebookScopeExclusions.excludedSourceAgentIds,
       chatEmbedding: null,
       entryStateOverrides:
         (chatMeta.entryStateOverrides ?? chatMeta.lorebookEntryStateOverrides) &&

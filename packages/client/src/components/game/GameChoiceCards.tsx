@@ -30,9 +30,9 @@ export function GameChoiceCards({ choices, onSelect, onDismiss, disabled }: Game
   };
 
   return (
-    <div className="mx-auto w-full max-w-2xl px-3 pb-3">
-      <div className="flex max-h-[min(52dvh,calc(100dvh-10.5rem))] flex-col rounded-2xl border border-white/15 bg-black/50 p-3 backdrop-blur-md shadow-[0_8px_24px_rgba(0,0,0,0.3)] md:max-h-none">
-        <div className="mb-2 flex items-center justify-between gap-2">
+    <div className="mx-auto flex h-full max-h-full min-h-0 w-full max-w-2xl px-3 pb-2 sm:pb-3">
+      <div className="flex h-full max-h-[clamp(8rem,30svh,14rem)] min-h-0 w-full flex-col rounded-2xl border border-white/15 bg-black/50 p-3 shadow-[0_8px_24px_rgba(0,0,0,0.3)] backdrop-blur-md sm:max-h-[clamp(9rem,36svh,20rem)] md:max-h-[min(52dvh,32rem)]">
+        <div className="mb-2 flex shrink-0 items-center justify-between gap-2">
           <span className="rounded-full bg-white/10 px-2 py-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-white/90">
             Choose your action
           </span>
@@ -49,7 +49,7 @@ export function GameChoiceCards({ choices, onSelect, onDismiss, disabled }: Game
           )}
         </div>
 
-        <div className="flex flex-col gap-2 overflow-y-auto overscroll-contain pr-1">
+        <div className="flex min-h-0 flex-1 touch-pan-y flex-col gap-2 overflow-y-auto overscroll-contain pr-1 [-webkit-overflow-scrolling:touch]">
           {choices.map((choice, i) => (
             <button
               key={i}
@@ -58,7 +58,7 @@ export function GameChoiceCards({ choices, onSelect, onDismiss, disabled }: Game
               onMouseLeave={() => setHoveredIndex(null)}
               disabled={disabled || selected !== null}
               className={cn(
-                "group relative overflow-hidden rounded-xl border px-4 py-3 text-left text-sm transition-all duration-200",
+                "group relative shrink-0 overflow-hidden rounded-xl border px-4 py-3 text-left text-sm transition-all duration-200",
                 selected === i
                   ? "border-[var(--primary)]/50 bg-[var(--primary)]/20 text-white ring-2 ring-[var(--primary)]/30 scale-[0.98]"
                   : selected !== null

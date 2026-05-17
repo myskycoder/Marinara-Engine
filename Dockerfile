@@ -47,6 +47,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libssl3 \
       libgomp1 \
       libvulkan1 \
+      python3 \
+      python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy workspace config
@@ -70,6 +72,7 @@ COPY --from=builder /app/packages/shared/dist packages/shared/dist
 COPY --from=builder /app/packages/server/dist packages/server/dist
 COPY --from=builder /app/packages/client/dist packages/client/dist
 COPY scripts/docker-entrypoint.mjs /usr/local/bin/marinara-docker-entrypoint.mjs
+COPY scripts/install-backgroundremover.mjs scripts/install-backgroundremover.mjs
 
 # Ensure /app/data exists for runtime use (file storage, uploads, generated assets)
 RUN mkdir -p /app/data && \
@@ -77,6 +80,7 @@ RUN mkdir -p /app/data && \
 
 # Point the server at /app/data regardless of working directory
 ENV DATA_DIR=/app/data
+ENV FILE_STORAGE_DIR=/app/data/storage
 
 # File-native storage + user uploads live in /app/data at runtime.
 # Mount a volume here for persistence.
@@ -86,6 +90,7 @@ VOLUME /app/data
 ENV PORT=7860
 ENV HOST=0.0.0.0
 ENV NODE_ENV=production
+ENV MARINARA_DOCKER=true
 ENV MARINARA_DOCKER_USER=node
 ENV MARINARA_DOCKER_GROUP=node
 EXPOSE 7860

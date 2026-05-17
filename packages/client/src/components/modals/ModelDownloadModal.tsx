@@ -54,12 +54,12 @@ function formatRuntimeVariantLabel(variant: string | null): string | null {
   return variant.replace(/-/g, " ");
 }
 
-function formatRuntimePreferenceLabel(preference: SidecarRuntimePreference): string {
+function formatRuntimePreferenceLabel(preference: SidecarRuntimePreference, platform?: string): string {
   switch (preference) {
     case "auto":
       return "Auto detect";
     case "nvidia":
-      return "NVIDIA GPU (CUDA)";
+      return platform === "linux" ? "NVIDIA GPU (Vulkan fallback)" : "NVIDIA GPU (CUDA)";
     case "amd":
       return "AMD GPU";
     case "intel":
@@ -203,7 +203,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
   const quickRuntimeSummary =
     activeBackend === "mlx"
       ? `MLX runtime • ${formatCompactTokens(config.contextSize)} ctx • ${formatCompactTokens(config.maxTokens)} max`
-      : `${formatRuntimePreferenceLabel(config.runtimePreference)} • ${describeGpuLayers(config.gpuLayers)} • ${formatCompactTokens(config.contextSize)} ctx • ${formatCompactTokens(config.maxTokens)} max`;
+      : `${formatRuntimePreferenceLabel(config.runtimePreference, platform)} • ${describeGpuLayers(config.gpuLayers)} • ${formatCompactTokens(config.contextSize)} ctx • ${formatCompactTokens(config.maxTokens)} max`;
 
   useEffect(() => {
     if (!open) {
@@ -568,7 +568,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                         >
                           {runtimePreferenceOptions.map((option) => (
                             <option key={option} value={option}>
-                              {formatRuntimePreferenceLabel(option)}
+                              {formatRuntimePreferenceLabel(option, platform)}
                             </option>
                           ))}
                         </select>
@@ -580,6 +580,12 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                       <div className="text-xs text-[var(--muted-foreground)]/70">
                         Pick the GPU family you actually want Marinara to target so it does not guess the wrong adapter.
                       </div>
+                      {platform === "linux" && config.runtimePreference === "nvidia" && (
+                        <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-100">
+                          Linux CUDA binaries are not currently published by llama.cpp, so Marinara tries Vulkan first
+                          and falls back to CPU. Use System llama-server for a custom CUDA build.
+                        </div>
+                      )}
                     </>
                   )}
                 </div>

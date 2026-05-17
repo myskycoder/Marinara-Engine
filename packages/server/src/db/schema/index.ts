@@ -7,6 +7,7 @@ export * from "./characters.js";
 export * from "./lorebooks.js";
 export * from "./prompts.js";
 export * from "./connections.js";
+export * from "./connection-folders.js";
 export * from "./assets.js";
 export * from "./agents.js";
 export * from "./custom-tools.js";

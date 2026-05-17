@@ -53,6 +53,7 @@ export interface ElementAttackTag {
 export interface InventoryTag {
   action: "add" | "remove";
   items: string[];
+  count?: number;
 }
 
 export interface SegmentInventoryUpdate {
@@ -546,7 +547,11 @@ function parseInventoryTagBody(body: string): InventoryTag | null {
     .map((item) => item.trim().replace(/^["']|["']$/g, ""))
     .filter(Boolean);
 
-  return items.length > 0 ? { action, items } : null;
+  const countMatch = /(?:count|quantity|qty)\s*=\s*"?(\d+)"?/i.exec(body);
+  const parsedCount = countMatch ? parseInt(countMatch[1]!, 10) : 1;
+  const count = Number.isFinite(parsedCount) && parsedCount > 0 ? Math.min(parsedCount, 9999) : 1;
+
+  return items.length > 0 ? { action, items, count } : null;
 }
 
 function parsePartyCharacterName(body: string): string {

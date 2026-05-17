@@ -17,6 +17,7 @@ import {
   useSaveConnectionDefaults,
   type ClaudeSubscriptionDiagnosis,
 } from "../../hooks/use-connections";
+import { usePresets } from "../../hooks/use-presets";
 import {
   ArrowLeft,
   Save,
@@ -24,6 +25,7 @@ import {
   Link,
   Wifi,
   MessageSquare,
+  FileText,
   Search,
   Tag,
   Check,
@@ -54,6 +56,7 @@ import {
 } from "../ui/GenerationParametersEditor";
 import {
   PROVIDERS,
+  LOCAL_SIDECAR_CONNECTION_ID,
   MODEL_LISTS,
   IMAGE_GENERATION_SOURCES,
   inferImageSource,
@@ -78,6 +81,10 @@ const API_KEY_LINKS: Partial<Record<APIProvider, { label: string; url: string }>
   openai: { label: "Get your OpenAI API key", url: "https://platform.openai.com/api-keys" },
   anthropic: { label: "Get your Anthropic API key", url: "https://console.anthropic.com/settings/keys" },
   google: { label: "Get your Google AI API key", url: "https://aistudio.google.com/apikey" },
+  google_vertex: {
+    label: "Open Vertex AI credentials docs",
+    url: "https://cloud.google.com/vertex-ai/docs/authentication",
+  },
   mistral: { label: "Get your Mistral API key", url: "https://console.mistral.ai/api-keys" },
   cohere: { label: "Get your Cohere API key", url: "https://dashboard.cohere.com/api-keys" },
   openrouter: { label: "Get your OpenRouter API key", url: "https://openrouter.ai/keys" },
@@ -119,6 +126,7 @@ export function ConnectionEditor() {
   const fetchModels = useFetchModels();
   const saveConnectionDefaults = useSaveConnectionDefaults();
   const { data: allConnections } = useConnections();
+  const { data: allPresets } = usePresets();
 
   const [dirty, setDirty] = useState(false);
   const setEditorDirty = useUIStore((s) => s.setEditorDirty);
@@ -143,10 +151,12 @@ export function ConnectionEditor() {
   const [localEmbeddingModel, setLocalEmbeddingModel] = useState("");
   const [localEmbeddingBaseUrl, setLocalEmbeddingBaseUrl] = useState("");
   const [localEmbeddingConnectionId, setLocalEmbeddingConnectionId] = useState("");
+  const [localPromptPresetId, setLocalPromptPresetId] = useState("");
   const [localOpenrouterProvider, setLocalOpenrouterProvider] = useState("");
   const [localImageGenerationSource, setLocalImageGenerationSource] = useState("");
   const [localComfyuiWorkflow, setLocalComfyuiWorkflow] = useState("");
   const [localImageService, setLocalImageService] = useState<string | null>(null);
+  const [localImageEndpointId, setLocalImageEndpointId] = useState("");
   const [localMaxTokensOverride, setLocalMaxTokensOverride] = useState<number | null>(null);
   const [localClaudeFastMode, setLocalClaudeFastMode] = useState(false);
   const [localDefaultParametersEnabled, setLocalDefaultParametersEnabled] = useState(false);
@@ -240,6 +250,7 @@ export function ConnectionEditor() {
     setLocalEmbeddingModel((c.embeddingModel as string) ?? "");
     setLocalEmbeddingBaseUrl((c.embeddingBaseUrl as string) ?? "");
     setLocalEmbeddingConnectionId((c.embeddingConnectionId as string) ?? "");
+    setLocalPromptPresetId((c.promptPresetId as string) ?? "");
     setLocalOpenrouterProvider((c.openrouterProvider as string) ?? "");
     const imageGenerationSource =
       (c.provider as APIProvider) === "image_generation"
@@ -255,6 +266,7 @@ export function ConnectionEditor() {
     setLocalImageGenerationSource(imageGenerationSource);
     setLocalComfyuiWorkflow((c.comfyuiWorkflow as string) ?? "");
     setLocalImageService(imageService);
+    setLocalImageEndpointId((c.imageEndpointId as string) ?? "");
     setLocalMaxTokensOverride(typeof c.maxTokensOverride === "number" ? (c.maxTokensOverride as number) : null);
     setLocalClaudeFastMode(c.claudeFastMode === "true" || c.claudeFastMode === true);
     setLocalDefaultParametersEnabled(!!parseEditableGenerationParameters(c.defaultParameters));
@@ -307,8 +319,15 @@ export function ConnectionEditor() {
       { token: "%seed%", label: "%seed%", critical: false },
       { token: "%model%", label: "%model%", critical: false },
       { token: "%reference_image%", label: "%reference_image%", critical: false },
+      { token: "%reference_image_name%", label: "%reference_image_name%", critical: false },
     ];
-    const missing = KNOWN_SUBS.filter(({ token }) => !wf.includes(token));
+    const hasReferenceImage = wf.includes("%reference_image%");
+    const hasReferenceImageName = wf.includes("%reference_image_name%");
+    const missing = KNOWN_SUBS.filter(({ token }) => {
+      if (token === "%reference_image%" && hasReferenceImageName) return false;
+      if (token === "%reference_image_name%" && hasReferenceImage) return false;
+      return !wf.includes(token);
+    });
     return { parseError: false as const, missing };
   }, [localComfyuiWorkflow]);
 
@@ -391,12 +410,17 @@ export function ConnectionEditor() {
       embeddingModel: localEmbeddingModel,
       embeddingBaseUrl: localEmbeddingBaseUrl,
       embeddingConnectionId: localEmbeddingConnectionId || null,
+      promptPresetId: localProvider !== "image_generation" ? localPromptPresetId || null : null,
       openrouterProvider: localOpenrouterProvider || null,
       imageGenerationSource:
         localProvider === "image_generation" ? localImageGenerationSource || localImageService || null : null,
       comfyuiWorkflow: localComfyuiWorkflow || null,
       imageService:
         localProvider === "image_generation" ? localImageGenerationSource || localImageService || null : null,
+      imageEndpointId:
+        localProvider === "image_generation" && selectedImageService === "runpod_comfyui"
+          ? localImageEndpointId || null
+          : null,
       maxTokensOverride: localMaxTokensOverride ?? null,
       claudeFastMode: localClaudeFastMode,
     };
@@ -445,14 +469,17 @@ export function ConnectionEditor() {
     localEmbeddingModel,
     localEmbeddingBaseUrl,
     localEmbeddingConnectionId,
+    localPromptPresetId,
     localOpenrouterProvider,
     localImageGenerationSource,
     localComfyuiWorkflow,
     localImageService,
+    localImageEndpointId,
     localMaxTokensOverride,
     localClaudeFastMode,
     localDefaultParametersEnabled,
     localDefaultParameters,
+    selectedImageService,
     selectedImageDefaultsService,
     localImageDefaults,
     updateConnection,
@@ -856,6 +883,25 @@ export function ConnectionEditor() {
             </div>
           )}
 
+          {localProvider === "google_vertex" && (
+            <div className="rounded-xl bg-sky-400/5 px-3 py-2.5 ring-1 ring-sky-400/30">
+              <p className="flex items-start gap-1.5 text-[0.6875rem] text-sky-300">
+                <AlertCircle size="0.75rem" className="mt-px shrink-0" />
+                <span>
+                  Uses Vertex AI&apos;s Gemini endpoint. Set Base URL to your project and location, then paste either a
+                  service account JSON key, an OAuth access token, or a Vertex API key when your project supports API
+                  key auth.
+                </span>
+              </p>
+              <p className="mt-1.5 text-[0.625rem] text-[var(--muted-foreground)]">
+                Example Base URL:{" "}
+                <code className="rounded bg-[var(--secondary)] px-1">
+                  https://us-central1-aiplatform.googleapis.com/v1/projects/my-project/locations/us-central1
+                </code>
+              </p>
+            </div>
+          )}
+
           {/* ── OpenRouter Provider Preference ── */}
           {localProvider === "openrouter" && (
             <FieldGroup
@@ -1059,6 +1105,14 @@ export function ConnectionEditor() {
                 Pick the backend type once, then point Base URL to any host or port. Provider-specific features like
                 ComfyUI workflow JSON and checkpoint fetching use this selection, not the default localhost URL.
               </p>
+              {selectedImageService === "runpod_comfyui" && (
+                <div className="mt-2 rounded-lg border border-amber-400/20 bg-amber-400/5 px-3 py-2 text-[0.625rem] text-amber-300/80">
+                  <strong>RunPod configuration:</strong> Your endpoint ID goes in the <strong>Endpoint ID</strong> field
+                  below. The API key is your RunPod API token. The workflow JSON is <strong>required</strong> — the
+                  endpoint executes the workflow you supply. Use <code>%prompt%</code> placeholders in the
+                  CLIPTextEncode node.
+                </div>
+              )}
             </FieldGroup>
           )}
 
@@ -1304,74 +1358,99 @@ export function ConnectionEditor() {
             )}
           </FieldGroup>
 
-          {/* ── ComfyUI Workflow ── */}
-          {localProvider === "image_generation" && selectedImageService === "comfyui" && (
+          {/* ── RunPod Endpoint ID ── */}
+          {localProvider === "image_generation" && selectedImageService === "runpod_comfyui" && (
             <FieldGroup
-              label="ComfyUI Workflow (Optional)"
-              icon={<Zap size="0.875rem" className="text-sky-400" />}
-              help="Paste a custom ComfyUI workflow JSON (API format). Use placeholders like %prompt%, %negative_prompt%, %width%, %height%, %seed%, %model%, %steps%, %cfg%, %sampler%, %scheduler%, and %denoise%. Leave empty to use the built-in default txt2img workflow."
+              label="RunPod Endpoint ID"
+              icon={<Server size="0.875rem" className="text-sky-400" />}
+              help="Your RunPod serverless endpoint ID (e.g. 'abc123def456'). This is the unique identifier for your endpoint on RunPod."
             >
-              <textarea
-                ref={comfyWorkflowTextareaRef}
-                value={localComfyuiWorkflow}
+              <input
+                type="text"
+                value={localImageEndpointId}
                 onChange={(e) => {
-                  setLocalComfyuiWorkflow(e.target.value);
+                  setLocalImageEndpointId(e.target.value);
                   markDirty();
                 }}
-                placeholder='Paste workflow JSON here (exported from ComfyUI via "Save (API Format)")…'
-                className={cn(
-                  "w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-xs font-mono outline-none ring-1 transition-shadow placeholder:text-[var(--muted-foreground)]/50 min-h-[120px] max-h-[300px] resize-y",
-                  comfyWorkflowValidation?.parseError
-                    ? "ring-red-400/60 focus:ring-red-400"
-                    : "ring-[var(--border)] focus:ring-sky-400/50",
-                )}
+                placeholder="abc123def456"
+                className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm outline-none ring-1 ring-[var(--border)] transition-shadow placeholder:text-[var(--muted-foreground)]/50 focus:ring-sky-400/50"
               />
-              {comfyWorkflowValidation?.parseError && (
-                <p className="mt-1 flex items-start gap-1 text-[0.625rem] text-red-400">
-                  <AlertCircle size="0.625rem" className="mt-px shrink-0" />
-                  {comfyWorkflowValidation.charPos !== null ? (
-                    <button
-                      onClick={handleJumpToJsonError}
-                      className="underline decoration-dotted cursor-pointer text-left hover:text-red-300"
-                    >
-                      {comfyWorkflowValidation.label}
-                    </button>
-                  ) : (
-                    comfyWorkflowValidation.label
-                  )}
-                </p>
-              )}
-              {comfyWorkflowValidation &&
-                !comfyWorkflowValidation.parseError &&
-                comfyWorkflowValidation.missing.length > 0 && (
-                  <p className="mt-1 flex items-start gap-1 text-[0.625rem] text-amber-400">
-                    <AlertCircle size="0.625rem" className="mt-px shrink-0" />
-                    <span>
-                      {comfyWorkflowValidation.missing.some((m) => m.critical) && (
-                        <>
-                          <strong>%prompt%</strong> placeholder not found — prompts won&apos;t be injected.{" "}
-                        </>
-                      )}
-                      {comfyWorkflowValidation.missing.some((m) => !m.critical) && (
-                        <>
-                          Unused:{" "}
-                          {comfyWorkflowValidation.missing
-                            .filter((m) => !m.critical)
-                            .map((m) => m.label)
-                            .join(", ")}
-                          .
-                        </>
-                      )}
-                    </span>
-                  </p>
-                )}
-              <p className="text-[0.55rem] text-[var(--muted-foreground)] mt-1">
-                Export your workflow from ComfyUI using <strong>Save (API Format)</strong> in the menu. Placeholders
-                like <code>%prompt%</code>, <code>%steps%</code>, and <code>%sampler%</code> will be replaced at
-                generation time.
-              </p>
             </FieldGroup>
           )}
+
+          {/* ── ComfyUI Workflow ── */}
+          {localProvider === "image_generation" &&
+            (selectedImageService === "comfyui" || selectedImageService === "runpod_comfyui") && (
+              <FieldGroup
+                label={`ComfyUI Workflow (${selectedImageService === "runpod_comfyui" ? "Required" : "Optional"})`}
+                icon={<Zap size="0.875rem" className="text-sky-400" />}
+                help={
+                  selectedImageService === "runpod_comfyui"
+                    ? "Paste your ComfyUI workflow JSON (API format). RunPod needs the full workflow to execute; the endpoint sends this workflow to your serverless endpoint. Use placeholders like %prompt%, %seed%, %width%, %height%, and %reference_image% to let Marinara inject generation parameters."
+                    : "Paste a custom ComfyUI workflow JSON (API format). Use placeholders like %prompt%, %negative_prompt%, %width%, %height%, %seed%, %model%, %steps%, %cfg%, %sampler%, %scheduler%, and %denoise%. For reference images, use %reference_image% to inject a base64 string for workflows that decode it, or %reference_image_name% to upload the image to ComfyUI's input directory and inject the filename for a vanilla LoadImage node. Leave empty to use the built-in default txt2img workflow."
+                }
+              >
+                <textarea
+                  ref={comfyWorkflowTextareaRef}
+                  value={localComfyuiWorkflow}
+                  onChange={(e) => {
+                    setLocalComfyuiWorkflow(e.target.value);
+                    markDirty();
+                  }}
+                  placeholder='Paste workflow JSON here (exported from ComfyUI via "Save (API Format)")…'
+                  className={cn(
+                    "w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-xs font-mono outline-none ring-1 transition-shadow placeholder:text-[var(--muted-foreground)]/50 min-h-[120px] max-h-[300px] resize-y",
+                    comfyWorkflowValidation?.parseError
+                      ? "ring-red-400/60 focus:ring-red-400"
+                      : "ring-[var(--border)] focus:ring-sky-400/50",
+                  )}
+                />
+                {comfyWorkflowValidation?.parseError && (
+                  <p className="mt-1 flex items-start gap-1 text-[0.625rem] text-red-400">
+                    <AlertCircle size="0.625rem" className="mt-px shrink-0" />
+                    {comfyWorkflowValidation.charPos !== null ? (
+                      <button
+                        onClick={handleJumpToJsonError}
+                        className="underline decoration-dotted cursor-pointer text-left hover:text-red-300"
+                      >
+                        {comfyWorkflowValidation.label}
+                      </button>
+                    ) : (
+                      comfyWorkflowValidation.label
+                    )}
+                  </p>
+                )}
+                {comfyWorkflowValidation &&
+                  !comfyWorkflowValidation.parseError &&
+                  comfyWorkflowValidation.missing.length > 0 && (
+                    <p className="mt-1 flex items-start gap-1 text-[0.625rem] text-amber-400">
+                      <AlertCircle size="0.625rem" className="mt-px shrink-0" />
+                      <span>
+                        {comfyWorkflowValidation.missing.some((m) => m.critical) && (
+                          <>
+                            <strong>%prompt%</strong> placeholder not found — prompts won&apos;t be injected.{" "}
+                          </>
+                        )}
+                        {comfyWorkflowValidation.missing.some((m) => !m.critical) && (
+                          <>
+                            Unused:{" "}
+                            {comfyWorkflowValidation.missing
+                              .filter((m) => !m.critical)
+                              .map((m) => m.label)
+                              .join(", ")}
+                            .
+                          </>
+                        )}
+                      </span>
+                    </p>
+                  )}
+                <p className="text-[0.55rem] text-[var(--muted-foreground)] mt-1">
+                  Export your workflow from ComfyUI using <strong>Save (API Format)</strong> in the menu. Placeholders
+                  like <code>%prompt%</code>, <code>%steps%</code>, <code>%sampler%</code>, and reference-image
+                  placeholders will be replaced at generation time.
+                </p>
+              </FieldGroup>
+            )}
 
           {localProvider === "image_generation" && selectedImageDefaultsService && localImageDefaults && (
             <ImageGenerationDefaultsPanel
@@ -1471,6 +1550,35 @@ export function ConnectionEditor() {
               <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
                 Agent batches for the same connection can be split across this many parallel jobs. Set to 1 for the
                 safest provider behavior.
+              </p>
+            </FieldGroup>
+          )}
+
+          {/* ── Prompt Preset Override ── */}
+          {localProvider !== "image_generation" && (
+            <FieldGroup
+              label="Prompt Preset Override"
+              icon={<FileText size="0.875rem" className="text-violet-400" />}
+              help="Optional. When roleplay or visual novel chats use this connection, Marinara assembles this prompt preset instead of the chat's selected prompt preset. Conversation and game mode keep their built-in prompt flows."
+            >
+              <select
+                value={localPromptPresetId}
+                onChange={(e) => {
+                  setLocalPromptPresetId(e.target.value);
+                  markDirty();
+                }}
+                className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+              >
+                <option value="">Use chat&apos;s prompt preset</option>
+                {(allPresets ?? []).map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.name}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
+                Use this for models that need a different prompt structure. If this preset has variables, Marinara uses
+                the preset&apos;s saved defaults unless the chat already uses the same preset.
               </p>
             </FieldGroup>
           )}
@@ -1717,6 +1825,9 @@ export function ConnectionEditor() {
                   className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
                 >
                   <option value="">Same as this connection</option>
+                  {import.meta.env.VITE_MARINARA_LITE !== "true" && (
+                    <option value={LOCAL_SIDECAR_CONNECTION_ID}>Local Model (sidecar)</option>
+                  )}
                   {((allConnections ?? []) as Record<string, unknown>[])
                     .filter((c) => c.id !== connectionDetailId && c.provider !== "image_generation")
                     .map((c) => (
@@ -1727,8 +1838,9 @@ export function ConnectionEditor() {
                     ))}
                 </select>
                 <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
-                  Use a different connection&apos;s API key and base URL for embeddings. The embedding model name above
-                  will still be used unless the chosen connection has its own embedding model configured.
+                  {localEmbeddingConnectionId === LOCAL_SIDECAR_CONNECTION_ID
+                    ? "Uses the built-in Local Model from the Connections panel. The sidecar starts on demand and uses the currently selected local model for embeddings."
+                    : "Use a different connection's API key and base URL for embeddings. The embedding model name above will still be used unless the chosen connection has its own embedding model configured."}
                 </p>
               </div>
             </FieldGroup>
@@ -1797,11 +1909,11 @@ export function ConnectionEditor() {
             </div>
 
             <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-              <strong>Test Connection</strong> verifies your API key works.
+              <strong>Test Connection</strong> verifies your API key against the provider catalog or health endpoint.
               {localProvider !== "image_generation" && (
                 <>
                   {" "}
-                  <strong>Send Test Message</strong> sends "hi" to the model and shows the response.
+                  <strong>Send Test Message</strong> sends "hi" to the selected model endpoint and shows the response.
                 </>
               )}
               {localProvider === "image_generation" && (
@@ -2029,7 +2141,7 @@ function TestResultCard({
         </span>
         <span className="ml-auto text-[0.625rem] text-[var(--muted-foreground)]">{latencyMs}ms</span>
       </div>
-      <div className="mt-1 text-[0.6875rem] text-[var(--foreground)]">{children}</div>
+      <div className="mt-1 whitespace-pre-wrap break-words text-[0.6875rem] text-[var(--foreground)]">{children}</div>
     </div>
   );
 }

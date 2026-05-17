@@ -88,6 +88,8 @@ export function createConnectionsStorage(db: DB) {
         imageGenerationSource: input.imageGenerationSource ?? null,
         comfyuiWorkflow: input.comfyuiWorkflow ?? null,
         imageService: input.imageService ?? null,
+        imageEndpointId: input.imageEndpointId ?? null,
+        promptPresetId: input.promptPresetId ?? null,
         maxTokensOverride: input.maxTokensOverride ?? null,
         claudeFastMode: String(input.claudeFastMode ?? false),
         createdAt: timestamp,
@@ -165,6 +167,12 @@ export function createConnectionsStorage(db: DB) {
       if (data.imageService !== undefined) {
         updateFields.imageService = data.imageService;
       }
+      if (data.imageEndpointId !== undefined) {
+        updateFields.imageEndpointId = data.imageEndpointId;
+      }
+      if (data.promptPresetId !== undefined) {
+        updateFields.promptPresetId = data.promptPresetId;
+      }
       if (data.maxTokensOverride !== undefined) {
         updateFields.maxTokensOverride = data.maxTokensOverride;
       }
@@ -205,6 +213,8 @@ export function createConnectionsStorage(db: DB) {
         imageGenerationSource: source.imageGenerationSource,
         comfyuiWorkflow: source.comfyuiWorkflow,
         imageService: source.imageService,
+        imageEndpointId: source.imageEndpointId,
+        promptPresetId: source.promptPresetId,
         maxTokensOverride: source.maxTokensOverride,
         maxParallelJobs: source.maxParallelJobs,
         claudeFastMode: source.claudeFastMode,

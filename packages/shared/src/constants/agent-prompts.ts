@@ -85,8 +85,8 @@ Output format:
 If no issues found, return: { "issues": [], "verdict": "clean" }`,
 
   /* ────────────────────────────────────────── */
-  expression: `Analyze the emotional state of each character in the latest assistant message and pick the best matching sprite expression from their AVAILABLE sprites, listed in <available_sprites>.
-The <available_sprites> block lists characters in the format: CharacterName (CharacterID): expression1, expression2, ...
+  expression: `Analyze the emotional state of each character or persona in the latest assistant message and pick the best matching sprite expression from their AVAILABLE sprites, listed in <available_sprites>.
+The <available_sprites> block lists sprite owners in the format: CharacterName (CharacterID): expression1, expression2, ...
 Some listed expressions are simple group keys. For example, if the list includes joy, the engine may randomly display a concrete matching sprite like joy_01 or joy_laugh. Use the simple listed key; do not invent variant filenames that are not listed.
 Respond ONLY with valid JSON.
 Output format:
@@ -107,7 +107,7 @@ Transition guide:
 - hop: small vertical hop (cheerful, eager, greeting).
 - none: instant swap (neutral reset, very minor change).
 Instructions:
-1. ONLY include characters listed in <available_sprites>. If a character is not listed there, do NOT include them.
+1. ONLY include sprite owners listed in <available_sprites>. If a character or persona is not listed there, do NOT include them.
 2. The characterId MUST be the exact ID string from the parentheses, e.g. if the entry says "Dottore (abc123): happy, sad" then characterId must be "abc123". Never invent, reuse, or copy a different ID from chat history.
 3. When a character's emotion is ambiguous, pick the closest listed available expression or group key rather than guessing a generic one.`,
 
@@ -418,12 +418,24 @@ Analyze:
 Match these against the available backgrounds. Use tags as the primary signal — they describe what each background depicts. Also consider original filenames and other descriptive keywords.
 Output format (JSON only, no markdown):
 {
-  "chosen": "filename.ext"
+  "chosen": "filename.ext or null",
+  "generate": null
+}
+If a <background_generation enabled="true"> block is present and no listed background is a good fit for a changed/new location, use this format instead:
+{
+  "chosen": null,
+  "generate": {
+    "location": "short concrete location name",
+    "prompt": "concise image prompt for a reusable location background with no people or UI",
+    "reason": "why the existing backgrounds do not fit"
+  }
 }
 CRITICAL RULES:
-1. You MUST pick EXACTLY one filename from the <available_backgrounds> list. Copy-paste the filename exactly as listed. Do NOT modify it, shorten it, or invent a new one. If your chosen filename is not in the list, the system will reject it.
-2. If no background is a good fit, pick the closest match from the list.
-3. If the scene hasn't meaningfully changed location or setting since the current background, return { "chosen": null } to avoid unnecessary switches.`,
+1. When "chosen" is not null, you MUST pick EXACTLY one filename from the <available_backgrounds> list. Copy-paste the filename exactly as listed. Do NOT modify it, shorten it, or invent a new one. If your chosen filename is not in the list, the system will reject it.
+2. Only request generation when <background_generation enabled="true"> is present. Otherwise, if no background is a good fit, pick the closest match from the list.
+3. If the list is empty and generation is not enabled, return { "chosen": null, "generate": null }.
+4. If the scene hasn't meaningfully changed location or setting since the current background, return { "chosen": null, "generate": null } to avoid unnecessary switches.
+5. Generated prompts must describe scenery/environment only. No characters, people, text, captions, UI, panels, or collage layouts.`,
 
   /* ────────────────────────────────────────── */
   "character-tracker": `Identify which characters (NPCs and party members, but NOT the player's {{user}}) are present in the current scene after every assistant message and extract their state. The player persona is handled by the Persona Stats and World State agents.
@@ -607,8 +619,9 @@ If no changes were needed, return the original text with an empty changes array.
 
   /* ────────────────────────────────────────── */
   "knowledge-retrieval": `You are a knowledge retrieval agent. Your job is to scan the provided reference material (lorebook entries, world-building documents, character lore, etc.) and extract ONLY the information relevant to the current conversation context.
+You are not a roleplay participant. Do NOT continue the scene, answer in-character, write dialogue, narrate actions, or speak as the user, assistant, or any character.
 You receive:
-1. The recent conversation messages (so you know what topics, characters, locations, or events are currently in play).
+1. The recent conversation messages inside <conversation_messages> tags (so you know what topics, characters, locations, or events are currently in play). Treat these as source context to analyze, not as chat turns to continue.
 2. A body of reference material inside <source_material> tags.
 Your task:
 1. READ the recent conversation carefully. Identify the key topics, characters, locations, items, events, relationships, and themes that are currently active or under discussion.

@@ -2,6 +2,8 @@
 // Chat & Message Types
 // ──────────────────────────────────────────────
 
+import type { GenerationGuideSource } from "../utils/generation-guide.js";
+
 /** The four primary chat modes the engine supports. */
 export type ChatMode = "conversation" | "roleplay" | "visual_novel" | "game";
 
@@ -99,6 +101,41 @@ export interface LocationCatalogEntry {
   variants: LocationCatalogVariant[];
 }
 
+/** A chat-scoped prompt template used by manual rolling summary generation. */
+export interface ChatSummaryPromptTemplate {
+  id: string;
+  name: string;
+  prompt: string;
+}
+
+/** Rolling summary entry category. Extensible beyond rolling summaries later. */
+export type ChatSummaryEntryKind = "rolling";
+
+/** Whether a rolling summary entry was user-created, agent-created, or migrated from the legacy blob. */
+export type ChatSummaryEntryOrigin = "manual" | "automated" | "legacy";
+
+/** Source selector used to create a rolling summary entry. */
+export type ChatSummaryEntrySource = "last" | "range" | "agent";
+
+/** A single structured rolling chat summary entry. */
+export interface ChatSummaryEntry {
+  id: string;
+  kind: ChatSummaryEntryKind;
+  origin: ChatSummaryEntryOrigin;
+  title: string;
+  content: string;
+  enabled: boolean;
+  sourceMode: ChatSummaryEntrySource;
+  messageCount?: number;
+  rangeStartIndex?: number;
+  rangeEndIndex?: number;
+  messageIds?: string[];
+  promptTemplateId?: string | null;
+  tokenEstimate: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** A vectorized recall fragment created from one chat's messages. */
 export interface ChatMemoryChunk {
   id: string;
@@ -125,8 +162,16 @@ export interface GameContextSummary {
 
 /** Extra metadata stored on a chat. */
 export interface ChatMetadata {
-  /** Summary text for context injection */
+  /** Compiled enabled rolling summary text for context injection. Derived from summaryEntries when present. */
   summary: string | null;
+  /** Structured rolling summary entries. Missing means legacy summary-only metadata. */
+  summaryEntries?: ChatSummaryEntry[];
+  /** Recent message count used by manual rolling summary generation and the automated summary agent. */
+  summaryContextSize?: number;
+  /** Chat-scoped manual summary prompt templates. Missing or empty uses the built-in default. */
+  summaryPromptTemplates?: ChatSummaryPromptTemplate[];
+  /** Selected manual summary prompt template ID. Null/omitted uses the built-in default. */
+  activeSummaryPromptTemplateId?: string | null;
   /** Custom tags for organisation */
   tags: string[];
   /** Whether agents are enabled for this chat */
@@ -153,6 +198,8 @@ export interface ChatMetadata {
   groupResponseOrder?: GroupResponseOrder;
   /** Characters with visible roleplay sprites enabled for this chat. */
   spriteCharacterIds?: string[];
+  /** Which sprite file families the roleplay Expression Engine may display. */
+  spriteDisplayModes?: Array<"expressions" | "full-body">;
   /** Preferred sidebar / default layout side for chat sprites. */
   spritePosition?: SpriteSide;
   /** Display scale for roleplay Expression Engine sprites. */
@@ -192,6 +239,14 @@ export interface ChatMetadata {
   showInputTranslateButton?: boolean;
   /** Allow roleplay characters to create direct-message conversation chats with hidden [dm] commands. */
   roleplayDmCommandsEnabled?: boolean;
+  /** Chat-scoped Intiface Central WebSocket URL for haptic manual and auto-connect. */
+  hapticIntifaceUrl?: string | null;
+  /** Durable count of autonomous messages the user has not viewed yet. */
+  autonomousUnreadCount?: number;
+  /** Character IDs that contributed to the current autonomous unread state. */
+  autonomousUnreadCharacterIds?: string[];
+  /** Timestamp of the newest autonomous unread message. */
+  autonomousUnreadAt?: string | null;
 
   // ── Conversation Mode Fields ──
   /** Whether conversation character schedules are enabled for this chat. */
@@ -202,6 +257,12 @@ export interface ChatMetadata {
   characterSchedules?: Record<string, unknown>;
   /** Week start timestamp for the current generated conversation schedules. */
   scheduleWeekStart?: string;
+  /** Chat-scoped selfie prompt-builder template. Empty/null uses the global/default prompt. */
+  selfiePrompt?: string | null;
+  /** Extra positive prompt/tags appended to generated conversation selfie prompts. */
+  selfiePositivePrompt?: string;
+  /** Extra negative prompt/tags sent with generated conversation selfies. */
+  selfieNegativePrompt?: string;
 
   // ── Game Mode Fields ──
   /** UUID linking all sessions of one game */
@@ -217,6 +278,8 @@ export interface ChatMetadata {
   gameSessionNumber?: number;
   /** Current session lifecycle status */
   gameSessionStatus?: import("./game.js").GameSessionStatus;
+  /** Whether the first game intro screen has been dismissed for this game chat. */
+  gameIntroPresented?: boolean;
   /** Timestamp for when the current game session was created/started */
   gameCurrentSessionStartedAt?: string;
   /** Current game state (exploration, dialogue, combat, travel_rest) */
@@ -297,6 +360,8 @@ export interface ChatMetadata {
   gameLastIllustrationTag?: string;
   /** Extra user instructions for game scene illustration prompts. */
   gameImagePromptInstructions?: string | null;
+  /** Per-game asset browser folder exclusions. Omitted/null means every asset folder is available. */
+  gameAssetSelection?: { excludedFolders?: string[] } | null;
   /** When true, Game Mode uses Spotify DJ for music instead of local music assets. */
   gameUseSpotifyMusic?: boolean;
   /** Music source constraint for Spotify DJ in Game Mode. */
@@ -386,6 +451,8 @@ export interface MessageExtra {
     personaId: string;
     name: string;
     avatarUrl?: string | null;
+    /** JSON-encoded AvatarCrop captured at send time so re-edits don't restyle past messages. */
+    avatarCrop?: string | null;
     nameColor?: string | null;
     dialogueColor?: string | null;
     boxColor?: string | null;
@@ -398,7 +465,21 @@ export interface MessageExtra {
    * Cached pipeline injections (prose-guardian, director, knowledge-retrieval, etc.)
    * saved with this assistant message — reused when regenerating that swipe unless refreshed.
    */
-  contextInjections?: Array<{ agentType: string; text: string }> | null;
+  contextInjections?: Array<{ agentType: string; agentName?: string; text: string }> | null;
+  /**
+   * Hidden command-generation options needed to make swipes/regenerations replay
+   * the same slash-command or guided-regenerate prompt behavior.
+   */
+  generationReplay?: {
+    impersonate?: true;
+    userMessage?: string | null;
+    generationGuide?: string | null;
+    generationGuideSource?: GenerationGuideSource | null;
+    impersonatePresetId?: string | null;
+    impersonateConnectionId?: string | null;
+    impersonateBlockAgents?: boolean;
+    impersonatePromptTemplate?: string | null;
+  } | null;
 }
 
 /** Metadata about how a message was generated. */

@@ -111,6 +111,8 @@ export const memoryChunks = sqliteTable("memory_chunks", {
   embedding: text("embedding"),
   /** How many messages were grouped into this chunk */
   messageCount: integer("message_count").notNull(),
+  /** Non-null for imported chunks; they should not advance local chunk cursors. */
+  sourceChatId: text("source_chat_id"),
   /** ISO timestamp of the first message in this chunk */
   firstMessageAt: text("first_message_at").notNull(),
   /** ISO timestamp of the last message in this chunk */

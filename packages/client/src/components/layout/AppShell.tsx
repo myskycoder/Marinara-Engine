@@ -17,9 +17,11 @@ import {
 } from "../../stores/ui.store";
 import { useChatStore } from "../../stores/chat.store";
 import { useBackgroundAutonomousPolling } from "../../hooks/use-background-autonomous";
+import { useClearAutonomousUnread } from "../../hooks/use-chats";
 import { useIdleDetection } from "../../hooks/use-idle-detection";
 import { usePageActivity } from "../../hooks/use-page-activity";
 import { cn } from "../../lib/utils";
+import { parseChatMetadata } from "../../lib/chat-display";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   lazy,
@@ -59,6 +61,9 @@ const RegexScriptEditor = lazy(() =>
 const BotBrowserView = lazy(() =>
   import("../bot-browser/BotBrowserView").then((module) => ({ default: module.BotBrowserView })),
 );
+const GameAssetsBrowserView = lazy(() =>
+  import("../game-assets/GameAssetsBrowserView").then((module) => ({ default: module.GameAssetsBrowserView })),
+);
 const RightPanel = lazy(() => import("./RightPanel").then((module) => ({ default: module.RightPanel })));
 const TrackerDataSidebar = lazy(() =>
   import("./TrackerDataSidebar").then((module) => ({ default: module.TrackerDataSidebar })),
@@ -89,18 +94,40 @@ function MainPaneFallback() {
     <div className="flex flex-1 items-center justify-center text-sm text-[var(--muted-foreground)]">Loading...</div>
   );
 }
-/** Keeps BotBrowserView mounted (hidden via CSS) once it's been opened at least once, so state persists. */
-function BotBrowserPersistent({ open }: { open: boolean }) {
+/** Mounts children once `open` becomes true, then keeps them mounted so state persists.
+ *  `overlay` mode uses framer-motion slide-in and never unmounts. */
+function MountOnceWhenOpened({
+  open,
+  children,
+  overlay,
+}: {
+  open: boolean;
+  children: React.ReactNode;
+  overlay?: boolean;
+}) {
   const [everOpened, setEverOpened] = useState(false);
   useEffect(() => {
     if (open && !everOpened) setEverOpened(true);
   }, [open, everOpened]);
   if (!everOpened) return null;
+  if (overlay) {
+    return (
+      <motion.div
+        initial={{ opacity: 0, x: 30 }}
+        animate={open ? { opacity: 1, x: 0 } : { opacity: 0, x: 30 }}
+        transition={{ duration: 0.2 }}
+        className={cn(
+          "absolute inset-0 flex flex-col overflow-hidden bg-[var(--background)]",
+          open ? "z-20" : "z-10 pointer-events-none",
+        )}
+      >
+        <Suspense fallback={<MainPaneFallback />}>{children}</Suspense>
+      </motion.div>
+    );
+  }
   return (
     <div className={open ? "flex flex-1 flex-col overflow-hidden" : "hidden"}>
-      <Suspense fallback={<MainPaneFallback />}>
-        <BotBrowserView />
-      </Suspense>
+      <Suspense fallback={<MainPaneFallback />}>{children}</Suspense>
     </div>
   );
 }
@@ -239,14 +266,34 @@ export function AppShell() {
   const personaDetailId = useUIStore((s) => s.personaDetailId);
   const regexDetailId = useUIStore((s) => s.regexDetailId);
   const botBrowserOpen = useUIStore((s) => s.botBrowserOpen);
+  const gameAssetsBrowserOpen = useUIStore((s) => s.gameAssetsBrowserOpen);
   const hasCompletedOnboarding = useUIStore((s) => s.hasCompletedOnboarding);
   const activeChatId = useChatStore((s) => s.activeChatId);
   const activeChat = useChatStore((s) => s.activeChat);
+  const clearUnread = useChatStore((s) => s.clearUnread);
+  const { mutate: clearAutonomousUnread, isPending: isClearingAutonomousUnread } = useClearAutonomousUnread();
   const isPageActive = usePageActivity();
   const [trackerPanelTop, setTrackerPanelTop] = useState(TRACKER_PANEL_EDGE_OFFSET);
   const [trackerPanelExitLayoutHold, setTrackerPanelExitLayoutHold] = useState(false);
   const [trackerPanelToggleAnchorY, setTrackerPanelToggleAnchorY] = useState<number | null>(null);
   const trackerPanelWasActiveRef = useRef(false);
+  const lastAutonomousUnreadClearRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!activeChatId || isClearingAutonomousUnread) return;
+    const metadata = parseChatMetadata(activeChat?.metadata);
+    const unreadCount = typeof metadata.autonomousUnreadCount === "number" ? metadata.autonomousUnreadCount : 0;
+    const persistedUnread = unreadCount > 0;
+    if (!persistedUnread && !useChatStore.getState().unreadCounts.has(activeChatId)) return;
+    const clearKey = `${activeChatId}:${unreadCount}:${metadata.autonomousUnreadAt ?? ""}`;
+    if (lastAutonomousUnreadClearRef.current === clearKey) return;
+    clearUnread(activeChatId);
+    clearAutonomousUnread(activeChatId, {
+      onSuccess: () => {
+        lastAutonomousUnreadClearRef.current = clearKey;
+      },
+    });
+  }, [activeChat?.metadata, activeChatId, clearAutonomousUnread, clearUnread, isClearingAutonomousUnread]);
 
   const startSidebarResize = useCallback(
     (event: ReactMouseEvent<HTMLDivElement>) => {
@@ -452,11 +499,13 @@ export function AppShell() {
     <LorebookEditor />
   ) : null;
 
-  const showAmbientDecor = isPageActive && !activeChatId && !detailView && !botBrowserOpen;
+  const showAmbientDecor = isPageActive && !activeChatId && !detailView && !botBrowserOpen && !gameAssetsBrowserOpen;
   const hasDetailView = detailView != null;
   const trackerPanelActive = trackerPanelEnabled && trackerPanelOpen;
+  const trackerPanelSurfaceAvailable = !botBrowserOpen && !gameAssetsBrowserOpen && !hasDetailView;
+  const trackerPanelVisible = trackerPanelActive && trackerPanelSurfaceAvailable;
   useEffect(() => {
-    if (trackerPanelActive) {
+    if (trackerPanelVisible) {
       trackerPanelWasActiveRef.current = true;
       setTrackerPanelExitLayoutHold(false);
       return;
@@ -467,10 +516,10 @@ export function AppShell() {
     setTrackerPanelExitLayoutHold(true);
     const timeout = window.setTimeout(() => setTrackerPanelExitLayoutHold(false), TRACKER_PANEL_DESKTOP_EXIT_MS);
     return () => window.clearTimeout(timeout);
-  }, [trackerPanelActive]);
+  }, [trackerPanelVisible]);
 
-  const trackerPanelPendingExit = !trackerPanelActive && trackerPanelWasActiveRef.current;
-  const trackerPanelAnchoredForMotion = trackerPanelActive || trackerPanelExitLayoutHold || trackerPanelPendingExit;
+  const trackerPanelPendingExit = !trackerPanelVisible && trackerPanelWasActiveRef.current;
+  const trackerPanelAnchoredForMotion = trackerPanelVisible || trackerPanelExitLayoutHold || trackerPanelPendingExit;
   const trackerPanelDockToEdge = trackerPanelAnchoredForMotion && trackerPanelHideHudWidgets;
   const updateTrackerPanelToggleAnchor = useCallback(() => {
     const root = mainRef.current;
@@ -514,7 +563,7 @@ export function AppShell() {
   }, [trackerPanelDockToEdge]);
 
   useLayoutEffect(() => {
-    if (isMobile || trackerPanelActive || botBrowserOpen || hasDetailView) return;
+    if (isMobile || trackerPanelVisible || !trackerPanelSurfaceAvailable) return;
 
     let frame = 0;
     let discoveryObserver: MutationObserver | null = null;
@@ -562,15 +611,16 @@ export function AppShell() {
     activeChat?.mode,
     activeChatId,
     botBrowserOpen,
+    gameAssetsBrowserOpen,
     centerCompact,
-    hasDetailView,
     isMobile,
-    trackerPanelActive,
+    trackerPanelSurfaceAvailable,
+    trackerPanelVisible,
     updateTrackerPanelToggleAnchor,
   ]);
 
   useLayoutEffect(() => {
-    if (isMobile || !trackerPanelAnchoredForMotion || botBrowserOpen || hasDetailView) {
+    if (isMobile || !trackerPanelAnchoredForMotion || !trackerPanelSurfaceAvailable) {
       setTrackerPanelTop(TRACKER_PANEL_EDGE_OFFSET);
       return;
     }
@@ -620,25 +670,26 @@ export function AppShell() {
     activeChat?.mode,
     activeChatId,
     botBrowserOpen,
+    gameAssetsBrowserOpen,
     centerCompact,
-    hasDetailView,
     isMobile,
     trackerPanelAnchoredForMotion,
     trackerPanelDockToEdge,
+    trackerPanelSurfaceAvailable,
     updateTrackerPanelTop,
   ]);
 
   const trackerPanelChatAvoidance =
-    !isMobile && trackerPanelAnchoredForMotion && !botBrowserOpen && !hasDetailView
+    !isMobile && trackerPanelAnchoredForMotion && trackerPanelSurfaceAvailable
       ? Math.round(liveTrackerPanelWidth * 0.62)
       : 0;
   const trackerPanelHudClearance =
-    !isMobile && trackerPanelAnchoredForMotion && trackerPanelHideHudWidgets && !botBrowserOpen && !hasDetailView
+    !isMobile && trackerPanelAnchoredForMotion && trackerPanelHideHudWidgets && trackerPanelSurfaceAvailable
       ? liveTrackerPanelWidth + TRACKER_PANEL_HUD_GAP
       : 0;
 
   const trackerPanelDesktop = (side: "left" | "right") =>
-    trackerPanelActive && trackerPanelSide === side ? (
+    trackerPanelVisible && trackerPanelSide === side ? (
       <motion.aside
         key={`tracker-${side}`}
         initial={{
@@ -781,7 +832,9 @@ export function AppShell() {
         />
       )}
 
-      <AnimatePresence initial={false}>{!isMobile && trackerPanelDesktop("left")}</AnimatePresence>
+      <AnimatePresence initial={false}>
+        {!isMobile && trackerPanelSurfaceAvailable && trackerPanelDesktop("left")}
+      </AnimatePresence>
 
       {/* Center content */}
       <main
@@ -792,29 +845,39 @@ export function AppShell() {
         className="@container mari-main relative flex min-w-0 flex-1 flex-col overflow-hidden"
       >
         <TopBar />
-        {/* Bot Browser — kept mounted once opened so state persists across close/reopen */}
-        <BotBrowserPersistent open={botBrowserOpen} />
-        <div
-          className={botBrowserOpen ? "hidden" : "flex flex-1 flex-col overflow-hidden"}
-          style={
-            {
-              "--tracker-chat-avoid-left": `${trackerPanelSide === "left" ? trackerPanelChatAvoidance : 0}px`,
-              "--tracker-chat-avoid-right": `${trackerPanelSide === "right" ? trackerPanelChatAvoidance : 0}px`,
-              "--tracker-panel-hud-clear-left": `${trackerPanelSide === "left" ? trackerPanelHudClearance : 0}px`,
-              "--tracker-panel-hud-clear-right": `${trackerPanelSide === "right" ? trackerPanelHudClearance : 0}px`,
-            } as CSSProperties
-          }
-        >
-          <Suspense fallback={<MainPaneFallback />}>{detailView ?? <ChatArea />}</Suspense>
+        <div className="relative flex flex-1 flex-col overflow-hidden">
+          {/* Bot Browser — kept mounted once opened so state persists across close/reopen */}
+          <MountOnceWhenOpened open={botBrowserOpen} overlay>
+            <BotBrowserView />
+          </MountOnceWhenOpened>
+          {/* Game Assets Browser — kept mounted once opened so state persists across close/reopen */}
+          <MountOnceWhenOpened open={gameAssetsBrowserOpen} overlay>
+            <GameAssetsBrowserView />
+          </MountOnceWhenOpened>
+          <div
+            className={botBrowserOpen || gameAssetsBrowserOpen ? "hidden" : "flex flex-1 flex-col overflow-hidden"}
+            style={
+              {
+                "--tracker-chat-avoid-left": `${trackerPanelSide === "left" ? trackerPanelChatAvoidance : 0}px`,
+                "--tracker-chat-avoid-right": `${trackerPanelSide === "right" ? trackerPanelChatAvoidance : 0}px`,
+                "--tracker-panel-hud-clear-left": `${trackerPanelSide === "left" ? trackerPanelHudClearance : 0}px`,
+                "--tracker-panel-hud-clear-right": `${trackerPanelSide === "right" ? trackerPanelHudClearance : 0}px`,
+              } as CSSProperties
+            }
+          >
+            <Suspense fallback={<MainPaneFallback />}>{detailView ?? <ChatArea />}</Suspense>
+          </div>
         </div>
         {/* Floating avatar notification bubbles (right edge) */}
         <ChatNotificationBubbles />
       </main>
 
-      <AnimatePresence initial={false}>{!isMobile && trackerPanelDesktop("right")}</AnimatePresence>
+      <AnimatePresence initial={false}>
+        {!isMobile && trackerPanelSurfaceAvailable && trackerPanelDesktop("right")}
+      </AnimatePresence>
 
       {/* Mobile tracker panel backdrop */}
-      {trackerPanelActive && (
+      {trackerPanelVisible && (
         <div
           className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm md:hidden"
           onClick={() => setTrackerPanelOpen(false)}
@@ -824,7 +887,7 @@ export function AppShell() {
       {/* Mobile tracker panel */}
       {isMobile && (
         <AnimatePresence mode="wait">
-          {trackerPanelActive && (
+          {trackerPanelVisible && (
             <motion.aside
               key="mobile-tracker"
               initial={{ x: trackerPanelSide === "left" ? "-100%" : "100%" }}

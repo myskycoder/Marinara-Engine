@@ -1,7 +1,7 @@
 // ──────────────────────────────────────────────
 // Routes: Import (SillyTavern data)
 // ──────────────────────────────────────────────
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { execFile } from "child_process";
 import { platform, homedir } from "os";
 import { readdir, stat } from "fs/promises";
@@ -12,13 +12,17 @@ import {
   importCharX,
   inspectSTCharacter,
   inspectCharX,
+  getExistingCharacterTagKeys,
   type STCharacterImportPreview,
+  type STCharacterTagImportMode,
 } from "../services/import/st-character.importer.js";
 import { importSTPreset } from "../services/import/st-prompt.importer.js";
 import { importSTLorebook } from "../services/import/st-lorebook.importer.js";
 import { importMarinara } from "../services/import/marinara.importer.js";
 import { scanSTFolder, runSTBulkImport, type STBulkImportOptions } from "../services/import/st-bulk.importer.js";
 import { characters as charactersTable } from "../db/schema/index.js";
+import { createChatsStorage } from "../services/storage/chats.storage.js";
+import { newId } from "../utils/id-generator.js";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
 import { getImportAllowedRoots } from "../config/runtime-config.js";
 import { requirePrivilegedAccess } from "../middleware/privileged-gate.js";
@@ -298,12 +302,55 @@ function readMultipartBooleanField(file: { fields?: Record<string, any> } | null
   return readBooleanOption(rawValue);
 }
 
+function readTagImportMode(value: unknown): STCharacterTagImportMode | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "all" || normalized === "none" || normalized === "existing") return normalized;
+  return undefined;
+}
+
+function readMultipartTagImportMode(file: { fields?: Record<string, any> } | null | undefined) {
+  const field = file?.fields?.tagImportMode;
+  const rawValue = Array.isArray(field) ? field.at(-1)?.value : field?.value;
+  return readTagImportMode(rawValue);
+}
+
+function invalidTagImportModeResponse() {
+  return {
+    success: false,
+    error: "Invalid tagImportMode. Expected one of: all, none, existing.",
+  };
+}
+
+type MultipartImportFile = { filename?: string; buffer: Buffer };
+
+async function readMultipartFileWithFields(req: FastifyRequest) {
+  let file: MultipartImportFile | null = null;
+  const fields: Record<string, unknown> = {};
+
+  for await (const part of req.parts()) {
+    if (part.type === "file") {
+      file = {
+        filename: part.filename,
+        buffer: await part.toBuffer(),
+      };
+      continue;
+    }
+
+    fields[part.fieldname] = part.value;
+  }
+
+  return { file, fields };
+}
+
 async function importCharacterBuffer(
   fileName: string,
   buffer: Buffer,
   db: FastifyInstance["db"],
   timestampOverrides?: ReturnType<typeof normalizeTimestampOverrides>,
   importEmbeddedLorebook?: boolean,
+  tagImportMode?: STCharacterTagImportMode,
+  existingTagKeys?: ReadonlySet<string>,
 ) {
   if (fileName.toLowerCase().endsWith(".png")) {
     const charData = extractCharaFromPng(buffer);
@@ -316,16 +363,21 @@ async function importCharacterBuffer(
 
     const avatarB64 = buffer.toString("base64");
     charData._avatarDataUrl = `data:image/png;base64,${avatarB64}`;
-    return importSTCharacter(charData, db, { timestampOverrides, importEmbeddedLorebook });
+    return importSTCharacter(charData, db, {
+      timestampOverrides,
+      importEmbeddedLorebook,
+      tagImportMode,
+      existingTagKeys,
+    });
   }
 
   if (fileName.toLowerCase().endsWith(".charx")) {
-    return importCharX(buffer, db, { timestampOverrides, importEmbeddedLorebook });
+    return importCharX(buffer, db, { timestampOverrides, importEmbeddedLorebook, tagImportMode, existingTagKeys });
   }
 
   try {
     const json = JSON.parse(buffer.toString("utf-8"));
-    return importSTCharacter(json, db, { timestampOverrides, importEmbeddedLorebook });
+    return importSTCharacter(json, db, { timestampOverrides, importEmbeddedLorebook, tagImportMode, existingTagKeys });
   } catch {
     return {
       success: false,
@@ -417,6 +469,92 @@ export async function importRoutes(app: FastifyInstance) {
     });
   });
 
+  /**
+   * Import a SillyTavern JSONL chat file as a new branch of an existing chat.
+   * Inherits the target chat's group, character roster, persona, connection,
+   * and prompt preset so the imported transcript shows up as a sibling
+   * "chat file" instead of spawning a new character entry.
+   */
+  app.post("/st-chat-into-group", async (req, reply) => {
+    const { file, fields } = await readMultipartFileWithFields(req);
+    if (!file) return reply.status(400).send({ success: false, error: "No file uploaded" });
+
+    const targetChatId = typeof fields.chatId === "string" ? fields.chatId : null;
+    if (!targetChatId || typeof targetChatId !== "string") {
+      return reply.status(400).send({ success: false, error: "Missing chatId" });
+    }
+
+    const storage = createChatsStorage(app.db);
+    const targetChat = await storage.getById(targetChatId);
+    if (!targetChat) return reply.status(404).send({ success: false, error: "Target chat not found" });
+
+    const text = file.buffer.toString("utf-8");
+    const timestampOverrides = readTimestampOverridesValue(fields.timestampOverrides ?? fields.__timestampOverrides);
+
+    // Auto-create a groupId on the target chat if it isn't already in one, so
+    // the imported transcript can sit alongside it as a branch (mirrors the
+    // behavior of POST /chats/:id/branch).
+    let groupId = (targetChat.groupId as string | null) ?? null;
+    if (!groupId) {
+      groupId = newId();
+      await storage.update(targetChatId, { groupId });
+    }
+
+    // Inherit the existing chat's character roster instead of trying to match
+    // characters out of the JSONL header — that path creates new characters
+    // when no match is found, which is exactly what we want to avoid here.
+    let inheritedCharacterIds: string[] = [];
+    try {
+      const parsed = JSON.parse(targetChat.characterIds as string);
+      if (Array.isArray(parsed)) inheritedCharacterIds = parsed.filter((cid): cid is string => typeof cid === "string");
+    } catch {
+      inheritedCharacterIds = [];
+    }
+
+    // For multi-character chats, map each speaker name in the JSONL to one of
+    // the existing characters so per-message attribution survives the import.
+    let speakerMap: Record<string, string> | undefined;
+    if (inheritedCharacterIds.length > 1) {
+      speakerMap = {};
+      const allChars = await app.db.select().from(charactersTable);
+      const byId = new Map(allChars.map((ch) => [ch.id, ch] as const));
+      for (const cid of inheritedCharacterIds) {
+        const ch = byId.get(cid);
+        if (!ch) continue;
+        try {
+          const charData = JSON.parse(ch.data);
+          const charName = typeof charData?.name === "string" ? charData.name.trim() : "";
+          if (charName) speakerMap[charName] = cid;
+        } catch {
+          // skip
+        }
+      }
+    }
+
+    const rawName = file.filename ?? "";
+    const branchName =
+      rawName
+        .replace(/\.jsonl$/i, "")
+        .replace(/_/g, " ")
+        .trim() || "Imported";
+
+    const result = await importSTChat(text, app.db, {
+      groupId,
+      chatName: targetChat.name,
+      branchName,
+      mode: targetChat.mode as any,
+      ...(inheritedCharacterIds.length === 1 ? { characterId: inheritedCharacterIds[0] } : {}),
+      ...(inheritedCharacterIds.length > 0 ? { characterIds: inheritedCharacterIds } : {}),
+      ...(speakerMap ? { speakerMap } : {}),
+      personaId: targetChat.personaId ?? null,
+      connectionId: targetChat.connectionId ?? null,
+      promptPresetId: targetChat.promptPresetId ?? null,
+      ...(timestampOverrides ? { timestampOverrides } : {}),
+    });
+
+    return { ...result, groupId };
+  });
+
   /** Import a Marinara Engine export (.marinara.json). */
   app.post("/marinara", async (req) => {
     const body = req.body as Record<string, unknown>;
@@ -440,6 +578,78 @@ export async function importRoutes(app: FastifyInstance) {
     return importMarinara(payload as any, app.db);
   });
 
+  /**
+   * Import a Marinara Engine native package (.marinara file — a zip with
+   * data.json plus the avatar binary). Single-file multipart upload.
+   */
+  app.post("/marinara-package", async (req, reply) => {
+    const file = await req.file();
+    if (!file) return reply.status(400).send({ success: false, error: "No file uploaded" });
+    const buffer = await file.toBuffer();
+    if (buffer.length < 4 || buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
+      return reply.status(400).send({ success: false, error: "Not a .marinara package (zip signature missing)" });
+    }
+    const AdmZip = (await import("adm-zip")).default;
+    let zip: InstanceType<typeof AdmZip>;
+    try {
+      zip = new AdmZip(buffer);
+    } catch {
+      return reply.status(400).send({ success: false, error: "Could not read .marinara package" });
+    }
+    // Bounds checks before any getData() call — a legitimate .marinara package
+    // ships data.json plus at most one avatar.* entry, so anything way past
+    // that is either accidental cruft or a zip-bomb-style decompression
+    // attempt. Sizes are read off the entry headers, not the decompressed
+    // stream, so we reject before paying the memory cost.
+    const MAX_PACKAGE_ENTRIES = 8;
+    const MAX_DATA_JSON_BYTES = 5 * 1024 * 1024;
+    const MAX_AVATAR_BYTES = 20 * 1024 * 1024;
+    const entries = zip.getEntries();
+    if (entries.length > MAX_PACKAGE_ENTRIES) {
+      return reply.status(400).send({ success: false, error: ".marinara package has too many entries" });
+    }
+    const dataEntry = zip.getEntry("data.json");
+    if (!dataEntry) {
+      return reply.status(400).send({ success: false, error: ".marinara package is missing data.json" });
+    }
+    if ((dataEntry.header.size ?? 0) > MAX_DATA_JSON_BYTES) {
+      return reply.status(400).send({ success: false, error: "data.json in package is too large" });
+    }
+    let envelope: Record<string, unknown>;
+    try {
+      envelope = JSON.parse(dataEntry.getData().toString("utf-8")) as Record<string, unknown>;
+    } catch {
+      return reply.status(400).send({ success: false, error: "data.json is not valid JSON" });
+    }
+    const avatarEntry = entries.find((e) => /^avatar\.(png|jpe?g|webp|gif|avif)$/i.test(e.entryName));
+    if (avatarEntry && (avatarEntry.header.size ?? 0) > MAX_AVATAR_BYTES) {
+      return reply.status(400).send({ success: false, error: "Avatar image in package is too large" });
+    }
+    if (avatarEntry && envelope.data && typeof envelope.data === "object") {
+      const ext = avatarEntry.entryName.split(".").pop()!.toLowerCase();
+      const mime =
+        ext === "jpg" || ext === "jpeg"
+          ? "image/jpeg"
+          : ext === "webp"
+            ? "image/webp"
+            : ext === "gif"
+              ? "image/gif"
+              : ext === "avif"
+                ? "image/avif"
+                : "image/png";
+      const dataUrl = `data:${mime};base64,${avatarEntry.getData().toString("base64")}`;
+      (envelope.data as Record<string, unknown>).avatar = dataUrl;
+    }
+    const timestampOverrides = readTimestampOverridesFromMultipart(file as any);
+    if (timestampOverrides && envelope.data && typeof envelope.data === "object") {
+      const data = envelope.data as Record<string, unknown>;
+      const existingMeta =
+        data.metadata && typeof data.metadata === "object" ? (data.metadata as Record<string, unknown>) : {};
+      data.metadata = { ...existingMeta, timestamps: timestampOverrides };
+    }
+    return importMarinara(envelope as any, app.db);
+  });
+
   /** Import a SillyTavern character (JSON body or PNG file upload). */
   app.post("/st-character", async (req) => {
     const contentType = req.headers["content-type"] ?? "";
@@ -450,22 +660,34 @@ export async function importRoutes(app: FastifyInstance) {
       if (!file) return { success: false, error: "No file uploaded" };
       const timestampOverrides = readTimestampOverridesFromMultipart(file as any);
       const importEmbeddedLorebook = readMultipartBooleanField(file as any, "importEmbeddedLorebook");
+      const rawTagImportModeField = (file as any)?.fields?.tagImportMode;
+      const rawTagImportMode = Array.isArray(rawTagImportModeField)
+        ? rawTagImportModeField.at(-1)?.value
+        : rawTagImportModeField?.value;
+      const tagImportMode = readMultipartTagImportMode(file as any);
+      if (rawTagImportMode !== undefined && tagImportMode === undefined) return invalidTagImportModeResponse();
       return importCharacterBuffer(
         file.filename ?? "",
         await file.toBuffer(),
         app.db,
         timestampOverrides,
         importEmbeddedLorebook,
+        tagImportMode,
       );
     }
 
     // Standard JSON body
     const body = { ...(req.body as Record<string, unknown>) };
     const importEmbeddedLorebook = readBooleanOption(body.importEmbeddedLorebook);
+    const rawTagImportMode = body.tagImportMode;
+    const tagImportMode = readTagImportMode(rawTagImportMode);
+    if (rawTagImportMode !== undefined && tagImportMode === undefined) return invalidTagImportModeResponse();
     delete body.importEmbeddedLorebook;
+    delete body.tagImportMode;
     return importSTCharacter(body, app.db, {
       timestampOverrides: readTimestampOverridesFromBody(body),
       importEmbeddedLorebook,
+      tagImportMode,
     });
   });
 
@@ -502,6 +724,8 @@ export async function importRoutes(app: FastifyInstance) {
     const files: Array<{ filename: string; buffer: Buffer }> = [];
     const timestampEntries: Array<{ name?: string; lastModified?: number | string }> = [];
     let importEmbeddedLorebook: boolean | undefined;
+    let tagImportMode: STCharacterTagImportMode | undefined;
+    let invalidTagImportMode = false;
 
     for await (const part of parts) {
       if (part.type === "file") {
@@ -526,7 +750,14 @@ export async function importRoutes(app: FastifyInstance) {
       if (part.fieldname === "importEmbeddedLorebook") {
         importEmbeddedLorebook = readBooleanOption(part.value);
       }
+
+      if (part.fieldname === "tagImportMode") {
+        tagImportMode = readTagImportMode(part.value);
+        invalidTagImportMode ||= part.value !== undefined && tagImportMode === undefined;
+      }
     }
+
+    if (invalidTagImportMode) return { ...invalidTagImportModeResponse(), results: [] };
 
     if (files.length === 0) {
       return { success: false, error: "No files uploaded", results: [] };
@@ -541,6 +772,8 @@ export async function importRoutes(app: FastifyInstance) {
     }
 
     const results = [];
+    const existingTagKeys =
+      tagImportMode === "existing" && files.length > 0 ? await getExistingCharacterTagKeys(app.db) : undefined;
     for (const file of files) {
       const timestampEntry = timestampsByName.get(file.filename)?.shift();
       const timestampOverrides = normalizeTimestampOverrides({
@@ -554,6 +787,8 @@ export async function importRoutes(app: FastifyInstance) {
           app.db,
           timestampOverrides,
           importEmbeddedLorebook,
+          tagImportMode,
+          existingTagKeys,
         );
         results.push({ filename: file.filename, ...result });
       } catch (error) {
@@ -610,6 +845,13 @@ export async function importRoutes(app: FastifyInstance) {
     };
     const resolved = resolveImportFolder(req.body as { folderPath?: unknown; folderToken?: unknown });
     if (!resolved.ok) return reply.send({ success: false, error: resolved.error });
+    const rawCharacterTagImportMode = (req.body as { options?: { characterTagImportMode?: unknown } }).options
+      ?.characterTagImportMode;
+    const characterTagImportMode = readTagImportMode(rawCharacterTagImportMode);
+    if (rawCharacterTagImportMode !== undefined && characterTagImportMode === undefined) {
+      return reply.send(invalidTagImportModeResponse());
+    }
+    if (characterTagImportMode) options.characterTagImportMode = characterTagImportMode;
 
     // Set up SSE headers
     reply.raw.writeHead(200, {

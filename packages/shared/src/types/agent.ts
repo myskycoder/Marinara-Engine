@@ -146,6 +146,10 @@ export interface AgentContext {
    * When null, agents that care should infer from recent messages.
    */
   narrationLanguage?: string | null;
+  /** Current-turn pre-generation injections, only present for agents that opt in */
+  preGenInjections?: Array<{ agentType: string; agentName?: string; text: string }>;
+  /** Current-turn parallel-phase results, only present for agents that opt in */
+  parallelResults?: AgentResult[];
   /** Whether internal agent LLM calls should use transport streaming. */
   streaming?: boolean;
   /** Abort signal — when triggered, agent execution should stop. Typed as `any` to avoid DOM/Node lib dependency. */
@@ -276,7 +280,8 @@ export const BUILT_IN_AGENTS: BuiltInAgentMeta[] = [
   {
     id: "background",
     name: "Background",
-    description: "Selects the most fitting background image for the current scene from your uploaded backgrounds.",
+    description:
+      "Selects the most fitting background image for the current scene from your uploaded backgrounds, with optional image generation for missing locations.",
     phase: "post_processing",
     enabledByDefault: false,
     category: "tracker",
@@ -481,6 +486,7 @@ export const BUILT_IN_AGENTS: BuiltInAgentMeta[] = [
 export const BUILT_IN_AGENT_RUN_INTERVAL_DEFAULTS: Readonly<Record<string, number>> = {
   director: 5,
   "lorebook-keeper": 8,
+  "card-evolution-auditor": 8,
   "chat-summary": 5,
 };
 

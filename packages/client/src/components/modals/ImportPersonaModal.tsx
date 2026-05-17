@@ -13,12 +13,28 @@ interface Props {
   onClose: () => void;
 }
 
+function stringField(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+function jsonStringField(value: unknown, fallback?: string) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value) || (value && typeof value === "object")) return JSON.stringify(value);
+  return fallback;
+}
+
 export function ImportPersonaModal({ open, onClose }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "done">("idle");
   const [results, setResults] = useState<Array<{ filename: string; success: boolean; message: string }>>([]);
   const [dragOver, setDragOver] = useState(false);
   const qc = useQueryClient();
+
+  const isZipFile = async (file: File): Promise<boolean> => {
+    if (file.size < 4) return false;
+    const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+    return head[0] === 0x50 && head[1] === 0x4b;
+  };
 
   const handleFiles = async (files: File[]) => {
     if (files.length === 0) return;
@@ -28,6 +44,28 @@ export function ImportPersonaModal({ open, onClose }: Props) {
     const nextResults: Array<{ filename: string; success: boolean; message: string }> = [];
     for (const file of files) {
       try {
+        // Marinara native packages are .marinara files (zip with data.json +
+        // avatar binary). Detect via the zip signature so a renamed file
+        // still works.
+        if (await isZipFile(file)) {
+          const form = new FormData();
+          form.append("file", file, file.name);
+          form.append(
+            "timestampOverrides",
+            JSON.stringify({ createdAt: file.lastModified, updatedAt: file.lastModified }),
+          );
+          const data = await api.upload<{ success: boolean; name?: string; error?: string }>(
+            "/import/marinara-package",
+            form,
+          );
+          nextResults.push({
+            filename: file.name,
+            success: data.success,
+            message: data.success ? `Imported "${data.name ?? file.name}"` : (data.error ?? "Import failed"),
+          });
+          continue;
+        }
+
         const text = await file.text();
         const json = JSON.parse(text) as Record<string, unknown>;
 
@@ -53,13 +91,21 @@ export function ImportPersonaModal({ open, onClose }: Props) {
         const name = typeof json.name === "string" ? json.name : "Imported Persona";
         const data = await api.post<{ id?: string; error?: string }>("/characters/personas", {
           name,
-          description: json.description ?? "",
-          personality: json.personality ?? "",
-          scenario: json.scenario ?? "",
-          backstory: json.backstory ?? "",
-          appearance: json.appearance ?? "",
-          comment: json.comment ?? "",
-          tags: json.tags ?? undefined,
+          description: stringField(json.description),
+          personality: stringField(json.personality),
+          scenario: stringField(json.scenario),
+          backstory: stringField(json.backstory),
+          appearance: stringField(json.appearance),
+          comment: stringField(json.comment),
+          nameColor: stringField(json.nameColor),
+          dialogueColor: stringField(json.dialogueColor),
+          boxColor: stringField(json.boxColor),
+          trackerCardColors: jsonStringField(json.trackerCardColors),
+          personaStats: stringField(json.personaStats),
+          altDescriptions: jsonStringField(json.altDescriptions, "[]"),
+          tags: jsonStringField(json.tags, "[]"),
+          savedStatusOptions: jsonStringField(json.savedStatusOptions, "[]"),
+          avatarCrop: jsonStringField(json.avatarCrop, ""),
           createdAt: file.lastModified,
           updatedAt: file.lastModified,
         });
@@ -194,6 +240,7 @@ export function ImportPersonaModal({ open, onClose }: Props) {
         {/* Footer */}
         <div className="flex justify-end border-t border-[var(--border)] pt-3">
           <button
+            type="button"
             onClick={() => {
               reset();
               onClose();

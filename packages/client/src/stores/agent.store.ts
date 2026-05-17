@@ -3,6 +3,7 @@
 // ──────────────────────────────────────────────
 import { create } from "zustand";
 import type { AgentResult, CharacterCardFieldUpdate } from "@marinara-engine/shared";
+import type { AgentFailure } from "../lib/agent-failures";
 
 /**
  * A character_card_update result awaiting user confirmation.
@@ -31,6 +32,16 @@ export interface AgentDebugEntry {
     maxTokens: number;
   }>;
   results?: AgentResult[];
+  toolCall?: {
+    name: string;
+    arguments: string;
+    allowed: boolean;
+  };
+  toolResult?: {
+    name: string;
+    result: string;
+    success: boolean;
+  };
   batchMaxTokens?: number;
   timestamp: number;
 }
@@ -42,6 +53,8 @@ interface AgentState {
   isProcessing: boolean;
   /** Agent types that failed even after auto-retry — manual retry available */
   failedAgentTypes: string[];
+  /** Rich failure details for the retry UI and troubleshooting copy */
+  failedAgentFailures: AgentFailure[];
   thoughtBubbles: Array<{
     agentId: string;
     agentName: string;
@@ -63,6 +76,7 @@ interface AgentState {
     label: string;
     text: string;
   }>;
+  cyoaChoicesChatId: string | null;
   pendingCardUpdates: PendingCardUpdate[];
 
   // Actions
@@ -72,6 +86,7 @@ interface AgentState {
   addDebugEntry: (entry: Omit<AgentDebugEntry, "timestamp"> & { timestamp?: number }) => void;
   clearDebugLog: () => void;
   setFailedAgentTypes: (types: string[]) => void;
+  setFailedAgentFailures: (failures: AgentFailure[]) => void;
   clearFailedAgentTypes: () => void;
   addThoughtBubble: (agentId: string, agentName: string, content: string) => void;
   dismissThoughtBubble: (index: number) => void;
@@ -82,7 +97,7 @@ interface AgentState {
   setEchoVisibleCount: (count: number) => void;
   setEchoBaseline: (count: number) => void;
   setEchoLoadedChatId: (chatId: string | null) => void;
-  setCyoaChoices: (choices: Array<{ label: string; text: string }>) => void;
+  setCyoaChoices: (choices: Array<{ label: string; text: string }>, chatId?: string | null) => void;
   clearCyoaChoices: () => void;
   enqueuePendingCardUpdate: (entry: PendingCardUpdate) => void;
   dismissPendingCardUpdate: (id: string) => void;
@@ -96,12 +111,14 @@ export const useAgentStore = create<AgentState>((set) => ({
   debugLog: [],
   isProcessing: false,
   failedAgentTypes: [],
+  failedAgentFailures: [],
   thoughtBubbles: [],
   echoMessages: [],
   echoVisibleCount: 0,
   echoBaseline: 0,
   echoLoadedChatId: null,
   cyoaChoices: [],
+  cyoaChoicesChatId: null,
   pendingCardUpdates: [],
 
   setActiveAgents: (agents) => set({ activeAgents: agents }),
@@ -126,8 +143,22 @@ export const useAgentStore = create<AgentState>((set) => ({
 
   clearDebugLog: () => set({ debugLog: [] }),
 
-  setFailedAgentTypes: (types) => set({ failedAgentTypes: types }),
-  clearFailedAgentTypes: () => set({ failedAgentTypes: [] }),
+  setFailedAgentTypes: (types) =>
+    set({
+      failedAgentTypes: types,
+      failedAgentFailures: types.map((agentType) => ({
+        agentType,
+        agentName: agentType,
+        error: null,
+        reasonLabel: null,
+      })),
+    }),
+  setFailedAgentFailures: (failures) =>
+    set({
+      failedAgentTypes: failures.map((failure) => failure.agentType),
+      failedAgentFailures: failures,
+    }),
+  clearFailedAgentTypes: () => set({ failedAgentTypes: [], failedAgentFailures: [] }),
 
   addThoughtBubble: (agentId, agentName, content) =>
     set((s) => ({
@@ -154,8 +185,8 @@ export const useAgentStore = create<AgentState>((set) => ({
   setEchoBaseline: (count) => set({ echoBaseline: count }),
   setEchoLoadedChatId: (chatId) => set({ echoLoadedChatId: chatId }),
 
-  setCyoaChoices: (choices) => set({ cyoaChoices: choices }),
-  clearCyoaChoices: () => set({ cyoaChoices: [] }),
+  setCyoaChoices: (choices, chatId = null) => set({ cyoaChoices: choices, cyoaChoicesChatId: chatId }),
+  clearCyoaChoices: () => set({ cyoaChoices: [], cyoaChoicesChatId: null }),
 
   enqueuePendingCardUpdate: (entry) =>
     set((s) => ({ pendingCardUpdates: [...s.pendingCardUpdates, entry].slice(-20) })),
@@ -170,12 +201,14 @@ export const useAgentStore = create<AgentState>((set) => ({
       debugLog: [],
       isProcessing: false,
       failedAgentTypes: [],
+      failedAgentFailures: [],
       thoughtBubbles: [],
       echoMessages: [],
       echoVisibleCount: 0,
       echoBaseline: 0,
       echoLoadedChatId: null,
       cyoaChoices: [],
+      cyoaChoicesChatId: null,
       pendingCardUpdates: [],
     }),
 }));

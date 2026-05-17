@@ -406,11 +406,12 @@ export async function sceneRoutes(app: FastifyInstance) {
     ];
 
     let result: ChatCompletionResult;
+    const summaryMaxTokens = provider.maxTokensOverrideValue ?? 1024;
     try {
       result = await provider.chatComplete(summaryPrompt, {
         model: conn.model,
         temperature: 0.8,
-        maxTokens: 1024,
+        maxTokens: summaryMaxTokens,
       });
     } catch (error) {
       logger.error(

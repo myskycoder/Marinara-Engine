@@ -7,7 +7,7 @@ import { createAgentsStorage } from "../storage/agents.storage.js";
 import { createCharactersStorage } from "../storage/characters.storage.js";
 import { createChatsStorage } from "../storage/chats.storage.js";
 import { createConnectionsStorage } from "../storage/connections.storage.js";
-import { fetchSpotifyApi, type SpotifyCredentialsResult } from "./spotify.service.js";
+import { fetchSpotifyApi, normalizeSpotifySearchQuery, type SpotifyCredentialsResult } from "./spotify.service.js";
 
 type ChatRow = Awaited<ReturnType<ReturnType<typeof createChatsStorage>["list"]>>[number];
 type MessageRow = Awaited<ReturnType<ReturnType<typeof createChatsStorage>["listMessagesPaginated"]>>[number];
@@ -275,7 +275,7 @@ async function searchSpotifyTrack(
       `"${compactTitle}" "${compactArtist}"`,
       `${compactTitle} ${compactArtist}`,
     ]),
-  ).map((query) => query.slice(0, 500));
+  ).map((query) => normalizeSpotifySearchQuery(query));
   const candidatesByUri = new Map<string, SpotifyTrack>();
 
   for (const query of queries) {

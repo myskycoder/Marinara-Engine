@@ -182,6 +182,7 @@ export const FILE_BACKED_TABLES = [
   "conversation_notes",
   "memory_chunks",
   "chat_folders",
+  "api_connection_folders",
   "custom_themes",
   "app_settings",
   "chat_presets",
@@ -326,16 +327,22 @@ function looksNulFilled(path: string): boolean {
   }
 }
 
-function atomicWriteFile(path: string, content: string) {
+function atomicWriteFile(path: string, content: string, options: { refreshBackup?: boolean } = {}) {
   mkdirSync(dirname(path), { recursive: true });
   const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
+  const refreshBackup = options.refreshBackup ?? true;
   try {
     // Refresh the .bak via tmp + fsync + rename so a hard crash mid-write
     // can't leave both main and backup zero-filled (NTFS allocates blocks
     // and updates metadata before the cache manager flushes data).
-    // Skip the refresh if the existing main is NUL-corrupted — copying garbage
-    // over a valid .bak would destroy the recovery source we just used.
-    if (existsSync(path) && !looksNulFilled(path)) {
+    //
+    // Skip the refresh when either:
+    //   1. Caller opted out (refreshBackup=false): this write is repairing a
+    //      file just recovered from .bak, so the still-corrupt primary is not
+    //      valid backup input.
+    //   2. The existing main is NUL-corrupted: copying garbage over a valid
+    //      .bak would destroy the recovery source.
+    if (refreshBackup && existsSync(path) && !looksNulFilled(path)) {
       const bakPath = `${path}.bak`;
       const bakTmpPath = `${bakPath}.tmp-${process.pid}-${Date.now()}`;
       try {
@@ -776,6 +783,7 @@ async function readLegacyRows(dbPath: string, table: string) {
 class FileTableStore {
   private tables = new Map<string, Row[]>();
   private dirtyTables = new Set<string>();
+  private backupRecoveredPaths = new Set<string>();
   private dirty = false;
   private saving = false;
   private debounceTimer: NodeJS.Timeout | null = null;
@@ -1020,9 +1028,13 @@ class FileTableStore {
     let loadedManifest: TableSnapshotManifest | null = null;
     let needsManifestRewrite = false;
     try {
-      const result = parseJsonFile<TableSnapshotManifest | null>(manifestPath(this.rootDir), null);
+      const path = manifestPath(this.rootDir);
+      const result = parseJsonFile<TableSnapshotManifest | null>(path, null);
       loadedManifest = result.value;
       needsManifestRewrite = result.recoveredFromBackup;
+      if (result.recoveredFromBackup) {
+        this.backupRecoveredPaths.add(path);
+      }
     } catch (err) {
       logger.error(
         err,
@@ -1043,13 +1055,17 @@ class FileTableStore {
     const counts: Record<string, number> = {};
     for (const table of FILE_BACKED_TABLES) {
       const meta = getMeta(table);
-      const { value: rows, recoveredFromBackup } = parseJsonFile<Row[]>(tableFilePath(this.rootDir, table), []);
+      const path = tableFilePath(this.rootDir, table);
+      const { value: rows, recoveredFromBackup } = parseJsonFile<Row[]>(path, []);
       const normalized = (Array.isArray(rows) ? rows : []).map((row) => normalizeRow(meta, row));
       this.tables.set(table, normalized);
       counts[table] = normalized.length;
       if (recoveredFromBackup) {
+        this.backupRecoveredPaths.add(path);
         // Same self-heal: rewrite the corrupt main file from in-memory data
-        // (which now matches the recovered backup) on the next flush.
+        // (which now matches the recovered backup) on the next flush, while
+        // suppressing .bak refresh for that write so the recovery source is
+        // preserved until the primary is repaired.
         this.dirtyTables.add(table);
         this.dirty = true;
       }
@@ -1084,6 +1100,7 @@ class FileTableStore {
     const existingPaths = [...new Set(dbPaths.filter((path) => existsSync(path)))];
     if (existingPaths.length === 0) return false;
 
+    legacyReaderUsed = null;
     const counts: Record<string, number> = {};
     let totalRows = 0;
     for (const table of FILE_BACKED_TABLES) {
@@ -1095,10 +1112,17 @@ class FileTableStore {
 
     if (totalRows === 0) return false;
 
+    const importedAt = new Date().toISOString();
     this.migratedFromSqlite = {
       path: existingPaths[0],
       paths: existingPaths,
-      importedAt: new Date().toISOString(),
+      importedAt,
+    };
+    this.legacyRepair = {
+      paths: existingPaths,
+      repairedAt: importedAt,
+      tables: {},
+      reader: legacyReaderUsed ?? undefined,
     };
     for (const table of FILE_BACKED_TABLES) this.dirtyTables.add(table);
     this.dirty = true;
@@ -1198,8 +1222,9 @@ class FileTableStore {
     for (const table of FILE_BACKED_TABLES) {
       const rows = this.rows(table);
       tables[table] = rows.length;
-      if (this.dirtyTables.has(table) || !existsSync(tableFilePath(this.rootDir, table))) {
-        atomicWriteFile(tableFilePath(this.rootDir, table), JSON.stringify(rows));
+      const path = tableFilePath(this.rootDir, table);
+      if (this.dirtyTables.has(table) || !existsSync(path)) {
+        atomicWriteFile(path, JSON.stringify(rows), { refreshBackup: !this.backupRecoveredPaths.has(path) });
       }
     }
 
@@ -1211,7 +1236,9 @@ class FileTableStore {
       ...(this.legacyRepair && { legacyRepair: this.legacyRepair }),
       tables,
     };
-    atomicWriteFile(manifestPath(this.rootDir), JSON.stringify(manifest, null, 2));
+    const path = manifestPath(this.rootDir);
+    atomicWriteFile(path, JSON.stringify(manifest, null, 2), { refreshBackup: !this.backupRecoveredPaths.has(path) });
+    this.backupRecoveredPaths.clear();
   }
 
   private installAutosave() {

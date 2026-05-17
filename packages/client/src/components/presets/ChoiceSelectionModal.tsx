@@ -35,6 +35,25 @@ interface VariableData {
   randomPick: boolean;
 }
 
+function sanitizeChoiceSelection(
+  variable: VariableData,
+  selection: string | string[] | undefined,
+): string | string[] | undefined {
+  const validValues = new Set(variable.options.map((opt) => opt.value));
+  const candidates = Array.isArray(selection) ? selection : typeof selection === "string" ? [selection] : [];
+
+  if (variable.multiSelect) {
+    return candidates.filter((value, index) => validValues.has(value) && candidates.indexOf(value) === index);
+  }
+
+  return candidates.find((value) => validValues.has(value));
+}
+
+function fallbackChoiceSelection(variable: VariableData): string | string[] | undefined {
+  if (variable.multiSelect) return [];
+  return variable.options[0]?.value;
+}
+
 export function ChoiceSelectionModal({
   open,
   onClose,
@@ -90,9 +109,9 @@ export function ChoiceSelectionModal({
       const existing = existingChoices[v.variableName];
       const saved = defaultChoices[v.variableName];
       if (existing !== undefined) {
-        initial[v.variableName] = existing;
+        initial[v.variableName] = sanitizeChoiceSelection(v, existing) ?? fallbackChoiceSelection(v) ?? "";
       } else if (saved !== undefined) {
-        initial[v.variableName] = saved;
+        initial[v.variableName] = sanitizeChoiceSelection(v, saved) ?? fallbackChoiceSelection(v) ?? "";
       } else if (v.multiSelect) {
         initial[v.variableName] = [];
       } else if (v.options.length > 0) {

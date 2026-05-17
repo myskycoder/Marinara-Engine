@@ -4,7 +4,7 @@
 // Chunks conversation messages into groups, embeds them, and provides
 // semantic recall: given a query, find the most relevant past
 // conversation fragments from specified chats.
-import { eq, desc, and, gt, inArray, isNotNull } from "drizzle-orm";
+import { eq, desc, and, gt, inArray, isNotNull, isNull } from "drizzle-orm";
 import type { DB } from "../db/connection.js";
 import { messages, memoryChunks } from "../db/schema/index.js";
 import { newId, now } from "../utils/id-generator.js";
@@ -95,7 +95,7 @@ export async function chunkAndEmbedMessages(
   const lastChunk = await db
     .select({ lastMessageAt: memoryChunks.lastMessageAt })
     .from(memoryChunks)
-    .where(eq(memoryChunks.chatId, chatId))
+    .where(and(eq(memoryChunks.chatId, chatId), isNull(memoryChunks.sourceChatId)))
     .orderBy(desc(memoryChunks.lastMessageAt))
     .limit(1);
 
@@ -185,10 +185,13 @@ export async function rebuildMemoryChunks(
 ): Promise<number> {
   if (isLite) return 0;
 
-  await db.delete(memoryChunks).where(eq(memoryChunks.chatId, chatId));
+  await db.delete(memoryChunks).where(and(eq(memoryChunks.chatId, chatId), isNull(memoryChunks.sourceChatId)));
   await chunkAndEmbedMessages(db, chatId, nameMap, options);
 
-  const rebuilt = await db.select({ id: memoryChunks.id }).from(memoryChunks).where(eq(memoryChunks.chatId, chatId));
+  const rebuilt = await db
+    .select({ id: memoryChunks.id })
+    .from(memoryChunks)
+    .where(and(eq(memoryChunks.chatId, chatId), isNull(memoryChunks.sourceChatId)));
   return rebuilt.length;
 }
 

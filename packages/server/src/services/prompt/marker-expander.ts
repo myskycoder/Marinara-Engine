@@ -3,7 +3,9 @@
 // sections into actual content at assembly time.
 // ──────────────────────────────────────────────
 import type { DB } from "../../db/connection.js";
+import { resolveCharacterScopedMacros } from "@marinara-engine/shared";
 import type {
+  CharacterMacroProfile,
   MarkerConfig,
   ChatMLMessage,
   CharacterData,
@@ -13,7 +15,7 @@ import type {
 } from "@marinara-engine/shared";
 import { createCharactersStorage } from "../storage/characters.storage.js";
 import { createAgentsStorage } from "../storage/agents.storage.js";
-import { processLorebooks } from "../lorebook/index.js";
+import { processLorebooks, type LorebookFinalContentResolver, type LorebookScanResult } from "../lorebook/index.js";
 import { wrapContent } from "./format-engine.js";
 import { getCharacterDescriptionWithExtensions } from "./character-description-extensions.js";
 import { agentRuns } from "../../db/schema/index.js";
@@ -37,6 +39,8 @@ export interface MarkerContext {
   /** Raw personaStats JSON (for rpgStats injection) */
   personaStats?: any;
   chatMessages: ChatMLMessage[];
+  /** Optional scan-only messages for lorebook matching. */
+  lorebookScanMessages?: ChatMLMessage[];
   chatSummary: string | null;
   wrapFormat: WrapFormat;
   /** When false, agent_data markers expand to empty strings */
@@ -45,6 +49,10 @@ export interface MarkerContext {
   activeAgentIds: string[];
   /** Per-chat list of manually activated lorebook IDs from chat settings */
   activeLorebookIds: string[];
+  /** Lorebook IDs that should be excluded even if otherwise scoped to the chat. */
+  excludedLorebookIds?: string[];
+  /** Source agent IDs whose generated lorebooks should be excluded from scanning. */
+  excludedLorebookSourceAgentIds?: string[];
   /** When true, lorebook markers expand to empty content without scanning global or scoped lorebooks. */
   disableLorebooks?: boolean;
   /** Pre-computed embedding of the chat context for semantic lorebook matching. */
@@ -61,12 +69,18 @@ export interface MarkerContext {
   generationTriggers?: string[];
   /** Preview/debug expansion: lorebook markers should not consume timing or ephemeral state. */
   previewOnly?: boolean;
+  /** Resolves prompt macros for final included lorebook entries. May apply macro side effects. */
+  resolveLorebookContent?: LorebookFinalContentResolver;
   /** Collector for lorebook depth entries — populated during expansion, consumed by the assembler. */
   lorebookDepthEntries?: Array<{ content: string; role: "system" | "user" | "assistant"; depth: number }>;
   /** Collector for updated entry state overrides after ephemeral processing — saved to chat metadata by caller. */
   updatedEntryStateOverrides?: Record<string, { ephemeral?: number | null; enabled?: boolean }>;
   /** Collector for updated sticky/cooldown/delay timing state — saved to chat metadata by caller. */
   updatedEntryTimingStates?: Record<string, LorebookEntryTimingState>;
+  /** Cached lorebook scan for all lorebook marker sections in this prompt build. */
+  lorebookScanResult?: LorebookScanResult;
+  /** True once cached lorebook state/depth side effects have been applied to this marker context. */
+  lorebookScanResultApplied?: boolean;
   /** When set, replaces all individual character scenario fields with this shared group scenario. */
   groupScenarioOverrideText?: string | null;
 }
@@ -110,11 +124,13 @@ export async function expandMarker(config: MarkerConfig, ctx: MarkerContext): Pr
 async function expandCharacter(config: MarkerConfig, ctx: MarkerContext): Promise<ExpandedMarker> {
   const charStorage = createCharactersStorage(ctx.db);
   const parts: string[] = [];
+  const resolveCharacterMacros = ctx.characterIds.length > 1;
 
   for (const charId of ctx.characterIds) {
     const row = await charStorage.getById(charId);
     if (!row) continue;
     const data = JSON.parse(row.data) as CharacterData;
+    let profile: CharacterMacroProfile | null = null;
 
     const fields = config.characterFields ?? [
       "description",
@@ -133,7 +149,11 @@ async function expandCharacter(config: MarkerConfig, ctx: MarkerContext): Promis
       if (field === "scenario" && ctx.groupScenarioOverrideText) continue;
       const value = getCharacterField(data, field);
       if (value) {
-        charParts.push(wrapContent(value, field, ctx.wrapFormat, 2));
+        const resolvedValue =
+          resolveCharacterMacros && value.includes("{{")
+            ? resolveCharacterScopedMacros(value, (profile ??= characterMacroProfileFromData(data)))
+            : value;
+        charParts.push(wrapContent(resolvedValue, field, ctx.wrapFormat, 2));
       }
     }
 
@@ -158,6 +178,20 @@ async function expandCharacter(config: MarkerConfig, ctx: MarkerContext): Promis
   }
 
   return { content: parts.join("\n") };
+}
+
+function characterMacroProfileFromData(data: CharacterData): CharacterMacroProfile {
+  return {
+    name: data.name ?? "Character",
+    description: getCharacterDescriptionWithExtensions(data),
+    personality: data.personality ?? "",
+    backstory: data.extensions?.backstory ?? "",
+    appearance: data.extensions?.appearance ?? "",
+    scenario: data.scenario ?? "",
+    example: data.mes_example ?? "",
+    systemPrompt: data.system_prompt ?? "",
+    postHistoryInstructions: data.post_history_instructions ?? "",
+  };
 }
 
 function getCharacterField(data: CharacterData, field: string): string {
@@ -246,34 +280,48 @@ async function expandPersona(_config: MarkerConfig, ctx: MarkerContext): Promise
 async function expandLorebook(config: MarkerConfig, ctx: MarkerContext): Promise<ExpandedMarker> {
   if (ctx.disableLorebooks === true) return { content: "" };
 
-  const result = await processLorebooks(ctx.db, ctx.chatMessages, ctx.gameState ?? null, {
-    chatId: ctx.chatId,
-    characterIds: ctx.characterIds,
-    personaId: ctx.personaId ?? null,
-    activeLorebookIds: ctx.activeLorebookIds,
-    tokenBudget: ctx.lorebookTokenBudget,
-    chatEmbedding: ctx.chatEmbedding ?? null,
-    entryStateOverrides: ctx.entryStateOverrides,
-    entryTimingStates: ctx.entryTimingStates,
-    generationTriggers: ctx.generationTriggers ?? ["chat"],
-    previewOnly: ctx.previewOnly === true,
-  });
+  const result =
+    ctx.lorebookScanResult ??
+    (ctx.lorebookScanResult = await processLorebooks(
+      ctx.db,
+      ctx.lorebookScanMessages ?? ctx.chatMessages,
+      ctx.gameState ?? null,
+      {
+        chatId: ctx.chatId,
+        characterIds: ctx.characterIds,
+        personaId: ctx.personaId ?? null,
+        activeLorebookIds: ctx.activeLorebookIds,
+        excludedLorebookIds: ctx.excludedLorebookIds,
+        excludedSourceAgentIds: ctx.excludedLorebookSourceAgentIds,
+        tokenBudget: ctx.lorebookTokenBudget,
+        chatEmbedding: ctx.chatEmbedding ?? null,
+        entryStateOverrides: ctx.entryStateOverrides,
+        entryTimingStates: ctx.entryTimingStates,
+        generationTriggers: ctx.generationTriggers ?? ["chat"],
+        previewOnly: ctx.previewOnly === true,
+        resolveContent: ctx.resolveLorebookContent,
+      },
+    ));
 
-  // Collect updated per-chat entry state overrides for the caller to persist
-  if (result.updatedEntryStateOverrides) {
-    ctx.updatedEntryStateOverrides = result.updatedEntryStateOverrides;
-    ctx.entryStateOverrides = result.updatedEntryStateOverrides;
-  }
-  if (result.updatedEntryTimingStates !== undefined) {
-    ctx.updatedEntryTimingStates = result.updatedEntryTimingStates;
-    ctx.entryTimingStates = result.updatedEntryTimingStates;
-  }
+  if (ctx.lorebookScanResultApplied !== true) {
+    ctx.lorebookScanResultApplied = true;
 
-  // Collect depth entries for the assembler to inject later
-  if (result.depthEntries.length > 0) {
-    ctx.lorebookDepthEntries ??= [];
-    for (const de of result.depthEntries) {
-      ctx.lorebookDepthEntries.push({ content: de.content, role: de.role, depth: de.depth });
+    // Collect updated per-chat entry state overrides for the caller to persist.
+    if (result.updatedEntryStateOverrides) {
+      ctx.updatedEntryStateOverrides = result.updatedEntryStateOverrides;
+      ctx.entryStateOverrides = result.updatedEntryStateOverrides;
+    }
+    if (result.updatedEntryTimingStates !== undefined) {
+      ctx.updatedEntryTimingStates = result.updatedEntryTimingStates;
+      ctx.entryTimingStates = result.updatedEntryTimingStates;
+    }
+
+    // Collect depth entries for the assembler to inject later.
+    if (result.depthEntries.length > 0) {
+      ctx.lorebookDepthEntries ??= [];
+      for (const de of result.depthEntries) {
+        ctx.lorebookDepthEntries.push({ content: de.content, role: de.role, depth: de.depth });
+      }
     }
   }
 
@@ -359,6 +407,7 @@ async function expandChatHistory(config: MarkerConfig, ctx: MarkerContext): Prom
 async function expandDialogueExamples(_config: MarkerConfig, ctx: MarkerContext): Promise<ExpandedMarker> {
   const charStorage = createCharactersStorage(ctx.db);
   const parts: string[] = [];
+  const resolveCharacterMacros = ctx.characterIds.length > 1;
 
   for (const charId of ctx.characterIds) {
     const row = await charStorage.getById(charId);
@@ -366,7 +415,11 @@ async function expandDialogueExamples(_config: MarkerConfig, ctx: MarkerContext)
     const data = JSON.parse(row.data) as CharacterData;
 
     if (data.mes_example) {
-      parts.push(data.mes_example);
+      const resolvedExample =
+        resolveCharacterMacros && data.mes_example.includes("{{")
+          ? resolveCharacterScopedMacros(data.mes_example, characterMacroProfileFromData(data))
+          : data.mes_example;
+      parts.push(resolvedExample);
     }
   }
 

@@ -33,7 +33,7 @@ import { ActiveWorldInfoButton, ActiveWorldInfoModal } from "./ActiveWorldInfoBu
 import { useChatStore } from "../../stores/chat.store";
 import { useUIStore } from "../../stores/ui.store";
 import { playNotificationPing } from "../../lib/notification-sound";
-import { getAvatarCropStyle } from "../../lib/utils";
+import { getAvatarCropStyle, type AvatarCropValue } from "../../lib/utils";
 import { characterKeys } from "../../hooks/use-characters";
 import { api } from "../../lib/api-client";
 import type { CharacterMap, MessageSelectionToggle, PersonaInfo } from "./chat-area.types";
@@ -64,6 +64,7 @@ interface ConversationViewProps {
   onRegenerate: (messageId: string) => void;
   onEdit: (messageId: string, content: string) => void;
   onSetActiveSwipe: (messageId: string, index: number) => void;
+  onToggleHiddenFromAI: (messageId: string, current: boolean) => void;
   onPeekPrompt: () => void;
   lastAssistantMessageId: string | null;
   onOpenSettings: () => void;
@@ -132,6 +133,102 @@ function isHiddenFromUser(message: Message) {
   } catch {
     return false;
   }
+}
+
+const LIST_LINE_RE = /^\s*(?:[-*+]|\d+\.)\s/;
+const TASK_LIST_LINE_RE = /^\s*[-*+] \[[ xX]\]\s/;
+const LIST_CONTINUATION_LINE_RE = /^\s{2,}\S/;
+const TABLE_ROW_RE = /^\s*\|.+\|\s*$/;
+const BLOCKQUOTE_LINE_RE = /^\s*>/;
+const CODE_FENCE_LINE_RE = /^\s*`{3,}/;
+
+function isListLine(line: string) {
+  return LIST_LINE_RE.test(line) || TASK_LIST_LINE_RE.test(line);
+}
+
+function isListBlockLine(line: string) {
+  return isListLine(line) || LIST_CONTINUATION_LINE_RE.test(line);
+}
+
+function chunkAssistantMarkdownBlocks(lines: string[]): string[][] {
+  const blocks: string[][] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index]!;
+
+    if (CODE_FENCE_LINE_RE.test(line)) {
+      const block = [line];
+      index++;
+      while (index < lines.length) {
+        const nextLine = lines[index]!;
+        block.push(nextLine);
+        index++;
+        if (CODE_FENCE_LINE_RE.test(nextLine)) break;
+      }
+      blocks.push(block);
+      continue;
+    }
+
+    if (TABLE_ROW_RE.test(line.trim())) {
+      const block = [line];
+      index++;
+      while (index < lines.length && TABLE_ROW_RE.test(lines[index]!.trim())) {
+        block.push(lines[index]!);
+        index++;
+      }
+      blocks.push(block);
+      continue;
+    }
+
+    if (isListLine(line)) {
+      const block = [line];
+      index++;
+      while (index < lines.length && isListBlockLine(lines[index]!)) {
+        block.push(lines[index]!);
+        index++;
+      }
+      blocks.push(block);
+      continue;
+    }
+
+    if (BLOCKQUOTE_LINE_RE.test(line)) {
+      const block = [line];
+      index++;
+      while (index < lines.length && BLOCKQUOTE_LINE_RE.test(lines[index]!)) {
+        block.push(lines[index]!);
+        index++;
+      }
+      blocks.push(block);
+      continue;
+    }
+
+    blocks.push([line]);
+    index++;
+  }
+
+  return blocks;
+}
+
+function splitAssistantContentLines(content: string, charName?: string | null): string[] {
+  const lines: string[] = [];
+  let inCodeBlock = false;
+
+  for (const line of content.split("\n")) {
+    const t = line.trim();
+    const isCodeFence = CODE_FENCE_LINE_RE.test(line);
+
+    if (!inCodeBlock && !t) continue;
+    if (!inCodeBlock && charName && (t === charName || t === `${charName}:`)) continue;
+
+    lines.push(line);
+
+    if (isCodeFence) {
+      inCodeBlock = !inCodeBlock;
+    }
+  }
+
+  return lines;
 }
 
 // Module-level set that remembers which message keys have been "seen" across
@@ -221,6 +318,7 @@ export function ConversationView({
   onRegenerate,
   onEdit,
   onSetActiveSwipe,
+  onToggleHiddenFromAI,
   onPeekPrompt,
   lastAssistantMessageId,
   onOpenSettings,
@@ -481,30 +579,9 @@ export function ConversationView({
         const cleaned = stripTimestamps(msg.content);
         // Strip lines that are just the character's name (LLM prefixing in group individual mode)
         const charName = msg.characterId ? characterMap.get(msg.characterId)?.name : null;
-        const lines = cleaned.split("\n").filter((l) => {
-          const t = l.trim();
-          if (!t) return false;
-          // Skip lines that are just the character name (with optional colon)
-          if (charName && (t === charName || t === `${charName}:`)) return false;
-          return true;
-        });
+        const lines = splitAssistantContentLines(cleaned, charName);
         if (lines.length > 1) {
-          // Group consecutive list items (ordered or unordered) into single
-          // blocks so numbered / bullet lists render correctly instead of
-          // each item becoming its own <ol> / <ul>.
-          const LIST_LINE_RE = /^\s*(?:[-*+]|\d+\.)\s/;
-          const blocks: string[][] = [];
-          for (const line of lines) {
-            const isList = LIST_LINE_RE.test(line);
-            const prev = blocks[blocks.length - 1];
-            if (isList && prev && LIST_LINE_RE.test(prev[0]!)) {
-              // Continue the current list block
-              prev.push(line);
-            } else {
-              // Start a new block
-              blocks.push([line]);
-            }
-          }
+          const blocks = chunkAssistantMarkdownBlocks(lines);
 
           blocks.forEach((block, bi) => {
             const isLast = bi === blocks.length - 1;
@@ -717,7 +794,7 @@ export function ConversationView({
             const chars = chatCharIds.map((id) => characterMap.get(id)).filter(Boolean) as Array<{
               name: string;
               avatarUrl: string | null;
-              avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null;
+              avatarCrop?: AvatarCropValue | null;
               conversationStatus?: "online" | "idle" | "dnd" | "offline";
               conversationActivity?: string;
             }>;
@@ -740,7 +817,7 @@ export function ConversationView({
                 <div className="flex items-center gap-2 rounded-lg bg-[var(--card)]/80 px-2.5 py-1.5 backdrop-blur-sm dark:bg-black/30">
                   <div className="relative flex-shrink-0">
                     {c.avatarUrl ? (
-                      <span className="block h-5 w-5 overflow-hidden rounded-full">
+                      <span className="relative block h-5 w-5 overflow-hidden rounded-full">
                         <img
                           src={c.avatarUrl}
                           alt={c.name}
@@ -778,7 +855,7 @@ export function ConversationView({
                     <div key={i} className="absolute top-0" style={{ left: i * 12 }}>
                       <div className="relative">
                         {c.avatarUrl ? (
-                          <span className="block h-5 w-5 overflow-hidden rounded-full ring-1 ring-[var(--border)]">
+                          <span className="relative block h-5 w-5 overflow-hidden rounded-full ring-1 ring-[var(--border)]">
                             <img
                               src={c.avatarUrl}
                               alt={c.name}
@@ -907,6 +984,7 @@ export function ConversationView({
                   onRegenerate={onRegenerate}
                   onEdit={onEdit}
                   onSetActiveSwipe={onSetActiveSwipe}
+                  onToggleHiddenFromAI={onToggleHiddenFromAI}
                   onPeekPrompt={onPeekPrompt}
                 />,
               );
@@ -943,6 +1021,7 @@ export function ConversationView({
                 onRegenerate={onRegenerate}
                 onEdit={onEdit}
                 onSetActiveSwipe={onSetActiveSwipe}
+                onToggleHiddenFromAI={onToggleHiddenFromAI}
                 onPeekPrompt={onPeekPrompt}
                 isLastAssistantMessage={msg.id === lastAssistantMessageId}
                 characterMap={characterMap}
@@ -1074,6 +1153,7 @@ function SplitMessageGroup({
   onRegenerate,
   onEdit,
   onSetActiveSwipe,
+  onToggleHiddenFromAI,
   onPeekPrompt,
 }: {
   items: Array<{ key: string; msg: Message; isGrouped: boolean; index: number }>;
@@ -1089,6 +1169,7 @@ function SplitMessageGroup({
   onRegenerate: (id: string) => void;
   onEdit: (id: string, content: string) => void;
   onSetActiveSwipe: (id: string, index: number) => void;
+  onToggleHiddenFromAI: (id: string, current: boolean) => void;
   onPeekPrompt: () => void;
 }) {
   const [showActions, setShowActions] = useState(false);
@@ -1129,6 +1210,7 @@ function SplitMessageGroup({
           onRegenerate={onRegenerate}
           onEdit={onEdit}
           onSetActiveSwipe={onSetActiveSwipe}
+          onToggleHiddenFromAI={onToggleHiddenFromAI}
           onPeekPrompt={onPeekPrompt}
           isLastAssistantMessage={false}
           characterMap={characterMap}
@@ -1204,6 +1286,7 @@ function SplitMessageGroup({
                 onRegenerate={onRegenerate}
                 onEdit={onEdit}
                 onSetActiveSwipe={onSetActiveSwipe}
+                onToggleHiddenFromAI={onToggleHiddenFromAI}
                 onPeekPrompt={onPeekPrompt}
                 isLastAssistantMessage={false}
                 characterMap={characterMap}
@@ -1230,6 +1313,7 @@ function SplitMessageGroup({
               onRegenerate={onRegenerate}
               onEdit={onEdit}
               onSetActiveSwipe={onSetActiveSwipe}
+              onToggleHiddenFromAI={onToggleHiddenFromAI}
               onPeekPrompt={onPeekPrompt}
               onEditClick={handleStartEdit}
               isLastAssistantMessage={firstItem.msg.id === lastAssistantMessageId}
@@ -1257,6 +1341,7 @@ function SplitMessageGroup({
               onRegenerate={onRegenerate}
               onEdit={onEdit}
               onSetActiveSwipe={onSetActiveSwipe}
+              onToggleHiddenFromAI={onToggleHiddenFromAI}
               onPeekPrompt={onPeekPrompt}
               onEditClick={handleStartEdit}
               isLastAssistantMessage={msg.id === lastAssistantMessageId}

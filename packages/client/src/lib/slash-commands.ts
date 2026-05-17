@@ -5,7 +5,12 @@ import { api } from "./api-client";
 import { useChatStore } from "../stores/chat.store";
 import { useUIStore } from "../stores/ui.store";
 import { toast } from "sonner";
-import { SUPPORTED_MACROS, type SceneCreateResponse, type ScenePlanResponse } from "@marinara-engine/shared";
+import {
+  SUPPORTED_MACROS,
+  buildNarratorInstructionMessage,
+  type SceneCreateResponse,
+  type ScenePlanResponse,
+} from "@marinara-engine/shared";
 
 export interface SlashCommand {
   name: string;
@@ -26,6 +31,8 @@ export interface SlashCommandContext {
     chatId: string;
     connectionId: string | null;
     userMessage?: string;
+    generationGuide?: string;
+    generationGuideSource?: "narrator" | "guide" | "game_start";
     impersonate?: boolean;
     attachments?: { type: string; data: string }[];
     impersonatePresetId?: string;
@@ -153,8 +160,26 @@ function parseNamedArgs(input: string): Record<string, string> {
   return values;
 }
 
+function parseCommandTokens(input: string): Array<{ value: string; quoted: boolean }> {
+  const tokens: Array<{ value: string; quoted: boolean }> = [];
+  const tokenPattern = /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|(\S+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = tokenPattern.exec(input))) {
+    const quoted = match[1] !== undefined || match[2] !== undefined;
+    const raw = (match[1] ?? match[2] ?? match[3] ?? "").trim();
+    if (!raw) continue;
+    tokens.push({ value: raw.replace(/\\(["'\\])/g, "$1"), quoted });
+  }
+  return tokens;
+}
+
 function normalizeLookup(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function isAllEmoteTarget(value: string): boolean {
+  const normalized = normalizeLookup(value);
+  return normalized === "all" || normalized === "*";
 }
 
 function findSceneCharacter(
@@ -195,7 +220,7 @@ async function buildEmoteListFeedback(characters: Array<{ id: string; name: stri
     "",
     ...rows,
     "",
-    'Use /emote name="Character" expression="expression" to switch one manually.',
+    'Use /emote joy, /emote "Character" joy, or /emote "all" joy to switch expressions.',
   ].join("\n");
 }
 
@@ -293,16 +318,17 @@ const COMMANDS: SlashCommand[] = [
     },
   },
   {
-    name: "narrator",
-    aliases: ["narrate", "nar"],
+    name: "guided",
+    aliases: ["narrator", "narrate", "nar"],
     description: "Steer the narrative — the AI will narrate events in the direction you describe",
-    usage: "/narrator <direction>",
+    usage: "/guided <direction>",
     async execute(args, ctx) {
-      if (!args.trim()) return { handled: true, feedback: "Usage: /narrator <direction to steer the narrative>" };
+      if (!args.trim()) return { handled: true, feedback: "Usage: /guided <direction to steer the narrative>" };
       await ctx.generate({
         chatId: ctx.chatId,
         connectionId: null,
-        userMessage: `[Narrator instruction — do not include a reply from {{user}}. Instead, write the next part of the narrative steering it toward the following: ${args.trim()}]`,
+        generationGuide: buildNarratorInstructionMessage(args),
+        generationGuideSource: "narrator",
       });
       return { handled: true };
     },
@@ -345,7 +371,7 @@ const COMMANDS: SlashCommand[] = [
     name: "emote",
     aliases: ["emotion", "sprite"],
     description: "List or switch roleplay sprite expressions",
-    usage: '/emote name="Character" expression="expression"',
+    usage: '/emote [expression] | /emote "Character" <expression>',
     local: true,
     async execute(args, ctx) {
       const sceneCharacters = ctx.characters ?? [];
@@ -357,11 +383,88 @@ const COMMANDS: SlashCommand[] = [
       }
 
       const namedArgs = parseNamedArgs(args);
-      const requestedName = namedArgs.name ?? namedArgs.character ?? "";
-      const requestedExpression = namedArgs.expression ?? namedArgs.emotion ?? namedArgs.sprite ?? "";
+      let requestedName = namedArgs.name ?? namedArgs.character ?? "";
+      let requestedExpression = namedArgs.expression ?? namedArgs.emotion ?? namedArgs.sprite ?? "";
+      let applyToAll = false;
 
       if (!args.trim() || (!requestedExpression && !requestedName)) {
-        return { handled: true, feedback: await buildEmoteListFeedback(sceneCharacters) };
+        const tokens = parseCommandTokens(args);
+        if (tokens.length === 0) {
+          return { handled: true, feedback: await buildEmoteListFeedback(sceneCharacters) };
+        }
+
+        if (tokens.length === 1) {
+          const token = tokens[0]!;
+          if (isAllEmoteTarget(token.value)) {
+            return { handled: true, feedback: await buildEmoteListFeedback(sceneCharacters) };
+          }
+
+          const quotedTarget = token.quoted ? findSceneCharacter(sceneCharacters, token.value) : null;
+          if (quotedTarget) {
+            requestedName = token.value;
+          } else if (sceneCharacters.length === 1) {
+            requestedExpression = token.value;
+          } else {
+            requestedExpression = token.value;
+            applyToAll = true;
+          }
+        } else {
+          const [targetToken, ...expressionTokens] = tokens;
+          requestedExpression = expressionTokens
+            .map((token) => token.value)
+            .join(" ")
+            .trim();
+          if (targetToken && isAllEmoteTarget(targetToken.value)) {
+            applyToAll = true;
+          } else {
+            requestedName = targetToken?.value ?? "";
+          }
+        }
+      }
+
+      if (requestedName && isAllEmoteTarget(requestedName)) {
+        requestedName = "";
+        applyToAll = true;
+      }
+
+      if (applyToAll) {
+        if (!requestedExpression) {
+          return { handled: true, feedback: await buildEmoteListFeedback(sceneCharacters) };
+        }
+        if (!ctx.setSpriteExpression) {
+          return {
+            handled: true,
+            feedback: "Sprite switching is only available in roleplay chats with sprites enabled.",
+          };
+        }
+
+        const matches = await Promise.all(
+          sceneCharacters.map(async (character) => {
+            const availableExpressions = await listSpriteExpressions(character.id);
+            return {
+              character,
+              expression: matchSpriteExpression(availableExpressions, requestedExpression),
+            };
+          }),
+        );
+        const missing = matches.filter((entry) => !entry.expression);
+        if (missing.length > 0) {
+          return {
+            handled: true,
+            feedback: `Expression "${requestedExpression}" is not available for all characters. Missing: ${missing
+              .map((entry) => entry.character.name)
+              .join(", ")}.`,
+          };
+        }
+
+        for (const match of matches) {
+          await ctx.setSpriteExpression(match.character.id, match.expression!);
+        }
+        ctx.invalidate();
+        return {
+          handled: true,
+          feedback: `Emote updated for ${matches.length} character${matches.length === 1 ? "" : "s"} -> ${requestedExpression}`,
+        };
       }
 
       let target = requestedName ? findSceneCharacter(sceneCharacters, requestedName) : null;
@@ -387,7 +490,7 @@ const COMMANDS: SlashCommand[] = [
             "",
             availableExpressions.length > 0 ? availableExpressions.join(", ") : "No uploaded expression sprites.",
             "",
-            `Use /emote name="${target.name}" expression="expression" to switch one manually.`,
+            `Use /emote "${target.name}" expression to switch one manually.`,
           ].join("\n"),
         };
       }

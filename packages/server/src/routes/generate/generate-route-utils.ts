@@ -19,6 +19,7 @@ export type PromptAttachment = {
 };
 
 const TEXT_ATTACHMENT_CHAR_LIMIT = 60_000;
+const IMAGE_ATTACHMENT_PROVIDER_BYTE_LIMIT = 6 * 1024 * 1024;
 const TEXT_ATTACHMENT_EXTENSIONS = new Set([
   "csv",
   "json",
@@ -34,6 +35,10 @@ const TEXT_ATTACHMENT_EXTENSIONS = new Set([
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+export function shouldAbortOnPassiveGenerationDisconnect(args: { chatMode: string; impersonate?: boolean }): boolean {
+  return args.chatMode !== "conversation" || args.impersonate === true;
 }
 
 export function mergeCustomParameters(
@@ -76,6 +81,59 @@ export function isMessageHiddenFromAI(message: { extra?: unknown }): boolean {
   return parseExtra(message.extra).hiddenFromAI === true;
 }
 
+export function shouldPreferLatestVisibleGameState(input: {
+  attachments?: unknown[] | null;
+  impersonate?: boolean;
+  regenerateMessageId?: string | null;
+  userMessage?: string | null;
+}): boolean {
+  if (input.impersonate === true || !!input.regenerateMessageId) return true;
+  return !input.userMessage?.trim() && !input.attachments?.length;
+}
+
+export function resolveVisibleGameStateAnchor(
+  messages: Array<{ role?: unknown; id?: unknown; activeSwipeIndex?: unknown }>,
+): { messageId: string; swipeIndex: number } | null {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!;
+    if (message.role !== "assistant" || typeof message.id !== "string" || !message.id) continue;
+    const swipeIndex =
+      typeof message.activeSwipeIndex === "number" &&
+      Number.isInteger(message.activeSwipeIndex) &&
+      message.activeSwipeIndex >= 0
+        ? message.activeSwipeIndex
+        : 0;
+    return { messageId: message.id, swipeIndex };
+  }
+  return null;
+}
+
+export function resolveRegenerationGameStateAnchor(
+  messages: Array<{ role?: unknown; id?: unknown; activeSwipeIndex?: unknown }>,
+  regenerateMessageId: string | null | undefined,
+): { messageId: string; swipeIndex: number } | null {
+  if (!regenerateMessageId) return resolveVisibleGameStateAnchor(messages);
+  const targetIndex = messages.findIndex((message) => message.id === regenerateMessageId);
+  if (targetIndex < 0) return resolveVisibleGameStateAnchor(messages);
+  return resolveVisibleGameStateAnchor(messages.slice(0, targetIndex));
+}
+
+export function resolveRegenerationGameStateFallbackMessageIds(
+  messages: Array<{ role?: unknown; id?: unknown }>,
+  regenerateMessageId: string | null | undefined,
+): string[] | null {
+  if (!regenerateMessageId) return null;
+  const targetIndex = messages.findIndex((message) => message.id === regenerateMessageId);
+  const boundedMessages = targetIndex >= 0 ? messages.slice(0, targetIndex) : messages;
+  const ids = new Set<string>([""]);
+  for (const message of boundedMessages) {
+    if (message.role === "assistant" && typeof message.id === "string") {
+      ids.add(message.id);
+    }
+  }
+  return Array.from(ids);
+}
+
 export function getAttachmentFilename(attachment: PromptAttachment): string {
   const rawName = attachment.filename ?? attachment.name;
   return typeof rawName === "string" && rawName.trim() ? rawName.trim() : "attachment";
@@ -85,7 +143,26 @@ export function extractImageAttachmentDataUrls(attachments: PromptAttachment[] |
   return (attachments ?? [])
     .filter((attachment) => typeof attachment.type === "string" && attachment.type.startsWith("image/"))
     .map((attachment) => attachment.data)
-    .filter((data): data is string => typeof data === "string" && data.length > 0);
+    .filter((data): data is string => typeof data === "string" && data.length > 0)
+    .filter((data) => estimateDataUrlBytes(data) <= IMAGE_ATTACHMENT_PROVIDER_BYTE_LIMIT);
+}
+
+function estimateDataUrlBytes(dataUrl: string): number {
+  const commaIndex = dataUrl.indexOf(",");
+  if (!dataUrl.startsWith("data:") || commaIndex < 0) return Buffer.byteLength(dataUrl, "utf8");
+
+  const meta = dataUrl.slice(0, commaIndex).toLowerCase();
+  const payload = dataUrl.slice(commaIndex + 1);
+  if (!meta.includes(";base64")) {
+    try {
+      return Buffer.byteLength(decodeURIComponent(payload), "utf8");
+    } catch {
+      return Buffer.byteLength(payload, "utf8");
+    }
+  }
+
+  const padding = payload.endsWith("==") ? 2 : payload.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((payload.length * 3) / 4) - padding);
 }
 
 function isReadableTextAttachment(attachment: PromptAttachment): boolean {
@@ -182,6 +259,16 @@ export function shouldEnableAgentsForGeneration({
   impersonateBlockAgents: boolean;
 }): boolean {
   return chatEnableAgents && chatMode !== "conversation" && !(impersonate && impersonateBlockAgents);
+}
+
+export function shouldInjectIdentityFallback({
+  chatMode,
+  presetId,
+}: {
+  chatMode: string;
+  presetId: string | null | undefined;
+}): boolean {
+  return chatMode !== "game" && !presetId;
 }
 
 /** Parse connection/chat stored generation parameters without injecting schema defaults. */

@@ -1,6 +1,8 @@
 name: Build Android APK
 
 on:
+  push:
+    tags: ["v*"]
   release:
     types: [published]
   workflow_dispatch:
@@ -46,6 +48,21 @@ jobs:
           fi
           chmod +x ./gradlew
 
+      - name: Resolve release tag
+        id: release_tag
+        shell: bash
+        run: |
+          event="${{ github.event_name }}"
+          input_tag="${{ github.event.inputs.tag || '' }}"
+          release_tag="${{ github.event.release.tag_name || '' }}"
+          ref_name="${{ github.ref_name }}"
+          if [ "$event" = "workflow_dispatch" ] && [ -z "$input_tag" ]; then
+            tag=""
+          else
+            tag="${release_tag:-${input_tag:-$ref_name}}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
       - name: Decode signing key
         working-directory: android
         env:
@@ -75,7 +92,7 @@ jobs:
             exit 1
           fi
           VERSION=$(node -p "require('../package.json').version")
-          OUT_NAME="marinara-engine-${VERSION}.apk"
+          OUT_NAME="marinara-engine-${VERSION}-android-webview-shell-requires-termux.apk"
           cp "$APK_PATH" "$OUT_NAME"
           echo "apk=android/${OUT_NAME}" >> "$GITHUB_OUTPUT"
           echo "name=${OUT_NAME}" >> "$GITHUB_OUTPUT"
@@ -87,10 +104,38 @@ jobs:
           name: ${{ steps.locate.outputs.name }}
           path: ${{ steps.locate.outputs.apk }}
 
-      - name: Attach APK to release
-        if: github.event_name == 'release' || github.event.inputs.tag != ''
+      - name: Ensure release APK notice
+        if: steps.release_tag.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+          TAG: ${{ steps.release_tag.outputs.tag }}
         run: |
+          for i in {1..60}; do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 10
+          done
+          gh release view "$TAG" --json body -q .body > release-body.md
+          if ! grep -Eiq "Android APK notice|not a standalone Marinara Engine app|requires Termux" release-body.md; then
+            printf '%s\n' \
+              '> [!IMPORTANT]' \
+              '> **Android APK notice:** The APK is not a standalone Marinara Engine app yet. It is a WebView shell for the local Marinara server, so Termux must be installed and `./start-termux.sh` must be running on the same Android device before you open the APK. Follow the [Android (Termux) installation guide](https://github.com/Pasta-Devs/Marinara-Engine/blob/main/docs/installation/android-termux.md) first; the APK is only an optional home-screen shell.' \
+              '' > release-body-with-apk-notice.md
+            cat release-body.md >> release-body-with-apk-notice.md
+            gh release edit "$TAG" --notes-file release-body-with-apk-notice.md
+          fi
+
+      - name: Attach APK to release
+        if: steps.release_tag.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release_tag.outputs.tag }}
+        run: |
+          for i in {1..60}; do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 10
+          done
           gh release upload "$TAG" "${{ steps.locate.outputs.apk }}" --clobber

@@ -16,6 +16,7 @@ import {
   getIpAllowlist,
   getTrustedPrivateNetworksOverride,
   isDockerBypassEnabled,
+  isDockerProxyAuthRequired,
   isTailscaleBypassEnabled,
 } from "../config/runtime-config.js";
 import { logger } from "../lib/logger.js";
@@ -291,7 +292,30 @@ export function isDockerIp(ip: string): boolean {
   return matchesCIDR(bytes, DOCKER_CIDR);
 }
 
-let bypassAnnounced = { tailscale: false, docker: false };
+const PROXY_FORWARDING_HEADERS = [
+  "forwarded",
+  "x-forwarded-for",
+  "x-real-ip",
+  "x-forwarded-host",
+  "x-forwarded-proto",
+] as const;
+
+function hasHeaderValue(value: string | string[] | undefined): boolean {
+  if (Array.isArray(value)) return value.some((entry) => entry.trim().length > 0);
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+/** True when a request carries common reverse-proxy forwarding headers. */
+function hasProxyForwardingHeaders(request: Pick<FastifyRequest, "headers">): boolean {
+  return PROXY_FORWARDING_HEADERS.some((header) => hasHeaderValue(request.headers[header]));
+}
+
+/** True when Docker bridge traffic appears to be forwarding another client. */
+function isDockerProxyForwardedRequest(request: Pick<FastifyRequest, "headers" | "ip">): boolean {
+  return isDockerIp(request.ip) && hasProxyForwardingHeaders(request);
+}
+
+let bypassAnnounced = { tailscale: false, docker: false, dockerProxyForwarded: false };
 
 /**
  * True if the given IP belongs to a Tailscale or Docker interface AND the
@@ -326,6 +350,21 @@ export function isTrustedInterfaceIp(ip: string): boolean {
   return false;
 }
 
+/** Request-aware variant that can withhold Docker trust for proxy-forwarded traffic. */
+export function isTrustedInterfaceRequest(request: FastifyRequest): boolean {
+  const dockerProxyForwarded = isDockerProxyForwardedRequest(request);
+  if (dockerProxyForwarded && isDockerProxyAuthRequired()) return false;
+  if (dockerProxyForwarded && isDockerBypassEnabled()) {
+    if (!bypassAnnounced.dockerProxyForwarded) {
+      logger.warn(
+        "[auth-bypass] Docker bridge request includes proxy forwarding headers; forwarded clients will skip Basic Auth and IP allowlist unless REQUIRE_AUTH_FOR_DOCKER_PROXY=true or BYPASS_AUTH_DOCKER=false",
+      );
+      bypassAnnounced.dockerProxyForwarded = true;
+    }
+  }
+  return isTrustedInterfaceIp(request.ip);
+}
+
 // ── Fastify onRequest hook ──
 
 export function ipAllowlistHook(request: FastifyRequest, reply: FastifyReply, done: () => void) {
@@ -350,7 +389,7 @@ export function ipAllowlistHook(request: FastifyRequest, reply: FastifyReply, do
 
   // Trusted Tailscale / Docker interfaces (when their bypass flag is on)
   // are treated like loopback — skip the allowlist check entirely.
-  if (isTrustedInterfaceIp(ip)) return done();
+  if (isTrustedInterfaceRequest(request)) return done();
 
   // Check the allowlist
   for (const entry of allowlist) {

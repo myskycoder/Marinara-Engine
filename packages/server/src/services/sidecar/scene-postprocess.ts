@@ -150,15 +150,11 @@ function sanitizeSpotifyTrack(
     return null;
   }
 
-  const reason =
-    raw && typeof raw === "object" ? sanitizeString((raw as Record<string, unknown>).reason)?.slice(0, 240) : null;
-
   return {
     uri: candidate.uri,
     name: candidate.name,
     artist: candidate.artist,
     album: candidate.album ?? null,
-    reason: reason ?? null,
   };
 }
 
@@ -257,6 +253,7 @@ function bestMatch(prose: string, tags: string[], category?: string): string | n
 export interface PostProcessContext {
   availableBackgrounds: string[];
   availableSfx: string[];
+  useSpotifyMusic?: boolean;
   availableSpotifyTracks?: SceneSpotifyTrackCandidate[];
   validWidgetIds: Set<string>;
   characterNames: string[];
@@ -465,10 +462,17 @@ export function postProcessSceneResult(raw: SceneAnalysis, ctx: PostProcessConte
 
   result.music = null;
   result.ambient = null;
-  result.musicGenre = normalizeMusicGenre(rawRecord.musicGenre);
-  result.musicIntensity = normalizeMusicIntensity(rawRecord.musicIntensity);
+  if (ctx.useSpotifyMusic) {
+    result.musicGenre = null;
+    result.musicIntensity = null;
+  } else {
+    result.musicGenre = normalizeMusicGenre(rawRecord.musicGenre);
+    result.musicIntensity = normalizeMusicIntensity(rawRecord.musicIntensity);
+  }
   result.locationKind = normalizeLocationKind(rawRecord.locationKind);
-  result.spotifyTrack = sanitizeSpotifyTrack(rawRecord.spotifyTrack, ctx.availableSpotifyTracks);
+  result.spotifyTrack = ctx.useSpotifyMusic
+    ? sanitizeSpotifyTrack(rawRecord.spotifyTrack, ctx.availableSpotifyTracks)
+    : null;
 
   // ── Background ──
   if (result.background && !ctx.availableBackgrounds.includes(result.background)) {

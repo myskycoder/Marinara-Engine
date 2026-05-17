@@ -22,7 +22,14 @@ const GITHUB_RELEASE_BY_TAG_API = (tag: string) => `${GITHUB_API_BASE}/releases/
 const UPDATE_REMOTE = "origin";
 const UPDATE_BRANCH = "main";
 const UPDATE_REF = `${UPDATE_REMOTE}/${UPDATE_BRANCH}`;
+const UPDATE_FETCH_REF = `+refs/heads/${UPDATE_BRANCH}:refs/remotes/${UPDATE_REMOTE}/${UPDATE_BRANCH}`;
 const DEFAULT_PNPM_VERSION = "10.33.2";
+const MANUAL_GIT_UPDATE_COMMAND =
+  "git fetch origin +refs/heads/main:refs/remotes/origin/main && (git merge --ff-only origin/main || git checkout --detach origin/main) && pnpm install && pnpm build && pnpm start";
+const DOCKER_UPDATE_COMMAND = "docker compose pull && docker compose up -d";
+const ANDROID_APK_NOTICE =
+  "> [!IMPORTANT]\n" +
+  "> **Android APK notice:** The APK is not a standalone Marinara Engine app yet. It is a WebView shell for the local Marinara server, so Termux must be installed and `./start-termux.sh` must be running on the same Android device before you open the APK.";
 
 // ── Cached release info (15-min TTL) ──
 let cachedRelease: {
@@ -46,7 +53,7 @@ function isGitInstall(): boolean {
 }
 
 async function fetchUpdateRef(root: string) {
-  await execFileAsync("git", ["fetch", UPDATE_REMOTE, UPDATE_BRANCH, "--quiet"], {
+  await execFileAsync("git", ["fetch", UPDATE_REMOTE, UPDATE_FETCH_REF, "--quiet"], {
     cwd: root,
     timeout: 15_000,
   });
@@ -152,9 +159,17 @@ function buildFallbackRelease(tag: string) {
   return {
     latestVersion: normalizeTag(tag),
     releaseUrl: `${GITHUB_REPO_URL}/releases/tag/${tag}`,
-    releaseNotes: "",
+    releaseNotes: ANDROID_APK_NOTICE,
     publishedAt: "",
   };
+}
+
+function withAndroidApkNotice(notes: string) {
+  if (/Android APK notice|not a standalone Marinara Engine app|requires Termux/i.test(notes)) {
+    return notes;
+  }
+
+  return notes.trim() ? `${ANDROID_APK_NOTICE}\n\n${notes}` : ANDROID_APK_NOTICE;
 }
 
 function buildRequestHeaders() {
@@ -288,7 +303,7 @@ async function resolveLatestReleaseFromGitHub(signal: AbortSignal) {
   return {
     latestVersion: normalizeTag(latestTag),
     releaseUrl: release.html_url ?? `${GITHUB_REPO_URL}/releases/tag/${latestTag}`,
-    releaseNotes: release.body ?? "",
+    releaseNotes: withAndroidApkNotice(release.body ?? ""),
     publishedAt: release.published_at ?? "",
   };
 }
@@ -309,6 +324,7 @@ function getApplyAvailability(gitInstall: boolean) {
       applyAvailable: false,
       updatesApplyEnabled: enabled,
       applyUnavailableReason: "unsupported-install",
+      manualUpdateCommand: DOCKER_UPDATE_COMMAND,
     };
   }
   if (!enabled) {
@@ -316,12 +332,14 @@ function getApplyAvailability(gitInstall: boolean) {
       applyAvailable: false,
       updatesApplyEnabled: false,
       applyUnavailableReason: "disabled",
+      manualUpdateCommand: MANUAL_GIT_UPDATE_COMMAND,
     };
   }
   return {
     applyAvailable: true,
     updatesApplyEnabled: true,
     applyUnavailableReason: null,
+    manualUpdateCommand: null,
   };
 }
 
@@ -411,10 +429,23 @@ export async function updatesRoutes(app: FastifyInstance) {
   // POST /api/updates/apply
   // Fast-forwards to origin/main, installs, rebuilds, then signals the process to restart.
   app.post<{ Body: ApplyUpdateBody }>("/apply", async (req, reply) => {
+    if (!isGitInstall()) {
+      return reply.status(400).send({
+        error: "Auto-update apply is unavailable for this install type",
+        message: `Auto-update is only available for git-based installs. For Docker, run: ${DOCKER_UPDATE_COMMAND}`,
+        installType: "standalone",
+        applyUnavailableReason: "unsupported-install",
+        manualUpdateCommand: DOCKER_UPDATE_COMMAND,
+      });
+    }
+
     if (!isUpdatesApplyEnabled()) {
       return reply.status(403).send({
-        error: "Auto-update apply is disabled",
-        message: "Set UPDATES_APPLY_ENABLED=true to enable server-side update application.",
+        error: "Auto-update apply is disabled for this install",
+        message: `Update manually with: ${MANUAL_GIT_UPDATE_COMMAND}. Advanced git installs can enable server-side update application with UPDATES_APPLY_ENABLED=true.`,
+        installType: "git",
+        applyUnavailableReason: "disabled",
+        manualUpdateCommand: MANUAL_GIT_UPDATE_COMMAND,
       });
     }
 
@@ -425,14 +456,6 @@ export async function updatesRoutes(app: FastifyInstance) {
       })
     ) {
       return;
-    }
-
-    if (!isGitInstall()) {
-      return reply.status(400).send({
-        error:
-          "Auto-update is only available for git-based installs. For Docker, run: docker compose pull && docker compose up -d",
-        installType: "standalone",
-      });
     }
 
     const root = getMonorepoRoot();
@@ -471,7 +494,7 @@ export async function updatesRoutes(app: FastifyInstance) {
         });
       }
 
-      // Step 0: stash local tracked changes so the fast-forward does not fail.
+      // Step 0: stash local tracked changes so the update does not fail.
       let stashed = false;
       try {
         if (await hasTrackedChanges(root)) {
@@ -485,19 +508,29 @@ export async function updatesRoutes(app: FastifyInstance) {
         /* clean tree — nothing to stash */
       }
 
-      // Step 1: fast-forward to the latest origin/main commit.
+      // Step 1: move to the latest origin/main commit.
+      // Installer-created release checkouts are shallow detached HEADs, so
+      // they cannot reliably merge a remote-tracking branch. A detached
+      // checkout is expected there; normal main-branch clones still fast-forward.
       if (oldHead !== targetHead) {
         try {
-          await execFileAsync("git", ["merge", "--ff-only", UPDATE_REF], {
-            cwd: root,
-            timeout: 60_000,
-          });
+          if (currentBranch) {
+            await execFileAsync("git", ["merge", "--ff-only", UPDATE_REF], {
+              cwd: root,
+              timeout: 60_000,
+            });
+          } else {
+            await execFileAsync("git", ["checkout", "--detach", targetHead], {
+              cwd: root,
+              timeout: 60_000,
+            });
+          }
         } catch (mergeErr) {
           if (stashed)
             await execFileAsync("git", ["stash", "pop", "-q"], { cwd: root, timeout: 10_000 }).catch(() => {});
           const branchLabel = currentBranch ? ` branch "${currentBranch}"` : " current checkout";
           const message = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
-          throw new Error(`Could not fast-forward the${branchLabel} to ${UPDATE_REF}: ${message}`);
+          throw new Error(`Could not update the${branchLabel} to ${UPDATE_REF}: ${message}`);
         }
       }
 
@@ -562,7 +595,7 @@ export async function updatesRoutes(app: FastifyInstance) {
       const pnpmVersion = getPinnedPnpmVersion(root);
       return reply.status(500).send({
         error: `Update failed: ${message}`,
-        hint: `You can try running the update manually: git fetch ${UPDATE_REMOTE} ${UPDATE_BRANCH} && git merge --ff-only ${UPDATE_REF} && pnpm install --frozen-lockfile && pnpm --filter @marinara-engine/shared build && pnpm --filter @marinara-engine/server --filter @marinara-engine/client --parallel run build. If pnpm is unavailable, run npm install -g pnpm@${pnpmVersion} first.`,
+        hint: `You can try running the update manually: git fetch ${UPDATE_REMOTE} +refs/heads/${UPDATE_BRANCH}:refs/remotes/${UPDATE_REMOTE}/${UPDATE_BRANCH} && (git merge --ff-only ${UPDATE_REF} || git checkout --detach ${UPDATE_REF}) && pnpm install --frozen-lockfile && pnpm --filter @marinara-engine/shared build && pnpm --filter @marinara-engine/server --filter @marinara-engine/client --parallel run build. If pnpm is unavailable, run npm install -g pnpm@${pnpmVersion} first.`,
       });
     }
   });

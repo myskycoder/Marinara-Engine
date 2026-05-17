@@ -10,8 +10,9 @@ import type {
   LorebookFilterMode,
   LorebookMatchingSource,
   LorebookSchedule,
-  SelectiveLogic,
 } from "@marinara-engine/shared";
+import { testPrimaryKeys, testSecondaryKeys } from "@marinara-engine/shared";
+import { vmRegexExecutor } from "./regex-timeout.js";
 
 /** Compute cosine similarity between two vectors. Returns 0 for empty/mismatched vectors. */
 function cosineSimilarity(a: number[], b: number[]): number {
@@ -37,6 +38,8 @@ export interface ScanMessage {
 /** Result of scanning: an activated entry plus metadata. */
 export interface ActivatedEntry {
   entry: LorebookEntry;
+  /** Original stored content when entry.content has been macro-expanded for scanning or budgeting. */
+  rawContent?: string;
   /** Which key(s) matched */
   matchedKeys: string[];
   /** Priority order for injection */
@@ -72,85 +75,6 @@ export interface GameStateForScanning {
   temperature?: string | null;
   presentCharacters?: Array<{ name: string; characterId: string }>;
   [key: string]: unknown;
-}
-
-/**
- * Test if a single keyword matches the given text.
- */
-function testKeyword(
-  keyword: string,
-  text: string,
-  options: { useRegex: boolean; matchWholeWords: boolean; caseSensitive: boolean },
-): boolean {
-  if (!keyword) return false;
-
-  try {
-    if (options.useRegex) {
-      const flags = options.caseSensitive ? "g" : "gi";
-      const regex = new RegExp(keyword, flags);
-      return regex.test(text);
-    }
-
-    const needle = options.caseSensitive ? keyword : keyword.toLowerCase();
-    const haystack = options.caseSensitive ? text : text.toLowerCase();
-
-    if (options.matchWholeWords) {
-      // Word boundary matching
-      const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const flags = options.caseSensitive ? "g" : "gi";
-      const regex = new RegExp(`\\b${escaped}\\b`, flags);
-      return regex.test(text);
-    }
-
-    return haystack.includes(needle);
-  } catch {
-    // Invalid regex — fall back to plain text
-    const needle = options.caseSensitive ? keyword : keyword.toLowerCase();
-    const haystack = options.caseSensitive ? text : text.toLowerCase();
-    return haystack.includes(needle);
-  }
-}
-
-/**
- * Test if primary keys match the text.
- */
-function testPrimaryKeys(
-  keys: string[],
-  text: string,
-  options: { useRegex: boolean; matchWholeWords: boolean; caseSensitive: boolean },
-): { matched: boolean; matchedKeys: string[] } {
-  const matchedKeys: string[] = [];
-  for (const key of keys) {
-    if (testKeyword(key, text, options)) {
-      matchedKeys.push(key);
-    }
-  }
-  return { matched: matchedKeys.length > 0, matchedKeys };
-}
-
-/**
- * Test secondary keys with selective logic.
- */
-function testSecondaryKeys(
-  secondaryKeys: string[],
-  text: string,
-  logic: SelectiveLogic,
-  options: { useRegex: boolean; matchWholeWords: boolean; caseSensitive: boolean },
-): boolean {
-  if (secondaryKeys.length === 0) return true;
-
-  const results = secondaryKeys.map((key) => testKeyword(key, text, options));
-
-  switch (logic) {
-    case "and":
-      return results.every(Boolean);
-    case "or":
-      return results.some(Boolean);
-    case "not":
-      return !results.some(Boolean);
-    default:
-      return true;
-  }
 }
 
 /**
@@ -259,10 +183,20 @@ function passesActivationGate(
 ): boolean {
   if (!passesContextualActivationGate(entry, filterContext, gameState)) return false;
   if (!ignoreTiming && !checkTiming(entry, timingState)) return false;
-  if (entry.probability !== null && entry.probability < 100) {
-    if (Math.random() * 100 >= entry.probability) return false;
-  }
   return true;
+}
+
+function normalizeProbability(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : null;
+  if (parsed === null || !Number.isFinite(parsed)) return null;
+  return Math.max(0, Math.min(100, parsed));
+}
+
+function passesProbabilityGate(entry: LorebookEntry, random: () => number): boolean {
+  const probability = normalizeProbability(entry.probability);
+  if (probability === null || probability >= 100) return true;
+  if (probability <= 0) return false;
+  return random() * 100 < probability;
 }
 
 function hasTimingConfig(entry: LorebookEntry): boolean {
@@ -437,6 +371,8 @@ export interface ScanOptions {
   additionalMatchingSourceText?: Partial<Record<LorebookMatchingSource, string>>;
   /** Ignore sticky/cooldown/delay runtime state for preview/debug scans. */
   ignoreTiming?: boolean;
+  /** Random source for probability gates; injectable for deterministic tests. */
+  random?: () => number;
 }
 
 /**
@@ -460,6 +396,7 @@ export function scanForActivatedEntries(
     generationTriggers = ["chat"],
     additionalMatchingSourceText = {},
     ignoreTiming = false,
+    random = Math.random,
   } = options;
   const filterContext: LorebookFilterValueContext = {
     activeCharacterIds: makeValueSet(activeCharacterIds),
@@ -473,6 +410,14 @@ export function scanForActivatedEntries(
 
   const activated: ActivatedEntry[] = [];
   const activatedIds = new Set<string>();
+  const probabilityDecisions = new Map<string, boolean>();
+  const passesEntryProbability = (entry: LorebookEntry) => {
+    const existing = probabilityDecisions.get(entry.id);
+    if (existing !== undefined) return existing;
+    const passes = passesProbabilityGate(entry, random);
+    probabilityDecisions.set(entry.id, passes);
+    return passes;
+  };
 
   for (const entry of entries) {
     const timingState = timingStates.get(entry.id);
@@ -494,6 +439,7 @@ export function scanForActivatedEntries(
     // Constant entries still activate without keywords, but they obey timing,
     // context filters, activation conditions, schedule, and probability gates.
     if (entry.constant) {
+      if (!passesEntryProbability(entry)) continue;
       activated.push({
         entry,
         matchedKeys: ["[constant]"],
@@ -518,6 +464,7 @@ export function scanForActivatedEntries(
       useRegex: entry.useRegex,
       matchWholeWords: entry.matchWholeWords,
       caseSensitive: entry.caseSensitive,
+      regexExecutor: vmRegexExecutor,
     };
 
     // Test primary keys
@@ -531,6 +478,8 @@ export function scanForActivatedEntries(
       }
     }
 
+    if (!passesEntryProbability(entry)) continue;
+
     activated.push({
       entry,
       matchedKeys,
@@ -543,12 +492,14 @@ export function scanForActivatedEntries(
   if (chatEmbedding && chatEmbedding.length > 0) {
     for (const entry of entries) {
       if (!entry.enabled || entry.constant || activatedIds.has(entry.id)) continue;
+      if (entry.excludeFromVectorization) continue;
       if (!entry.embedding || entry.embedding.length === 0) continue;
       const timingState = timingStates.get(entry.id);
       if (!passesActivationGate(entry, timingState, filterContext, gameState, ignoreTiming)) continue;
 
       const similarity = cosineSimilarity(chatEmbedding, entry.embedding);
       if (similarity >= semanticThreshold) {
+        if (!passesEntryProbability(entry)) continue;
         activated.push({
           entry,
           matchedKeys: [`[semantic:${similarity.toFixed(3)}]`],
@@ -577,13 +528,14 @@ export function recursiveScan(
   options: ScanOptions = {},
   maxDepth: number = 3,
 ): ActivatedEntry[] {
-  let allActivated = scanForActivatedEntries(messages, entries, options);
+  const allActivated = scanForActivatedEntries(messages, entries, options);
   const activatedIds = new Set(allActivated.map((a) => a.entry.id));
+  let newlyActivated = allActivated;
 
   for (let depth = 0; depth < maxDepth; depth++) {
     // Build text from newly activated entries, excluding those with preventRecursion
-    const newContent = allActivated
-      .filter((a) => (!activatedIds.has(a.entry.id) || depth === 0) && !a.entry.preventRecursion)
+    const newContent = newlyActivated
+      .filter((a) => !a.entry.preventRecursion)
       .map((a) => a.entry.content)
       .join("\n");
 
@@ -596,9 +548,11 @@ export function recursiveScan(
 
     if (newActivated.length === 0) break;
 
+    newlyActivated = [];
     for (const a of newActivated) {
       activatedIds.add(a.entry.id);
       allActivated.push(a);
+      newlyActivated.push(a);
     }
   }
 

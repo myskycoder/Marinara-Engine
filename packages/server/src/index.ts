@@ -6,8 +6,13 @@ import { fileURLToPath } from "url";
 import { buildApp } from "./app.js";
 import { logger } from "./lib/logger.js";
 import { getHost, getPort, getServerProtocol, loadTlsOptions, logStorageDiagnostics } from "./config/runtime-config.js";
+import { logCsrfTrustSummary } from "./middleware/csrf-protection.js";
 import { startEnvWatcher } from "./config/env-watcher.js";
 import { migrateTaskbarShortcuts } from "./services/setup/taskbar-shortcut-migration.js";
+
+function isAddressInUseError(err: unknown): err is NodeJS.ErrnoException {
+  return err instanceof Error && "code" in err && err.code === "EADDRINUSE";
+}
 
 function scheduleTaskbarShortcutMigration() {
   const timeout = setTimeout(() => {
@@ -59,6 +64,7 @@ async function main() {
   try {
     await app.listen({ port, host });
     logger.info(`Marinara Engine server listening on ${protocol}://${host}:${port}`);
+    logCsrfTrustSummary();
     scheduleTaskbarShortcutMigration();
   } catch (err) {
     if (isShuttingDown) {
@@ -66,7 +72,15 @@ async function main() {
       return;
     }
 
-    logger.error(err);
+    if (isAddressInUseError(err)) {
+      logger.error(
+        err,
+        "Port %d is already in use. Marinara Engine could not start. Close the app using that port or set PORT to another value, for example PORT=7869 bash ./start.sh on macOS/Linux or set PORT=7869 && start.bat in Windows cmd.",
+        port,
+      );
+    } else {
+      logger.error(err);
+    }
     process.exit(1);
   }
 }

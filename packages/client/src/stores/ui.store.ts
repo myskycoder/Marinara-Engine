@@ -26,9 +26,18 @@ export type EchoChamberSide = "top-left" | "top-right" | "bottom-left" | "bottom
 export type UserStatus = "active" | "idle" | "dnd";
 export type RoleplayAvatarStyle = "circles" | "rectangles" | "panel";
 export type GameDialogueDisplayMode = "classic" | "stacked";
+export type SummaryPopoverSourceMode = "last" | "range";
 export interface FloatingWidgetPosition {
   x: number;
   y: number;
+}
+export interface SummaryPopoverSettings {
+  sourceMode: SummaryPopoverSourceMode;
+  contextSize: number | null;
+  rangeStart: number | null;
+  rangeEnd: number | null;
+  hideSummarisedMessages: boolean;
+  collapseHiddenMessages: boolean;
 }
 export const APP_LANGUAGE_OPTIONS = [{ id: "en", label: "English" }] as const;
 export type AppLanguage = (typeof APP_LANGUAGE_OPTIONS)[number]["id"];
@@ -80,6 +89,14 @@ const DEFAULT_GAME_SETUP_REMEMBERED_TEXT: GameSetupRememberedText = {
   playerGoals: "",
   preferences: "",
 };
+const DEFAULT_SUMMARY_POPOVER_SETTINGS: SummaryPopoverSettings = {
+  sourceMode: "last",
+  contextSize: null,
+  rangeStart: null,
+  rangeEnd: null,
+  hideSummarisedMessages: false,
+  collapseHiddenMessages: false,
+};
 
 function clampImageDimension(value: number) {
   const rounded = Number.isFinite(value) ? Math.round(value) : 0;
@@ -118,6 +135,20 @@ function normalizeTrackerPanelSectionOrder(value: unknown): TrackerPanelSectionO
   }
 
   return order;
+}
+
+function normalizeSummaryPopoverSettings(value: unknown): SummaryPopoverSettings {
+  const raw = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  const numberOrNull = (next: unknown) => (typeof next === "number" && Number.isFinite(next) ? Math.round(next) : null);
+
+  return {
+    sourceMode: raw.sourceMode === "range" ? "range" : "last",
+    contextSize: numberOrNull(raw.contextSize),
+    rangeStart: numberOrNull(raw.rangeStart),
+    rangeEnd: numberOrNull(raw.rangeEnd),
+    hideSummarisedMessages: raw.hideSummarisedMessages === true,
+    collapseHiddenMessages: raw.collapseHiddenMessages === true,
+  };
 }
 
 function normalizeLearnedGameSetupOption(value: unknown) {
@@ -194,6 +225,8 @@ interface UIState {
   modal: { type: string; props?: Record<string, unknown> } | null;
   theme: "dark" | "light";
   chatBackground: string | null;
+  /** Native blur applied to selected chat/game background images, in px. */
+  chatBackgroundBlur: number;
   /** When set, the main area shows the full-page character editor instead of chat */
   characterDetailId: string | null;
   /** When set, the main area shows the full-page lorebook editor instead of chat */
@@ -212,6 +245,8 @@ interface UIState {
   regexDetailId: string | null;
   /** When true, the main area shows the browser */
   botBrowserOpen: boolean;
+  /** When true, the main area shows the game assets browser */
+  gameAssetsBrowserOpen: boolean;
   /** When true, the main area shows the full-page character library */
   characterLibraryOpen: boolean;
   /** True when any open detail editor has unsaved changes */
@@ -258,6 +293,10 @@ interface UIState {
   showTokenUsage: boolean;
   showMessageNumbers: boolean;
   guideGenerations: boolean;
+  showQuickRepliesMenu: boolean;
+  showQuickReplyPostOnly: boolean;
+  showQuickReplyGuide: boolean;
+  showQuickReplyImpersonate: boolean;
   confirmBeforeDelete: boolean;
   /** Number of messages to load per page (0 = load all) */
   messagesPerPage: number;
@@ -267,6 +306,8 @@ interface UIState {
   trimIncompleteModelOutput: boolean;
   /** When true, chat inputs show a microphone button for browser speech-to-text dictation. */
   speechToTextEnabled: boolean;
+  /** When true, allow the rare Chibi Professor Mari scroll toast. */
+  chibiProfessorMariEnabled: boolean;
   /** When true, show the global Spotify mini player in the app chrome. */
   spotifyPlayerEnabled: boolean;
   /** Mobile Spotify widget collapsed state. */
@@ -277,6 +318,10 @@ interface UIState {
   intuitiveSwipeNavigation: boolean;
   /** When true, moving past the newest swipe on the latest assistant message creates a new reroll. */
   intuitiveSwipeRerollLatest: boolean;
+  /** When true, pressing Up Arrow with an empty chat input opens the last user message for editing (Conversation/Roleplay). */
+  editLastMessageOnArrowUp: boolean;
+  /** Persisted controls shown in the Chat Summary popover settings window. */
+  summaryPopoverSettings: SummaryPopoverSettings;
 
   // ── Text Appearance ──
   /** Color for narrator text in RP mode (empty = default amber) */
@@ -410,6 +455,7 @@ interface UIState {
   closeModal: () => void;
   setTheme: (theme: "dark" | "light") => void;
   setChatBackground: (url: string | null) => void;
+  setChatBackgroundBlur: (v: number) => void;
   openCharacterDetail: (id: string) => void;
   closeCharacterDetail: () => void;
   openLorebookDetail: (id: string) => void;
@@ -430,6 +476,8 @@ interface UIState {
   closeCharacterLibrary: () => void;
   openBotBrowser: () => void;
   closeBotBrowser: () => void;
+  openGameAssetsBrowser: () => void;
+  closeGameAssetsBrowser: () => void;
 
   /** Returns true if any full-page detail editor is currently open */
   hasAnyDetailOpen: () => boolean;
@@ -462,16 +510,23 @@ interface UIState {
   setShowTokenUsage: (v: boolean) => void;
   setShowMessageNumbers: (v: boolean) => void;
   setGuideGenerations: (v: boolean) => void;
+  setShowQuickRepliesMenu: (v: boolean) => void;
+  setShowQuickReplyPostOnly: (v: boolean) => void;
+  setShowQuickReplyGuide: (v: boolean) => void;
+  setShowQuickReplyImpersonate: (v: boolean) => void;
   setConfirmBeforeDelete: (v: boolean) => void;
   setMessagesPerPage: (n: number) => void;
   setBoldDialogue: (v: boolean) => void;
   setTrimIncompleteModelOutput: (v: boolean) => void;
   setSpeechToTextEnabled: (v: boolean) => void;
+  setChibiProfessorMariEnabled: (v: boolean) => void;
   setSpotifyPlayerEnabled: (v: boolean) => void;
   setSpotifyMobileWidgetCollapsed: (v: boolean) => void;
   setSpotifyMobileWidgetPosition: (position: FloatingWidgetPosition) => void;
   setIntuitiveSwipeNavigation: (v: boolean) => void;
   setIntuitiveSwipeRerollLatest: (v: boolean) => void;
+  setEditLastMessageOnArrowUp: (v: boolean) => void;
+  setSummaryPopoverSettings: (settings: Partial<SummaryPopoverSettings>) => void;
   setNarrationFontColor: (v: string) => void;
   setNarrationOpacity: (v: number) => void;
   setChatFontColor: (v: string) => void;
@@ -494,6 +549,7 @@ interface UIState {
     options: Partial<GameSetupLearnedOptions>,
     text?: Partial<GameSetupRememberedText>,
   ) => void;
+  forgetGameSetupOption: (group: keyof GameSetupLearnedOptions, value: string) => void;
   setEnterToSendRP: (v: boolean) => void;
   setEnterToSendConvo: (v: boolean) => void;
   setEnterToSendGame: (v: boolean) => void;
@@ -548,6 +604,7 @@ export function pickSyncedSettings(state: UIState) {
     trackerPanelSectionOrder: state.trackerPanelSectionOrder,
     theme: state.theme,
     chatBackground: state.chatBackground,
+    chatBackgroundBlur: state.chatBackgroundBlur,
     fontSize: state.fontSize,
     language: state.language,
     chatFontSize: state.chatFontSize,
@@ -573,16 +630,23 @@ export function pickSyncedSettings(state: UIState) {
     showTokenUsage: state.showTokenUsage,
     showMessageNumbers: state.showMessageNumbers,
     guideGenerations: state.guideGenerations,
+    showQuickRepliesMenu: state.showQuickRepliesMenu,
+    showQuickReplyPostOnly: state.showQuickReplyPostOnly,
+    showQuickReplyGuide: state.showQuickReplyGuide,
+    showQuickReplyImpersonate: state.showQuickReplyImpersonate,
     confirmBeforeDelete: state.confirmBeforeDelete,
     messagesPerPage: state.messagesPerPage,
     boldDialogue: state.boldDialogue,
     trimIncompleteModelOutput: state.trimIncompleteModelOutput,
     speechToTextEnabled: state.speechToTextEnabled,
+    chibiProfessorMariEnabled: state.chibiProfessorMariEnabled,
     spotifyPlayerEnabled: state.spotifyPlayerEnabled,
     spotifyMobileWidgetCollapsed: state.spotifyMobileWidgetCollapsed,
     spotifyMobileWidgetPosition: state.spotifyMobileWidgetPosition,
     intuitiveSwipeNavigation: state.intuitiveSwipeNavigation,
     intuitiveSwipeRerollLatest: state.intuitiveSwipeRerollLatest,
+    editLastMessageOnArrowUp: state.editLastMessageOnArrowUp,
+    summaryPopoverSettings: state.summaryPopoverSettings,
     narrationFontColor: state.narrationFontColor,
     narrationOpacity: state.narrationOpacity,
     chatFontColor: state.chatFontColor,
@@ -643,6 +707,7 @@ export const useUIStore = create<UIState>()(
       modal: null,
       theme: "dark" as const,
       chatBackground: null,
+      chatBackgroundBlur: 0,
       characterDetailId: null,
       lorebookDetailId: null,
       presetDetailId: null,
@@ -652,6 +717,7 @@ export const useUIStore = create<UIState>()(
       personaDetailId: null,
       regexDetailId: null,
       botBrowserOpen: false,
+      gameAssetsBrowserOpen: false,
       characterLibraryOpen: false,
       editorDirty: false,
 
@@ -669,12 +735,12 @@ export const useUIStore = create<UIState>()(
       gameTextSpeed: 50,
       gameAutoPlayDelay: 3000,
       reviewImagePromptsBeforeSend: false,
-      imageBackgroundWidth: 1024,
-      imageBackgroundHeight: 576,
-      imagePortraitWidth: 512,
-      imagePortraitHeight: 512,
-      imageSelfieWidth: 512,
-      imageSelfieHeight: 768,
+      imageBackgroundWidth: 1280,
+      imageBackgroundHeight: 720,
+      imagePortraitWidth: 1024,
+      imagePortraitHeight: 1024,
+      imageSelfieWidth: 896,
+      imageSelfieHeight: 1152,
 
       messageGrouping: true,
       showTimestamps: false,
@@ -682,16 +748,23 @@ export const useUIStore = create<UIState>()(
       showTokenUsage: false,
       showMessageNumbers: false,
       guideGenerations: false,
+      showQuickRepliesMenu: false,
+      showQuickReplyPostOnly: true,
+      showQuickReplyGuide: true,
+      showQuickReplyImpersonate: true,
       confirmBeforeDelete: true,
       messagesPerPage: 20,
       boldDialogue: true,
       trimIncompleteModelOutput: false,
       speechToTextEnabled: false,
+      chibiProfessorMariEnabled: true,
       spotifyPlayerEnabled: false,
       spotifyMobileWidgetCollapsed: true,
       spotifyMobileWidgetPosition: { x: 16, y: 96 },
       intuitiveSwipeNavigation: false,
       intuitiveSwipeRerollLatest: false,
+      editLastMessageOnArrowUp: true,
+      summaryPopoverSettings: DEFAULT_SUMMARY_POPOVER_SETTINGS,
       narrationFontColor: "",
       narrationOpacity: 80,
       chatFontColor: "",
@@ -802,6 +875,7 @@ export const useUIStore = create<UIState>()(
       closeModal: () => set({ modal: null }),
       setTheme: (theme) => set({ theme }),
       setChatBackground: (url) => set({ chatBackground: url }),
+      setChatBackgroundBlur: (v) => set({ chatBackgroundBlur: Math.max(0, Math.min(24, Math.round(v))) }),
       openCharacterDetail: (id) =>
         set({
           characterDetailId: id,
@@ -928,6 +1002,7 @@ export const useUIStore = create<UIState>()(
       openBotBrowser: () =>
         set({
           botBrowserOpen: true,
+          gameAssetsBrowserOpen: false,
           characterLibraryOpen: false,
           regexDetailId: null,
           personaDetailId: null,
@@ -940,6 +1015,22 @@ export const useUIStore = create<UIState>()(
           ...(window.innerWidth < 768 && { rightPanelOpen: false }),
         }),
       closeBotBrowser: () => set({ botBrowserOpen: false }),
+      openGameAssetsBrowser: () =>
+        set({
+          gameAssetsBrowserOpen: true,
+          botBrowserOpen: false,
+          characterLibraryOpen: false,
+          regexDetailId: null,
+          personaDetailId: null,
+          characterDetailId: null,
+          lorebookDetailId: null,
+          presetDetailId: null,
+          connectionDetailId: null,
+          agentDetailId: null,
+          toolDetailId: null,
+          ...(window.innerWidth < 768 && { rightPanelOpen: false }),
+        }),
+      closeGameAssetsBrowser: () => set({ gameAssetsBrowserOpen: false }),
 
       hasAnyDetailOpen: () => {
         const s = get();
@@ -953,7 +1044,8 @@ export const useUIStore = create<UIState>()(
           s.personaDetailId ||
           s.regexDetailId ||
           s.characterLibraryOpen ||
-          s.botBrowserOpen
+          s.botBrowserOpen ||
+          s.gameAssetsBrowserOpen
         );
       },
       closeAllDetails: () =>
@@ -968,6 +1060,7 @@ export const useUIStore = create<UIState>()(
           regexDetailId: null,
           characterLibraryOpen: false,
           botBrowserOpen: false,
+          gameAssetsBrowserOpen: false,
           editorDirty: false,
         }),
       setEditorDirty: (dirty) => set({ editorDirty: dirty }),
@@ -1008,11 +1101,16 @@ export const useUIStore = create<UIState>()(
       setShowTokenUsage: (v) => set({ showTokenUsage: v }),
       setShowMessageNumbers: (v) => set({ showMessageNumbers: v }),
       setGuideGenerations: (v) => set({ guideGenerations: v }),
+      setShowQuickRepliesMenu: (v) => set({ showQuickRepliesMenu: v }),
+      setShowQuickReplyPostOnly: (v) => set({ showQuickReplyPostOnly: v }),
+      setShowQuickReplyGuide: (v) => set({ showQuickReplyGuide: v }),
+      setShowQuickReplyImpersonate: (v) => set({ showQuickReplyImpersonate: v }),
       setConfirmBeforeDelete: (v) => set({ confirmBeforeDelete: v }),
       setMessagesPerPage: (n) => set({ messagesPerPage: n }),
       setBoldDialogue: (v) => set({ boldDialogue: v }),
       setTrimIncompleteModelOutput: (v) => set({ trimIncompleteModelOutput: v }),
       setSpeechToTextEnabled: (v) => set({ speechToTextEnabled: v }),
+      setChibiProfessorMariEnabled: (v) => set({ chibiProfessorMariEnabled: v }),
       setSpotifyPlayerEnabled: (v) => set({ spotifyPlayerEnabled: v }),
       setSpotifyMobileWidgetCollapsed: (v) => set({ spotifyMobileWidgetCollapsed: v }),
       setSpotifyMobileWidgetPosition: (position) =>
@@ -1024,6 +1122,14 @@ export const useUIStore = create<UIState>()(
         }),
       setIntuitiveSwipeNavigation: (v) => set({ intuitiveSwipeNavigation: v }),
       setIntuitiveSwipeRerollLatest: (v) => set({ intuitiveSwipeRerollLatest: v }),
+      setEditLastMessageOnArrowUp: (v) => set({ editLastMessageOnArrowUp: v }),
+      setSummaryPopoverSettings: (settings) =>
+        set((state) => ({
+          summaryPopoverSettings: normalizeSummaryPopoverSettings({
+            ...state.summaryPopoverSettings,
+            ...settings,
+          }),
+        })),
       setNarrationFontColor: (v) => set({ narrationFontColor: v }),
       setNarrationOpacity: (v) => set({ narrationOpacity: Math.max(0, Math.min(100, v)) }),
       setChatFontColor: (v) => set({ chatFontColor: v }),
@@ -1074,6 +1180,19 @@ export const useUIStore = create<UIState>()(
             },
           };
         }),
+      forgetGameSetupOption: (group, value) =>
+        set((state) => {
+          const learned = state.learnedGameSetupOptions ?? DEFAULT_GAME_SETUP_LEARNED_OPTIONS;
+          const targetKey = normalizeLearnedGameSetupOption(value).toLowerCase();
+          if (!targetKey) return state;
+          const next = learned[group].filter(
+            (entry) => normalizeLearnedGameSetupOption(entry).toLowerCase() !== targetKey,
+          );
+          if (next.length === learned[group].length) return state;
+          return {
+            learnedGameSetupOptions: { ...learned, [group]: next },
+          };
+        }),
       setEnterToSendRP: (v) => set({ enterToSendRP: v }),
       setEnterToSendConvo: (v) => set({ enterToSendConvo: v }),
       setEnterToSendGame: (v) => set({ enterToSendGame: v }),
@@ -1111,7 +1230,7 @@ export const useUIStore = create<UIState>()(
     }),
     {
       name: "marinara-engine-ui",
-      version: 27,
+      version: 32,
       // Debounce localStorage writes to avoid sync I/O on every state change
       storage: createJSONStorage(() => {
         let timer: ReturnType<typeof setTimeout> | null = null;
@@ -1241,12 +1360,12 @@ export const useUIStore = create<UIState>()(
           if (persisted.reviewImagePromptsBeforeSend === undefined) {
             persisted.reviewImagePromptsBeforeSend = false;
           }
-          if (persisted.imageBackgroundWidth === undefined) persisted.imageBackgroundWidth = 1024;
-          if (persisted.imageBackgroundHeight === undefined) persisted.imageBackgroundHeight = 576;
-          if (persisted.imagePortraitWidth === undefined) persisted.imagePortraitWidth = 512;
-          if (persisted.imagePortraitHeight === undefined) persisted.imagePortraitHeight = 512;
-          if (persisted.imageSelfieWidth === undefined) persisted.imageSelfieWidth = 512;
-          if (persisted.imageSelfieHeight === undefined) persisted.imageSelfieHeight = 768;
+          if (persisted.imageBackgroundWidth === undefined) persisted.imageBackgroundWidth = 1280;
+          if (persisted.imageBackgroundHeight === undefined) persisted.imageBackgroundHeight = 720;
+          if (persisted.imagePortraitWidth === undefined) persisted.imagePortraitWidth = 1024;
+          if (persisted.imagePortraitHeight === undefined) persisted.imagePortraitHeight = 1024;
+          if (persisted.imageSelfieWidth === undefined) persisted.imageSelfieWidth = 896;
+          if (persisted.imageSelfieHeight === undefined) persisted.imageSelfieHeight = 1152;
         }
         // v13 -> v14: add optional custom user activity text for Conversation status.
         if (version <= 13) {
@@ -1362,6 +1481,34 @@ export const useUIStore = create<UIState>()(
             persisted.roleplaySpriteScale = 1;
           }
         }
+        // v27 -> v28: enable Up-Arrow recall of the last user message by default.
+        if (version <= 27 && persisted.editLastMessageOnArrowUp === undefined) {
+          persisted.editLastMessageOnArrowUp = true;
+        }
+        // v28 -> v29: preserve existing Impersonate quick-button users by moving them into Quick replies.
+        if (
+          version <= 28 &&
+          persisted.showQuickRepliesMenu === undefined &&
+          persisted.impersonateShowQuickButton === true
+        ) {
+          persisted.showQuickRepliesMenu = true;
+          persisted.showQuickReplyPostOnly = false;
+          persisted.showQuickReplyGuide = false;
+          persisted.showQuickReplyImpersonate = true;
+        }
+        // v29 -> v30: allow users to disable the rare Chibi Professor Mari toast.
+        if (version <= 29 && persisted.chibiProfessorMariEnabled === undefined) {
+          persisted.chibiProfessorMariEnabled = true;
+        }
+        // v30 -> v31: persist Chat Summary popover source and display controls.
+        if (version <= 30) {
+          persisted.summaryPopoverSettings = normalizeSummaryPopoverSettings(persisted.summaryPopoverSettings);
+        }
+        persisted.summaryPopoverSettings = normalizeSummaryPopoverSettings(persisted.summaryPopoverSettings);
+        // v31 -> v32: add native chat/game background blur.
+        if (version <= 31 && persisted.chatBackgroundBlur === undefined) {
+          persisted.chatBackgroundBlur = 0;
+        }
         return persisted;
       },
       partialize: (state) => ({
@@ -1378,6 +1525,7 @@ export const useUIStore = create<UIState>()(
         trackerPanelSectionOrder: state.trackerPanelSectionOrder,
         theme: state.theme,
         chatBackground: state.chatBackground,
+        chatBackgroundBlur: state.chatBackgroundBlur,
         fontSize: state.fontSize,
         language: state.language,
         chatFontSize: state.chatFontSize,
@@ -1404,16 +1552,23 @@ export const useUIStore = create<UIState>()(
         showTokenUsage: state.showTokenUsage,
         showMessageNumbers: state.showMessageNumbers,
         guideGenerations: state.guideGenerations,
+        showQuickRepliesMenu: state.showQuickRepliesMenu,
+        showQuickReplyPostOnly: state.showQuickReplyPostOnly,
+        showQuickReplyGuide: state.showQuickReplyGuide,
+        showQuickReplyImpersonate: state.showQuickReplyImpersonate,
         confirmBeforeDelete: state.confirmBeforeDelete,
         messagesPerPage: state.messagesPerPage,
         boldDialogue: state.boldDialogue,
         trimIncompleteModelOutput: state.trimIncompleteModelOutput,
         speechToTextEnabled: state.speechToTextEnabled,
+        chibiProfessorMariEnabled: state.chibiProfessorMariEnabled,
         spotifyPlayerEnabled: state.spotifyPlayerEnabled,
         spotifyMobileWidgetCollapsed: state.spotifyMobileWidgetCollapsed,
         spotifyMobileWidgetPosition: state.spotifyMobileWidgetPosition,
         intuitiveSwipeNavigation: state.intuitiveSwipeNavigation,
         intuitiveSwipeRerollLatest: state.intuitiveSwipeRerollLatest,
+        editLastMessageOnArrowUp: state.editLastMessageOnArrowUp,
+        summaryPopoverSettings: state.summaryPopoverSettings,
         narrationFontColor: state.narrationFontColor,
         narrationOpacity: state.narrationOpacity,
         chatFontColor: state.chatFontColor,

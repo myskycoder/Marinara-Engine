@@ -9,6 +9,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Sparkles, ChevronDown, ChevronUp, X } from "lucide-react";
 import { useAgentStore } from "../../stores/agent.store";
 import { cn } from "../../lib/utils";
+import { ContinuityIssueChecklist } from "./ContinuityIssueChecklist";
 
 export function AgentThoughtBubbles({ enabledAgentTypes }: { enabledAgentTypes?: Set<string> }) {
   const allThoughtBubbles = useAgentStore((s) => s.thoughtBubbles);
@@ -93,9 +94,13 @@ export function AgentThoughtBubbles({ enabledAgentTypes }: { enabledAgentTypes?:
                   </button>
                   <div className="pr-4">
                     <span className="font-semibold text-[var(--primary)]">{bubble.agentName}</span>
-                    <p className="mt-0.5 whitespace-pre-wrap text-[var(--muted-foreground)] leading-relaxed">
-                      {bubble.content}
-                    </p>
+                    {bubble.agentId === "continuity" ? (
+                      <ContinuityIssueChecklist content={bubble.content} />
+                    ) : (
+                      <p className="mt-0.5 whitespace-pre-wrap text-[var(--muted-foreground)] leading-relaxed">
+                        {bubble.content}
+                      </p>
+                    )}
                   </div>
                 </motion.div>
               ))}

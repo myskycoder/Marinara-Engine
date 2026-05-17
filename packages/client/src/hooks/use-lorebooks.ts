@@ -63,6 +63,20 @@ export function useUpdateLorebook() {
   });
 }
 
+export function useUploadLorebookImage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, image }: { id: string; image: string }) =>
+      api.post<Lorebook>(`/lorebooks/${id}/image`, { image }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: lorebookKeys.all });
+      qc.invalidateQueries({ queryKey: lorebookKeys.list() });
+      qc.invalidateQueries({ queryKey: lorebookKeys.detail(variables.id) });
+      qc.invalidateQueries({ queryKey: lorebookKeys.active() });
+    },
+  });
+}
+
 export function useDeleteLorebook() {
   const qc = useQueryClient();
   return useMutation({
@@ -342,8 +356,23 @@ export interface ActiveLorebookEntry {
   constant: boolean;
 }
 
+export interface BudgetSkippedLorebookEntry {
+  id: string;
+  name: string;
+  lorebookId: string;
+  lorebookName: string;
+  matchedKeys: string[];
+  estimatedTokens: number;
+  lorebookBudget: number;
+  lorebookUsedTokens: number;
+  chatBudget: number;
+  chatUsedTokens: number;
+  blockedBy: "lorebook" | "chat" | "both";
+}
+
 export interface ActiveLorebookScan {
   entries: ActiveLorebookEntry[];
+  budgetSkippedEntries: BudgetSkippedLorebookEntry[];
   totalTokens: number;
   totalEntries: number;
 }

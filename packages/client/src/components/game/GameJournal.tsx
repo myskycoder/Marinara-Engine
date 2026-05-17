@@ -101,6 +101,10 @@ const TYPE_ICONS: Record<string, typeof ScrollText> = {
   note: ScrollText,
 };
 
+function isMobileGameViewport(): boolean {
+  return typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches;
+}
+
 const TRAILING_REPUTATION_LABEL = /(devoted|allied|friendly|neutral|unfriendly|hostile|enemy)$/i;
 
 function normalizeNpcName(value: string): string {
@@ -515,6 +519,20 @@ function NpcsView({
 
   const trackedNpcs = npcs ?? [];
   const hasContent = trackedNpcs.length > 0;
+  const [mobilePortraitActionsNpc, setMobilePortraitActionsNpc] = useState<string | null>(null);
+
+  const handleNpcPortraitAvatarClick = useCallback(
+    (npcName: string) => {
+      if (isMobileGameViewport() && onNpcPortraitGenerate && npcPortraitGenerationEnabled === true) {
+        const normalizedName = npcName.trim().toLowerCase();
+        setMobilePortraitActionsNpc((current) => (current === normalizedName ? null : normalizedName));
+        return;
+      }
+
+      onNpcPortraitClick?.(npcName);
+    },
+    [npcPortraitGenerationEnabled, onNpcPortraitClick, onNpcPortraitGenerate],
+  );
 
   if (!hasContent) {
     return <div className="text-center text-xs text-white/40">No NPCs encountered yet.</div>;

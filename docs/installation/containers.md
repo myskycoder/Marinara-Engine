@@ -18,7 +18,7 @@ Data (file-backed storage, uploads, fonts, default backgrounds) is stored in the
 docker volume inspect marinara-data
 ```
 
-On startup, the official image repairs ownership of `/app/data` for named volumes, then drops back to the non-root runtime user. This lets older Docker installs migrate to file-backed storage without manual `chown` steps.
+On startup, the official image repairs ownership of `/app/data` for named volumes, then drops back to the non-root runtime user. This lets older Docker installs migrate to file-backed storage without manual `chown` steps. The runtime `.env` file is auto-created at `/app/data/.env`, and file-native storage is pinned to `/app/data/storage`, so both app settings and user data remain inside the mounted volume.
 
 To pull the latest image and restart:
 

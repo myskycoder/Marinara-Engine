@@ -346,13 +346,7 @@ const SCENE_ANALYSIS_SCHEMA = {
     musicIntensity: { type: ["string", "null"] as const },
     locationKind: { type: ["string", "null"] as const },
     spotifyTrack: {
-      type: ["object", "null"] as const,
-      properties: {
-        uri: { type: "string" as const },
-        reason: { type: "string" as const },
-      },
-      required: ["uri"] as const,
-      additionalProperties: false as const,
+      type: ["string", "null"] as const,
     },
     reputationChanges: {
       type: "array" as const,

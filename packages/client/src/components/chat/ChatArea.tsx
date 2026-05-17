@@ -34,28 +34,35 @@ import { useGenerate } from "../../hooks/use-generate";
 import { useCharacters, usePersonas } from "../../hooks/use-characters";
 import { useConnections } from "../../hooks/use-connections";
 import { usePageActivity } from "../../hooks/use-page-activity";
-import { api } from "../../lib/api-client";
-import { getChatDisplayName, parseChatMetadata } from "../../lib/chat-display";
+import { api, ApiError } from "../../lib/api-client";
+import { filterLanguageGenerationConnections } from "../../lib/connection-filters";
+import { getChatDisplayName, getConnectedChatDisplayName, parseChatMetadata } from "../../lib/chat-display";
 import { parseCharacterDisplayData } from "../../lib/character-display";
 import { showConfirmDialog } from "../../lib/app-dialogs";
+import { chatBackgroundMetadataToUrl, chatBackgroundUrlToMetadata } from "../../lib/backgrounds";
 import { useGameStateStore } from "../../stores/game-state.store";
 import { toast } from "sonner";
 import { BookOpen, Check, HelpCircle, MessageSquare, Theater, X } from "lucide-react";
-import type { SpritePlacement, SpriteSide } from "@marinara-engine/shared";
+import {
+  APP_VERSION,
+  BUILT_IN_AGENTS,
+  buildGuidedGenerationInstructionMessage,
+  type SpritePlacement,
+  type SpriteSide,
+} from "@marinara-engine/shared";
 import { useUIStore } from "../../stores/ui.store";
 import { useAgentStore } from "../../stores/agent.store";
-import { cn } from "../../lib/utils";
+import { cn, parseAvatarCropJson } from "../../lib/utils";
 import { Modal } from "../ui/Modal";
 import { useEncounter } from "../../hooks/use-encounter";
 import { useScene } from "../../hooks/use-scene";
 import { useEncounterStore } from "../../stores/encounter.store";
-import { APP_VERSION } from "@marinara-engine/shared";
-import { BUILT_IN_AGENTS } from "@marinara-engine/shared";
 import { useTranslationStore } from "../../stores/translation.store";
 import { ttsService } from "../../lib/tts-service";
 import { useTTSConfig } from "../../hooks/use-tts";
 import { buildTTSMessageText, resolveTTSVoiceForSpeaker } from "../../lib/tts-dialogue";
 import { mirrorSpritePlacements, normalizeSpritePlacements } from "./sprite-placement";
+import { normalizeSpriteDisplayModes } from "./sprite-display-modes";
 import type { CharacterMap, MessageSelectionToggle, MessageWithSwipes, PeekPromptData } from "./chat-area.types";
 import { RecentChats } from "./RecentChats";
 import { HomeFaq } from "./HomeFaq";
@@ -133,11 +140,14 @@ export function ChatArea() {
   const guideGenerations = useUIStore((s) => s.guideGenerations);
   const intuitiveSwipeNavigation = useUIStore((s) => s.intuitiveSwipeNavigation);
   const intuitiveSwipeRerollLatest = useUIStore((s) => s.intuitiveSwipeRerollLatest);
+  const editLastMessageOnArrowUp = useUIStore((s) => s.editLastMessageOnArrowUp);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevScrollHeightRef = useRef(0);
   const isLoadingMoreRef = useRef(false);
   const intuitiveTouchStartRef = useRef<{ x: number; y: number; target: EventTarget | null } | null>(null);
+  const swipeActionSeq = useRef(0);
+  const pendingSwipeMutationsRef = useRef(new Map<string, Promise<void>>());
   // Tracks whether the initial load stagger animation has played.
   // After the first render with messages, new/re-mounted messages
   // skip the entry animation to avoid a visible flash on refetch.
@@ -157,7 +167,7 @@ export function ChatArea() {
   const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(new Set());
   const [selectionAnchorIndex, setSelectionAnchorIndex] = useState<number | null>(null);
 
-  const { data: chat } = useChat(activeChatId);
+  const { data: chat, error: chatError } = useChat(activeChatId);
   const { data: allChats } = useChats();
   // Game mode loads ALL messages (no pagination) so the in-game log
   // shows the full session history instead of only the latest page.
@@ -219,6 +229,11 @@ export function ChatArea() {
   const agentProcessing = useAgentStore((s) => s.isProcessing);
 
   useEffect(() => {
+    if (!activeChatId || !(chatError instanceof ApiError) || chatError.status !== 404) return;
+    setActiveChatId(null);
+  }, [activeChatId, chatError, setActiveChatId]);
+
+  useEffect(() => {
     const handleReviewRequest = (event: Event) => {
       const detail = (event as CustomEvent<AgentInjectionReviewRequest>).detail;
       if (!detail?.chatId || !Array.isArray(detail.injections)) return;
@@ -236,6 +251,7 @@ export function ChatArea() {
     if (!agentInjectionReview) return;
     const overrides = agentInjectionReview.injections.map((injection) => ({
       agentType: injection.agentType,
+      agentName: injection.agentName,
       text: agentInjectionDrafts[injection.agentType] ?? injection.text,
     }));
     const chatId = agentInjectionReview.chatId;
@@ -251,7 +267,9 @@ export function ChatArea() {
 
   const handleQuickStart = useCallback(
     (mode: "conversation" | "roleplay" | "game") => {
-      const connectionRows = ((connections ?? []) as Array<{ id: string }>).filter((connection) => !!connection.id);
+      const connectionRows = filterLanguageGenerationConnections(
+        (connections ?? []) as Array<{ id: string; provider?: string }>,
+      ).filter((connection) => !!connection.id);
       if (connectionRows.length === 0) {
         useChatStore.getState().setPendingNewChatMode(mode);
         return;
@@ -332,6 +350,7 @@ export function ChatArea() {
       appearance?: string;
       altDescriptions?: string;
       avatarPath?: string | null;
+      avatarCrop?: string;
       nameColor?: string;
       dialogueColor?: string;
       boxColor?: string;
@@ -365,6 +384,7 @@ export function ChatArea() {
       backstory: persona.backstory || undefined,
       appearance: persona.appearance || undefined,
       avatarUrl: persona.avatarPath || undefined,
+      avatarCrop: parseAvatarCropJson(persona.avatarCrop),
       nameColor: persona.nameColor || undefined,
       dialogueColor: persona.dialogueColor || undefined,
       boxColor: persona.boxColor || undefined,
@@ -391,6 +411,7 @@ export function ChatArea() {
     return parseChatMetadata(raw);
   }, [chat]);
   const spriteCharacterIds: string[] = Array.isArray(chatMeta.spriteCharacterIds) ? chatMeta.spriteCharacterIds : [];
+  const spriteDisplayModes = normalizeSpriteDisplayModes(chatMeta.spriteDisplayModes);
   const spritePosition: SpriteSide = chatMeta.spritePosition === "right" ? "right" : "left";
   const spriteScale = normalizeSpriteDisplayValue(chatMeta.spriteScale, roleplaySpriteScale, 0.5, 1.75);
   const spriteOpacity = normalizeSpriteDisplayValue(chatMeta.spriteOpacity, 1, 0.15, 1);
@@ -420,12 +441,6 @@ export function ChatArea() {
 
   const updateMeta = useUpdateChatMetadata();
   const summaryContextSize: number = (chatMeta.summaryContextSize as number) ?? 50;
-  const handleSummaryContextSizeChange = useCallback(
-    (size: number) => {
-      if (chat?.id) updateMeta.mutate({ id: chat.id, summaryContextSize: size });
-    },
-    [chat?.id, updateMeta],
-  );
 
   // Sync translation config from chat metadata to the translation store
   useEffect(() => {
@@ -476,8 +491,7 @@ export function ChatArea() {
   });
   useEffect(() => {
     if (!chat?.id) return;
-    const bg = chatMeta.background as string | null | undefined;
-    const restoredUrl = bg ? `/api/backgrounds/file/${encodeURIComponent(bg)}` : null;
+    const restoredUrl = chatBackgroundMetadataToUrl(chatMeta.background);
     restoredChatBackgroundRef.current = { chatId: chat.id, url: restoredUrl, isSyncing: true };
     useUIStore.getState().setChatBackground(restoredUrl);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -493,7 +507,7 @@ export function ChatArea() {
   const bgPersistTimer = useRef<ReturnType<typeof setTimeout>>(null);
   useEffect(() => {
     if (!chat?.id) return;
-    const savedFilename = (chatMeta.background as string | null | undefined) ?? null;
+    const savedBackground = chatBackgroundUrlToMetadata(chatBackgroundMetadataToUrl(chatMeta.background));
     const restoredBackground = restoredChatBackgroundRef.current;
 
     if (
@@ -507,7 +521,7 @@ export function ChatArea() {
     }
 
     if (!chatBackground) {
-      if (savedFilename === null) return;
+      if (savedBackground === null) return;
       if (bgPersistTimer.current) clearTimeout(bgPersistTimer.current);
       bgPersistTimer.current = setTimeout(() => {
         updateMeta.mutate({ id: chat!.id, background: null });
@@ -515,11 +529,11 @@ export function ChatArea() {
       return;
     }
 
-    const filename = decodeURIComponent(chatBackground.replace(/^\/api\/backgrounds\/file\//, ""));
-    if (filename === savedFilename) return;
+    const nextBackground = chatBackgroundUrlToMetadata(chatBackground);
+    if (nextBackground === savedBackground) return;
     if (bgPersistTimer.current) clearTimeout(bgPersistTimer.current);
     bgPersistTimer.current = setTimeout(() => {
-      updateMeta.mutate({ id: chat!.id, background: filename });
+      updateMeta.mutate({ id: chat!.id, background: nextBackground });
     }, 500);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatBackground, chat?.id]);
@@ -641,6 +655,18 @@ export function ChatArea() {
 
   const combatAgentEnabled = enabledAgentTypes.has("combat");
   const expressionAgentEnabled = enabledAgentTypes.has("expression");
+  const shouldRefreshGameStateOnSwipe = isGameChat || Boolean(chatMeta.enableAgents);
+
+  const refreshVisibleGameState = useCallback(async () => {
+    if (!shouldRefreshGameStateOnSwipe || !activeChatId) return;
+    try {
+      const gs = await api.get<import("@marinara-engine/shared").GameState | null>(`/chats/${activeChatId}/game-state`);
+      if (useChatStore.getState().activeChatId !== activeChatId) return;
+      useGameStateStore.getState().setGameState(gs ?? null);
+    } catch {
+      // Non-critical refresh failure; the next tracker load will fetch again.
+    }
+  }, [activeChatId, shouldRefreshGameStateOnSwipe]);
 
   const handleDelete = useCallback((messageId: string) => {
     setDeleteDialogMessageId(messageId);
@@ -662,11 +688,49 @@ export function ChatArea() {
   }, [deleteDialogMessageId, deleteMessage]);
 
   const handleDeleteSwipe = useCallback(() => {
-    if (deleteDialogMessageId && deleteDialogCanDeleteSwipe) {
-      deleteSwipe.mutate({ messageId: deleteDialogMessageId, index: deleteDialogActiveSwipeIndex });
-    }
+    const messageId = deleteDialogMessageId;
+    const index = deleteDialogActiveSwipeIndex;
     setDeleteDialogMessageId(null);
-  }, [deleteDialogActiveSwipeIndex, deleteDialogCanDeleteSwipe, deleteDialogMessageId, deleteSwipe]);
+    if (!messageId || !deleteDialogCanDeleteSwipe) return;
+    const actionId = ++swipeActionSeq.current;
+    const refreshChatId = activeChatId;
+    void (async () => {
+      const gameStateStore = useGameStateStore.getState();
+      if (shouldRefreshGameStateOnSwipe && refreshChatId) gameStateStore.setRefreshingChat(refreshChatId);
+      try {
+        const flushPatch = useGameStateStore.getState().flushPatch;
+        if (flushPatch) {
+          try {
+            await flushPatch();
+          } catch {
+            if (swipeActionSeq.current === actionId) {
+              toast.error("Could not save tracker changes before deleting the swipe.");
+            }
+            return;
+          }
+        }
+        if (swipeActionSeq.current !== actionId) return;
+        await deleteSwipe.mutateAsync({ messageId, index });
+        if (swipeActionSeq.current !== actionId) return;
+        await refreshVisibleGameState();
+      } catch {
+        if (swipeActionSeq.current !== actionId) return;
+        toast.error("Could not delete the swipe.");
+      } finally {
+        if (swipeActionSeq.current === actionId) {
+          useGameStateStore.getState().clearRefreshingChat(refreshChatId);
+        }
+      }
+    })();
+  }, [
+    activeChatId,
+    deleteDialogActiveSwipeIndex,
+    deleteDialogCanDeleteSwipe,
+    deleteDialogMessageId,
+    deleteSwipe,
+    refreshVisibleGameState,
+    shouldRefreshGameStateOnSwipe,
+  ]);
 
   const handleDeleteMore = useCallback(() => {
     if (deleteDialogMessageId) {
@@ -795,7 +859,8 @@ export function ChatArea() {
                 chatId: activeChatId,
                 connectionId: null,
                 regenerateMessageId: messageId,
-                generationGuide: currentInput?.toString(),
+                generationGuide: buildGuidedGenerationInstructionMessage(currentInput.toString()),
+                generationGuideSource: "guide",
               }
             : { chatId: activeChatId, connectionId: null, regenerateMessageId: messageId },
         );
@@ -831,24 +896,59 @@ export function ChatArea() {
 
   const handleSetActiveSwipe = useCallback(
     (messageId: string, index: number) => {
-      setActiveSwipe.mutate(
-        { messageId, index },
-        {
-          onSuccess: () => {
-            // Refetch game state so the HUD shows trackers for the active swipe
-            if (isGameChat && activeChatId) {
-              api
-                .get<import("@marinara-engine/shared").GameState | null>(`/chats/${activeChatId}/game-state`)
-                .then((gs) => {
-                  useGameStateStore.getState().setGameState(gs ?? null);
-                })
-                .catch(() => {});
+      const actionId = ++swipeActionSeq.current;
+      const refreshChatId = activeChatId;
+      void (async () => {
+        const gameStateStore = useGameStateStore.getState();
+        if (shouldRefreshGameStateOnSwipe && refreshChatId) gameStateStore.setRefreshingChat(refreshChatId);
+        try {
+          const flushPatch = useGameStateStore.getState().flushPatch;
+          if (flushPatch) {
+            try {
+              await flushPatch();
+            } catch {
+              if (swipeActionSeq.current === actionId) {
+                toast.error("Could not save tracker changes before switching swipes.");
+              }
+              return;
             }
-          },
-        },
-      );
+          }
+          if (swipeActionSeq.current !== actionId) return;
+          const previousMutation = pendingSwipeMutationsRef.current.get(messageId);
+          if (previousMutation) {
+            try {
+              await previousMutation;
+            } catch {
+              // The active action below will report its own failure if needed.
+            }
+          }
+          if (swipeActionSeq.current !== actionId) return;
+          const mutation = setActiveSwipe.mutateAsync({ messageId, index });
+          const trackedMutation = mutation.then(
+            () => undefined,
+            () => undefined,
+          );
+          pendingSwipeMutationsRef.current.set(messageId, trackedMutation);
+          try {
+            await mutation;
+          } finally {
+            if (pendingSwipeMutationsRef.current.get(messageId) === trackedMutation) {
+              pendingSwipeMutationsRef.current.delete(messageId);
+            }
+          }
+          if (swipeActionSeq.current !== actionId) return;
+          await refreshVisibleGameState();
+        } catch {
+          if (swipeActionSeq.current !== actionId) return;
+          toast.error("Could not switch swipes.");
+        } finally {
+          if (swipeActionSeq.current === actionId) {
+            useGameStateStore.getState().clearRefreshingChat(refreshChatId);
+          }
+        }
+      })();
     },
-    [setActiveSwipe, isGameChat, activeChatId],
+    [activeChatId, setActiveSwipe, refreshVisibleGameState, shouldRefreshGameStateOnSwipe],
   );
 
   const handleEdit = useCallback(
@@ -923,11 +1023,23 @@ export function ChatArea() {
     return null;
   }, [messages]);
 
-  const latestUserMessageForEdit = useMemo(() => {
+  const latestMessageForEdit = useMemo(() => {
     if (!messages) return null;
     for (let i = messages.length - 1; i >= 0; i--) {
       const candidate = messages[i]!;
-      if (candidate.role === "user") return candidate;
+      if (candidate.role !== "user" && candidate.role !== "assistant") continue;
+      const extra =
+        typeof candidate.extra === "string"
+          ? (() => {
+              try {
+                return JSON.parse(candidate.extra as unknown as string);
+              } catch {
+                return {};
+              }
+            })()
+          : (candidate.extra ?? {});
+      if (extra?.hiddenFromUser === true) continue;
+      return candidate;
     }
     return null;
   }, [messages]);
@@ -985,37 +1097,8 @@ export function ChatArea() {
   useEffect(() => {
     if (!intuitiveSwipeNavigation || intuitiveSwipeBlocked) return;
 
-    const supportsMode = chatMode === "conversation" || isRoleplay;
-
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
-
-      if (event.key === "ArrowUp") {
-        if (!supportsMode || !latestUserMessageForEdit) return;
-        if (event.repeat || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-        const target = event.target;
-        if (target instanceof Element) {
-          // Don't hijack up-arrow when the user is typing or already editing.
-          // Allow it from the chat input only when it's empty (shell-style recall).
-          if (target.tagName === "TEXTAREA") {
-            const ta = target as HTMLTextAreaElement;
-            if (ta.value.length > 0) return;
-          } else if (
-            target.tagName === "INPUT" ||
-            target.tagName === "SELECT" ||
-            target.getAttribute("contenteditable") === "true"
-          ) {
-            return;
-          }
-        }
-        event.preventDefault();
-        window.dispatchEvent(
-          new CustomEvent("marinara:start-edit-message", {
-            detail: { messageId: latestUserMessageForEdit.id },
-          }),
-        );
-        return;
-      }
 
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
       if (shouldIgnoreIntuitiveSwipeTarget(event.target)) return;
@@ -1032,14 +1115,57 @@ export function ChatArea() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [intuitiveSwipeBlocked, intuitiveSwipeNavigation, latestAssistantMessageForSwipes, navigateLatestSwipe]);
+
+  // Up-Arrow recall of the most recent message (user OR assistant) — runs
+  // independently of swipe nav so the shortcut works with that toggle off.
+  useEffect(() => {
+    if (!editLastMessageOnArrowUp || intuitiveSwipeBlocked) return;
+    const supportsMode = chatMode === "conversation" || isRoleplay;
+    if (!supportsMode) return;
+
+    const handleArrowUp = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (event.key !== "ArrowUp") return;
+      if (event.repeat || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (!latestMessageForEdit) return;
+      // Don't try to edit a message that's currently streaming/regenerating.
+      if (isStreaming || agentProcessing) return;
+
+      const target = event.target;
+      if (target instanceof Element) {
+        // Allow recall when the chat input textarea is focused but empty
+        // (shell-style). Otherwise leave typing/editing alone.
+        if (target.tagName === "TEXTAREA") {
+          const ta = target as HTMLTextAreaElement;
+          if (ta.value.length > 0) return;
+        } else if (
+          target.tagName === "INPUT" ||
+          target.tagName === "SELECT" ||
+          target.getAttribute("contenteditable") === "true"
+        ) {
+          return;
+        }
+      }
+
+      event.preventDefault();
+      window.dispatchEvent(
+        new CustomEvent("marinara:start-edit-message", {
+          detail: { messageId: latestMessageForEdit.id },
+        }),
+      );
+    };
+
+    window.addEventListener("keydown", handleArrowUp);
+    return () => window.removeEventListener("keydown", handleArrowUp);
   }, [
+    agentProcessing,
     chatMode,
+    editLastMessageOnArrowUp,
     intuitiveSwipeBlocked,
-    intuitiveSwipeNavigation,
     isRoleplay,
-    latestAssistantMessageForSwipes,
-    latestUserMessageForEdit,
-    navigateLatestSwipe,
+    isStreaming,
+    latestMessageForEdit,
   ]);
 
   useEffect(() => {
@@ -1519,7 +1645,7 @@ export function ChatArea() {
   const chatList =
     (allChats as Array<{ id: string; name: string; metadata?: string | Record<string, unknown> }> | undefined) ?? [];
   const connectedChatName = chat?.connectedChatId
-    ? getChatDisplayName(chatList.find((item) => item.id === chat.connectedChatId))
+    ? getConnectedChatDisplayName(chatList.find((item) => item.id === chat.connectedChatId))
     : undefined;
   const activeSceneChat = chatMeta.activeSceneChatId
     ? chatList.find((item) => item.id === chatMeta.activeSceneChatId)
@@ -1684,6 +1810,7 @@ export function ChatArea() {
             onRegenerate={handleRegenerate}
             onEdit={handleEdit}
             onSetActiveSwipe={handleSetActiveSwipe}
+            onToggleHiddenFromAI={handleToggleHiddenFromAI}
             onPeekPrompt={handlePeekPrompt}
             onToggleSelectMessage={handleToggleSelectMessage}
             onSwitchChat={chat?.connectedChatId ? () => setActiveChatId(chat.connectedChatId!) : undefined}
@@ -1753,6 +1880,7 @@ export function ChatArea() {
           encounterActive={encounterActive}
           spritePosition={spritePosition}
           spriteCharacterIds={spriteCharacterIds}
+          spriteDisplayModes={spriteDisplayModes}
           spriteExpressions={spriteExpressions}
           spritePlacements={spritePlacements}
           spriteScale={spriteScale}
@@ -1802,7 +1930,6 @@ export function ChatArea() {
           onCloneSceneFromHere={isSceneChat ? handleCloneSceneFromHere : undefined}
           isCloneSceneFromHereDisabled={isForking || isStreaming}
           onToggleSelectMessage={handleToggleSelectMessage}
-          onSummaryContextSizeChange={handleSummaryContextSizeChange}
           onRerunTrackers={handleRerunTrackers}
           onRerunSingleTracker={handleRerunSingleTracker}
           onStartEncounter={() => startEncounter()}

@@ -23,7 +23,7 @@ import {
 import type { GameSetupConfig, GameGmMode } from "@marinara-engine/shared";
 import { getCharacterTitle } from "../../lib/character-display";
 import { api } from "../../lib/api-client";
-import { cn, getAvatarCropStyle } from "../../lib/utils";
+import { cn, getAvatarCropStyle, parseAvatarCropJson, type AvatarCropValue } from "../../lib/utils";
 import { Modal } from "../ui/Modal";
 import {
   GenerationParametersFields,
@@ -52,7 +52,7 @@ interface GameSetupWizardProps {
     name: string;
     comment?: string | null;
     avatarUrl?: string | null;
-    avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null;
+    avatarCrop?: AvatarCropValue | null;
   }>;
 }
 
@@ -68,7 +68,7 @@ function CharacterAvatar({
   character: {
     name: string;
     avatarUrl?: string | null;
-    avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null;
+    avatarCrop?: AvatarCropValue | null;
   };
   className?: string;
 }) {
@@ -80,7 +80,7 @@ function CharacterAvatar({
     );
   }
   return (
-    <span className={cn("block shrink-0 overflow-hidden", className)}>
+    <span className={cn("relative block shrink-0 overflow-hidden", className)}>
       <img
         src={character.avatarUrl}
         alt={character.name}
@@ -164,12 +164,14 @@ function LearnedOptionChips({
   expanded,
   onToggleExpanded,
   onSelect,
+  onForget,
   selected,
 }: {
   options: string[];
   expanded: boolean;
   onToggleExpanded: () => void;
   onSelect: (value: string) => void;
+  onForget?: (value: string) => void;
   selected?: (value: string) => boolean;
 }) {
   if (options.length === 0) return null;
@@ -182,19 +184,33 @@ function LearnedOptionChips({
       {visible.map((option) => {
         const isSelected = selected?.(option) ?? false;
         return (
-          <button
+          <span
             key={option}
-            type="button"
-            onClick={() => onSelect(option)}
             className={cn(
-              "rounded-full px-2 py-0.5 text-[0.625rem] transition-colors",
+              "group/learned inline-flex items-center rounded-full text-[0.625rem] transition-colors",
               isSelected
                 ? "bg-[var(--primary)]/20 text-[var(--primary)] ring-1 ring-[var(--primary)]/35"
                 : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:bg-[var(--primary)]/10 hover:text-[var(--primary)]",
             )}
           >
-            {option}
-          </button>
+            <button type="button" onClick={() => onSelect(option)} className="px-2 py-0.5">
+              {option}
+            </button>
+            {onForget && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onForget(option);
+                }}
+                aria-label={`Forget ${option}`}
+                title="Forget this option"
+                className="ml-0.5 mr-1 inline-flex rounded-full p-0.5 opacity-40 transition-opacity hover:bg-[var(--destructive)]/20 hover:text-[var(--destructive)] hover:opacity-100 focus-visible:opacity-100 group-hover/learned:opacity-100"
+              >
+                <X size={9} />
+              </button>
+            )}
+          </span>
         );
       })}
       {(hiddenCount > 0 || expanded) && (
@@ -302,6 +318,7 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
   const sidecarConfig = useSidecarStore((s) => s.config);
   const learnedGameSetupOptions = useUIStore((s) => s.learnedGameSetupOptions);
   const rememberGameSetupOptions = useUIStore((s) => s.rememberGameSetupOptions);
+  const forgetGameSetupOption = useUIStore((s) => s.forgetGameSetupOption);
   const sidecarAvailable = !!sidecarConfig.modelPath && sidecarStatus !== "not_downloaded";
 
   // Fetch sidecar status on mount so the dropdown is populated without visiting Connections first
@@ -325,9 +342,15 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
   const spotifyPlaylistsQuery = useQuery({
     queryKey: ["spotify", "playlists", 50],
     queryFn: () =>
-      api.get<{ playlists: Array<{ id: string; name: string; uri: string; trackCount: number }> }>(
-        "/spotify/playlists?limit=50",
-      ),
+      api.get<{
+        playlists: Array<{
+          id: string;
+          name: string;
+          uri: string;
+          trackCount: number | null;
+          owned: boolean | null;
+        }>;
+      }>("/spotify/playlists?limit=50"),
     enabled: enableSpotifyDj && gameSpotifySourceType === "playlist",
     staleTime: 60_000,
     retry: false,
@@ -354,7 +377,14 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
   );
   const imageConnections = useMemo(() => connections.filter((c) => c.provider === "image_generation"), [connections]);
   const personas = useMemo(
-    () => (personasList as Array<{ id: string; name: string; avatarPath?: string | null; comment?: string }>) ?? [],
+    () =>
+      (personasList as Array<{
+        id: string;
+        name: string;
+        avatarPath?: string | null;
+        avatarCrop?: string | null;
+        comment?: string;
+      }>) ?? [],
     [personasList],
   );
 
@@ -617,6 +647,7 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                 expanded={expandedLearnedOptions.genres}
                 onToggleExpanded={() => toggleLearnedOptions("genres")}
                 onSelect={toggleGenre}
+                onForget={(value) => forgetGameSetupOption("genres", value)}
                 selected={(value) => genres.includes(value)}
               />
               <div className="mt-2 flex items-center gap-1.5">
@@ -665,6 +696,7 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                 expanded={expandedLearnedOptions.settings}
                 onToggleExpanded={() => toggleLearnedOptions("settings")}
                 onSelect={setSetting}
+                onForget={(value) => forgetGameSetupOption("settings", value)}
               />
             </div>
 
@@ -707,6 +739,7 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                 expanded={expandedLearnedOptions.tones}
                 onToggleExpanded={() => toggleLearnedOptions("tones")}
                 onSelect={toggleTone}
+                onForget={(value) => forgetGameSetupOption("tones", value)}
                 selected={(value) => tones.includes(value)}
               />
               <div className="mt-2 flex items-center gap-1.5">
@@ -1021,18 +1054,13 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                   const title = getPersonaTitle(p);
                   return (
                     <div className="mb-2 flex items-center gap-2.5 rounded-lg bg-[var(--primary)]/10 px-3 py-2 ring-1 ring-[var(--primary)]/30">
-                      {p.avatarPath ? (
-                        <img
-                          src={p.avatarPath}
-                          alt={p.name}
-                          loading="lazy"
-                          className="h-6 w-6 rounded-full object-cover"
-                        />
-                      ) : (
-                        <div className="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--accent)] text-[0.5625rem] font-bold">
-                          {p.name[0]}
-                        </div>
-                      )}
+                      <CharacterAvatar
+                        character={{
+                          name: p.name,
+                          avatarUrl: p.avatarPath ?? null,
+                          avatarCrop: parseAvatarCropJson(p.avatarCrop),
+                        }}
+                      />
                       <div className="flex-1 min-w-0">
                         <span className="block truncate text-xs">{p.name}</span>
                         {title && (
@@ -1071,18 +1099,13 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                           p.id === personaId && "bg-[var(--primary)]/5",
                         )}
                       >
-                        {p.avatarPath ? (
-                          <img
-                            src={p.avatarPath}
-                            alt={p.name}
-                            loading="lazy"
-                            className="h-6 w-6 rounded-full object-cover"
-                          />
-                        ) : (
-                          <div className="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--accent)] text-[0.5625rem] font-bold">
-                            {p.name[0]}
-                          </div>
-                        )}
+                        <CharacterAvatar
+                          character={{
+                            name: p.name,
+                            avatarUrl: p.avatarPath ?? null,
+                            avatarCrop: parseAvatarCropJson(p.avatarCrop),
+                          }}
+                        />
                         <div className="flex-1 min-w-0">
                           <span className="block truncate text-xs">{p.name}</span>
                           {title && (
@@ -1293,11 +1316,20 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                               className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)]"
                             >
                               <option value="">Choose playlist...</option>
-                              {spotifyPlaylistsQuery.data.playlists.map((playlist) => (
-                                <option key={playlist.id} value={playlist.id}>
-                                  {playlist.name} ({playlist.trackCount})
-                                </option>
-                              ))}
+                              {spotifyPlaylistsQuery.data.playlists.map((playlist) => {
+                                const suffix =
+                                  typeof playlist.trackCount === "number"
+                                    ? ` (${playlist.trackCount})`
+                                    : playlist.owned === false
+                                      ? " (followed — unavailable)"
+                                      : "";
+                                return (
+                                  <option key={playlist.id} value={playlist.id}>
+                                    {playlist.name}
+                                    {suffix}
+                                  </option>
+                                );
+                              })}
                             </select>
                           ) : (
                             <input
@@ -1506,6 +1538,7 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                 expanded={expandedLearnedOptions.goals}
                 onToggleExpanded={() => toggleLearnedOptions("goals")}
                 onSelect={setPlayerGoals}
+                onForget={(value) => forgetGameSetupOption("goals", value)}
               />
             </div>
 
@@ -1537,6 +1570,7 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                 expanded={expandedLearnedOptions.preferences}
                 onToggleExpanded={() => toggleLearnedOptions("preferences")}
                 onSelect={setPreferences}
+                onForget={(value) => forgetGameSetupOption("preferences", value)}
               />
             </div>
 

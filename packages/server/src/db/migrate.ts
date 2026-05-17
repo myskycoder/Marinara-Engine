@@ -70,10 +70,12 @@ const CREATE_TABLES: string[] = [
     backstory TEXT NOT NULL DEFAULT '',
     appearance TEXT NOT NULL DEFAULT '',
     avatar_path TEXT,
+    avatar_crop TEXT NOT NULL DEFAULT '',
     is_active TEXT NOT NULL DEFAULT 'false',
     name_color TEXT NOT NULL DEFAULT '',
     dialogue_color TEXT NOT NULL DEFAULT '',
     box_color TEXT NOT NULL DEFAULT '',
+    tracker_card_colors TEXT NOT NULL DEFAULT '{"mode":"chat"}',
     persona_stats TEXT NOT NULL DEFAULT '',
     alt_descriptions TEXT NOT NULL DEFAULT '[]',
     tags TEXT NOT NULL DEFAULT '[]',
@@ -103,6 +105,7 @@ const CREATE_TABLES: string[] = [
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     category TEXT NOT NULL DEFAULT 'uncategorized',
+    image_path TEXT,
     scan_depth INTEGER NOT NULL DEFAULT 2,
     token_budget INTEGER NOT NULL DEFAULT 2048,
     recursive_scanning TEXT NOT NULL DEFAULT 'false',
@@ -184,6 +187,7 @@ const CREATE_TABLES: string[] = [
     activation_conditions TEXT NOT NULL DEFAULT '[]',
     schedule TEXT,
     prevent_recursion TEXT NOT NULL DEFAULT 'false',
+    exclude_from_vectorization TEXT NOT NULL DEFAULT 'false',
     embedding TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -256,6 +260,7 @@ const CREATE_TABLES: string[] = [
     use_for_random TEXT NOT NULL DEFAULT 'false',
     enable_caching TEXT NOT NULL DEFAULT 'false',
     caching_at_depth INTEGER NOT NULL DEFAULT 5,
+    prompt_preset_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
@@ -407,6 +412,7 @@ const CREATE_TABLES: string[] = [
     content TEXT NOT NULL,
     embedding TEXT,
     message_count INTEGER NOT NULL,
+    source_chat_id TEXT,
     first_message_at TEXT NOT NULL,
     last_message_at TEXT NOT NULL,
     created_at TEXT NOT NULL
@@ -415,6 +421,15 @@ const CREATE_TABLES: string[] = [
     id TEXT PRIMARY KEY NOT NULL,
     name TEXT NOT NULL,
     mode TEXT NOT NULL,
+    color TEXT NOT NULL DEFAULT '',
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    collapsed TEXT NOT NULL DEFAULT 'false',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS api_connection_folders (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
     color TEXT NOT NULL DEFAULT '',
     sort_order INTEGER NOT NULL DEFAULT 0,
     collapsed TEXT NOT NULL DEFAULT 'false',
@@ -647,8 +662,18 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
     definition: "TEXT NOT NULL DEFAULT 'false'",
   },
   {
+    table: "lorebooks",
+    column: "image_path",
+    definition: "TEXT",
+  },
+  {
     table: "api_connections",
     column: "default_parameters",
+    definition: "TEXT",
+  },
+  {
+    table: "api_connections",
+    column: "prompt_preset_id",
     definition: "TEXT",
   },
   {
@@ -707,9 +732,44 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
     definition: "TEXT NOT NULL DEFAULT '[]'",
   },
   {
+    table: "lorebook_entries",
+    column: "exclude_from_vectorization",
+    definition: "TEXT NOT NULL DEFAULT 'false'",
+  },
+  {
     table: "api_connections",
     column: "claude_fast_mode",
     definition: "TEXT NOT NULL DEFAULT 'false'",
+  },
+  {
+    table: "personas",
+    column: "avatar_crop",
+    definition: "TEXT NOT NULL DEFAULT ''",
+  },
+  {
+    table: "personas",
+    column: "tracker_card_colors",
+    definition: `TEXT NOT NULL DEFAULT '{"mode":"chat"}'`,
+  },
+  {
+    table: "api_connections",
+    column: "folder_id",
+    definition: "TEXT",
+  },
+  {
+    table: "api_connections",
+    column: "sort_order",
+    definition: "INTEGER NOT NULL DEFAULT 0",
+  },
+  {
+    table: "api_connections",
+    column: "image_endpoint_id",
+    definition: "TEXT",
+  },
+  {
+    table: "memory_chunks",
+    column: "source_chat_id",
+    definition: "TEXT",
   },
 ];
 

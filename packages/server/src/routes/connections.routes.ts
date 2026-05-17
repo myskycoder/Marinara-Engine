@@ -7,9 +7,96 @@ import { createConnectionsStorage } from "../services/storage/connections.storag
 import { createLLMProvider } from "../services/llm/provider-registry.js";
 import { enterAiAuditContext } from "../services/ai-audit/audit-context.js";
 import { fetchOpenAIChatGPTModels, getOpenAIChatGPTAuth } from "../services/llm/openai-chatgpt-auth.js";
+import { buildGoogleVertexModelUrl, googleAuthHeadersForVertex } from "../services/llm/providers/google.provider.js";
 import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
 import { isImageLocalUrlsEnabled, isProviderLocalUrlsEnabled } from "../config/runtime-config.js";
+import { logDebugOverride } from "../lib/logger.js";
 import { normalizeLoopbackUrl, safeFetch } from "../utils/security.js";
+
+const CONNECTION_TEST_ERROR_PREVIEW_CHARS = 2000;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function readDebugMode(body: unknown): boolean {
+  return isRecord(body) && body.debugMode === true;
+}
+
+function trimProviderError(value: string, maxLen = CONNECTION_TEST_ERROR_PREVIEW_CHARS): string {
+  return value.trim().replace(/\s+/g, " ").slice(0, maxLen);
+}
+
+function providerJsonMessage(json: unknown): string | null {
+  if (!isRecord(json)) return null;
+
+  const nestedError = json.error;
+  const message =
+    (isRecord(nestedError) && typeof nestedError.message === "string" && nestedError.message) ||
+    (typeof nestedError === "string" && nestedError) ||
+    (typeof json.message === "string" && json.message) ||
+    (typeof json.detail === "string" && json.detail) ||
+    null;
+
+  if (!message) return null;
+
+  const markers = [
+    typeof json.type === "string" ? `type: ${json.type}` : null,
+    typeof json.code === "string" && json.code !== json.type ? `code: ${json.code}` : null,
+  ].filter(Boolean);
+
+  return markers.length > 0 ? `${message} (${markers.join(", ")})` : message;
+}
+
+function formatProviderErrorBody(body: string): string {
+  const trimmed = body.trim();
+  if (!trimmed) return "No response body";
+
+  if (/<(?:!doctype|html)\b/i.test(trimmed)) {
+    const titleMatch = trimmed.match(/<title[^>]*>(.*?)<\/title>/i);
+    if (titleMatch?.[1]) return trimProviderError(titleMatch[1]);
+    return trimProviderError(trimmed.replace(/<[^>]+>/g, " "));
+  }
+
+  try {
+    const json = JSON.parse(trimmed) as unknown;
+    const message = providerJsonMessage(json);
+    if (message) return trimProviderError(message);
+  } catch {
+    // Raw text response; fall through to preview.
+  }
+
+  return trimProviderError(trimmed);
+}
+
+function isOpenAICompatibleProvider(provider: string): boolean {
+  return ["openai", "openrouter", "nanogpt", "xai", "mistral", "custom", "cohere"].includes(provider);
+}
+
+function usesResponsesEndpointForTestMessage(provider: string, model: string): boolean {
+  if (!isOpenAICompatibleProvider(provider) || provider === "custom") return false;
+  const normalized = model.toLowerCase();
+  return (
+    normalized.startsWith("gpt-5.5") ||
+    normalized.startsWith("gpt-5.4") ||
+    normalized.startsWith("codex-") ||
+    normalized.endsWith("-codex") ||
+    normalized.endsWith("-codex-max") ||
+    normalized.endsWith("-codex-mini")
+  );
+}
+
+function describeTestMessageTarget(provider: string, baseUrl: string, model: string): string {
+  if (provider === "claude_subscription") return "Claude Agent SDK";
+  if (provider === "openai_chatgpt") return "local ChatGPT session";
+  if (!baseUrl) return "(no base URL)";
+  if (provider === "google_vertex") return buildGoogleVertexModelUrl(baseUrl, model, "generateContent");
+  if (isOpenAICompatibleProvider(provider)) {
+    return `${baseUrl}${usesResponsesEndpointForTestMessage(provider, model) ? "/responses" : "/chat/completions"}`;
+  }
+  if (provider === "anthropic") return `${baseUrl}/messages`;
+  return baseUrl;
+}
 
 function resolveImageGenerationSource(conn: Record<string, unknown>, baseUrl: string): string {
   const explicitSource = typeof conn.imageGenerationSource === "string" ? conn.imageGenerationSource : "";
@@ -52,6 +139,30 @@ function buildStabilityUrl(baseUrl: string, targetPath: string): string {
   } catch {
     return `${baseUrl.replace(/\/+$/, "")}/${targetPath.replace(/^\/+/, "")}`;
   }
+}
+
+function buildHordeUrl(baseUrl: string, targetPath: string): string {
+  try {
+    const url = new URL(baseUrl);
+    const parts = url.pathname.split("/").filter(Boolean);
+    const versionIndex = parts.findIndex((part, index) => part === "api" && parts[index + 1] === "v2");
+    const prefix = versionIndex >= 0 ? parts.slice(0, versionIndex + 2) : [...parts, "api", "v2"];
+    url.pathname = `/${[...prefix, ...targetPath.split("/").filter(Boolean)].join("/")}`;
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return `${baseUrl.replace(/\/+$/, "")}/api/v2/${targetPath.replace(/^\/+/, "")}`;
+  }
+}
+
+function hordeHeaders(apiKey: string): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    apikey: apiKey.trim() || "0000000000",
+    "Client-Agent": "Marinara-Engine",
+  };
 }
 
 function isStabilityV1Base(baseUrl: string): boolean {
@@ -126,6 +237,8 @@ export async function connectionsRoutes(app: FastifyInstance) {
     const conn = await storage.getWithKey(req.params.id);
     if (!conn) return reply.status(404).send({ error: "Connection not found" });
 
+    const requestDebug = readDebugMode(req.body);
+    const debugLog = (message: string, ...args: any[]) => logDebugOverride(requestDebug, message, ...args);
     const start = Date.now();
     try {
       // Claude (Subscription) has no HTTP endpoint — verify the local SDK
@@ -180,6 +293,9 @@ export async function connectionsRoutes(app: FastifyInstance) {
       if (provider?.apiKeyHeader) {
         headers[provider.apiKeyHeader] = conn.apiKey;
       }
+      if (conn.provider === "google_vertex") {
+        Object.assign(headers, await googleAuthHeadersForVertex(conn.apiKey));
+      }
 
       const imageSource =
         conn.provider === "image_generation" ? resolveImageGenerationSource(conn as any, baseUrl) : "";
@@ -189,6 +305,9 @@ export async function connectionsRoutes(app: FastifyInstance) {
       if (conn.provider === "image_generation" && imageSource === "novelai") {
         // NovelAI: validate the API key via the user subscription endpoint
         testUrl = "https://api.novelai.net/user/subscription";
+      } else if (conn.provider === "image_generation" && imageSource === "horde") {
+        // Horde: heartbeat is the lightweight health endpoint for the public API.
+        testUrl = buildHordeUrl(baseUrl, "status/heartbeat");
       } else if (conn.provider === "image_generation" && imageSource === "stability") {
         // Stability's generation endpoints live under v2beta, but account/key checks are v1.
         testUrl = buildStabilityUrl(baseUrl, "v1/user/account");
@@ -198,14 +317,28 @@ export async function connectionsRoutes(app: FastifyInstance) {
       } else if (conn.provider === "image_generation" && imageSource === "automatic1111") {
         // AUTOMATIC1111 / SD Web UI: ping the internal ping endpoint
         testUrl = `${baseUrl}/sdapi/v1/options`;
+      } else if (conn.provider === "image_generation" && imageSource === "runpod_comfyui") {
+        // RunPod: use Test Image to verify — no cheap endpoint test available
+        return {
+          success: true,
+          message: "RunPod endpoint configured. Use 'Test Image' to verify generation works.",
+          latencyMs: Date.now() - start,
+          modelName: conn.model,
+        };
+      } else if (conn.provider === "google_vertex") {
+        testUrl = buildGoogleVertexModelUrl(baseUrl, conn.model, "models");
       } else {
         testUrl = `${baseUrl}${provider?.modelsEndpoint || "/models"}`;
       }
 
+      const testHeaders =
+        conn.provider === "image_generation" && imageSource === "horde" ? hordeHeaders(conn.apiKey) : headers;
+      debugLog("[connections/test] provider=%s model=%s catalogUrl=%s", conn.provider, conn.model ?? "", testUrl);
       const res = await safeFetch(testUrl, {
-        headers,
+        headers: testHeaders,
         policy: localUrlPolicyForProvider(conn.provider, imageSource),
         maxResponseBytes: 2 * 1024 * 1024,
+        decodeCompressedResponse: true,
       });
       const latencyMs = Date.now() - start;
 
@@ -213,14 +346,27 @@ export async function connectionsRoutes(app: FastifyInstance) {
         return { success: true, message: "Connection successful", latencyMs, modelName: conn.model };
       } else {
         const body = await res.text();
+        const detail = formatProviderErrorBody(body);
+        debugLog(
+          "[connections/test] provider=%s catalogUrl=%s returned %d: %s",
+          conn.provider,
+          testUrl,
+          res.status,
+          detail,
+        );
         return {
           success: false,
-          message: `API returned ${res.status}: ${body.slice(0, 200)}`,
+          message: `API returned ${res.status}: ${detail}`,
           latencyMs,
           modelName: null,
         };
       }
     } catch (err) {
+      debugLog(
+        "[connections/test] provider=%s failed: %s",
+        conn.provider,
+        err instanceof Error ? err.message : "Unknown error",
+      );
       return {
         success: false,
         message: `Connection failed: ${err instanceof Error ? err.message : "Unknown error"}`,
@@ -270,6 +416,9 @@ export async function connectionsRoutes(app: FastifyInstance) {
       if (provider?.apiKeyHeader) {
         headers[provider.apiKeyHeader] = conn.apiKey;
       }
+      if (conn.provider === "google_vertex") {
+        Object.assign(headers, await googleAuthHeadersForVertex(conn.apiKey));
+      }
 
       // Anthropic requires version header for models endpoint
       if (conn.provider === "anthropic") {
@@ -295,6 +444,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
           headers,
           policy: localUrlPolicyForProvider(conn.provider, imageSource),
           maxResponseBytes: 2 * 1024 * 1024,
+          decodeCompressedResponse: true,
         });
         if (!accountRes.ok) {
           const body = await accountRes.text();
@@ -308,6 +458,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
             headers,
             policy: localUrlPolicyForProvider(conn.provider, imageSource),
             maxResponseBytes: 5 * 1024 * 1024,
+            decodeCompressedResponse: true,
           });
           if (!res.ok) {
             const body = await res.text();
@@ -350,6 +501,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
         const res = await safeFetch(`${baseUrl}/object_info/CheckpointLoaderSimple`, {
           policy: localUrlPolicyForProvider(conn.provider, imageSource),
           maxResponseBytes: 5 * 1024 * 1024,
+          decodeCompressedResponse: true,
         });
         if (!res.ok) {
           return reply.status(502).send({ error: `ComfyUI returned ${res.status}` });
@@ -366,6 +518,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
         const res = await safeFetch(`${baseUrl}/sdapi/v1/sd-models`, {
           policy: localUrlPolicyForProvider(conn.provider, imageSource),
           maxResponseBytes: 5 * 1024 * 1024,
+          decodeCompressedResponse: true,
         });
         if (!res.ok) {
           return reply.status(502).send({ error: `SD Web UI returned ${res.status}` });
@@ -389,6 +542,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
             flagName: "PROVIDER_LOCAL_URLS_ENABLED",
           },
           maxResponseBytes: 5 * 1024 * 1024,
+          decodeCompressedResponse: true,
         });
         if (!res.ok) {
           const body = await res.text();
@@ -415,6 +569,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
           headers,
           policy: localUrlPolicyForProvider(conn.provider, imageSource),
           maxResponseBytes: 5 * 1024 * 1024,
+          decodeCompressedResponse: true,
         });
         if (!res.ok) {
           const body = await res.text();
@@ -434,9 +589,45 @@ export async function connectionsRoutes(app: FastifyInstance) {
         return { models: normalizeModelsResponse("openrouter", json) };
       }
 
+      if (conn.provider === "image_generation" && imageSource === "horde") {
+        const res = await safeFetch(`${buildHordeUrl(baseUrl, "status/models")}?type=image`, {
+          headers: hordeHeaders(conn.apiKey),
+          policy: localUrlPolicyForProvider(conn.provider, imageSource),
+          maxResponseBytes: 5 * 1024 * 1024,
+          decodeCompressedResponse: true,
+        });
+        if (!res.ok) {
+          const body = await res.text();
+          return reply.status(502).send({
+            error: `Horde returned ${res.status}: ${sanitizeProviderBody(body)}`,
+          });
+        }
+        const text = await res.text();
+        let json: unknown;
+        try {
+          json = JSON.parse(text);
+        } catch {
+          return reply.status(502).send({
+            error: `Failed to fetch models: ${sanitizeProviderBody(text)}`,
+          });
+        }
+        const models = (Array.isArray(json) ? json : [])
+          .map((model) => {
+            if (!model || typeof model !== "object") return null;
+            const record = model as { name?: string; id?: string };
+            const id = record.name ?? record.id ?? "";
+            return id ? { id, name: id } : null;
+          })
+          .filter((model): model is { id: string; name: string } => Boolean(model));
+        return { models };
+      }
+
       // Use `||` so image_generation's empty modelsEndpoint falls back to /models
       // (same as POST /:id/test). `??` would keep "" and hit the provider root HTML.
-      let modelsUrl = `${baseUrl}${provider?.modelsEndpoint || "/models"}`;
+      let modelsUrl =
+        conn.provider === "google_vertex"
+          ? buildGoogleVertexModelUrl(baseUrl, conn.model, "models")
+          : `${baseUrl}${provider?.modelsEndpoint || "/models"}`;
       if (conn.provider === "google") {
         modelsUrl += `?key=${conn.apiKey}`;
       }
@@ -451,6 +642,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
           flagName: "PROVIDER_LOCAL_URLS_ENABLED",
         },
         maxResponseBytes: 5 * 1024 * 1024,
+        decodeCompressedResponse: true,
       });
       if (!res.ok) {
         const body = await res.text();
@@ -506,6 +698,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
       const result = await generateImage(imgSource, baseUrl, imgApiKey, imgServiceHint, {
         prompt: BASE_PROMPT,
         model: imgModel || undefined,
+        imageEndpointId: (conn.imageEndpointId as string | undefined) ?? undefined,
         width: 512,
         height: 512,
         comfyWorkflow: conn.comfyuiWorkflow || undefined,
@@ -642,7 +835,11 @@ export async function connectionsRoutes(app: FastifyInstance) {
     }
 
     const start = Date.now();
+    const requestDebug = readDebugMode(req.body);
+    const debugLog = (message: string, ...args: any[]) => logDebugOverride(requestDebug, message, ...args);
+    const targetUrl = describeTestMessageTarget(conn.provider, baseUrl, conn.model);
     try {
+      debugLog("[connections/test-message] provider=%s model=%s url=%s", conn.provider, conn.model, targetUrl);
       const provider = createLLMProvider(
         conn.provider,
         baseUrl,
@@ -664,6 +861,12 @@ export async function connectionsRoutes(app: FastifyInstance) {
       }
 
       const latencyMs = Date.now() - start;
+      debugLog(
+        "[connections/test-message] url=%s success in %dms: %s",
+        targetUrl,
+        latencyMs,
+        fullResponse.slice(0, 500),
+      );
       return {
         success: true,
         response: fullResponse.slice(0, 500),
@@ -671,6 +874,13 @@ export async function connectionsRoutes(app: FastifyInstance) {
         model: conn.model,
       };
     } catch (err) {
+      debugLog(
+        "[connections/test-message] provider=%s model=%s url=%s failed: %s",
+        conn.provider,
+        conn.model,
+        targetUrl,
+        err instanceof Error ? err.message : "Unknown error",
+      );
       return {
         success: false,
         response: "",
@@ -704,6 +914,22 @@ function normalizeModelsResponse(provider: string, json: Record<string, unknown>
         .map((m) => ({
           id: (m.name ?? "").replace(/^models\//, ""),
           name: m.displayName ?? (m.name ?? "").replace(/^models\//, ""),
+        }))
+        .filter((m) => m.id);
+    }
+
+    case "google_vertex": {
+      // Vertex AI returns { publisherModels: [{ name: "publishers/google/models/gemini-...", ... }] }
+      const models = (json.publisherModels ?? []) as Array<{
+        name?: string;
+        displayName?: string;
+        supportedActions?: { viewRestApi?: unknown };
+      }>;
+      return models
+        .filter((m) => m.name?.includes("/models/"))
+        .map((m) => ({
+          id: (m.name ?? "").replace(/^.*\/models\//, ""),
+          name: m.displayName ?? (m.name ?? "").replace(/^.*\/models\//, ""),
         }))
         .filter((m) => m.id);
     }

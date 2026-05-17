@@ -17,8 +17,7 @@ import {
   OutputType,
 } from "buttplug";
 import type { HapticDevice, HapticCapability, HapticDeviceCommand, HapticStatus } from "@marinara-engine/shared";
-
-const DEFAULT_SERVER_URL = "ws://127.0.0.1:12345";
+import { getIntifaceUrl } from "../../config/runtime-config.js";
 
 const POSITION_WITH_DURATION_OUTPUT =
   (OutputType as unknown as Record<string, OutputType | undefined>).HwPositionWithDuration ??
@@ -43,6 +42,14 @@ const ACTION_TO_OUTPUT: Partial<Record<HapticDeviceCommand["action"], OutputType
   oscillate: OutputType.Oscillate,
   constrict: OutputType.Constrict,
   inflate: OutputType.Inflate,
+};
+
+const ACTION_FALLBACKS: Partial<Record<HapticDeviceCommand["action"], HapticDeviceCommand["action"][]>> = {
+  oscillate: ["vibrate"],
+  rotate: ["vibrate"],
+  constrict: ["vibrate"],
+  inflate: ["vibrate"],
+  position: ["vibrate"],
 };
 
 function normalizeAction(action: unknown): HapticDeviceCommand["action"] | null {
@@ -98,6 +105,7 @@ function deviceToDTO(device: ButtplugClientDevice): HapticDevice {
 class ButtplugService {
   private client: ButtplugClient;
   private serverUrl: string | null = null;
+  private preferredServerUrl: string | null = null;
   private stopTimers = new Map<number | "all", ReturnType<typeof setTimeout>>();
 
   constructor() {
@@ -134,6 +142,7 @@ class ButtplugService {
     return {
       connected: this.connected,
       serverUrl: this.serverUrl,
+      defaultServerUrl: this.preferredServerUrl ?? getIntifaceUrl(),
       scanning: this.scanning,
       devices: this.devices,
     };
@@ -142,10 +151,12 @@ class ButtplugService {
   /** Connect to Intiface Central server. */
   async connect(url?: string): Promise<void> {
     if (this.client.connected) return;
-    const target = url || DEFAULT_SERVER_URL;
+    const requestedUrl = url?.trim() || null;
+    const target = requestedUrl ?? this.preferredServerUrl ?? getIntifaceUrl();
     const connector = new ButtplugNodeWebsocketClientConnector(target);
     await this.client.connect(connector);
     this.serverUrl = target;
+    if (requestedUrl) this.preferredServerUrl = requestedUrl;
     logger.info(`[haptic] Connected to Intiface Central at ${target}`);
   }
 
@@ -182,7 +193,7 @@ class ButtplugService {
     if (!this.client.connected) throw new Error("Not connected to Intiface Central");
 
     const targets = this.resolveTargets(cmd.deviceIndex);
-    if (targets.length === 0) return;
+    if (targets.length === 0) throw new Error(`No connected haptic devices matched target ${cmd.deviceIndex}`);
 
     const action = normalizeAction(cmd.action);
     if (!action) throw new Error(`Unknown action: ${String(cmd.action)}`);
@@ -200,6 +211,7 @@ class ButtplugService {
     const duration = durationSeconds(cmd.duration);
     let successfulTargets = 0;
     let firstFailure: unknown = null;
+    const unsupportedDevices: string[] = [];
 
     for (const device of targets) {
       try {
@@ -211,12 +223,38 @@ class ButtplugService {
           } else if (device.hasOutput(OutputType.Position)) {
             await device.runOutput(DeviceOutput.Position.percent(intensity));
             successfulTargets++;
+          } else if (device.hasOutput(OutputType.Vibrate)) {
+            await device.runOutput(DeviceOutput.Vibrate.percent(intensity));
+            successfulTargets++;
+            logger.debug("[haptic] Device %s does not support position; used vibrate fallback", deviceName(device));
+          } else {
+            unsupportedDevices.push(deviceName(device));
           }
           continue;
         }
 
-        if (!outputType || !device.hasOutput(outputType)) continue;
-        const outCmd = new DeviceOutputValueConstructor(outputType).percent(intensity);
+        let selectedOutputType = outputType;
+        if (!selectedOutputType || !device.hasOutput(selectedOutputType)) {
+          const fallbackAction = (ACTION_FALLBACKS[action] ?? []).find((candidate) => {
+            const fallbackOutput = ACTION_TO_OUTPUT[candidate];
+            return fallbackOutput ? device.hasOutput(fallbackOutput) : false;
+          });
+          selectedOutputType = fallbackAction ? ACTION_TO_OUTPUT[fallbackAction] : undefined;
+          if (fallbackAction) {
+            logger.debug(
+              "[haptic] Device %s does not support %s; used %s fallback",
+              deviceName(device),
+              action,
+              fallbackAction,
+            );
+          }
+        }
+
+        if (!selectedOutputType || !device.hasOutput(selectedOutputType)) {
+          unsupportedDevices.push(deviceName(device));
+          continue;
+        }
+        const outCmd = new DeviceOutputValueConstructor(selectedOutputType).percent(intensity);
         await device.runOutput(outCmd);
         successfulTargets++;
       } catch (err) {
@@ -227,6 +265,10 @@ class ButtplugService {
 
     if (successfulTargets === 0 && firstFailure) {
       throw firstFailure instanceof Error ? firstFailure : new Error(String(firstFailure));
+    }
+    if (successfulTargets === 0) {
+      const targetNames = unsupportedDevices.length > 0 ? unsupportedDevices.join(", ") : "selected devices";
+      throw new Error(`No compatible haptic outputs for action "${action}" on ${targetNames}`);
     }
 
     // Schedule auto-stop if duration is specified and action isn't position

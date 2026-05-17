@@ -337,10 +337,12 @@ export function useCreatePersona() {
       nameColor?: string;
       dialogueColor?: string;
       boxColor?: string;
+      trackerCardColors?: string;
       personaStats?: string;
       altDescriptions?: string;
       tags?: string;
       savedStatusOptions?: string;
+      avatarCrop?: string;
     }) => api.post("/characters/personas", data),
     onSuccess: () => qc.invalidateQueries({ queryKey: characterKeys.personas }),
   });
@@ -364,10 +366,12 @@ export function useUpdatePersona() {
       nameColor?: string;
       dialogueColor?: string;
       boxColor?: string;
+      trackerCardColors?: string;
       personaStats?: string;
       altDescriptions?: string;
       tags?: string;
       savedStatusOptions?: string;
+      avatarCrop?: string;
     }) => api.patch(`/characters/personas/${id}`, data),
     onSuccess: (updatedPersona, variables) => {
       qc.setQueryData<unknown[] | undefined>(characterKeys.personas, (old) => {

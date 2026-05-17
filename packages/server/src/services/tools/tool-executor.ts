@@ -7,6 +7,8 @@ import { createHash } from "node:crypto";
 import { isCustomToolScriptEnabled, isWebhookLocalUrlsEnabled } from "../../config/runtime-config.js";
 import { safeFetch } from "../../utils/security.js";
 import { logger } from "../../lib/logger.js";
+import { normalizeSpotifySearchQuery } from "../spotify/spotify.service.js";
+import { appendChatSummaryEntryToMetadata } from "@marinara-engine/shared";
 
 export interface ToolExecutionResult {
   toolCallId: string;
@@ -40,7 +42,6 @@ export type MetadataUpdater = (current: MetadataPatch) => MetadataPatch | Promis
 export type MetadataPatchInput = MetadataPatch | MetadataUpdater;
 
 const MAX_APPEND_BYTES = 16 * 1024;
-const MAX_TOTAL_SUMMARY_BYTES = 64 * 1024;
 const MAX_CHAT_VARIABLE_KEY_LENGTH = 128;
 const MAX_CHAT_VARIABLE_VALUE_BYTES = 64 * 1024;
 const MAX_CHAT_VARIABLES = 256;
@@ -461,10 +462,19 @@ async function appendChatSummary(
   }
 
   const updated = await context.onUpdateMetadata((currentMeta) => {
-    const existing =
-      typeof currentMeta.summary === "string" ? sanitizePersistedSummaryText(currentMeta.summary.trim()) : "";
-    const summary = existing ? `${existing}\n\n${sanitizedText}` : sanitizedText;
-    return { summary: trimToUtf8Bytes(summary, MAX_TOTAL_SUMMARY_BYTES, true).trim() };
+    const existingSummary =
+      typeof currentMeta.summary === "string" ? sanitizePersistedSummaryText(currentMeta.summary.trim()) : null;
+    const result = appendChatSummaryEntryToMetadata(
+      { ...currentMeta, summary: existingSummary },
+      {
+        kind: "rolling",
+        origin: "automated",
+        sourceMode: "agent",
+        content: sanitizedText,
+        enabled: true,
+      },
+    );
+    return { summary: result.summary, summaryEntries: result.entries };
   });
   return { summary: typeof updated.summary === "string" ? updated.summary : sanitizedText };
 }
@@ -1000,7 +1010,7 @@ async function spotifySearch(
   if (!creds?.accessToken) {
     return { error: "Spotify not configured. Please add your Spotify access token in the Spotify DJ agent settings." };
   }
-  const query = String(args.query ?? "");
+  const query = normalizeSpotifySearchQuery(args.query);
   const limit = Math.min(Number(args.limit ?? 5), 20);
 
   try {

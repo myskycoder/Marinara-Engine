@@ -467,7 +467,7 @@ Type definitions for all entities in `packages/shared/src/types/`:
 
 | File              | Purpose                                                                                                                      |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `macro-engine.ts` | `resolveMacros(template, context)` — replaces `{{date}}`, `{{char}}`, `{{random}}`, `{{roll:2d6}}`, `{{getvar::name}}`, etc. |
+| `macro-engine.ts` | `resolveMacros(template, context)` — replaces `{{date}}`, `{{char}}`, `{{random}}`, `{{random::A@2::B@0.5}}`, `{{roll:2d6}}`, `{{getvar::name}}`, etc. |
 | `xml-wrapper.ts`  | `wrapInXml()`, `stripXmlTags()`, `nameToXmlTag()`                                                                            |
 
 ---

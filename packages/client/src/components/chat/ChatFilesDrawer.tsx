@@ -2,11 +2,15 @@
 // Chat: Manage Chat Files — switch between branches
 // Like SillyTavern's "Manage chat files" feature
 // ──────────────────────────────────────────────
-import { X, Trash2, FileText, MessageSquare, Download, Pencil } from "lucide-react";
+import { useRef, useState } from "react";
+import { X, Trash2, FileText, MessageSquare, Download, Pencil, Upload } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { getChatDisplayName } from "../../lib/chat-display";
 import { cn } from "../../lib/utils";
 import {
+  chatKeys,
   useChatGroup,
   useDeleteChat,
   useDeleteChatGroup,
@@ -23,15 +27,52 @@ interface ChatFilesDrawerProps {
 }
 
 export function ChatFilesDrawer({ chat, open, onClose }: ChatFilesDrawerProps) {
-  const groupId = (chat as any).groupId as string | null;
+  const groupId = chat.groupId;
   const { data: groupChats, refetch: refetchGroupChats } = useChatGroup(groupId);
   const deleteChat = useDeleteChat();
   const deleteChatGroup = useDeleteChatGroup();
   const exportChat = useExportChat();
   const setActiveChatId = useChatStore((s) => s.setActiveChatId);
   const activeChatId = useChatStore((s) => s.activeChatId);
+  const qc = useQueryClient();
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const [isImporting, setIsImporting] = useState(false);
 
   const chatFiles = (groupChats ?? []) as Chat[];
+
+  const handleImportChat = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+
+    setIsImporting(true);
+    try {
+      const formData = new FormData();
+      formData.append("chatId", chat.id);
+      formData.append("file", file);
+      const res = await fetch("/api/import/st-chat-into-group", { method: "POST", body: formData });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.success === false || data?.error) {
+        toast.error(`Import failed: ${data?.error ?? res.statusText ?? "Unknown error"}`);
+        return;
+      }
+      toast.success(`Imported ${data.messagesImported ?? 0} messages as a new chat file`);
+      qc.invalidateQueries({ queryKey: chatKeys.list() });
+      // The target chat may have just been assigned a groupId server-side, so
+      // refetch its detail before refreshing the (now-correct) group list.
+      await qc.invalidateQueries({ queryKey: chatKeys.detail(chat.id) });
+      const newGroupId = data.groupId ?? groupId;
+      if (newGroupId) {
+        await qc.invalidateQueries({ queryKey: chatKeys.group(newGroupId) });
+      }
+      await refetchGroupChats();
+      if (data.chatId) setActiveChatId(data.chatId);
+    } catch (err) {
+      toast.error(err instanceof Error ? `Import failed: ${err.message}` : "Import failed.");
+    } finally {
+      setIsImporting(false);
+    }
+  };
 
   const handleSwitch = (chatId: string) => {
     setActiveChatId(chatId);
@@ -66,10 +107,12 @@ export function ChatFilesDrawer({ chat, open, onClose }: ChatFilesDrawerProps) {
     ) {
       return;
     }
-    deleteChat.mutate(chatId);
-    if (chatId === activeChatId && chatFiles.length > 1) {
-      const next = chatFiles.find((c) => c.id !== chatId);
-      if (next) setActiveChatId(next.id);
+    const nextActiveChatId = chatId === activeChatId ? chatFiles.find((c) => c.id !== chatId)?.id : null;
+    try {
+      await deleteChat.mutateAsync({ id: chatId, groupId });
+      if (nextActiveChatId) setActiveChatId(nextActiveChatId);
+    } catch (err) {
+      toast.error(err instanceof Error ? `Delete failed: ${err.message}` : "Delete failed.");
     }
   };
 
@@ -114,6 +157,24 @@ export function ChatFilesDrawer({ chat, open, onClose }: ChatFilesDrawerProps) {
                 Text
               </button>
             </div>
+          </div>
+          <div className="border-b border-[var(--border)] px-4 py-3">
+            <p className="mb-1.5 text-[0.625rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
+              Import Chat
+            </p>
+            <button
+              type="button"
+              onClick={() => importInputRef.current?.click()}
+              disabled={isImporting}
+              className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-xs font-medium text-[var(--foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] active:scale-[0.98] disabled:opacity-50"
+            >
+              <Upload size="0.8125rem" />
+              {isImporting ? "Importing…" : "JSONL"}
+            </button>
+            <p className="mt-2 text-center text-[0.625rem] text-[var(--muted-foreground)]/60">
+              Adds the file as a new branch in this chat
+            </p>
+            <input ref={importInputRef} type="file" accept=".jsonl" onChange={handleImportChat} className="hidden" />
           </div>
           <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
             <FileText size="2rem" className="text-[var(--muted-foreground)]/40" />
@@ -175,6 +236,26 @@ export function ChatFilesDrawer({ chat, open, onClose }: ChatFilesDrawerProps) {
           </p>
         </div>
 
+        {/* Import tools */}
+        <div className="border-b border-[var(--border)] px-4 py-3">
+          <p className="mb-1.5 text-[0.625rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
+            Import Chat
+          </p>
+          <button
+            type="button"
+            onClick={() => importInputRef.current?.click()}
+            disabled={isImporting}
+            className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-xs font-medium text-[var(--foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] active:scale-[0.98] disabled:opacity-50"
+          >
+            <Upload size="0.8125rem" />
+            {isImporting ? "Importing…" : "JSONL"}
+          </button>
+          <p className="mt-2 text-center text-[0.625rem] text-[var(--muted-foreground)]/60">
+            Adds the file as a new branch in this chat
+          </p>
+          <input ref={importInputRef} type="file" accept=".jsonl" onChange={handleImportChat} className="hidden" />
+        </div>
+
         {/* Chat files list */}
         <div className="flex-1 overflow-y-auto px-3 py-2">
           <div className="flex flex-col gap-1">
@@ -229,8 +310,9 @@ export function ChatFilesDrawer({ chat, open, onClose }: ChatFilesDrawerProps) {
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleDelete(cf.id);
+                          void handleDelete(cf.id);
                         }}
+                        disabled={deleteChat.isPending}
                         className="rounded-lg p-1.5 transition-all hover:bg-[var(--destructive)]/15"
                         title="Delete branch"
                       >

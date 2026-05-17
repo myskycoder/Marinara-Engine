@@ -13,11 +13,32 @@ echo ""
 # Navigate to script directory
 cd "$(dirname "$0")"
 
+SKIP_UPDATE=0
+for arg in "$@"; do
+    case "$arg" in
+        --skip-update|--no-update)
+            SKIP_UPDATE=1
+            ;;
+        -h|--help)
+            echo "Usage: ./start-termux.sh [--skip-update]"
+            echo ""
+            echo "  ./start-termux.sh               Check for updates, then start Marinara Engine"
+            echo "  ./start-termux.sh --skip-update Start the current local install without checking for updates"
+            exit 0
+            ;;
+        *)
+            echo "  [ERROR] Unknown option: $arg"
+            echo "          Run ./start-termux.sh --help for usage."
+            exit 1
+            ;;
+    esac
+done
+
 # ── Ensure required Termux packages ──
 for pkg_name in git; do
     if ! dpkg -s "$pkg_name" &> /dev/null; then
         echo "  [..] Installing $pkg_name..."
-        pkg install -y "$pkg_name" 2>/dev/null || true
+        pkg install -y -o Dpkg::Options::="--force-confold" "$pkg_name" 2>/dev/null || true
     fi
 done
 
@@ -43,12 +64,17 @@ if [ "$NODE_PLAT" = "android" ]; then
         # Force pnpm to re-resolve optional deps on next install
         TERMUX_FORCE_INSTALL=1
     fi
+    # Ensure wasm32 is supported (required for sharp fallback on some Android devices)
+    if ! grep -q "supportedArchitectures.cpu\[\]=wasm32" .npmrc 2>/dev/null; then
+        echo "supportedArchitectures.cpu[]=wasm32" >> .npmrc
+        TERMUX_FORCE_INSTALL=1
+    fi
 fi
 
 # ── Check Node.js ──
 if ! command -v node &> /dev/null || ! node -v &> /dev/null; then
     echo "  [..] Node.js not found or broken — installing via pkg..."
-    pkg install -y nodejs-lts
+    pkg install -y -o Dpkg::Options::="--force-confold" nodejs-lts
 fi
 
 if ! NODE_VERSION=$(node -v 2>/dev/null | cut -d'.' -f1 | tr -d 'v'); then
@@ -67,7 +93,7 @@ echo "  [OK] Node.js $(node -v) found"
 
 if [ "$NODE_VERSION" -lt 24 ]; then
     echo "  [..] Node.js 24 LTS or newer is required. You have v${NODE_VERSION}; upgrading nodejs-lts..."
-    pkg upgrade -y nodejs-lts || pkg install -y nodejs-lts
+    pkg upgrade -y -o Dpkg::Options::="--force-confold" nodejs-lts || pkg install -y -o Dpkg::Options::="--force-confold" nodejs-lts
     if ! NODE_VERSION=$(node -v 2>/dev/null | cut -d'.' -f1 | tr -d 'v'); then
         echo "  [ERR] Node.js is still not working after upgrade."
         echo "        Try:  pkg upgrade && pkg install nodejs-lts"
@@ -143,16 +169,19 @@ restore_stashed_changes() {
 }
 
 # ── Auto-update from Git ──
-if [ -d ".git" ]; then
+if [ "$SKIP_UPDATE" = "1" ]; then
+    echo "  [OK] Skipping update check; starting the current local install."
+elif [ -d ".git" ]; then
     echo "  [..] Checking for updates..."
     OLD_HEAD=$(git rev-parse HEAD 2>/dev/null)
-    if ! git fetch origin main --quiet 2>/dev/null; then
+    if ! git fetch origin +refs/heads/main:refs/remotes/origin/main --quiet 2>/dev/null; then
         echo "  [WARN] Could not check for updates (no internet?). Continuing with current version."
     elif [ "$OLD_HEAD" = "$(git rev-parse origin/main 2>/dev/null || true)" ]; then
         echo "  [OK] Already up to date"
     else
         TARGET_HEAD=$(git rev-parse origin/main 2>/dev/null || true)
-        # Stash any tracked local changes (e.g. pnpm install modifying package.json) so the fast-forward update doesn't fail
+        CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || true)
+        # Stash any tracked local changes (e.g. pnpm install modifying package.json) so the update doesn't fail
         STASHED=0
         STASH_REF=""
         if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
@@ -161,7 +190,12 @@ if [ -d ".git" ]; then
                 STASH_REF=$(git stash list -1 --format=%gd 2>/dev/null || true)
             fi
         fi
-        if git merge --ff-only origin/main 2>/dev/null; then
+        if [ -z "$CURRENT_BRANCH" ]; then
+            UPDATE_COMMAND=(git checkout --detach "$TARGET_HEAD")
+        else
+            UPDATE_COMMAND=(git merge --ff-only origin/main)
+        fi
+        if "${UPDATE_COMMAND[@]}" 2>/dev/null; then
             NEW_HEAD=$(git rev-parse HEAD 2>/dev/null)
             if [ "$STASHED" = "1" ]; then
                 restore_stashed_changes || true
@@ -176,7 +210,7 @@ if [ -d ".git" ]; then
                 rm -f packages/shared/tsconfig.tsbuildinfo packages/server/tsconfig.tsbuildinfo packages/client/tsconfig.tsbuildinfo
             fi
         else
-            echo "  [WARN] Could not fast-forward to origin/main. Continuing with current version."
+            echo "  [WARN] Could not update to origin/main. Continuing with current version."
             if [ "$STASHED" = "1" ]; then
                 restore_stashed_changes || true
             fi

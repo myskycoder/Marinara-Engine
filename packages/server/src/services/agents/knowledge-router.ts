@@ -17,6 +17,12 @@ import type { AgentContext, AgentResult, LorebookEntry } from "@marinara-engine/
 import type { BaseLLMProvider } from "../llm/base-provider.js";
 import { executeAgent, type AgentExecConfig } from "./agent-executor.js";
 import { logger } from "../../lib/logger.js";
+import { scanForActivatedEntries, type ScanMessage, type ScanOptions } from "../lorebook/keyword-scanner.js";
+import {
+  semanticShortlistLorebookEntries,
+  type LorebookEmbeddingOptions,
+  type SemanticLorebookMatch,
+} from "../lorebook/embeddings.js";
 
 /** Approx ~4 chars per token for English text. Used for the content fallback budget. */
 const FALLBACK_TOKEN_BUDGET = 60;
@@ -34,6 +40,7 @@ const KEYS_PER_ENTRY = 3;
  * this scale; when they do, the router truncates and logs a warning.
  */
 const MAX_ROUTER_CANDIDATES = 400;
+const DEFAULT_SEMANTIC_TOP_K = 40;
 
 /** Single catalog row the LLM sees for routing. */
 export interface CatalogItem {
@@ -46,6 +53,22 @@ export interface CatalogItem {
 
 interface RouterResponse {
   entryIds: string[];
+}
+
+export interface KnowledgeRouterCandidateOptions extends LorebookEmbeddingOptions {
+  semanticTopK?: unknown;
+  scanMessages?: ScanMessage[];
+  scanOptions?: Pick<
+    ScanOptions,
+    | "gameState"
+    | "activeCharacterIds"
+    | "activeCharacterTags"
+    | "generationTriggers"
+    | "additionalMatchingSourceText"
+    | "random"
+  >;
+  activatedEntries?: LorebookEntry[];
+  keywordScanEntries?: LorebookEntry[];
 }
 
 /** Take the first ~N tokens of text (rough char-count approximation). */
@@ -129,6 +152,97 @@ export function parseRouterResponse(text: string): string[] {
   }
 }
 
+function normalizePositiveInteger(value: unknown, fallback: number): number {
+  const numeric = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+  if (!Number.isFinite(numeric) || numeric < 1) return fallback;
+  return Math.max(1, Math.trunc(numeric));
+}
+
+export function buildKnowledgeRouterQuery(context: AgentContext): string {
+  const parts = context.recentMessages
+    .slice(-10)
+    .map((message) => message.content.trim())
+    .filter(Boolean);
+  if (context.chatSummary?.trim()) parts.unshift(context.chatSummary.trim());
+  if (context.gameState) parts.push(JSON.stringify(context.gameState));
+  return parts.join("\n\n");
+}
+
+export function buildKeywordActivatedRouterEntries(
+  entries: LorebookEntry[],
+  messages: ScanMessage[],
+  options: KnowledgeRouterCandidateOptions["scanOptions"] = {},
+): LorebookEntry[] {
+  return scanForActivatedEntries(messages, entries, { ...options, scanDepth: 0, ignoreTiming: true }).map(
+    (activated) => activated.entry,
+  );
+}
+
+export function mergeKnowledgeRouterCandidates(
+  semanticMatches: SemanticLorebookMatch[],
+  activatedEntries: LorebookEntry[],
+): LorebookEntry[] {
+  const candidates: LorebookEntry[] = [];
+  const seen = new Set<string>();
+  for (const match of semanticMatches) {
+    if (seen.has(match.entry.id)) continue;
+    seen.add(match.entry.id);
+    candidates.push(match.entry);
+  }
+  for (const entry of activatedEntries) {
+    if (seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    candidates.push(entry);
+  }
+  return candidates;
+}
+
+export async function prepareKnowledgeRouterCandidates(
+  entries: LorebookEntry[],
+  context: AgentContext,
+  options: KnowledgeRouterCandidateOptions = {},
+): Promise<LorebookEntry[]> {
+  if (entries.length === 0) return [];
+  const scanMessages =
+    options.scanMessages ??
+    context.recentMessages.map((message) => ({
+      role: message.role,
+      content: message.content,
+    }));
+  const activatedEntries =
+    options.activatedEntries ??
+    buildKeywordActivatedRouterEntries(options.keywordScanEntries ?? entries, scanMessages, options.scanOptions);
+  const keywordScanEntries =
+    options.activatedEntries && options.keywordScanEntries
+      ? buildKeywordActivatedRouterEntries(options.keywordScanEntries, scanMessages, options.scanOptions)
+      : [];
+  const fallbackCandidates = mergeKnowledgeRouterCandidates(
+    [],
+    [...activatedEntries, ...keywordScanEntries, ...entries],
+  );
+  const query = buildKnowledgeRouterQuery(context);
+  let semanticMatches: SemanticLorebookMatch[] | null;
+  try {
+    semanticMatches = await semanticShortlistLorebookEntries(entries, query, {
+      topK: normalizePositiveInteger(options.semanticTopK, DEFAULT_SEMANTIC_TOP_K),
+      localEmbedder: options.localEmbedder,
+      embeddingSource: options.embeddingSource,
+    });
+  } catch (err) {
+    logger.warn(err, "[knowledge-router] semantic shortlist failed; using fallback candidates");
+    return fallbackCandidates;
+  }
+
+  if (semanticMatches === null) {
+    logger.debug("[knowledge-router] semantic shortlist unavailable; using filtered router entries");
+    return fallbackCandidates;
+  }
+
+  const candidates = mergeKnowledgeRouterCandidates(semanticMatches, [...activatedEntries, ...keywordScanEntries]);
+  if (candidates.length === 0) return entries;
+  return candidates;
+}
+
 /**
  * Execute the knowledge-router agent.
  *
@@ -148,6 +262,7 @@ export async function executeKnowledgeRouter(
   provider: BaseLLMProvider,
   model: string,
   entries: LorebookEntry[],
+  options: KnowledgeRouterCandidateOptions = {},
 ): Promise<AgentResult> {
   const startTime = Date.now();
 
@@ -165,16 +280,22 @@ export async function executeKnowledgeRouter(
     };
   }
 
+  const routerEntries = await prepareKnowledgeRouterCandidates(entries, baseContext, {
+    ...options,
+    semanticTopK: options.semanticTopK ?? config.settings.semanticTopK,
+  });
+
   // Cap candidates to protect against context-window blowups on huge lorebooks.
   // The router still works on truncated input — it just sees the first N entries.
   // A future enhancement could rank or paginate before truncating; for now the
   // truncation is order-preserving (matches `listEntriesByLorebooks` order).
-  const candidates = entries.length > MAX_ROUTER_CANDIDATES ? entries.slice(0, MAX_ROUTER_CANDIDATES) : entries;
-  if (entries.length > MAX_ROUTER_CANDIDATES) {
+  const candidates =
+    routerEntries.length > MAX_ROUTER_CANDIDATES ? routerEntries.slice(0, MAX_ROUTER_CANDIDATES) : routerEntries;
+  if (routerEntries.length > MAX_ROUTER_CANDIDATES) {
     logger.warn(
       "[knowledge-router] catalog truncated to %d/%d entries (MAX_ROUTER_CANDIDATES)",
       candidates.length,
-      entries.length,
+      routerEntries.length,
     );
   }
 

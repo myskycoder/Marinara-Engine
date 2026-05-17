@@ -93,6 +93,15 @@ export function createLLMProvider(
       );
     case "google":
       return new GoogleProvider(baseUrl, apiKey, normalizedMaxContext, openrouterProvider, normalizedMaxTokensOverride);
+    case "google_vertex":
+      return new GoogleProvider(
+        baseUrl,
+        apiKey,
+        normalizedMaxContext,
+        openrouterProvider,
+        normalizedMaxTokensOverride,
+        "google_vertex",
+      );
     default:
       return new OpenAIProvider(
         baseUrl,

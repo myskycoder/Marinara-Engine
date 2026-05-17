@@ -20,6 +20,20 @@ export const SPOTIFY_SCOPES = [
   "user-library-read",
 ].join(" ");
 
+export const SPOTIFY_SEARCH_QUERY_MAX_CHARS = 250;
+
+export function normalizeSpotifySearchQuery(value: unknown, maxLength = SPOTIFY_SEARCH_QUERY_MAX_CHARS): string {
+  const raw = typeof value === "string" ? value : String(value ?? "");
+  const compact = raw.replace(/\s+/g, " ").trim();
+  const parsedMax = Number.isFinite(maxLength) ? Math.trunc(maxLength) : SPOTIFY_SEARCH_QUERY_MAX_CHARS;
+  const safeMax = Math.max(1, Math.min(SPOTIFY_SEARCH_QUERY_MAX_CHARS, parsedMax));
+  if (compact.length <= safeMax) return compact;
+
+  const truncated = compact.slice(0, safeMax).trim();
+  const wordTrimmed = truncated.replace(/\s+\S*$/, "").trim();
+  return wordTrimmed.length >= Math.min(8, safeMax) ? wordTrimmed : truncated;
+}
+
 export interface SpotifyCredentialsResult {
   accessToken: string;
   agentId: string;

@@ -101,9 +101,9 @@
 
 ## Latest Release
 
-Current stable release: **[v1.5.9](https://github.com/Pasta-Devs/Marinara-Engine/releases/tag/v1.5.9)**.
+Current stable release: **[v1.6.0](https://github.com/Pasta-Devs/Marinara-Engine/releases/tag/v1.6.0)**.
 
-See [CHANGELOG.md](CHANGELOG.md) for detailed release notes. Tagged releases use the `vX.Y.Z` format and are published on the [Releases](https://github.com/Pasta-Devs/Marinara-Engine/releases) page.
+See [CHANGELOG.md](CHANGELOG.md) for detailed release notes. Tagged releases use the `vX.Y.Z` format and are published on the [Releases](https://github.com/Pasta-Devs/Marinara-Engine/releases) page. If you download an Android APK from a release, it is an optional WebView shell and still requires Marinara Engine to be running through Termux on the same Android device.
 
 ---
 
@@ -127,6 +127,8 @@ More detailed public [roadmap](https://github.com/orgs/Pasta-Devs/projects/1).
 | 🍎🐧 macOS / Linux  | [macOS / Linux Installation Guide](docs/installation/macos-linux.md)          |
 | 🤖 Android (Termux) | [Android (Termux) Installation Guide](docs/installation/android-termux.md)    |
 | 📱 iOS / iPadOS     | [iOS / iPadOS PWA Guide](docs/installation/ios-pwa.md)                        |
+
+> **Android APK note:** APK files attached to GitHub Releases are not standalone Android server builds. They are optional WebView shells and require the Termux install path above to be running on the same Android device.
 
 Each guide covers installation, updating, and LAN access for that platform. See [Configuration Reference](docs/CONFIGURATION.md) for environment variables setup. Having trouble? See [FAQ](docs/FAQ.md) and [Troubleshooting](docs/TROUBLESHOOTING.md).
 
@@ -154,11 +156,11 @@ Preset system with drag-and-drop prompt ordering, lorebooks with keyword trigger
 
 ### Connections & Providers
 
-OpenAI, Anthropic, Google, OpenRouter, NanoGPT, Mistral, Cohere, Pollinations, Stability AI, Together AI, NovelAI, ComfyUI, SD Web UI, and custom OpenAI-compatible endpoints. API keys are encrypted at rest with AES-256. Per-chat connection overrides.
+OpenAI, Anthropic, Google Gemini, Google Vertex AI, OpenRouter, NanoGPT, Mistral, Cohere, Pollinations, Stability AI, Together AI, NovelAI, ComfyUI, SD Web UI, and custom OpenAI-compatible endpoints. API keys are encrypted at rest with AES-256. Per-chat connection overrides.
 
 ### Export & Data
 
-Export chats as JSONL or plain text. Fully local file-native storage — all data stays on your machine. No account required.
+Export individual chats or bulk transcript zips as JSONL or plain text. Fully local file-native storage — all data stays on your machine. No account required.
 
 ---
 
@@ -170,6 +172,7 @@ Export chats as JSONL or plain text. Fully local file-native storage — all dat
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md)       | Environment variables and `.env` reference                      |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)   | Common issues and fixes                                         |
 | [docs/FAQ.md](docs/FAQ.md)                           | Frequently asked questions (LAN access, etc.)                   |
+| [docs/MACROS.md](docs/MACROS.md)                     | Prompt macro syntax, including weighted random choices          |
 | [docs/PROFESSOR_MARI.md](docs/PROFESSOR_MARI.md)     | Built-in assistant capabilities, limits, and safety notes       |
 | [docs/FRONTEND.md](docs/FRONTEND.md)                 | Frontend architecture, components, hooks, and API reference     |
 | [docs/ARCHITECTURE_MAP.md](docs/ARCHITECTURE_MAP.md) | Code ownership map and module-boundary refactor groundwork      |

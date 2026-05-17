@@ -46,7 +46,7 @@ import {
   isUnauthenticatedRemoteAllowed,
 } from "../config/runtime-config.js";
 import { logger } from "../lib/logger.js";
-import { isInIpAllowlist, isLoopbackIp, isPrivateNetworkIp, isTrustedInterfaceIp } from "./ip-allowlist.js";
+import { isInIpAllowlist, isLoopbackIp, isPrivateNetworkIp, isTrustedInterfaceRequest } from "./ip-allowlist.js";
 
 interface CachedConfig {
   user: string;
@@ -314,7 +314,7 @@ export function isBasicAuthSatisfied(request: FastifyRequest): boolean {
   if (request.url === "/api/health" || request.url.startsWith("/api/health?")) return true;
 
   const ip = request.ip;
-  if (isLoopbackIp(ip) || isInIpAllowlist(ip) || isTrustedInterfaceIp(ip)) return true;
+  if (isLoopbackIp(ip) || isInIpAllowlist(ip) || isTrustedInterfaceRequest(request)) return true;
 
   const config = loadConfig();
   if (!config) {
@@ -339,7 +339,7 @@ export function basicAuthHook(request: FastifyRequest, reply: FastifyReply, done
   // arriving from a trusted Tailscale / Docker interface (when its bypass
   // flag is on).
   const ip = request.ip;
-  const trusted = isLoopbackIp(ip) || isInIpAllowlist(ip) || isTrustedInterfaceIp(ip);
+  const trusted = isLoopbackIp(ip) || isInIpAllowlist(ip) || isTrustedInterfaceRequest(request);
   if (trusted) return done();
 
   const config = loadConfig();

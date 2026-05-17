@@ -1,5 +1,6 @@
 import {
   fetchSpotifyApi,
+  normalizeSpotifySearchQuery,
   resolveSpotifyCredentials,
   spotifyHasScope,
   type SpotifyCredentialsResult,
@@ -15,18 +16,33 @@ export type ConversationSpotifyTrack = {
   album: string | null;
 };
 
+export type ConversationSpotifyCommandErrorCode =
+  | "spotify_unavailable"
+  | "missing_playback_scope"
+  | "track_not_found"
+  | "playback_failed";
+
 export class ConversationSpotifyCommandError extends Error {
   status: number;
+  code: ConversationSpotifyCommandErrorCode;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code: ConversationSpotifyCommandErrorCode) {
     super(message);
     this.name = "ConversationSpotifyCommandError";
     this.status = status;
+    this.code = code;
   }
 }
 
-function fail(status: number, message: string): never {
-  throw new ConversationSpotifyCommandError(status, message);
+function fail(status: number, message: string, code: ConversationSpotifyCommandErrorCode): never {
+  throw new ConversationSpotifyCommandError(status, message, code);
+}
+
+export function isSilentConversationSpotifyCommandError(error: unknown): error is ConversationSpotifyCommandError {
+  return (
+    error instanceof ConversationSpotifyCommandError &&
+    (error.code === "spotify_unavailable" || error.code === "missing_playback_scope")
+  );
 }
 
 async function readSpotifyError(res: Response, fallback: string): Promise<string> {
@@ -87,7 +103,7 @@ async function searchSpotifyTrack(args: {
   const artist = args.artist.replace(/"/g, "").replace(/\s+/g, " ").trim();
   const queries = Array.from(
     new Set([`track:"${title}" artist:"${artist}"`, `"${title}" "${artist}"`, `${title} ${artist}`]),
-  ).map((query) => query.slice(0, 500));
+  ).map((query) => normalizeSpotifySearchQuery(query));
   const candidatesByUri = new Map<string, ConversationSpotifyTrack>();
 
   for (const query of queries) {
@@ -136,10 +152,10 @@ export async function playConversationSpotifyCommand(args: {
 }): Promise<{ track: ConversationSpotifyTrack }> {
   const credentials = await resolveSpotifyCredentials(args.storage, { refreshSkewMs: 60_000 });
   if (!("accessToken" in credentials)) {
-    fail(credentials.status, credentials.error);
+    fail(credentials.status, credentials.error, "spotify_unavailable");
   }
   if (!spotifyHasScope(credentials.scopes, "user-modify-playback-state")) {
-    fail(400, "Reconnect Spotify to allow conversation song commands.");
+    fail(400, "Reconnect Spotify to allow conversation song commands.", "missing_playback_scope");
   }
 
   const track = await searchSpotifyTrack({
@@ -148,7 +164,7 @@ export async function playConversationSpotifyCommand(args: {
     artist: args.artist,
   });
   if (!track) {
-    fail(404, `Spotify could not find "${args.title}" by ${args.artist}.`);
+    fail(404, `Spotify could not find "${args.title}" by ${args.artist}.`, "track_not_found");
   }
 
   const res = await fetchSpotifyApi(credentials, "/me/player/play", {
@@ -157,7 +173,11 @@ export async function playConversationSpotifyCommand(args: {
     signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok && res.status !== 204) {
-    fail(res.status, `Spotify play failed: ${await readSpotifyError(res, "Could not start playback.")}`);
+    fail(
+      res.status,
+      `Spotify play failed: ${await readSpotifyError(res, "Could not start playback.")}`,
+      "playback_failed",
+    );
   }
 
   return { track };

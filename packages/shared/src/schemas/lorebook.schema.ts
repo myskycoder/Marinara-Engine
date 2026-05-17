@@ -55,6 +55,7 @@ export const createLorebookSchema = z.object({
   name: z.string().min(1).max(200),
   description: z.string().default(""),
   category: lorebookCategorySchema.default("uncategorized"),
+  imagePath: z.string().nullable().default(null),
   scanDepth: z.number().int().min(0).default(2),
   tokenBudget: z.number().int().min(0).default(2048),
   recursiveScanning: z.boolean().default(false),
@@ -76,6 +77,7 @@ export const updateLorebookSchema = z
     name: z.string().min(1).max(200).optional(),
     description: z.string().optional(),
     category: lorebookCategorySchema.optional(),
+    imagePath: z.string().nullable().optional(),
     scanDepth: z.number().int().min(0).optional(),
     tokenBudget: z.number().int().min(0).optional(),
     recursiveScanning: z.boolean().optional(),
@@ -164,6 +166,7 @@ export const createLorebookEntrySchema = z.object({
   dynamicState: z.record(z.unknown()).default({}),
   activationConditions: z.array(activationConditionSchema).default([]),
   schedule: lorebookScheduleSchema.nullable().default(null),
+  excludeFromVectorization: z.boolean().default(false),
 });
 
 export const updateLorebookEntrySchema = z.object({
@@ -206,6 +209,7 @@ export const updateLorebookEntrySchema = z.object({
   dynamicState: z.record(z.unknown()).optional(),
   activationConditions: z.array(activationConditionSchema).optional(),
   schedule: lorebookScheduleSchema.nullable().optional(),
+  excludeFromVectorization: z.boolean().optional(),
 });
 
 export type CreateLorebookInput = z.input<typeof createLorebookSchema>;

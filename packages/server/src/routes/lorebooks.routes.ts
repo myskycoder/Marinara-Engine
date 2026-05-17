@@ -2,6 +2,9 @@
 // Routes: Lorebooks
 // ──────────────────────────────────────────────
 import type { FastifyInstance } from "fastify";
+import { existsSync } from "fs";
+import { mkdir, readFile, writeFile } from "fs/promises";
+import { extname, join } from "path";
 import {
   createLorebookSchema,
   updateLorebookSchema,
@@ -9,6 +12,7 @@ import {
   updateLorebookEntrySchema,
   createLorebookFolderSchema,
   updateLorebookFolderSchema,
+  LOCAL_SIDECAR_CONNECTION_ID,
   type CreateLorebookEntryInput,
   type LorebookEntryTimingState,
   type LorebookEntry,
@@ -19,14 +23,20 @@ import { createChatsStorage } from "../services/storage/chats.storage.js";
 import { createCharactersStorage } from "../services/storage/characters.storage.js";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { processLorebooks } from "../services/lorebook/index.js";
+import { resolveGameLorebookScopeExclusions } from "../services/lorebook/game-lorebook-scope.js";
+import { buildPromptMacroContext, resolveMacrosWithVariableSnapshot } from "../services/prompt/index.js";
 import {
   syncCharacterBookFromLorebook,
   clearCharacterEmbeddedLorebook,
 } from "../services/lorebook/character-book-sync.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
-import type { APIProvider } from "@marinara-engine/shared";
+import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "../services/llm/local-sidecar.js";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
+import { DATA_DIR } from "../utils/data-dir.js";
+import { assertInsideDir, extensionFromImageMime, isAllowedImageBuffer } from "../utils/security.js";
 import AdmZip from "adm-zip";
+
+const LOREBOOK_IMAGES_DIR = join(DATA_DIR, "lorebooks", "images");
 
 function toSafeExportName(name: string, fallback: string) {
   const sanitized = name
@@ -38,6 +48,28 @@ function toSafeExportName(name: string, fallback: string) {
 
 type ExportFormat = "native" | "compatible";
 type EntryTransferOperation = "copy" | "move";
+
+function parseImageUpload(image: string): { buffer: Buffer; hintedExt: string } {
+  let base64 = image;
+  let hintedExt = "png";
+  if (base64.startsWith("data:")) {
+    const match = base64.match(/^data:image\/([\w.+-]+);base64,/i);
+    if (match?.[1]) {
+      hintedExt = match[1].replace("+xml", "");
+      base64 = base64.slice(base64.indexOf(",") + 1);
+    }
+  }
+  return { buffer: Buffer.from(base64, "base64"), hintedExt };
+}
+
+function getSafeLorebookImagePath(filename: string): string | null {
+  if (!filename || filename.includes("..") || filename.includes("/") || filename.includes("\\")) return null;
+  try {
+    return assertInsideDir(LOREBOOK_IMAGES_DIR, join(LOREBOOK_IMAGES_DIR, filename));
+  } catch {
+    return null;
+  }
+}
 
 function resolveExportFormat(query: unknown, fallback: ExportFormat = "native"): ExportFormat {
   const raw = query && typeof query === "object" ? (query as Record<string, unknown>).format : undefined;
@@ -167,6 +199,7 @@ function buildTransferredEntryInput(
     groupWeight: entry.groupWeight,
     folderId: null,
     preventRecursion: entry.preventRecursion,
+    excludeFromVectorization: entry.excludeFromVectorization,
     locked: entry.locked,
     tag: entry.tag,
     relationships: entry.relationships,
@@ -188,6 +221,20 @@ export async function lorebooksRoutes(app: FastifyInstance) {
     if (query.personaId) return storage.listByPersona(query.personaId);
     if (query.chatId) return storage.listByChat(query.chatId);
     return storage.list();
+  });
+
+  app.get<{ Params: { filename: string } }>("/images/file/:filename", async (req, reply) => {
+    const filepath = getSafeLorebookImagePath(req.params.filename);
+    if (!filepath || !existsSync(filepath)) return reply.status(404).send({ error: "Image not found" });
+
+    const buffer = await readFile(filepath);
+    const imageInfo = isAllowedImageBuffer(buffer, extname(req.params.filename));
+    if (!imageInfo) return reply.status(404).send({ error: "Image not found" });
+
+    return reply
+      .header("Content-Type", imageInfo.mimeType)
+      .header("Cache-Control", "public, max-age=31536000, immutable")
+      .send(buffer);
   });
 
   app.get<{ Params: { id: string } }>("/:id", async (req, reply) => {
@@ -213,6 +260,28 @@ export async function lorebooksRoutes(app: FastifyInstance) {
     const updated = await storage.update(req.params.id, input);
     if (!updated) return reply.status(404).send({ error: "Lorebook not found" });
     await syncCharacterBookFromLorebook(app.db, req.params.id);
+    return updated;
+  });
+
+  app.post<{ Params: { id: string } }>("/:id/image", async (req, reply) => {
+    const lorebook = await storage.getById(req.params.id);
+    if (!lorebook) return reply.status(404).send({ error: "Lorebook not found" });
+
+    const body = req.body as { image?: string };
+    if (!body.image) return reply.status(400).send({ error: "No image data provided" });
+
+    const { buffer, hintedExt } = parseImageUpload(body.image);
+    const imageInfo = isAllowedImageBuffer(buffer, `.${hintedExt}`);
+    if (!imageInfo) return reply.status(400).send({ error: "Unsupported or invalid lorebook image" });
+
+    const ext = extensionFromImageMime(imageInfo.mimeType);
+    await mkdir(LOREBOOK_IMAGES_DIR, { recursive: true });
+    const filename = `lorebook-${req.params.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const filepath = assertInsideDir(LOREBOOK_IMAGES_DIR, join(LOREBOOK_IMAGES_DIR, filename));
+    await writeFile(filepath, buffer);
+
+    const updated = await storage.update(req.params.id, { imagePath: `/api/lorebooks/images/file/${filename}` });
+    if (!updated) return reply.status(404).send({ error: "Lorebook not found" });
     return updated;
   });
 
@@ -569,17 +638,58 @@ export async function lorebooksRoutes(app: FastifyInstance) {
       }
     }
 
+    const lorebookScopeExclusions = resolveGameLorebookScopeExclusions(chat?.mode, chatMeta);
     const scanSourceMessages = selectMessagesForLastGenerationScan(chatMessages);
     const scanMessages = scanSourceMessages.map((m) => ({
       role: (m.role === "narrator" ? "system" : m.role) as string,
       content: typeof m.content === "string" ? m.content : "",
     }));
+    const lastInput = [...scanMessages].reverse().find((message) => message.role === "user")?.content;
+
+    const lorebookMacroResolvers = await (async () => {
+      try {
+        const charactersStorage = createCharactersStorage(app.db);
+        let personaName = "User";
+        let personaDescription = "";
+        let personaFields: { personality?: string; scenario?: string; backstory?: string; appearance?: string } = {};
+        if (personaId) {
+          const persona = await charactersStorage.getPersona(personaId);
+          if (persona) {
+            personaName = persona.name || personaName;
+            personaDescription = persona.description ?? "";
+            personaFields = {
+              personality: persona.personality ?? "",
+              scenario: persona.scenario ?? "",
+              backstory: persona.backstory ?? "",
+              appearance: persona.appearance ?? "",
+            };
+          }
+        }
+        const macroContext = await buildPromptMacroContext({
+          db: app.db,
+          characterIds,
+          personaName,
+          personaDescription,
+          personaFields,
+          variables: {},
+          lastInput,
+          chatId,
+        });
+        return {
+          resolveContent: (value: string) => resolveMacrosWithVariableSnapshot(value, macroContext),
+        };
+      } catch {
+        return undefined;
+      }
+    })();
 
     const result = await processLorebooks(app.db, scanMessages, null, {
       chatId,
       characterIds,
       personaId,
       activeLorebookIds,
+      excludedLorebookIds: lorebookScopeExclusions.excludedLorebookIds,
+      excludedSourceAgentIds: lorebookScopeExclusions.excludedSourceAgentIds,
       tokenBudget: typeof chatMeta.lorebookTokenBudget === "number" ? chatMeta.lorebookTokenBudget : undefined,
       entryStateOverrides:
         (chatMeta.entryStateOverrides ?? chatMeta.lorebookEntryStateOverrides) &&
@@ -599,7 +709,10 @@ export async function lorebooksRoutes(app: FastifyInstance) {
           : undefined,
       previewOnly: true,
       generationTriggers: resolveScanGenerationTriggers(chat?.mode),
+      resolveContent: lorebookMacroResolvers?.resolveContent,
     });
+
+    const resolvedContentById = new Map(result.activatedEntries.map((entry) => [entry.id, entry.content]));
 
     // Fetch full entry data for the activated IDs
     const activeEntries =
@@ -613,7 +726,8 @@ export async function lorebooksRoutes(app: FastifyInstance) {
       entries: activeEntries.map((e) => ({
         id: (e as Record<string, unknown>).id,
         name: (e as Record<string, unknown>).name,
-        content: (e as Record<string, unknown>).content,
+        content:
+          resolvedContentById.get(String((e as Record<string, unknown>).id)) ?? (e as Record<string, unknown>).content,
         keys: (e as Record<string, unknown>).keys,
         lorebookId: (e as Record<string, unknown>).lorebookId,
         order: (e as Record<string, unknown>).order,
@@ -621,6 +735,7 @@ export async function lorebooksRoutes(app: FastifyInstance) {
       })),
       totalTokens: result.totalTokensEstimate,
       totalEntries: result.totalEntries,
+      budgetSkippedEntries: result.budgetSkippedEntries,
     };
   });
 
@@ -628,36 +743,49 @@ export async function lorebooksRoutes(app: FastifyInstance) {
 
   app.post<{ Params: { id: string } }>("/:id/vectorize", async (req, reply) => {
     const body = req.body as { connectionId: string; model: string; onlyMissing?: boolean };
-    if (!body.connectionId || !body.model) {
-      return reply.status(400).send({ error: "connectionId and model are required" });
+    if (!body.connectionId) {
+      return reply.status(400).send({ error: "connectionId is required" });
+    }
+    const useLocalSidecar = body.connectionId === LOCAL_SIDECAR_CONNECTION_ID;
+    if (!useLocalSidecar && !body.model) {
+      return reply.status(400).send({ error: "model is required" });
     }
 
     const connStorage = createConnectionsStorage(app.db);
-    const conn = await connStorage.getWithKey(body.connectionId);
-    if (!conn) return reply.status(404).send({ error: "Connection not found" });
+    const conn = useLocalSidecar ? null : await connStorage.getWithKey(body.connectionId);
+    if (!useLocalSidecar && !conn) return reply.status(404).send({ error: "Connection not found" });
 
     const allEntries = await storage.listEntries(req.params.id);
     if (!allEntries.length) return { vectorized: 0, total: 0, skipped: 0 };
+    const vectorizableEntries = allEntries.filter(
+      (entry) => !(entry as Record<string, unknown>).excludeFromVectorization,
+    );
     const entries = body.onlyMissing
-      ? allEntries.filter((entry) => {
+      ? vectorizableEntries.filter((entry) => {
           const embedding = (entry as Record<string, unknown>).embedding;
           return !Array.isArray(embedding) || embedding.length === 0;
         })
-      : allEntries;
+      : vectorizableEntries;
     if (!entries.length) return { vectorized: 0, total: allEntries.length, skipped: allEntries.length };
 
-    // Use dedicated embedding base URL if configured, otherwise the connection's base URL
-    const embedBaseUrl = conn.embeddingBaseUrl
-      ? (conn.embeddingBaseUrl as string).replace(/\/+$/, "")
-      : (conn.baseUrl as string);
-    const provider = createLLMProvider(
-      conn.provider as string,
-      embedBaseUrl,
-      conn.apiKey as string,
-      conn.maxContext,
-      conn.openrouterProvider,
-      conn.maxTokensOverride,
-    );
+    const provider = useLocalSidecar
+      ? getLocalSidecarProvider()
+      : (() => {
+          const resolvedConn = conn!;
+          // Use dedicated embedding base URL if configured, otherwise the connection's base URL
+          const embedBaseUrl = resolvedConn.embeddingBaseUrl
+            ? (resolvedConn.embeddingBaseUrl as string).replace(/\/+$/, "")
+            : (resolvedConn.baseUrl as string);
+          return createLLMProvider(
+            resolvedConn.provider as string,
+            embedBaseUrl,
+            resolvedConn.apiKey as string,
+            resolvedConn.maxContext,
+            resolvedConn.openrouterProvider,
+            resolvedConn.maxTokensOverride,
+          );
+        })();
+    const embeddingModel = useLocalSidecar ? LOCAL_SIDECAR_MODEL : body.model;
 
     // Build text for each entry: combine name, keys, and content
     const texts = (entries as Array<Record<string, unknown>>).map((e) => {
@@ -674,7 +802,7 @@ export async function lorebooksRoutes(app: FastifyInstance) {
     for (let i = 0; i < texts.length; i += BATCH_SIZE) {
       const batchTexts = texts.slice(i, i + BATCH_SIZE);
       const batchEntries = entries.slice(i, i + BATCH_SIZE);
-      const embeddings = await provider.embed(batchTexts, body.model);
+      const embeddings = await provider.embed(batchTexts, embeddingModel);
       for (let j = 0; j < batchEntries.length; j++) {
         const entry = batchEntries[j] as Record<string, unknown>;
         if (embeddings[j]) {

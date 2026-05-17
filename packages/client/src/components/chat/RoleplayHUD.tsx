@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { api } from "../../lib/api-client";
+import type { AgentFailure } from "../../lib/agent-failures";
 import { TrackerPanelIcon } from "../ui/TrackerPanelIcon";
 import { useGameStateStore } from "../../stores/game-state.store";
 import { useAgentStore } from "../../stores/agent.store";
@@ -96,6 +97,7 @@ export function RoleplayHUD({
 }: RoleplayHUDProps & { mobileCompact?: boolean }) {
   const [agentsOpen, setAgentsOpen] = useState(false);
   const gameState = useGameStateStore((s) => s.current);
+  const gameStateRefreshing = useGameStateStore((s) => s.isRefreshing);
   const setGameState = useGameStateStore((s) => s.setGameState);
   const { patchField, patchPlayerStats } = useGameStatePatcher(chatId, "roleplay-hud");
 
@@ -133,6 +135,7 @@ export function RoleplayHUD({
   const thoughtBubbles = useAgentStore((s) => s.thoughtBubbles);
   const isAgentProcessing = useAgentStore((s) => s.isProcessing);
   const failedAgentTypes = useAgentStore((s) => s.failedAgentTypes);
+  const failedAgentFailures = useAgentStore((s) => s.failedAgentFailures);
   const dismissThoughtBubble = useAgentStore((s) => s.dismissThoughtBubble);
   const clearThoughtBubbles = useAgentStore((s) => s.clearThoughtBubbles);
   const resetAgentStore = useAgentStore((s) => s.reset);
@@ -141,8 +144,8 @@ export function RoleplayHUD({
   const trackerPanelHideHudWidgets = useUIStore((s) => s.trackerPanelHideHudWidgets);
   const toggleTrackerPanel = useUIStore((s) => s.toggleTrackerPanel);
 
-  const isTrackerBusy = isAgentProcessing || isStreaming;
-  const showHudTrackerWidgets = !(trackerPanelEnabled && trackerPanelHideHudWidgets);
+  const isTrackerBusy = isAgentProcessing || isStreaming || gameStateRefreshing;
+  const showHudTrackerWidgets = !gameStateRefreshing && !(trackerPanelEnabled && trackerPanelHideHudWidgets);
 
   useEffect(() => {
     if (!chatId) return;
@@ -251,6 +254,7 @@ export function RoleplayHUD({
         onRetriggerTrackers={onRetriggerTrackers}
         onRetryFailedAgents={onRetryFailedAgents}
         failedAgentTypes={failedAgentTypes}
+        failedAgentFailures={failedAgentFailures}
         showInjectionsTab={showInjectionsTab}
         showSecretPlotTab={showSecretPlotTab}
       />
@@ -464,6 +468,7 @@ interface ActionsGroupProps {
   onRetriggerTrackers?: () => void;
   onRetryFailedAgents?: () => void;
   failedAgentTypes: string[];
+  failedAgentFailures: AgentFailure[];
   showInjectionsTab?: boolean;
   showSecretPlotTab?: boolean;
 }
@@ -472,7 +477,7 @@ function ActionsGroup({
   chatId,
   injectionSourceMessages,
   agentConfigs,
-  isVertical: _isVertical,
+  isVertical,
   agentsOpen,
   setAgentsOpen,
   isAgentProcessing,
@@ -485,6 +490,7 @@ function ActionsGroup({
   onRetriggerTrackers,
   onRetryFailedAgents,
   failedAgentTypes,
+  failedAgentFailures,
   showInjectionsTab,
   showSecretPlotTab,
 }: ActionsGroupProps) {
@@ -528,6 +534,7 @@ function ActionsGroup({
   // Badge count — unique agent types that produced results
   const uniqueAgentCount = new Set(thoughtBubbles.map((b) => b.agentId)).size;
   const badgeCount = uniqueAgentCount + customAgentRuns.length + (echoMessages.length > 0 ? 1 : 0);
+  const showIllustratorRetry = failedAgentTypes.includes("illustrator") && !!onRetryFailedAgents;
 
   // ── Shared dropdown portal (used by both desktop & mobile) ──
   const dropdownContent =
@@ -560,6 +567,7 @@ function ActionsGroup({
             onRetriggerTrackers={onRetriggerTrackers}
             onRetryFailedAgents={onRetryFailedAgents}
             failedAgentTypes={failedAgentTypes}
+            failedAgentFailures={failedAgentFailures}
             onClose={() => setAgentsOpen(false)}
             showInjectionsTab={showInjectionsTab}
             showSecretPlotTab={showSecretPlotTab}
@@ -570,7 +578,7 @@ function ActionsGroup({
     );
 
   return (
-    <div className="relative">
+    <div className={cn("relative flex items-center gap-1", isVertical && "flex-col")}>
       <button
         ref={btnRef}
         onClick={() => setAgentsOpen(!agentsOpen)}
@@ -604,6 +612,19 @@ function ActionsGroup({
           </span>
         )}
       </button>
+      {showIllustratorRetry && (
+        <button
+          type="button"
+          onClick={() => onRetryFailedAgents?.()}
+          disabled={isAgentProcessing}
+          className="flex h-8 items-center justify-center gap-1 rounded-lg border border-amber-400/30 bg-amber-500/15 px-2 text-[0.625rem] font-semibold text-amber-200 transition-colors hover:bg-amber-500/25 disabled:cursor-not-allowed disabled:opacity-50 md:h-10"
+          title="Try Illustrator again"
+          aria-label="Try Illustrator again"
+        >
+          <RefreshCw size="0.75rem" className={cn("shrink-0", isAgentProcessing && "animate-spin")} />
+          <span className="hidden md:inline">{isAgentProcessing ? "Retrying..." : "Try again"}</span>
+        </button>
+      )}
       {dropdownContent}
     </div>
   );

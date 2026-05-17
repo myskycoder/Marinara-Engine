@@ -13,7 +13,14 @@ import {
 } from "lucide-react";
 import { BUILT_IN_AGENTS, type Message } from "@marinara-engine/shared";
 import { useUpdateAgentRunData, type AgentConfigRow, type AgentRunRow } from "../../hooks/use-agents";
+import {
+  formatAgentFailureDetail,
+  formatAgentFailureTitle,
+  toAgentFailure,
+  type AgentFailure,
+} from "../../lib/agent-failures";
 import { ContextInjectionPanel } from "../agents/ContextInjectionPanel";
+import { ContinuityIssueChecklist } from "../agents/ContinuityIssueChecklist";
 
 const SecretPlotPanel = lazy(async () =>
   import("../agents/SecretPlotPanel").then((m) => ({ default: m.SecretPlotPanel })),
@@ -48,6 +55,7 @@ interface RoleplayHUDActionsMenuProps {
   onRetriggerTrackers?: () => void;
   onRetryFailedAgents?: () => void;
   failedAgentTypes?: string[];
+  failedAgentFailures?: AgentFailure[];
   onClose: () => void;
   showInjectionsTab?: boolean;
   showSecretPlotTab?: boolean;
@@ -73,6 +81,7 @@ export function RoleplayHUDActionsMenu({
   onRetriggerTrackers,
   onRetryFailedAgents,
   failedAgentTypes,
+  failedAgentFailures,
   onClose,
   showInjectionsTab,
   showSecretPlotTab,
@@ -100,6 +109,13 @@ export function RoleplayHUDActionsMenu({
   const activeTab = currentTab.id;
   const showTrackerActions = activeTab === "activity";
   const showRetryFailedAction = !!(onRetryFailedAgents && failedAgentTypes && failedAgentTypes.length > 0);
+  const displayedFailures = useMemo(
+    () =>
+      failedAgentFailures && failedAgentFailures.length > 0
+        ? failedAgentFailures
+        : (failedAgentTypes ?? []).map((agentType) => toAgentFailure({ agentType })),
+    [failedAgentFailures, failedAgentTypes],
+  );
   const showFooterActions = showEcho || showTrackerActions || showRetryFailedAction;
 
   useEffect(() => {
@@ -181,7 +197,11 @@ export function RoleplayHUDActionsMenu({
                     </button>
                     <div className="pr-4">
                       <span className="font-semibold text-purple-300">{bubble.agentName}</span>
-                      <p className="mt-0.5 whitespace-pre-wrap text-white/50 leading-relaxed">{bubble.content}</p>
+                      {bubble.agentId === "continuity" ? (
+                        <ContinuityIssueChecklist content={bubble.content} compact />
+                      ) : (
+                        <p className="mt-0.5 whitespace-pre-wrap text-white/50 leading-relaxed">{bubble.content}</p>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -238,6 +258,28 @@ export function RoleplayHUDActionsMenu({
 
       {showFooterActions && (
         <div className="border-t border-white/5 divide-y divide-white/5">
+          {showRetryFailedAction && displayedFailures.length > 0 && (
+            <div className="space-y-1.5 px-3 py-2">
+              <div className="flex items-center gap-1.5 text-[0.5625rem] font-semibold uppercase tracking-wide text-amber-300/90">
+                <AlertTriangle size="0.625rem" />
+                Failed agents
+              </div>
+              <div className="space-y-1">
+                {displayedFailures.map((failure) => (
+                  <div
+                    key={failure.agentType}
+                    className="rounded-md border border-amber-400/15 bg-amber-500/10 px-2 py-1.5 text-[0.625rem]"
+                    title={failure.error ?? undefined}
+                  >
+                    <div className="font-semibold text-amber-200">{formatAgentFailureTitle(failure)}</div>
+                    <div className="mt-0.5 max-h-8 overflow-hidden break-words text-amber-100/65">
+                      {formatAgentFailureDetail(failure)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           {showEcho && (
             <button
               onClick={toggleEchoChamber}

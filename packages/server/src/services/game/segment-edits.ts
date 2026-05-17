@@ -11,13 +11,16 @@
 // parseNarrationSegments segment-indexing logic just enough to do that.
 // ──────────────────────────────────────────────
 
+import { formatSkillCheckResultSummary, type SkillCheckResult } from "@marinara-engine/shared";
+
 /**
  * Strip GM command tags from message content.
  * Mirrors the client's `stripGmTagsKeepReadables` (minus readable
- * preservation which is irrelevant for segment editing).
+ * preservation which is irrelevant for segment editing). Resolved skill checks
+ * are preserved as plain text because the roll result is canonical history.
  */
 export function stripGmCommandTags(content: string): string {
-  let text = content
+  let text = preserveResolvedSkillCheckResults(content)
     .replace(/\[music:\s*[^\]]+\]/gi, "")
     .replace(/\[sfx:\s*[^\]]+\]/gi, "")
     .replace(/\[bg:\s*[^\]]+\]/gi, "")
@@ -45,6 +48,77 @@ export function stripGmCommandTags(content: string): string {
   text = text.replace(/\[(?!Note:|Book:)\w+:[^\]]*\]/g, "");
   text = stripDanglingTagClosers(text);
   return text.trim();
+}
+
+function preserveResolvedSkillCheckResults(content: string): string {
+  return content.replace(/\[skill_check:\s*([^\]]+)\]/gi, (fullTag, body: string) => {
+    const result = parseResolvedSkillCheckBody(body);
+    return result ? `Skill check result: ${formatSkillCheckResultSummary(result)}` : fullTag;
+  });
+}
+
+function parseSkillCheckAttributes(body: string): Map<string, string> {
+  const values = new Map<string, string>();
+  const attributes = Array.from(body.matchAll(/(\w+)\s*=\s*("[^"]*"|'[^']*'|[^\s\]]+)/g));
+  for (const match of attributes) {
+    const key = match[1]?.trim().toLowerCase();
+    const rawValue = match[2]?.trim();
+    if (!key || !rawValue) continue;
+    values.set(key, rawValue.replace(/^['"]|['"]$/g, ""));
+  }
+  return values;
+}
+
+function parseSkillCheckRolls(value: string): number[] {
+  return value
+    .split(/[|,]/)
+    .map((entry) => Number.parseInt(entry.trim(), 10))
+    .filter((entry) => Number.isFinite(entry));
+}
+
+function parseResolvedSkillCheckBody(body: string): SkillCheckResult | null {
+  const values = parseSkillCheckAttributes(body);
+  const skill = values.get("skill")?.trim() ?? "";
+  const dc = Number.parseInt(values.get("dc") ?? "", 10);
+  const rollsValue = values.get("rolls") ?? "";
+  const modifier = Number.parseInt(values.get("modifier") ?? "", 10);
+  const total = Number.parseInt(values.get("total") ?? "", 10);
+  const resultValue = values.get("result")?.trim().toLowerCase().replace(/\s+/g, "_") ?? "";
+  if (!skill || Number.isNaN(dc) || Number.isNaN(modifier) || Number.isNaN(total) || !resultValue) return null;
+
+  const rolls = parseSkillCheckRolls(rollsValue);
+  if (rolls.length === 0) return null;
+
+  const modeValue = values.get("mode")?.trim().toLowerCase();
+  const rollMode: SkillCheckResult["rollMode"] =
+    modeValue === "advantage" ? "advantage" : modeValue === "disadvantage" ? "disadvantage" : "normal";
+  const explicitUsedRoll = Number.parseInt(values.get("used") ?? "", 10);
+  const inferredRollFromTotal = total - modifier;
+  const usedRoll = Number.isFinite(explicitUsedRoll)
+    ? explicitUsedRoll
+    : rolls.includes(inferredRollFromTotal)
+      ? inferredRollFromTotal
+      : rollMode === "advantage"
+        ? Math.max(...rolls)
+        : rollMode === "disadvantage"
+          ? Math.min(...rolls)
+          : rolls[0]!;
+  const criticalSuccess = resultValue === "critical_success";
+  const criticalFailure = resultValue === "critical_failure";
+  const success = criticalSuccess ? true : criticalFailure ? false : resultValue === "success";
+
+  return {
+    skill,
+    dc,
+    rolls,
+    usedRoll,
+    modifier,
+    total,
+    success,
+    criticalSuccess,
+    criticalFailure,
+    rollMode,
+  };
 }
 
 /** Remove dangling closers left behind by malformed or partially stripped tags. */

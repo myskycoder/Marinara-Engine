@@ -1,7 +1,8 @@
-import { PROVIDERS } from "@marinara-engine/shared";
+import { LOCAL_SIDECAR_CONNECTION_ID, PROVIDERS } from "@marinara-engine/shared";
 import type { DB } from "../db/connection.js";
 import { logger } from "../lib/logger.js";
 import { isLocalEmbedderAvailable } from "./local-embedder.js";
+import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "./llm/local-sidecar.js";
 import { createLLMProvider } from "./llm/provider-registry.js";
 import type { MemoryRecallEmbeddingSource } from "./memory-recall.js";
 import { createConnectionsStorage } from "./storage/connections.storage.js";
@@ -55,6 +56,22 @@ export async function resolveMemoryRecallEmbeddingSource(
   const chatMeta = parseMetadata(options.chatMetadata);
   const embeddingConnId =
     nonEmptyString(chatMeta.embeddingConnectionId) ?? nonEmptyString(activeConnection.embeddingConnectionId);
+
+  if (embeddingConnId === LOCAL_SIDECAR_CONNECTION_ID) {
+    const provider = getLocalSidecarProvider();
+    const label = "Local Model sidecar";
+    return {
+      label,
+      async embed(texts: string[]) {
+        try {
+          return await provider.embed(texts, LOCAL_SIDECAR_MODEL);
+        } catch (err) {
+          logger.warn(err, "[memory-recall] Configured embedding source %s failed", label);
+          return null;
+        }
+      },
+    };
+  }
 
   let embeddingConnection = activeConnection;
   let embeddingBaseUrl = options.activeBaseUrl ?? null;

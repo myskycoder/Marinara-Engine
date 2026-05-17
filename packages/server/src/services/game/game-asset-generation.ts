@@ -8,8 +8,9 @@
 // ──────────────────────────────────────────────
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { createHash } from "crypto";
 import { logger } from "../../lib/logger.js";
-import { join } from "path";
+import { basename, join } from "path";
 import { slugifyForFs } from "@marinara-engine/shared";
 import { DATA_DIR } from "../../utils/data-dir.js";
 import { generateImage, type ImageGenResult } from "../image/image-generation.js";
@@ -21,8 +22,10 @@ import type { ImageGenerationDefaultsProfile } from "@marinara-engine/shared";
 import type { ImageGenerationSize } from "../image/image-generation-settings.js";
 
 const NPC_AVATAR_DIR = join(DATA_DIR, "avatars", "npc");
-export const DEFAULT_GAME_BACKGROUND_SIZE: ImageGenerationSize = { width: 1024, height: 576 };
-export const DEFAULT_GAME_PORTRAIT_SIZE: ImageGenerationSize = { width: 512, height: 512 };
+const CHAT_BACKGROUND_DIR = join(DATA_DIR, "backgrounds");
+const CHAT_BACKGROUND_META_PATH = join(CHAT_BACKGROUND_DIR, "meta.json");
+export const DEFAULT_GAME_BACKGROUND_SIZE: ImageGenerationSize = { width: 1280, height: 720 };
+export const DEFAULT_GAME_PORTRAIT_SIZE: ImageGenerationSize = { width: 1024, height: 1024 };
 export const GENERATED_GAME_BACKGROUND_EXTS = ["png", "jpg", "jpeg", "webp", "avif", "gif"] as const;
 const GAME_BACKGROUND_EXT_SET = new Set<string>(GENERATED_GAME_BACKGROUND_EXTS);
 const GAME_PORTRAIT_NEGATIVE_PROMPT =
@@ -31,6 +34,7 @@ const GAME_BACKGROUND_NEGATIVE_PROMPT =
   "text, letters, captions, subtitles, UI, watermark, logo, signature, people, character, portrait, split screen, panel, collage, contact sheet, grid, multiple frames, low quality";
 const GAME_ILLUSTRATION_NEGATIVE_PROMPT =
   "text, letters, captions, subtitles, UI, watermark, logo, signature, speech bubble, split screen, panel, collage, contact sheet, character sheet, grid, four images, duplicated face, extra head, unrelated character, bad anatomy, low quality";
+const MAX_GENERATED_ASSET_SLUG_BYTES = 180;
 
 // sharp is optional in the server package. Generated game backgrounds should be
 // stored at the VN canvas ratio when possible, but generation must still work on
@@ -59,6 +63,8 @@ type GameBackgroundImage = {
   buffer: Buffer;
   ext: string;
 };
+
+type ChatBackgroundMeta = Record<string, { originalName?: string; tags: string[] }>;
 
 /** Return the extension implied by known image file signatures. */
 function detectImageExt(buffer: Buffer): string | null {
@@ -192,6 +198,31 @@ export function readNpcAvatarBase64(chatId: string, npcId: string): string | und
   }
 }
 
+function readChatBackgroundMeta(): ChatBackgroundMeta {
+  if (!existsSync(CHAT_BACKGROUND_META_PATH)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(CHAT_BACKGROUND_META_PATH, "utf-8"));
+    return parsed && typeof parsed === "object" ? (parsed as ChatBackgroundMeta) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeChatBackgroundMeta(meta: ChatBackgroundMeta): void {
+  if (!existsSync(CHAT_BACKGROUND_DIR)) mkdirSync(CHAT_BACKGROUND_DIR, { recursive: true });
+  writeFileSync(CHAT_BACKGROUND_META_PATH, JSON.stringify(meta, null, 2), "utf-8");
+}
+
+function chatBackgroundTags(req: ChatBackgroundGenRequest, slug: string): string[] {
+  const tags = new Set<string>(["generated", "roleplay", slug.replace(/-/g, " ")]);
+  for (const value of [req.locationSlug, req.reason]) {
+    if (!value) continue;
+    const clean = value.trim().replace(/\s+/g, " ");
+    if (clean) tags.add(clean.slice(0, 80));
+  }
+  return Array.from(tags).filter(Boolean);
+}
+
 export function readAvatarBase64(avatarPath: string | null | undefined): string | undefined {
   if (!avatarPath) return undefined;
   const cleanAvatarPath = avatarPath.split("?")[0] ?? avatarPath;
@@ -240,6 +271,28 @@ export function deleteNpcAvatar(chatId: string, npcId: string): boolean {
     logger.warn(err, "[game-asset-gen] Failed to delete NPC avatar for regeneration: %s/%s", chatId, npcId);
     return false;
   }
+}
+
+function truncateSlugByBytes(slug: string, maxBytes: number): string {
+  let truncated = slug;
+  while (Buffer.byteLength(truncated, "utf8") > maxBytes) {
+    truncated = truncated.slice(0, -1);
+  }
+  return truncated.replace(/-+$/g, "");
+}
+
+export function safeGeneratedAssetSlug(name: string, opts: { maxBytes?: number; suffix?: string } = {}): string {
+  const maxBytes = opts.maxBytes ?? MAX_GENERATED_ASSET_SLUG_BYTES;
+  const slug = safeName(name) || "asset";
+  const suffix = opts.suffix ? safeName(opts.suffix) : "";
+  const candidate = suffix ? `${slug}-${suffix}` : slug;
+  if (Buffer.byteLength(candidate, "utf8") <= maxBytes) return candidate;
+
+  const hash = createHash("sha256").update(slug).digest("hex").slice(0, 8);
+  const tail = [hash, suffix].filter(Boolean).join("-");
+  const prefixBudget = Math.max(1, maxBytes - Buffer.byteLength(tail, "utf8") - 1);
+  const prefix = truncateSlugByBytes(slug, prefixBudget) || "asset";
+  return `${prefix}-${tail}`;
 }
 
 function hasExplicitNonHumanCue(value: string): boolean {
@@ -293,6 +346,7 @@ export interface NpcPortraitRequest {
   imgBaseUrl: string;
   imgApiKey: string;
   imgService?: string | null;
+  imgEndpointId?: string | null;
   imgComfyWorkflow?: string | undefined;
   imgDefaults?: ImageGenerationDefaultsProfile | null;
   debugLog?: (message: string, ...args: any[]) => void;
@@ -543,6 +597,7 @@ export interface BackgroundGenRequest {
   imgBaseUrl: string;
   imgApiKey: string;
   imgService?: string | null;
+  imgEndpointId?: string | null;
   imgComfyWorkflow?: string | undefined;
   imgDefaults?: ImageGenerationDefaultsProfile | null;
   debugLog?: (message: string, ...args: any[]) => void;
@@ -569,6 +624,11 @@ export interface BackgroundGenResult {
   prompt?: string;
 }
 
+export interface ChatBackgroundGenRequest extends BackgroundGenRequest {
+  /** Why the background agent asked for generation. Stored as background metadata. */
+  reason?: string;
+}
+
 export interface SceneIllustrationGenRequest {
   chatId: string;
   prompt: string;
@@ -589,6 +649,7 @@ export interface SceneIllustrationGenRequest {
   imgBaseUrl: string;
   imgApiKey: string;
   imgService?: string | null;
+  imgEndpointId?: string | null;
   imgComfyWorkflow?: string | undefined;
   imgDefaults?: ImageGenerationDefaultsProfile | null;
   debugLog?: (message: string, ...args: any[]) => void;
@@ -753,6 +814,7 @@ export async function generateBackground(req: BackgroundGenRequest): Promise<Bac
         model: req.imgModel,
         width: size.width,
         height: size.height,
+        imageEndpointId: req.imgEndpointId || undefined,
         comfyWorkflow: req.imgComfyWorkflow || undefined,
         imageDefaults: req.imgDefaults ?? undefined,
       },
@@ -792,9 +854,81 @@ export async function generateBackground(req: BackgroundGenRequest): Promise<Bac
   }
 }
 
+/**
+ * Generate a reusable Roleplay chat background and save it into the normal
+ * user backgrounds folder so the Background agent can select it on later turns.
+ * Returns the saved filename on success, or null on failure.
+ */
+export async function generateChatBackground(req: ChatBackgroundGenRequest): Promise<string | null> {
+  const baseSlug = safeGeneratedAssetSlug(req.locationSlug || req.sceneDescription.slice(0, 80), { maxBytes: 160 });
+  if (!baseSlug) return null;
+
+  const slug = `generated-${baseSlug}`;
+  if (!existsSync(CHAT_BACKGROUND_DIR)) mkdirSync(CHAT_BACKGROUND_DIR, { recursive: true });
+
+  const existingPath = existingGeneratedBackgroundPath(CHAT_BACKGROUND_DIR, slug);
+  if (existingPath) return basename(existingPath);
+
+  const prompt = await buildBackgroundImagePrompt(req);
+  const size = resolvedSize(req.size, DEFAULT_GAME_BACKGROUND_SIZE);
+  req.debugLog?.(
+    "[debug/background-agent/image-generation] request slug=%s model=%s source=%s targetSize=%dx%d prompt:\n%s",
+    slug,
+    req.imgModel,
+    req.imgSource || req.imgService || "",
+    size.width,
+    size.height,
+    prompt,
+  );
+
+  try {
+    const result = await generateImage(
+      req.imgModel,
+      req.imgBaseUrl,
+      req.imgApiKey,
+      req.imgSource || req.imgService || "",
+      {
+        prompt,
+        negativePrompt: GAME_BACKGROUND_NEGATIVE_PROMPT,
+        model: req.imgModel,
+        width: size.width,
+        height: size.height,
+        imageEndpointId: req.imgEndpointId || undefined,
+        comfyWorkflow: req.imgComfyWorkflow || undefined,
+        imageDefaults: req.imgDefaults ?? undefined,
+      },
+    );
+
+    const image = await gameBackgroundImage(result, size);
+    const filename = `${slug}.${image.ext}`;
+    writeFileSync(join(CHAT_BACKGROUND_DIR, filename), image.buffer);
+
+    const meta = readChatBackgroundMeta();
+    meta[filename] = {
+      originalName: `Generated: ${req.locationSlug || baseSlug}`,
+      tags: chatBackgroundTags(req, baseSlug),
+    };
+    writeChatBackgroundMeta(meta);
+
+    buildAssetManifest();
+    logger.info('[background-agent] Generated roleplay background "%s"', filename);
+    req.debugLog?.(
+      "[debug/background-agent/image-generation] result slug=%s bytes=%d filename=%s",
+      slug,
+      image.buffer.byteLength,
+      filename,
+    );
+    return filename;
+  } catch (err) {
+    logger.warn(err, '[background-agent] Failed to generate roleplay background "%s"', slug);
+    return null;
+  }
+}
+
 export async function generateSceneIllustration(req: SceneIllustrationGenRequest): Promise<string | null> {
-  const baseSlug = safeName(req.slug || req.reason || req.prompt.slice(0, 80)) || "scene-illustration";
-  const slug = `${baseSlug}-${Date.now().toString(36)}`;
+  const slug = safeGeneratedAssetSlug(req.slug || req.reason || req.prompt.slice(0, 80) || "scene-illustration", {
+    suffix: Date.now().toString(36),
+  });
   const targetDir = join(GAME_ASSETS_DIR, "backgrounds", "illustrations");
   const tag = `backgrounds:illustrations:${slug}`;
 
@@ -823,6 +957,7 @@ export async function generateSceneIllustration(req: SceneIllustrationGenRequest
         model: req.imgModel,
         width: size.width,
         height: size.height,
+        imageEndpointId: req.imgEndpointId || undefined,
         comfyWorkflow: req.imgComfyWorkflow || undefined,
         imageDefaults: req.imgDefaults ?? undefined,
         referenceImages: req.referenceImages?.length ? req.referenceImages.slice(0, 4) : undefined,

@@ -71,7 +71,7 @@ function redactSensitiveValue(value: unknown): unknown {
   return redacted;
 }
 
-function formatToolPayloadForLog(payload: string, maxLength = 400): string {
+export function formatToolPayloadForLog(payload: string, maxLength = 400): string {
   const truncate = (value: string) => (value.length > maxLength ? `${value.slice(0, maxLength)}...` : value);
   const scrubSensitiveText = (value: string) =>
     value
@@ -170,9 +170,11 @@ async function executeAgentInner(
     const messages =
       config.type === "expression"
         ? buildExpressionAgentMessages(template, context)
-        : config.type === "spotify" && context.chatMode === "game"
-          ? buildGameSpotifyAgentMessages(template, context)
-          : buildStandardAgentMessages(config, template, context);
+        : config.type === "knowledge-retrieval"
+          ? buildKnowledgeRetrievalAgentMessages(config, template, context)
+          : config.type === "spotify" && context.chatMode === "game"
+            ? buildGameSpotifyAgentMessages(template, context)
+            : buildStandardAgentMessages(config, template, context);
 
     // Agents use lower temperature for reliability
     const temperature = (config.settings.temperature as number) ?? 0.3;
@@ -411,6 +413,25 @@ async function executeAgentBatchInner(
 ): Promise<AgentResult[]> {
   if (configs.length === 0) return [];
   const isolatedConfigs = configs.filter(shouldRunAgentIndividually);
+  if (isolatedConfigs.length === configs.length) {
+    logger.info(
+      "[agent-batch] Running %d isolated agent(s) individually: [%s]",
+      isolatedConfigs.length,
+      isolatedConfigs.map((c) => c.type).join(", "),
+    );
+    const isolatedSettled = await Promise.allSettled(
+      isolatedConfigs.map((config) => executeAgent(config, context, provider, model)),
+    );
+    return isolatedSettled.map((entry, index) =>
+      entry.status === "fulfilled"
+        ? entry.value
+        : makeError(
+            isolatedConfigs[index]!,
+            entry.reason instanceof Error ? entry.reason.message : "Agent execution failed",
+            Date.now(),
+          ),
+    );
+  }
   if (isolatedConfigs.length > 0 && isolatedConfigs.length < configs.length) {
     logger.info(
       "[agent-batch] Running %d compact agent(s) outside batch: [%s]",
@@ -686,7 +707,9 @@ function makeError(config: AgentExecConfig, error: string, startTime: number): A
 }
 
 function shouldRunAgentIndividually(config: Pick<AgentExecConfig, "type">): boolean {
-  return config.type === "expression";
+  // These agents either need compact prompts or carry large private extras that
+  // must not be merged into unrelated batched agent requests.
+  return config.type === "expression" || config.type === "lorebook-keeper";
 }
 
 function buildStandardAgentMessages(config: AgentExecConfig, template: string, context: AgentContext): ChatMessage[] {
@@ -711,6 +734,75 @@ function buildStandardAgentMessages(config: AgentExecConfig, template: string, c
   // Build multi-turn message array for this agent (sliced to its own contextSize)
   const agentContextSize = normalizeAgentContextSize(config.settings.contextSize);
   return buildAgentMessages(systemParts.join("\n"), context, config.type, agentContextSize);
+}
+
+export function buildKnowledgeRetrievalAgentMessagesForTest(
+  config: AgentExecConfig,
+  template: string,
+  context: AgentContext,
+): ChatMessage[] {
+  return buildKnowledgeRetrievalAgentMessages(config, template, context);
+}
+
+function buildKnowledgeRetrievalAgentMessages(
+  config: AgentExecConfig,
+  template: string,
+  context: AgentContext,
+): ChatMessage[] {
+  const systemParts: string[] = [];
+  systemParts.push(`<role>`);
+  systemParts.push(
+    `You are a specialized knowledge retrieval agent. Extract relevant facts from source material; do not roleplay, continue the conversation, write dialogue, or answer as any character.`,
+  );
+  systemParts.push(`</role>`);
+  systemParts.push(``);
+  systemParts.push(`<agents>`);
+  systemParts.push(template);
+  systemParts.push(`</agents>`);
+  const extras = buildAgentExtras(context, [config.type]);
+  if (extras) {
+    systemParts.push(``);
+    systemParts.push(extras);
+  }
+
+  const agentContextSize = normalizeAgentContextSize(config.settings.contextSize);
+  const recent = context.recentMessages.slice(-agentContextSize).filter((message) => message.content.trim());
+  const userParts: string[] = [];
+
+  if (recent.length > 0) {
+    userParts.push(`<conversation_messages>`);
+    for (const message of recent) {
+      const speaker = knowledgeRetrievalSpeakerLabel(message, context);
+      userParts.push(`${speaker}: ${truncateAgentText(message.content, 2000)}`);
+    }
+    userParts.push(`</conversation_messages>`);
+    userParts.push(``);
+  }
+
+  userParts.push(
+    `Use the conversation messages only to identify which source-material facts are relevant. Return a concise factual summary from <source_material>. If no source material is relevant, output: "No relevant information found."`,
+  );
+  userParts.push(`Now return the requested format.`);
+
+  return [
+    { role: "system", content: systemParts.join("\n"), contextKind: "prompt" },
+    { role: "user", content: userParts.join("\n"), contextKind: "history" },
+  ];
+}
+
+function knowledgeRetrievalSpeakerLabel(
+  message: { role: string; characterId?: string },
+  context: AgentContext,
+): string {
+  if (message.role === "user") return context.persona?.name?.trim() || "User";
+  if (message.role === "assistant") {
+    if (message.characterId) {
+      const character = context.characters.find((entry) => entry.id === message.characterId);
+      if (character?.name?.trim()) return character.name.trim();
+    }
+    return context.characters[0]?.name?.trim() || "Assistant";
+  }
+  return message.role || "Message";
 }
 
 function truncateAgentText(text: string, maxChars: number): string {
@@ -944,6 +1036,18 @@ function buildAgentMessages(
     finalParts.push(`</assistant_response>`);
   }
 
+  if (context.preGenInjections?.length) {
+    finalParts.push(`\n<pre_generation_injections>`);
+    finalParts.push(JSON.stringify(context.preGenInjections));
+    finalParts.push(`</pre_generation_injections>`);
+  }
+
+  if (context.parallelResults?.length) {
+    finalParts.push(`\n<parallel_agent_results>`);
+    finalParts.push(JSON.stringify(context.parallelResults));
+    finalParts.push(`</parallel_agent_results>`);
+  }
+
   if (context.memory._agentResults) {
     finalParts.push(`\n<agent_results>`);
     finalParts.push(JSON.stringify(context.memory._agentResults));
@@ -966,19 +1070,12 @@ function buildAgentMessages(
 
 /**
  * Build the lore block for the system message from the agent context.
- * Contains lorebook entries, characters, and persona.
+ * Contains character and persona context. Runtime lorebook entries are
+ * intentionally excluded to keep non-lorebook agent prompts compact.
  */
 function buildLoreBlock(context: AgentContext): string {
   const parts: string[] = [];
   parts.push(`<lore>`);
-
-  if (context.activatedLorebookEntries && context.activatedLorebookEntries.length > 0) {
-    parts.push(`<lorebook_entries>`);
-    for (const entry of context.activatedLorebookEntries) {
-      parts.push(`[${entry.tag}] ${entry.name}: ${entry.content}`);
-    }
-    parts.push(`</lorebook_entries>`);
-  }
 
   if (context.characters.length > 0) {
     parts.push(`<characters>`);
@@ -1106,17 +1203,27 @@ function buildAgentExtras(context: AgentContext, agentTypes: string[] = []): str
       filename: string;
       originalName?: string | null;
       tags: string[];
+      source?: "user" | "game_asset";
     }>;
     parts.push(`<available_backgrounds>`);
     for (const bg of bgs) {
       const label = bg.originalName ? `${bg.filename} (${bg.originalName})` : bg.filename;
+      const source = bg.source === "game_asset" ? " [source: game asset]" : "";
       const tagStr = bg.tags.length > 0 ? ` [tags: ${bg.tags.join(", ")}]` : "";
-      parts.push(`- ${label}${tagStr}`);
+      parts.push(`- ${label}${source}${tagStr}`);
     }
     parts.push(`</available_backgrounds>`);
     if (context.memory._currentBackground) {
       parts.push(`<current_background>${context.memory._currentBackground}</current_background>`);
     }
+  }
+
+  if (agentTypes.includes("background") && context.memory._backgroundGenerationEnabled === true) {
+    parts.push(`<background_generation enabled="true">`);
+    parts.push(
+      `If no listed background fits a changed or new location, request a generated reusable location background instead of forcing a weak match.`,
+    );
+    parts.push(`</background_generation>`);
   }
 
   if (agentTypes.includes("spotify") && context.memory._spotifyDjConstraints) {
@@ -1125,7 +1232,7 @@ function buildAgentExtras(context: AgentContext, agentTypes: string[] = []): str
     parts.push(`</spotify_dj_constraints>`);
   }
 
-  if (context.memory._existingLorebookEntries) {
+  if (agentTypes.includes("lorebook-keeper") && context.memory._existingLorebookEntries) {
     const rawEntries = context.memory._existingLorebookEntries as Array<
       string | { id?: string; name?: string; content?: string; keys?: string[]; locked?: boolean }
     >;

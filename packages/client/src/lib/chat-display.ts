@@ -5,6 +5,8 @@ export type ChatDisplaySource = {
   metadata?: Chat["metadata"] | string | Record<string, unknown> | null;
 };
 
+const PLACEHOLDER_BRANCH_NAME = "New Branch";
+
 export function parseChatMetadata(raw: unknown): Record<string, any> {
   if (!raw) return {};
   if (typeof raw === "string") {
@@ -21,5 +23,13 @@ export function parseChatMetadata(raw: unknown): Record<string, any> {
 export function getChatDisplayName(chat: ChatDisplaySource | null | undefined): string {
   if (!chat) return "";
   const metadata = parseChatMetadata(chat.metadata);
-  return typeof metadata.branchName === "string" && metadata.branchName.trim() ? metadata.branchName : chat.name;
+  if (typeof metadata.branchName !== "string") return chat.name;
+
+  const branchName = metadata.branchName.trim();
+  return branchName || chat.name;
+}
+
+export function getConnectedChatDisplayName(chat: ChatDisplaySource | null | undefined): string {
+  const displayName = getChatDisplayName(chat);
+  return displayName === PLACEHOLDER_BRANCH_NAME ? (chat?.name ?? "") : displayName;
 }

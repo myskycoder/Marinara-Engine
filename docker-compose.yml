@@ -12,7 +12,10 @@ services:
       - marinara-data:/app/data
     environment:
       - NODE_ENV=production
+      - HOME=/app
       - DATA_DIR=/app/data
+      - FILE_STORAGE_DIR=/app/data/storage
+      - MARINARA_DOCKER=true
       - AUTO_CREATE_DEFAULT_CONNECTION=${AUTO_CREATE_DEFAULT_CONNECTION:-true}
       # Set BASIC_AUTH_USER/BASIC_AUTH_PASS and ADMIN_SECRET before exposing beyond localhost.
       # - TZ=America/New_York          # IANA timezone for time-based features (e.g. character schedules)

@@ -11,6 +11,19 @@ export function normalizeTTSCharacterName(value?: string | null): string {
   return (value ?? "").toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
+export function normalizeTTSCharacterBaseName(value?: string | null): string {
+  let normalized = normalizeTTSCharacterName(value);
+  let previous = "";
+  while (normalized && normalized !== previous) {
+    previous = normalized;
+    normalized = normalized.replace(/\s*(?:\([^()]*\)|\[[^\]]*\]|\{[^{}]*})\s*$/g, "").trim();
+  }
+
+  const separatedVariant = normalized.match(/^(.+?)\s+(?:[-–—:|])\s+[^-–—:|]+$/);
+  const base = separatedVariant?.[1]?.trim();
+  return base && base.length > 0 ? base : normalized;
+}
+
 export function ttsConfigMatchesSpeaker(
   _config: Pick<TTSConfig, "dialogueScope" | "dialogueCharacterName">,
   _speaker?: string | null,
@@ -114,12 +127,24 @@ export function resolveTTSVoiceForSpeaker(
   if (config.voiceMode === "per-character") {
     const assignments = Array.isArray(config.voiceAssignments) ? config.voiceAssignments : [];
     const normalizedSpeaker = normalizeTTSCharacterName(speaker);
-    const assignment = assignments.find((entry) => {
+    const exactAssignment = assignments.find((entry) => {
       if (!entry.voice) return false;
       if (characterId && entry.characterId === characterId) return true;
       return normalizedSpeaker.length > 0 && normalizeTTSCharacterName(entry.characterName) === normalizedSpeaker;
     });
-    if (assignment?.voice) return assignment.voice;
+    if (exactAssignment?.voice) return exactAssignment.voice;
+
+    const normalizedSpeakerBase = normalizeTTSCharacterBaseName(speaker);
+    if (normalizedSpeakerBase) {
+      const baseMatchedVoices = new Set<string>();
+      for (const entry of assignments) {
+        if (!entry.voice || !entry.characterName) continue;
+        if (normalizeTTSCharacterBaseName(entry.characterName) === normalizedSpeakerBase) {
+          baseMatchedVoices.add(entry.voice);
+        }
+      }
+      if (baseMatchedVoices.size === 1) return [...baseMatchedVoices][0] ?? "";
+    }
   }
 
   const npcDefaultVoice = resolveNpcDefaultVoice(config, npcHint);

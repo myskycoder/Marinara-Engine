@@ -13,6 +13,7 @@ import {
   resolveSpotifyCredentials,
   SPOTIFY_SCOPES,
   spotifyHasScope,
+  type SpotifyCredentialsResult,
 } from "../services/spotify/spotify.service.js";
 import { composeDjMariPlaylist, DjMariPlaylistError } from "../services/spotify/dj-mari-playlist.service.js";
 
@@ -117,6 +118,53 @@ async function readSpotifyError(res: Response, fallback: string) {
     /* use text fallback */
   }
   return text.slice(0, 300);
+}
+
+function isSpotifyDeviceNotFound(status: number, error: string): boolean {
+  return status === 404 && /device\s+not\s+found/i.test(error);
+}
+
+function isSpotifyRestrictionViolated(error: string): boolean {
+  return /restriction\s+violated/i.test(error);
+}
+
+function isSpotifyVolumeUnsupported(error: string): boolean {
+  return /cannot\s+control\s+device\s+volume/i.test(error);
+}
+
+function spotifyControlPath(path: string, deviceId?: string | null): string {
+  if (!deviceId) return path;
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}${new URLSearchParams({ device_id: deviceId }).toString()}`;
+}
+
+async function fetchSpotifyPlayerControl(args: {
+  credentials: SpotifyCredentialsResult;
+  path: string;
+  method: "POST" | "PUT";
+  fallbackError: string;
+  deviceId?: string | null;
+  body?: string;
+}): Promise<{ res: Response; error: string | null }> {
+  const options = { method: args.method, body: args.body };
+  const res = await fetchSpotifyApi(args.credentials, spotifyControlPath(args.path, args.deviceId), options);
+  if (res.ok || res.status === 204 || !args.deviceId) return { res, error: null };
+
+  const error = await readSpotifyError(res, args.fallbackError);
+  if (!isSpotifyDeviceNotFound(res.status, error) && !isSpotifyRestrictionViolated(error)) return { res, error };
+
+  logger.debug(
+    "[spotify] Playback device %s failed for %s (%s); retrying against the active Spotify device",
+    args.deviceId,
+    args.path,
+    error,
+  );
+
+  const retry = await fetchSpotifyApi(args.credentials, args.path, options);
+  return {
+    res: retry,
+    error: retry.ok || retry.status === 204 ? null : await readSpotifyError(retry, args.fallbackError),
+  };
 }
 
 export async function spotifyAuthRoutes(app: FastifyInstance) {
@@ -506,16 +554,57 @@ export async function spotifyAuthRoutes(app: FastifyInstance) {
       return reply.status(res.status).send({ error: await readSpotifyError(res, "Spotify playlists failed") });
     }
     const data = (await res.json()) as {
-      items?: Array<{ id?: string; name?: string; uri?: string; tracks?: { total?: number } }>;
+      items?: Array<{
+        id?: string;
+        name?: string;
+        uri?: string;
+        tracks?: { total?: number };
+        owner?: { id?: string };
+      }>;
     };
-    return {
-      playlists: (data.items ?? []).map((playlist) => ({
-        id: playlist.id ?? "",
-        name: playlist.name ?? "Untitled playlist",
-        uri: playlist.uri ?? "",
-        trackCount: playlist.tracks?.total ?? 0,
-      })),
-    };
+
+    // Spotify strips `tracks.total` from /me/playlists for Development Mode
+    // apps. Look up real counts by hitting /playlists/{id}/items?limit=1 in
+    // parallel for playlists owned by the connected user (followed playlists
+    // 403 and stay unknown). Falls back gracefully if Spotify changes its mind.
+    const meRes = await fetchSpotifyApi(credentials, "/me").catch((err) => {
+      logger.warn(err, "Spotify /me lookup failed while resolving playlist ownership");
+      return null;
+    });
+    const myId = meRes && meRes.ok ? ((await meRes.json()) as { id?: string }).id : null;
+    if (!myId) {
+      logger.warn("Could not resolve Spotify user id; playlist ownership will be unknown");
+    }
+
+    const playlists = await Promise.all(
+      (data.items ?? []).map(async (playlist) => {
+        const reported = playlist.tracks?.total;
+        // Tri-state: true (owned), false (followed), null (unknown — e.g. /me lookup failed).
+        // Null prevents the client from mislabeling owned playlists as "followed — unavailable"
+        // when /me transiently fails.
+        const owned: boolean | null = myId ? playlist.owner?.id === myId : null;
+        let trackCount: number | null = typeof reported === "number" ? reported : null;
+        if (trackCount === null && owned === true && playlist.id) {
+          const itemsRes = await fetchSpotifyApi(
+            credentials,
+            `/playlists/${encodeURIComponent(playlist.id)}/items?limit=1`,
+          ).catch(() => null);
+          if (itemsRes && itemsRes.ok) {
+            const itemsData = (await itemsRes.json().catch(() => null)) as { total?: number } | null;
+            if (typeof itemsData?.total === "number") trackCount = itemsData.total;
+          }
+        }
+        return {
+          id: playlist.id ?? "",
+          name: playlist.name ?? "Untitled playlist",
+          uri: playlist.uri ?? "",
+          trackCount,
+          owned,
+        };
+      }),
+    );
+
+    return { playlists };
   });
 
   app.post<{ Body: { agentId?: string; deviceId?: string | null } }>("/dj-mari-playlist", async (req, reply) => {
@@ -554,7 +643,6 @@ export async function spotifyAuthRoutes(app: FastifyInstance) {
     const credentials = await getCredentialsOrReply(reply, req.body?.agentId ?? null);
     if (!credentials) return;
 
-    const query = req.body?.deviceId ? `?${new URLSearchParams({ device_id: req.body.deviceId })}` : "";
     const body: Record<string, unknown> = {};
     if (typeof req.body?.contextUri === "string" && req.body.contextUri.startsWith("spotify:")) {
       body.context_uri = req.body.contextUri;
@@ -564,12 +652,16 @@ export async function spotifyAuthRoutes(app: FastifyInstance) {
       body.uris = [req.body.uri];
     }
 
-    const res = await fetchSpotifyApi(credentials, `/me/player/play${query}`, {
+    const { res, error } = await fetchSpotifyPlayerControl({
+      credentials,
+      path: "/me/player/play",
       method: "PUT",
       body: Object.keys(body).length > 0 ? JSON.stringify(body) : undefined,
+      deviceId: req.body?.deviceId,
+      fallbackError: "Spotify play failed",
     });
     if (!res.ok && res.status !== 204) {
-      return reply.status(res.status).send({ error: await readSpotifyError(res, "Spotify play failed") });
+      return reply.status(res.status).send({ error: error ?? (await readSpotifyError(res, "Spotify play failed")) });
     }
     return { success: true };
   });
@@ -578,10 +670,15 @@ export async function spotifyAuthRoutes(app: FastifyInstance) {
     const credentials = await getCredentialsOrReply(reply, req.body?.agentId ?? null);
     if (!credentials) return;
 
-    const query = req.body?.deviceId ? `?${new URLSearchParams({ device_id: req.body.deviceId })}` : "";
-    const res = await fetchSpotifyApi(credentials, `/me/player/pause${query}`, { method: "PUT" });
+    const { res, error } = await fetchSpotifyPlayerControl({
+      credentials,
+      path: "/me/player/pause",
+      method: "PUT",
+      deviceId: req.body?.deviceId,
+      fallbackError: "Spotify pause failed",
+    });
     if (!res.ok && res.status !== 204) {
-      return reply.status(res.status).send({ error: await readSpotifyError(res, "Spotify pause failed") });
+      return reply.status(res.status).send({ error: error ?? (await readSpotifyError(res, "Spotify pause failed")) });
     }
     return { success: true };
   });
@@ -590,10 +687,15 @@ export async function spotifyAuthRoutes(app: FastifyInstance) {
     const credentials = await getCredentialsOrReply(reply, req.body?.agentId ?? null);
     if (!credentials) return;
 
-    const query = req.body?.deviceId ? `?${new URLSearchParams({ device_id: req.body.deviceId })}` : "";
-    const res = await fetchSpotifyApi(credentials, `/me/player/next${query}`, { method: "POST" });
+    const { res, error } = await fetchSpotifyPlayerControl({
+      credentials,
+      path: "/me/player/next",
+      method: "POST",
+      deviceId: req.body?.deviceId,
+      fallbackError: "Spotify next failed",
+    });
     if (!res.ok && res.status !== 204) {
-      return reply.status(res.status).send({ error: await readSpotifyError(res, "Spotify next failed") });
+      return reply.status(res.status).send({ error: error ?? (await readSpotifyError(res, "Spotify next failed")) });
     }
     return { success: true };
   });
@@ -602,10 +704,17 @@ export async function spotifyAuthRoutes(app: FastifyInstance) {
     const credentials = await getCredentialsOrReply(reply, req.body?.agentId ?? null);
     if (!credentials) return;
 
-    const query = req.body?.deviceId ? `?${new URLSearchParams({ device_id: req.body.deviceId })}` : "";
-    const res = await fetchSpotifyApi(credentials, `/me/player/previous${query}`, { method: "POST" });
+    const { res, error } = await fetchSpotifyPlayerControl({
+      credentials,
+      path: "/me/player/previous",
+      method: "POST",
+      deviceId: req.body?.deviceId,
+      fallbackError: "Spotify previous failed",
+    });
     if (!res.ok && res.status !== 204) {
-      return reply.status(res.status).send({ error: await readSpotifyError(res, "Spotify previous failed") });
+      return reply
+        .status(res.status)
+        .send({ error: error ?? (await readSpotifyError(res, "Spotify previous failed")) });
     }
     return { success: true };
   });
@@ -617,11 +726,22 @@ export async function spotifyAuthRoutes(app: FastifyInstance) {
       if (!credentials) return;
 
       const volume = Math.max(0, Math.min(100, Math.round(Number(req.body?.volume ?? 50))));
-      const params = new URLSearchParams({ volume_percent: String(volume) });
-      if (req.body?.deviceId) params.set("device_id", req.body.deviceId);
-      const res = await fetchSpotifyApi(credentials, `/me/player/volume?${params.toString()}`, { method: "PUT" });
+      const { res, error } = await fetchSpotifyPlayerControl({
+        credentials,
+        path: `/me/player/volume?${new URLSearchParams({ volume_percent: String(volume) }).toString()}`,
+        method: "PUT",
+        deviceId: req.body?.deviceId,
+        fallbackError: "Spotify volume failed",
+      });
       if (!res.ok && res.status !== 204) {
-        return reply.status(res.status).send({ error: await readSpotifyError(res, "Spotify volume failed") });
+        const message = error ?? (await readSpotifyError(res, "Spotify volume failed"));
+        if (isSpotifyVolumeUnsupported(message)) {
+          return reply.status(409).send({
+            code: "SPOTIFY_VOLUME_UNSUPPORTED",
+            error: "This Spotify device does not allow remote volume control. Use the device volume buttons instead.",
+          });
+        }
+        return reply.status(res.status).send({ error: message });
       }
       return { success: true, volume };
     },
@@ -633,11 +753,19 @@ export async function spotifyAuthRoutes(app: FastifyInstance) {
       const credentials = await getCredentialsOrReply(reply, req.body?.agentId ?? null);
       if (!credentials) return;
 
-      const params = new URLSearchParams({ state: req.body?.enabled === true ? "true" : "false" });
-      if (req.body?.deviceId) params.set("device_id", req.body.deviceId);
-      const res = await fetchSpotifyApi(credentials, `/me/player/shuffle?${params.toString()}`, { method: "PUT" });
+      const { res, error } = await fetchSpotifyPlayerControl({
+        credentials,
+        path: `/me/player/shuffle?${new URLSearchParams({
+          state: req.body?.enabled === true ? "true" : "false",
+        }).toString()}`,
+        method: "PUT",
+        deviceId: req.body?.deviceId,
+        fallbackError: "Spotify shuffle failed",
+      });
       if (!res.ok && res.status !== 204) {
-        return reply.status(res.status).send({ error: await readSpotifyError(res, "Spotify shuffle failed") });
+        return reply
+          .status(res.status)
+          .send({ error: error ?? (await readSpotifyError(res, "Spotify shuffle failed")) });
       }
       return { success: true, shuffle: req.body?.enabled === true };
     },
@@ -654,11 +782,17 @@ export async function spotifyAuthRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: "repeat state must be off, track, or context" });
       }
 
-      const params = new URLSearchParams({ state });
-      if (req.body?.deviceId) params.set("device_id", req.body.deviceId);
-      const res = await fetchSpotifyApi(credentials, `/me/player/repeat?${params.toString()}`, { method: "PUT" });
+      const { res, error } = await fetchSpotifyPlayerControl({
+        credentials,
+        path: `/me/player/repeat?${new URLSearchParams({ state }).toString()}`,
+        method: "PUT",
+        deviceId: req.body?.deviceId,
+        fallbackError: "Spotify repeat failed",
+      });
       if (!res.ok && res.status !== 204) {
-        return reply.status(res.status).send({ error: await readSpotifyError(res, "Spotify repeat failed") });
+        return reply
+          .status(res.status)
+          .send({ error: error ?? (await readSpotifyError(res, "Spotify repeat failed")) });
       }
       return { success: true, repeat: state };
     },

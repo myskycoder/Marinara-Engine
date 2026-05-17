@@ -91,6 +91,18 @@ export function useAutonomousMessaging(
     [chatId],
   );
 
+  const recordClientPresence = useCallback(
+    async (userStatus: "active" | "idle" | "dnd") => {
+      if (!chatId) return;
+      try {
+        await api.post("/conversation/activity/presence", { chatId, userStatus });
+      } catch {
+        // non-critical
+      }
+    },
+    [chatId],
+  );
+
   // ── Polling logic ──
   useEffect(() => {
     if (!chatId || !enabled) return;
@@ -109,14 +121,20 @@ export function useAutonomousMessaging(
         return;
       }
 
+      const userStatus = useUIStore.getState().userStatus;
+
       // Don't trigger autonomous messages when user is DND
-      if (useUIStore.getState().userStatus === "dnd") {
+      if (userStatus === "dnd") {
+        await recordClientPresence(userStatus);
         schedulePoll();
         return;
       }
 
       try {
-        const result = await api.post<AutonomousCheckResult>("/conversation/autonomous/check", { chatId });
+        const result = await api.post<AutonomousCheckResult>("/conversation/autonomous/check", {
+          chatId,
+          userStatus,
+        });
 
         // Refresh character data so sidebar status dots update
         qc.invalidateQueries({ queryKey: characterKeys.list() });
@@ -220,7 +238,7 @@ export function useAutonomousMessaging(
       if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
       if (busyTimerRef.current) clearTimeout(busyTimerRef.current);
     };
-  }, [chatId, enabled, exchangesEnabled, generate, recordAssistantActivity, qc]);
+  }, [chatId, enabled, exchangesEnabled, generate, recordAssistantActivity, recordClientPresence, qc]);
 
   return {
     recordUserActivity,

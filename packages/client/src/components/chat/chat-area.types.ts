@@ -1,4 +1,5 @@
 import type { Message } from "@marinara-engine/shared";
+import type { AvatarCrop, LegacyAvatarCrop } from "../../lib/utils";
 
 export type CharacterMap = Map<
   string,
@@ -14,7 +15,7 @@ export type CharacterMap = Map<
     nameColor?: string;
     dialogueColor?: string;
     boxColor?: string;
-    avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null;
+    avatarCrop?: AvatarCrop | LegacyAvatarCrop | null;
     conversationStatus?: "online" | "idle" | "dnd" | "offline";
     conversationActivity?: string;
   }
@@ -28,6 +29,7 @@ export type PersonaInfo = {
   appearance?: string;
   scenario?: string;
   avatarUrl?: string;
+  avatarCrop?: AvatarCrop | LegacyAvatarCrop | null;
   nameColor?: string;
   dialogueColor?: string;
   boxColor?: string;

@@ -11,7 +11,7 @@ import { X, MessageCircle } from "lucide-react";
 import { useChatStore } from "../../stores/chat.store";
 import { useGameModeStore } from "../../stores/game-mode.store";
 import { useUIStore } from "../../stores/ui.store";
-import { cn, getAvatarCropStyle } from "../../lib/utils";
+import { cn, getAvatarCropStyle, type AvatarCropValue } from "../../lib/utils";
 import { AnimatePresence, motion } from "framer-motion";
 
 export function ChatNotificationBubbles() {
@@ -145,7 +145,7 @@ function NotificationBubble({
     chatId: string;
     characterName: string;
     avatarUrl: string | null;
-    avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null;
+    avatarCrop?: AvatarCropValue | null;
     count: number;
   };
   onNavigate: () => void;

@@ -7,7 +7,7 @@ import { MessageSquare, BookOpen } from "lucide-react";
 import { useChats } from "../../hooks/use-chats";
 import { useCharacters } from "../../hooks/use-characters";
 import { useChatStore } from "../../stores/chat.store";
-import { cn, getAvatarCropStyle } from "../../lib/utils";
+import { cn, getAvatarCropStyle, type AvatarCropValue } from "../../lib/utils";
 import type { Chat } from "@marinara-engine/shared";
 
 const MODE_BADGE: Record<string, { icon: React.ReactNode; bg: string; label: string }> = {
@@ -34,10 +34,7 @@ export function RecentChats() {
   const setActiveChatId = useChatStore((s) => s.setActiveChatId);
 
   const charLookup = useMemo(() => {
-    const map = new Map<
-      string,
-      { name: string; avatarUrl: string | null; avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null }
-    >();
+    const map = new Map<string, { name: string; avatarUrl: string | null; avatarCrop?: AvatarCropValue | null }>();
     if (!allCharacters) return map;
     for (const char of allCharacters as Array<{ id: string; data: string; avatarPath: string | null }>) {
       try {
@@ -81,10 +78,7 @@ function RecentChatChip({
   onClick,
 }: {
   chat: Chat;
-  charLookup: Map<
-    string,
-    { name: string; avatarUrl: string | null; avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null }
-  >;
+  charLookup: Map<string, { name: string; avatarUrl: string | null; avatarCrop?: AvatarCropValue | null }>;
   onClick: () => void;
 }) {
   const mode = MODE_BADGE[chat.mode] ?? MODE_BADGE.conversation;
@@ -114,7 +108,7 @@ function RecentChatChip({
       {/* Small avatar with mode dot */}
       <div className="relative flex-shrink-0">
         {firstAvatar?.avatarUrl ? (
-          <span className="block h-5 w-5 overflow-hidden rounded-md">
+          <span className="relative block h-5 w-5 overflow-hidden rounded-md">
             <img
               src={firstAvatar.avatarUrl}
               alt={firstAvatar.name}

@@ -1515,6 +1515,7 @@ export async function spritesRoutes(app: FastifyInstance) {
               referenceImage: resolvedRefs[0],
               referenceImages: resolvedRefs.length > 1 ? resolvedRefs : undefined,
               transparentBackground: nativeTransparentPng,
+              imageEndpointId: conn.imageEndpointId || undefined,
               comfyWorkflow: conn.comfyuiWorkflow || undefined,
               imageDefaults,
             });
@@ -1572,6 +1573,7 @@ export async function spritesRoutes(app: FastifyInstance) {
         referenceImage: resolvedRefs[0],
         referenceImages: resolvedRefs.length > 1 ? resolvedRefs : undefined,
         transparentBackground: nativeTransparentPng,
+        imageEndpointId: conn.imageEndpointId || undefined,
         comfyWorkflow: conn.comfyuiWorkflow || undefined,
         imageDefaults,
       });

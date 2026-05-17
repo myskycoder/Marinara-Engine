@@ -6,6 +6,8 @@
 // The active chat's autonomous messaging is handled by ConversationView.
 
 import { useEffect, useRef } from "react";
+import type { Chat } from "@marinara-engine/shared";
+import type { AvatarCropValue } from "../lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api } from "../lib/api-client";
@@ -102,8 +104,17 @@ export function useBackgroundAutonomousPolling() {
         }
       });
 
+      const userStatus = useUIStore.getState().userStatus;
+
       // Don't trigger autonomous messages when user is DND
-      if (useUIStore.getState().userStatus === "dnd" || backgroundChats.length === 0) {
+      if (userStatus === "dnd" || backgroundChats.length === 0) {
+        if (userStatus === "dnd" && backgroundChats.length > 0) {
+          await Promise.allSettled(
+            backgroundChats.map((chat) =>
+              api.post("/conversation/activity/presence", { chatId: chat.id, userStatus }).catch(() => {}),
+            ),
+          );
+        }
         schedulePoll();
         return;
       }
@@ -114,7 +125,10 @@ export function useBackgroundAutonomousPolling() {
         if (useChatStore.getState().abortControllers.has(chat.id)) continue;
 
         try {
-          const result = await api.post<AutonomousCheckResult>("/conversation/autonomous/check", { chatId: chat.id });
+          const result = await api.post<AutonomousCheckResult>("/conversation/autonomous/check", {
+            chatId: chat.id,
+            userStatus,
+          });
 
           if (result.shouldTrigger && result.characterIds.length > 0) {
             const characterId = result.characterIds[0]!;
@@ -155,11 +169,20 @@ export function useBackgroundAutonomousPolling() {
                 // message isn't there even though it was saved.
                 qc.resetQueries({ queryKey: chatKeys.messages(chat.id) });
                 qc.invalidateQueries({ queryKey: characterKeys.list() });
+                void api
+                  .post<Chat>(`/chats/${chat.id}/autonomous-unread`, { characterId })
+                  .then((updatedChat) => {
+                    qc.setQueryData(chatKeys.detail(chat.id), updatedChat);
+                    qc.invalidateQueries({ queryKey: chatKeys.list() });
+                  })
+                  .catch(() => {
+                    /* persistence is best-effort; keep the local notification */
+                  });
 
                 // Resolve character name for the notification
                 let charName = "Someone";
                 let charAvatar: string | null = null;
-                let charAvatarCrop: { zoom: number; offsetX: number; offsetY: number } | null = null;
+                let charAvatarCrop: AvatarCropValue | null = null;
                 try {
                   // Find the triggering character's name
                   const charRow = await api.get<RawCharacter>(`/characters/${characterId}`);

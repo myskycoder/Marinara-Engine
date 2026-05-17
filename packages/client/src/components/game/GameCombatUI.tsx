@@ -10,7 +10,15 @@
 // - Status effect icons
 // - Victory / defeat overlays
 // ──────────────────────────────────────────────
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import { cn } from "../../lib/utils";
 import { audioManager } from "../../lib/game-audio";
 import { getOrCreateCachedTTSAudioBlob } from "../../lib/tts-audio-cache";
@@ -29,6 +37,8 @@ import type {
   CombatDialogueCue,
   CombatItemEffect,
   CombatMechanic,
+  CombatSkill,
+  CombatStatus,
   PartyDialogueLine,
   TTSConfig,
 } from "@marinara-engine/shared";
@@ -47,6 +57,10 @@ import {
   SkullIcon,
   ScrollText,
   X,
+  Pause,
+  Play,
+  RotateCcw,
+  VolumeX,
 } from "lucide-react";
 
 // `combatant.sprite` is populated either from a real avatar URL (player party,
@@ -56,6 +70,9 @@ import {
 // shape-tagged value so the renderer picks `<img>`, an emoji glyph, or the
 // initials fallback instead of stuffing free text into `<img src>`.
 type SpriteKind = { kind: "url"; value: string } | { kind: "emoji"; value: string } | { kind: "none" };
+
+type CombatSkillType = NonNullable<Combatant["skills"]>[number]["type"];
+type CombatStatusStat = NonNullable<Combatant["statusEffects"]>[number]["stat"];
 
 function resolveSpriteKind(sprite: string | null | undefined): SpriteKind {
   if (!sprite) return { kind: "none" };
@@ -68,6 +85,221 @@ function resolveSpriteKind(sprite: string | null | undefined): SpriteKind {
     return { kind: "emoji", value: trimmed };
   }
   return { kind: "none" };
+}
+
+function stringFromUnknown(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed || undefined;
+  }
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return (
+      stringFromUnknown(record.name) ??
+      stringFromUnknown(record.label) ??
+      stringFromUnknown(record.id) ??
+      stringFromUnknown(record.type)
+    );
+  }
+  return undefined;
+}
+
+function numberFromUnknown(value: unknown, fallback: number): number {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function normalizeCombatSkillType(value: unknown): CombatSkillType {
+  return value === "heal" || value === "buff" || value === "debuff" ? value : "attack";
+}
+
+function normalizeCombatStatusStat(value: unknown): CombatStatusStat {
+  return value === "attack" || value === "defense" || value === "speed" || value === "hp" ? value : "hp";
+}
+
+function sanitizeCombatSkills(skills: unknown): Combatant["skills"] {
+  if (!Array.isArray(skills)) return undefined;
+  const sanitized: CombatSkill[] = [];
+  for (const [index, raw] of skills.entries()) {
+    if (!raw || typeof raw !== "object") continue;
+    const skill = raw as Record<string, unknown>;
+    const name = stringFromUnknown(skill.name);
+    if (!name) continue;
+    const next: CombatSkill = {
+      id: stringFromUnknown(skill.id) ?? `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${index}`,
+      name,
+      type: normalizeCombatSkillType(skill.type),
+      mpCost: Math.max(0, numberFromUnknown(skill.mpCost, 0)),
+      power: Math.max(0.1, numberFromUnknown(skill.power, 1)),
+    };
+    const description = stringFromUnknown(skill.description);
+    if (description) next.description = description;
+    if (typeof skill.cooldown === "number" && Number.isFinite(skill.cooldown)) next.cooldown = skill.cooldown;
+    const element = stringFromUnknown(skill.element);
+    if (element) next.element = element;
+    const statusEffect = stringFromUnknown(skill.statusEffect);
+    if (statusEffect) next.statusEffect = statusEffect;
+    sanitized.push(next);
+  }
+  return sanitized.length > 0 ? sanitized : undefined;
+}
+
+function sanitizeCombatStatusEffects(statusEffects: unknown): Combatant["statusEffects"] {
+  if (!Array.isArray(statusEffects)) return undefined;
+  const sanitized = statusEffects
+    .map((raw) => {
+      if (!raw || typeof raw !== "object") return null;
+      const effect = raw as Record<string, unknown>;
+      const name = stringFromUnknown(effect.name);
+      if (!name) return null;
+      return {
+        name,
+        modifier: numberFromUnknown(effect.modifier, 0),
+        stat: normalizeCombatStatusStat(effect.stat),
+        turnsLeft: Math.max(1, Math.floor(numberFromUnknown(effect.turnsLeft, 1))),
+      };
+    })
+    .filter((effect): effect is NonNullable<Combatant["statusEffects"]>[number] => !!effect);
+  return sanitized.length > 0 ? sanitized : undefined;
+}
+
+function sanitizeElementAura(elementAura: unknown): Combatant["elementAura"] | undefined {
+  if (elementAura == null) return elementAura as null | undefined;
+  if (!elementAura || typeof elementAura !== "object") return undefined;
+  const aura = elementAura as Record<string, unknown>;
+  const element = stringFromUnknown(aura.element);
+  const sourceId = stringFromUnknown(aura.sourceId);
+  if (!element || !sourceId) return undefined;
+  return {
+    element,
+    gauge: numberFromUnknown(aura.gauge, 1),
+    sourceId,
+  };
+}
+
+function sanitizeCombatItemEffect(effect: unknown): CombatItemEffect | undefined {
+  if (!effect || typeof effect !== "object") return undefined;
+  const raw = effect as Record<string, unknown>;
+  const name = stringFromUnknown(raw.name);
+  if (!name) return undefined;
+  const target =
+    raw.target === "self" || raw.target === "ally" || raw.target === "enemy" || raw.target === "any"
+      ? raw.target
+      : "any";
+  const type =
+    raw.type === "heal" ||
+    raw.type === "damage" ||
+    raw.type === "buff" ||
+    raw.type === "debuff" ||
+    raw.type === "status" ||
+    raw.type === "utility"
+      ? raw.type
+      : "utility";
+  const status =
+    raw.status && typeof raw.status === "object"
+      ? (() => {
+          const rawStatus = raw.status as Record<string, unknown>;
+          const statusName = stringFromUnknown(rawStatus.name);
+          if (!statusName) return undefined;
+          const status: CombatStatus = {
+            name: statusName,
+            emoji: stringFromUnknown(rawStatus.emoji) ?? "",
+            duration: Math.max(1, Math.floor(numberFromUnknown(rawStatus.duration, 2))),
+          };
+          if (typeof rawStatus.modifier === "number" && Number.isFinite(rawStatus.modifier)) {
+            status.modifier = rawStatus.modifier;
+          }
+          if (
+            rawStatus.stat === "attack" ||
+            rawStatus.stat === "defense" ||
+            rawStatus.stat === "speed" ||
+            rawStatus.stat === "hp"
+          ) {
+            status.stat = rawStatus.stat;
+          }
+          return status;
+        })()
+      : undefined;
+  return {
+    name,
+    target,
+    type,
+    description: stringFromUnknown(raw.description) ?? name,
+    power: typeof raw.power === "number" && Number.isFinite(raw.power) ? raw.power : undefined,
+    element: stringFromUnknown(raw.element),
+    status,
+    consumes: typeof raw.consumes === "boolean" ? raw.consumes : undefined,
+  };
+}
+
+function sanitizeCombatMechanics(mechanics: unknown): CombatMechanic[] | undefined {
+  if (!Array.isArray(mechanics)) return undefined;
+  const sanitized: CombatMechanic[] = [];
+  for (const raw of mechanics) {
+    if (!raw || typeof raw !== "object") continue;
+    const mechanic = raw as Record<string, unknown>;
+    const name = stringFromUnknown(mechanic.name);
+    const description = stringFromUnknown(mechanic.description);
+    if (!name || !description) continue;
+    const next: CombatMechanic = {
+      name,
+      description,
+      trigger:
+        mechanic.trigger === "round_interval" ||
+        mechanic.trigger === "hp_threshold" ||
+        mechanic.trigger === "on_hit" ||
+        mechanic.trigger === "on_attack" ||
+        mechanic.trigger === "passive"
+          ? mechanic.trigger
+          : "passive",
+    };
+    const ownerName = stringFromUnknown(mechanic.ownerName);
+    if (ownerName) next.ownerName = ownerName;
+    if (typeof mechanic.interval === "number" && Number.isFinite(mechanic.interval)) next.interval = mechanic.interval;
+    if (typeof mechanic.hpThreshold === "number" && Number.isFinite(mechanic.hpThreshold)) {
+      next.hpThreshold = mechanic.hpThreshold;
+    }
+    const counterplay = stringFromUnknown(mechanic.counterplay);
+    if (counterplay) next.counterplay = counterplay;
+    if (
+      mechanic.effectType === "damage_all" ||
+      mechanic.effectType === "damage_one" ||
+      mechanic.effectType === "buff_self" ||
+      mechanic.effectType === "debuff_party" ||
+      mechanic.effectType === "status_party" ||
+      mechanic.effectType === "status_enemy"
+    ) {
+      next.effectType = mechanic.effectType;
+    }
+    if (typeof mechanic.power === "number" && Number.isFinite(mechanic.power)) next.power = mechanic.power;
+    const element = stringFromUnknown(mechanic.element);
+    if (element) next.element = element;
+    const status = sanitizeCombatItemEffect({ name, target: "any", type: "status", status: mechanic.status })?.status;
+    if (status) next.status = status;
+    sanitized.push(next);
+  }
+  return sanitized.length > 0 ? sanitized : undefined;
+}
+
+function sanitizeCombatantForRound(combatant: Combatant): Omit<Combatant, "sprite"> {
+  return {
+    id: stringFromUnknown(combatant.id) ?? combatant.id,
+    name: stringFromUnknown(combatant.name) ?? combatant.name,
+    hp: numberFromUnknown(combatant.hp, 0),
+    maxHp: Math.max(1, numberFromUnknown(combatant.maxHp, 1)),
+    mp: combatant.mp == null ? undefined : numberFromUnknown(combatant.mp, 0),
+    maxMp: combatant.maxMp == null ? undefined : Math.max(0, numberFromUnknown(combatant.maxMp, 0)),
+    attack: Math.max(1, numberFromUnknown(combatant.attack, 1)),
+    defense: Math.max(0, numberFromUnknown(combatant.defense, 0)),
+    speed: Math.max(0, numberFromUnknown(combatant.speed, 0)),
+    level: Math.max(1, numberFromUnknown(combatant.level, 1)),
+    side: combatant.side,
+    skills: sanitizeCombatSkills(combatant.skills),
+    statusEffects: sanitizeCombatStatusEffects(combatant.statusEffects),
+    element: stringFromUnknown(combatant.element),
+    elementAura: sanitizeElementAura(combatant.elementAura),
+  };
 }
 
 // Mobile layout breakpoint. Uses Tailwind's `sm` boundary so the existing
@@ -327,6 +559,39 @@ function normalizeCombatCueName(value?: string): string {
   return (value ?? "").trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
 }
 
+function buildCombatDialogueLineKey(line: PartyDialogueLine): string {
+  return [
+    normalizeCombatCueName(line.character),
+    line.type,
+    normalizeCombatCueName(line.target),
+    line.expression ?? "",
+    line.content.trim(),
+  ].join("\u0001");
+}
+
+function findDialogueCombatant(
+  line: PartyDialogueLine,
+  party: Combatant[],
+  enemies: Combatant[],
+): { combatant: Combatant; side: "player" | "enemy" } | null {
+  const speakerKey = normalizeCombatCueName(line.character);
+  if (!speakerKey) return null;
+
+  const partyMatch = party.find(
+    (combatant) =>
+      normalizeCombatCueName(combatant.name) === speakerKey || normalizeCombatCueName(combatant.id) === speakerKey,
+  );
+  if (partyMatch) return { combatant: partyMatch, side: "player" };
+
+  const enemyMatch = enemies.find(
+    (combatant) =>
+      normalizeCombatCueName(combatant.name) === speakerKey || normalizeCombatCueName(combatant.id) === speakerKey,
+  );
+  if (enemyMatch) return { combatant: enemyMatch, side: "enemy" };
+
+  return null;
+}
+
 function combatCueToPartyLine(cue: CombatDialogueCue): PartyDialogueLine {
   return {
     character: cue.speaker,
@@ -394,6 +659,10 @@ export function GameCombatUI({
     narration ? [{ id: "combat-start", text: narration, tone: "system" }] : [],
   );
   const [combatVoiceVersion, setCombatVoiceVersion] = useState(0);
+  const [combatVoicePlaying, setCombatVoicePlaying] = useState(false);
+  const [combatVoicePaused, setCombatVoicePaused] = useState(false);
+  const [lastCombatVoiceKeys, setLastCombatVoiceKeys] = useState<string[]>([]);
+  const [dismissedCombatDialogueKeys, setDismissedCombatDialogueKeys] = useState<Set<string>>(() => new Set());
 
   const combatRound = useCombatRound();
   const { data: ttsConfig } = useTTSConfig();
@@ -466,6 +735,55 @@ export function GameCombatUI({
     return [...combatDialogue, ...cueLines].filter((line) => line.content.trim() && line.type !== "action");
   }, [animatingActionIndex, combatDialogue, combatDialogueCues, enemies, party, phase, round, roundResult]);
 
+  useEffect(() => {
+    const visibleKeys = new Set(visibleCombatDialogue.map(buildCombatDialogueLineKey));
+    setDismissedCombatDialogueKeys((previous) => {
+      if (previous.size === 0) return previous;
+
+      let changed = false;
+      const next = new Set<string>();
+      for (const key of previous) {
+        if (visibleKeys.has(key)) {
+          next.add(key);
+        } else {
+          changed = true;
+        }
+      }
+
+      return changed ? next : previous;
+    });
+  }, [visibleCombatDialogue]);
+
+  const dismissCombatDialogueLine = useCallback((line: PartyDialogueLine) => {
+    const key = buildCombatDialogueLineKey(line);
+    setDismissedCombatDialogueKeys((previous) => {
+      if (previous.has(key)) return previous;
+      const next = new Set(previous);
+      next.add(key);
+      return next;
+    });
+  }, []);
+
+  const combatDialogueLayout = useMemo(() => {
+    const byCombatantId = new Map<string, PartyDialogueLine[]>();
+    const unanchored: PartyDialogueLine[] = [];
+
+    for (const line of visibleCombatDialogue) {
+      if (dismissedCombatDialogueKeys.has(buildCombatDialogueLineKey(line))) continue;
+
+      const match = findDialogueCombatant(line, party, enemies);
+      if (!match) {
+        unanchored.push(line);
+        continue;
+      }
+
+      const existing = byCombatantId.get(match.combatant.id) ?? [];
+      byCombatantId.set(match.combatant.id, [...existing, line].slice(-2));
+    }
+
+    return { byCombatantId, unanchored: unanchored.slice(-3) };
+  }, [dismissedCombatDialogueKeys, enemies, party, visibleCombatDialogue]);
+
   const voicedCombatSpeakerSet = useMemo(
     () => new Set(voicedCombatSpeakerNames.map(normalizeTTSCharacterName).filter(Boolean)),
     [voicedCombatSpeakerNames],
@@ -507,6 +825,8 @@ export function GameCombatUI({
       combatVoiceAudioRef.current.onerror = null;
       combatVoiceAudioRef.current = null;
     }
+    setCombatVoicePlaying(false);
+    setCombatVoicePaused(false);
   }, []);
 
   const playCombatVoiceKeys = useCallback(
@@ -517,8 +837,11 @@ export function GameCombatUI({
       });
       if (playableKeys.length === 0) return;
 
+      audioManager.unlock();
       stopCombatVoicePlayback();
       const sequence = ++combatVoiceSequenceRef.current;
+      setLastCombatVoiceKeys(playableKeys);
+      setCombatVoicePaused(false);
       let keyIndex = 0;
       let urlIndex = 0;
 
@@ -527,6 +850,8 @@ export function GameCombatUI({
         const key = playableKeys[keyIndex];
         if (!key) {
           combatVoiceAudioRef.current = null;
+          setCombatVoicePlaying(false);
+          setCombatVoicePaused(false);
           return;
         }
 
@@ -547,9 +872,12 @@ export function GameCombatUI({
         }
 
         const audio = new Audio(url);
-        audio.volume = normalizedGameVoiceVolume;
+        audio.preload = "auto";
+        audioManager.setMediaElementVolume(audio, normalizedGameVoiceVolume);
         audio.muted = normalizedGameVoiceVolume <= 0;
         combatVoiceAudioRef.current = audio;
+        setCombatVoicePlaying(true);
+        setCombatVoicePaused(false);
         audio.onended = () => {
           if (combatVoiceSequenceRef.current !== sequence || combatVoiceAudioRef.current !== audio) return;
           urlIndex += 1;
@@ -558,10 +886,14 @@ export function GameCombatUI({
         audio.onerror = () => {
           if (combatVoiceSequenceRef.current !== sequence || combatVoiceAudioRef.current !== audio) return;
           combatVoiceAudioRef.current = null;
+          setCombatVoicePlaying(false);
+          setCombatVoicePaused(false);
         };
         audio.play().catch(() => {
           if (combatVoiceSequenceRef.current !== sequence || combatVoiceAudioRef.current !== audio) return;
           combatVoiceAudioRef.current = null;
+          setCombatVoicePlaying(false);
+          setCombatVoicePaused(false);
         });
       };
 
@@ -570,9 +902,39 @@ export function GameCombatUI({
     [normalizedGameVoiceVolume, stopCombatVoicePlayback],
   );
 
+  const playableCombatVoiceKeys = combatVoiceLines
+    .filter((line) => {
+      const entry = combatVoiceCacheRef.current.get(line.voiceKey);
+      return entry?.status === "ready" && entry.urls.length > 0;
+    })
+    .map((line) => line.voiceKey);
+
+  const pauseCombatVoicePlayback = useCallback(() => {
+    if (!combatVoiceAudioRef.current || !combatVoicePlaying || combatVoicePaused) return;
+    combatVoiceAudioRef.current.pause();
+    setCombatVoicePaused(true);
+  }, [combatVoicePaused, combatVoicePlaying]);
+
+  const resumeCombatVoicePlayback = useCallback(() => {
+    const audio = combatVoiceAudioRef.current;
+    if (!audio || !combatVoicePlaying || !combatVoicePaused) return;
+    setCombatVoicePaused(false);
+    void audio.play().catch(() => {
+      if (combatVoiceAudioRef.current !== audio) return;
+      combatVoiceAudioRef.current = null;
+      setCombatVoicePlaying(false);
+      setCombatVoicePaused(false);
+    });
+  }, [combatVoicePaused, combatVoicePlaying]);
+
+  const restartCombatVoicePlayback = useCallback(() => {
+    const keys = lastCombatVoiceKeys.length > 0 ? lastCombatVoiceKeys : playableCombatVoiceKeys;
+    if (keys.length > 0) playCombatVoiceKeys(keys);
+  }, [lastCombatVoiceKeys, playableCombatVoiceKeys, playCombatVoiceKeys]);
+
   useEffect(() => {
     if (!combatVoiceAudioRef.current) return;
-    combatVoiceAudioRef.current.volume = normalizedGameVoiceVolume;
+    audioManager.setMediaElementVolume(combatVoiceAudioRef.current, normalizedGameVoiceVolume);
     combatVoiceAudioRef.current.muted = normalizedGameVoiceVolume <= 0;
   }, [normalizedGameVoiceVolume]);
 
@@ -668,6 +1030,54 @@ export function GameCombatUI({
       cached.clear();
     };
   }, [stopCombatVoicePlayback]);
+
+  const combatVoiceControls =
+    playableCombatVoiceKeys.length > 0 || combatVoicePlaying ? (
+      <div className="inline-flex items-center gap-0.5 rounded-full border border-white/10 bg-black/45 p-0.5 shadow-lg backdrop-blur-md">
+        {combatVoicePlaying ? (
+          <>
+            <button
+              type="button"
+              onClick={combatVoicePaused ? resumeCombatVoicePlayback : pauseCombatVoicePlayback}
+              className="inline-flex h-6 w-6 items-center justify-center rounded-full text-sky-100 transition-colors hover:bg-white/10"
+              title={combatVoicePaused ? "Resume combat voice-over" : "Pause combat voice-over"}
+              aria-label={combatVoicePaused ? "Resume combat voice-over" : "Pause combat voice-over"}
+            >
+              {combatVoicePaused ? <Play size={12} /> : <Pause size={12} />}
+            </button>
+            <button
+              type="button"
+              onClick={restartCombatVoicePlayback}
+              className="inline-flex h-6 w-6 items-center justify-center rounded-full text-sky-100 transition-colors hover:bg-white/10"
+              title="Restart combat voice-over"
+              aria-label="Restart combat voice-over"
+            >
+              <RotateCcw size={12} />
+            </button>
+            <button
+              type="button"
+              onClick={stopCombatVoicePlayback}
+              className="inline-flex h-6 w-6 items-center justify-center rounded-full text-sky-100 transition-colors hover:bg-white/10"
+              title="Stop combat voice-over"
+              aria-label="Stop combat voice-over"
+            >
+              <VolumeX size={12} />
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            onClick={() => playCombatVoiceKeys(playableCombatVoiceKeys)}
+            className="inline-flex h-6 w-6 items-center justify-center rounded-full text-white/60 transition-colors hover:bg-white/10 hover:text-sky-100 disabled:cursor-not-allowed disabled:opacity-40"
+            title="Play combat voice-over"
+            aria-label="Play combat voice-over"
+            disabled={playableCombatVoiceKeys.length === 0}
+          >
+            <Play size={12} />
+          </button>
+        )}
+      </div>
+    ) : null;
 
   useEffect(() => {
     setParty(initialParty);
@@ -973,28 +1383,13 @@ export function GameCombatUI({
       combatRound.mutate(
         {
           chatId,
-          combatants: allCombatants
-            .filter((c) => c.hp > 0)
-            .map((c) => ({
-              id: c.id,
-              name: c.name,
-              hp: c.hp,
-              maxHp: c.maxHp,
-              mp: c.mp,
-              maxMp: c.maxMp,
-              attack: c.attack,
-              defense: c.defense,
-              speed: c.speed,
-              level: c.level,
-              side: c.side,
-              skills: c.skills,
-              statusEffects: c.statusEffects,
-              element: c.element,
-              elementAura: c.elementAura,
-            })),
+          combatants: allCombatants.filter((c) => c.hp > 0).map((c) => sanitizeCombatantForRound(c)),
           round,
-          playerAction,
-          mechanics: combatMechanics,
+          playerAction:
+            playerAction.type === "item"
+              ? { ...playerAction, itemEffect: sanitizeCombatItemEffect(playerAction.itemEffect) }
+              : playerAction,
+          mechanics: sanitizeCombatMechanics(combatMechanics),
         },
         {
           onSuccess: (data) => {
@@ -1229,7 +1624,7 @@ export function GameCombatUI({
           </div>
         </div>
 
-        {/* Middle: scene area (animating narration, victory/defeat overlay, dialogue toast) */}
+        {/* Middle: touch battle stage with anchored dialogue bubbles */}
         <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
           {phase === "animating" && roundResult && animatingActionIndex >= 0 && (
             <div className="pointer-events-none absolute inset-x-2 top-2 z-10 rounded-lg border border-white/10 bg-black/75 px-3 py-2 backdrop-blur-md">
@@ -1244,32 +1639,76 @@ export function GameCombatUI({
                 : "Resolving actions..."}
             </div>
           )}
-          {/* Latest dialogue cue floats as a toast */}
-          {visibleCombatDialogue.length > 0 && phase !== "intro" && phase !== "victory" && phase !== "defeat" && (
-            <div className="pointer-events-none absolute inset-x-2 bottom-2 z-10 max-h-[35%] space-y-1 overflow-hidden">
-              {visibleCombatDialogue.slice(-2).map((line, index) => {
-                const isEnemyLine = !voicedCombatSpeakerSet.has(normalizeTTSCharacterName(line.character));
-                return (
-                  <div
-                    key={`mobile-cue-${line.character}-${line.type}-${index}-${line.content.slice(0, 16)}`}
-                    className={cn(
-                      "game-combat-action-bark mx-auto w-fit max-w-full rounded-xl border px-2.5 py-1.5 shadow-lg backdrop-blur-md animate-party-slide-in",
-                      isEnemyLine
-                        ? "border-red-300/20 bg-red-950/60 text-red-50/85"
-                        : "border-sky-300/20 bg-sky-950/60 text-sky-50/90",
-                    )}
-                  >
-                    <div className="flex items-center gap-1">
-                      <span className={cn("text-[0.6rem] font-bold", isEnemyLine ? "text-red-200" : "text-sky-200")}>
-                        {line.character}
-                      </span>
-                    </div>
-                    <p className="mt-0.5 break-words text-xs leading-snug [overflow-wrap:anywhere]">{line.content}</p>
-                  </div>
-                );
-              })}
+
+          <div className="relative z-0 flex min-h-0 flex-1 flex-col justify-between gap-2 overflow-hidden px-2 py-2">
+            <div className="flex min-h-0 flex-1 flex-wrap content-start items-start justify-center gap-1.5 overflow-visible pt-14">
+              {enemies.map((enemy) => (
+                <CombatantCard
+                  key={`stage-${enemy.id}`}
+                  combatant={enemy}
+                  side="enemy"
+                  isTargetable={phase === "target-select" && selectingEnemyTarget}
+                  isActive={turnOrder[0]?.id === enemy.id && phase === "animating"}
+                  onSelect={() => handleTargetSelect(enemy.id)}
+                  damagePopups={damagePopups.filter((p) => p.targetId === enemy.id)}
+                  dialogueLines={combatDialogueLayout.byCombatantId.get(enemy.id)}
+                  onDismissDialogue={dismissCombatDialogueLine}
+                  compact
+                />
+              ))}
             </div>
-          )}
+
+            <div className="flex shrink-0 flex-wrap items-end justify-center gap-1.5 overflow-visible pb-1">
+              {party.map((member, i) => (
+                <CombatantCard
+                  key={`stage-${member.id}`}
+                  combatant={member}
+                  side="player"
+                  isTargetable={phase === "target-select" && selectingAllyTarget}
+                  isActive={
+                    (phase === "player-turn" && i === activePlayerIndex) ||
+                    (turnOrder[0]?.id === member.id && phase === "animating")
+                  }
+                  onSelect={
+                    phase === "target-select" && selectingAllyTarget ? () => handleTargetSelect(member.id) : undefined
+                  }
+                  damagePopups={damagePopups.filter((p) => p.targetId === member.id)}
+                  dialogueLines={combatDialogueLayout.byCombatantId.get(member.id)}
+                  onDismissDialogue={dismissCombatDialogueLine}
+                  compact
+                />
+              ))}
+            </div>
+          </div>
+
+          {combatDialogueLayout.unanchored.length > 0 &&
+            phase !== "intro" &&
+            phase !== "victory" &&
+            phase !== "defeat" && (
+              <div className="pointer-events-none absolute inset-x-2 bottom-2 z-10 max-h-[35%] space-y-1 overflow-hidden">
+                {combatDialogueLayout.unanchored.map((line, index) => {
+                  const isEnemyLine = !voicedCombatSpeakerSet.has(normalizeTTSCharacterName(line.character));
+                  return (
+                    <div
+                      key={`mobile-cue-${line.character}-${line.type}-${index}-${line.content.slice(0, 16)}`}
+                      className={cn(
+                        "game-combat-action-bark mx-auto w-fit max-w-full rounded-xl border px-2.5 py-1.5 shadow-lg backdrop-blur-md animate-party-slide-in",
+                        isEnemyLine
+                          ? "border-red-300/20 bg-red-950/60 text-red-50/85"
+                          : "border-sky-300/20 bg-sky-950/60 text-sky-50/90",
+                      )}
+                    >
+                      <div className="flex items-center gap-1">
+                        <span className={cn("text-[0.6rem] font-bold", isEnemyLine ? "text-red-200" : "text-sky-200")}>
+                          {line.character}
+                        </span>
+                      </div>
+                      <p className="mt-0.5 break-words text-xs leading-snug [overflow-wrap:anywhere]">{line.content}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           {/* Victory / defeat overlays — full-screen on mobile, not buried in the bottom sheet */}
           {phase === "victory" && (
             <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-black/85 px-6 text-center animate-in fade-in duration-500">
@@ -1726,7 +2165,11 @@ export function GameCombatUI({
               )}
               {openDrawer === "mechanics" && <CombatMechanicsPanel mechanics={combatMechanics} round={round} />}
               {openDrawer === "cues" && (
-                <CombatDialoguePanel lines={visibleCombatDialogue} voiceableSpeakers={voicedCombatSpeakerSet} />
+                <CombatDialoguePanel
+                  lines={visibleCombatDialogue}
+                  voiceableSpeakers={voicedCombatSpeakerSet}
+                  voiceControls={combatVoiceControls}
+                />
               )}
               {openDrawer === "log" && (
                 <div className="space-y-1 pr-1">
@@ -1795,7 +2238,7 @@ export function GameCombatUI({
         )}
 
         {/* ── Enemy area (top section) ── */}
-        <div className="relative flex min-h-0 flex-1 items-start justify-center gap-2 overflow-hidden px-3 pt-20 sm:px-6 sm:pt-20 md:pt-24 lg:gap-4 lg:pt-20 xl:gap-6 xl:pt-6">
+        <div className="relative flex min-h-0 flex-1 flex-wrap content-start items-start justify-center gap-2 overflow-visible px-3 pt-20 sm:px-6 sm:pt-20 md:pt-24 lg:gap-3 lg:pt-20 xl:gap-4 xl:pt-6">
           {enemies.map((enemy) => (
             <CombatantCard
               key={enemy.id}
@@ -1805,12 +2248,14 @@ export function GameCombatUI({
               isActive={turnOrder[0]?.id === enemy.id && phase === "animating"}
               onSelect={() => handleTargetSelect(enemy.id)}
               damagePopups={damagePopups.filter((p) => p.targetId === enemy.id)}
+              dialogueLines={combatDialogueLayout.byCombatantId.get(enemy.id)}
+              onDismissDialogue={dismissCombatDialogueLine}
             />
           ))}
         </div>
 
         {/* ── Party area (bottom section) ── */}
-        <div className="relative flex shrink-0 items-end justify-center gap-2 overflow-hidden px-3 pb-3 sm:px-6 sm:pb-4 lg:gap-4 xl:gap-6">
+        <div className="relative flex shrink-0 flex-wrap items-end justify-center gap-2 overflow-visible px-3 pb-3 sm:px-6 sm:pb-4 lg:gap-3 xl:gap-4">
           {party.map((member, i) => (
             <CombatantCard
               key={member.id}
@@ -1825,14 +2270,29 @@ export function GameCombatUI({
                 phase === "target-select" && selectingAllyTarget ? () => handleTargetSelect(member.id) : undefined
               }
               damagePopups={damagePopups.filter((p) => p.targetId === member.id)}
+              dialogueLines={combatDialogueLayout.byCombatantId.get(member.id)}
+              onDismissDialogue={dismissCombatDialogueLine}
             />
           ))}
         </div>
       </div>
 
-      {visibleCombatDialogue.length > 0 && phase !== "intro" && (
-        <CombatDialoguePanel lines={visibleCombatDialogue} voiceableSpeakers={voicedCombatSpeakerSet} />
+      {combatDialogueLayout.unanchored.length > 0 && phase !== "intro" && (
+        <CombatDialoguePanel
+          lines={combatDialogueLayout.unanchored}
+          voiceableSpeakers={voicedCombatSpeakerSet}
+          voiceControls={combatVoiceControls}
+        />
       )}
+
+      {combatDialogueLayout.unanchored.length === 0 &&
+        visibleCombatDialogue.length > 0 &&
+        phase !== "intro" &&
+        combatVoiceControls && (
+          <div className="relative z-30 flex shrink-0 justify-end px-3 pb-1.5 sm:px-4 sm:pb-2">
+            {combatVoiceControls}
+          </div>
+        )}
 
       {combatMechanics.length > 0 && phase !== "intro" && (
         <CombatMechanicsPanel mechanics={combatMechanics} round={round} />
@@ -2281,12 +2741,15 @@ export function GameCombatUI({
 function CombatDialoguePanel({
   lines,
   voiceableSpeakers,
+  voiceControls,
 }: {
   lines: PartyDialogueLine[];
   voiceableSpeakers: Set<string>;
+  voiceControls?: ReactNode;
 }) {
   return (
     <div className="relative z-30 shrink-0 px-3 pb-1.5 sm:px-4 sm:pb-2">
+      {voiceControls && <div className="mb-1 flex justify-end">{voiceControls}</div>}
       <div className="max-h-[18svh] space-y-1.5 overflow-y-auto pr-1 sm:max-h-28">
         {lines.map((line, index) => {
           const isEnemyLine = !voiceableSpeakers.has(normalizeTTSCharacterName(line.character));
@@ -2377,6 +2840,9 @@ function CombatantCard({
   isActive,
   onSelect,
   damagePopups,
+  dialogueLines,
+  onDismissDialogue,
+  compact = false,
 }: {
   combatant: Combatant;
   side: "player" | "enemy";
@@ -2384,10 +2850,14 @@ function CombatantCard({
   isActive: boolean;
   onSelect?: () => void;
   damagePopups: DamagePopup[];
+  dialogueLines?: PartyDialogueLine[];
+  onDismissDialogue?: (line: PartyDialogueLine) => void;
+  compact?: boolean;
 }) {
   const hpPercent = combatant.maxHp > 0 ? (combatant.hp / combatant.maxHp) * 100 : 0;
   const mpPercent = combatant.maxMp && combatant.maxMp > 0 ? ((combatant.mp ?? 0) / combatant.maxMp) * 100 : null;
   const isKo = combatant.hp <= 0;
+  const canSelect = isTargetable && !isKo && !!onSelect;
 
   const hpColor = hpPercent > 60 ? "bg-emerald-500" : hpPercent > 25 ? "bg-amber-500" : "bg-red-500";
   const hpGlow =
@@ -2405,17 +2875,81 @@ function CombatantCard({
             : "hit"
     : null;
 
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!canSelect) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    onSelect?.();
+  };
+
   return (
-    <button
-      type="button"
-      onClick={onSelect}
-      disabled={!isTargetable || isKo}
+    <div
+      role={canSelect ? "button" : undefined}
+      tabIndex={canSelect ? 0 : undefined}
+      aria-disabled={!canSelect}
+      onClick={canSelect ? onSelect : undefined}
+      onKeyDown={handleKeyDown}
       className={cn(
-        "relative flex flex-col items-center rounded-2xl border border-transparent p-1 text-center transition-all duration-200",
+        "relative flex min-w-0 flex-col items-center rounded-2xl border border-transparent p-1 text-center transition-all duration-200",
+        compact ? "w-[clamp(4.25rem,24vw,5.5rem)]" : "w-[clamp(5rem,11vw,7.5rem)] max-w-[calc((100vw-3rem)/2)]",
         isTargetable && !isKo && "cursor-pointer border-amber-400/35 bg-amber-400/5",
         !isTargetable && "cursor-default",
       )}
     >
+      {dialogueLines && dialogueLines.length > 0 && onDismissDialogue && (
+        <div
+          className={cn(
+            "pointer-events-auto absolute bottom-full left-1/2 z-40 mb-2 flex -translate-x-1/2 flex-col items-center gap-1",
+            compact ? "w-[min(12rem,84vw)]" : "w-[min(15rem,78vw)]",
+          )}
+        >
+          {dialogueLines.slice(-2).map((line, index) => (
+            <button
+              key={`${buildCombatDialogueLineKey(line)}-${index}`}
+              type="button"
+              title="Dismiss dialogue"
+              onClick={(event) => {
+                event.stopPropagation();
+                onDismissDialogue(line);
+              }}
+              className={cn(
+                "game-combat-action-bark w-full rounded-xl border px-2.5 py-1.5 text-left shadow-lg backdrop-blur-md transition-colors animate-party-slide-in hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50",
+                side === "enemy"
+                  ? "border-red-300/25 bg-red-950/70 text-red-50/90"
+                  : "border-sky-300/25 bg-sky-950/70 text-sky-50/90",
+                isShoutedCombatDialogue(line) && "game-combat-action-bark--shout",
+              )}
+              style={{ animationDelay: `${index * 70}ms` }}
+            >
+              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                <span
+                  className={cn(
+                    "truncate text-[0.65rem] font-bold",
+                    side === "enemy" ? "text-red-200" : "text-sky-200",
+                  )}
+                >
+                  {line.character}
+                </span>
+                {line.expression && (
+                  <span className="rounded-full bg-white/10 px-1.5 py-0.5 text-[0.5rem] font-semibold uppercase tracking-wide text-white/55">
+                    {line.expression}
+                  </span>
+                )}
+              </div>
+              <p
+                className={cn(
+                  "mt-0.5 max-h-20 overflow-y-auto break-words text-xs leading-snug [overflow-wrap:anywhere]",
+                  line.type === "thought" && "italic opacity-80",
+                  line.type === "whisper" && "italic",
+                )}
+              >
+                {line.content}
+              </p>
+            </button>
+          ))}
+        </div>
+      )}
+
       {combatant.statusEffects && combatant.statusEffects.length > 0 && (
         <div className="pointer-events-none absolute -top-3 left-1/2 z-10 flex -translate-x-1/2 gap-1">
           {combatant.statusEffects.map((effect, i) => (
@@ -2444,7 +2978,8 @@ function CombatantCard({
       {/* Combatant sprite / avatar area */}
       <div
         className={cn(
-          "relative flex h-16 w-16 items-center justify-center rounded-xl border-2 transition-all duration-200 sm:h-20 sm:w-20 xl:h-24 xl:w-24",
+          "relative flex aspect-square items-center justify-center rounded-xl border-2 transition-all duration-200",
+          compact ? "w-[clamp(3rem,18vw,4.25rem)]" : "w-[clamp(3.75rem,8vw,6rem)]",
           isKo && "grayscale opacity-40",
           isTargetable &&
             !isKo &&
@@ -2463,10 +2998,10 @@ function CombatantCard({
           combatant={combatant}
           imageClassName="h-full w-full rounded-lg object-cover"
           textClassName={cn(
-            "text-xl font-bold sm:text-2xl xl:text-3xl",
+            compact ? "text-lg font-bold" : "text-xl font-bold sm:text-2xl xl:text-3xl",
             side === "enemy" ? "text-red-300/60" : "text-blue-300/60",
           )}
-          emojiClassName="text-2xl leading-none sm:text-3xl xl:text-4xl"
+          emojiClassName={compact ? "text-2xl leading-none" : "text-2xl leading-none sm:text-3xl xl:text-4xl"}
         />
 
         {/* KO overlay */}
@@ -2490,7 +3025,7 @@ function CombatantCard({
       </div>
 
       {/* Name + Level */}
-      <div className="mt-1.5 flex max-w-24 items-center gap-1.5 xl:max-w-28">
+      <div className={cn("mt-1.5 flex min-w-0 items-center gap-1", compact ? "max-w-[5rem]" : "max-w-[7rem]")}>
         <span
           className={cn("truncate text-[0.68rem] font-semibold sm:text-xs", isKo ? "text-white/30" : "text-white/90")}
         >
@@ -2502,7 +3037,7 @@ function CombatantCard({
       </div>
 
       {/* HP bar */}
-      <div className="mt-1 w-20 sm:w-24 xl:w-28">
+      <div className={cn("mt-1", compact ? "w-[clamp(3.75rem,22vw,5rem)]" : "w-[clamp(4.5rem,10vw,7rem)]")}>
         <div className="flex items-center gap-1">
           <Heart size={9} className={cn(isKo ? "text-white/20" : "text-red-400")} />
           <div className={cn("h-2 flex-1 overflow-hidden rounded-full bg-white/10", !isKo && `shadow-sm ${hpGlow}`)}>
@@ -2546,7 +3081,7 @@ function CombatantCard({
           {combatant.elementAura.element}
         </div>
       )}
-    </button>
+    </div>
   );
 }
 

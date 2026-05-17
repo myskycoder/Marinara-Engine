@@ -82,15 +82,17 @@ Each character in a Conversation chat has a **7-day × 24-hour availability grid
 - **User-editable** in the chat settings drawer — open the schedule editor, drag-fill cells, type custom activity strings.
 - **Regenerable** with global guidance preferences (e.g. `no characters past midnight`, `everyone is a college student`).
 
-Schedules influence **autonomous messaging timing** — a character whose schedule says they're `offline` won't reach out unprompted, even if autonomous messages are enabled. They're stored per-chat, so the same character can have different schedules in different conversations.
+Schedules add **routine-aware autonomous messaging timing**. When schedules are enabled, a character whose schedule says they're `offline` won't reach out unprompted, even if autonomous messages are enabled. When schedules are off or missing, autonomous messages still work from the character's talkativeness and your active/idle/DND status, without routine availability or busy-delay behavior. Schedules are stored per-chat, so the same character can have different routines in different conversations.
 
 ### Autonomous messages
 
 A toggle in the chat settings drawer (and in the quick-setup modal). When enabled, characters can send you messages **on their own** if you've been idle for a while. The Autonomous Messenger agent reads each character's personality and schedule, then triggers an unprompted message when:
 
 - The user has been inactive for a configured amount of time.
-- The character's schedule says they're online or idle (not offline or dnd).
+- The character is available according to their schedule, if schedules are enabled.
 - The character's personality fits reaching out (a chatty character will message sooner than a reserved one).
+
+Schedules are optional. Without schedules, chatty characters can still reach out based on talkativeness and whether your status is active or idle. If your status is DND, Marinara suppresses autonomous messages.
 
 Autonomous messages **default to ON** when you complete the quick-setup modal. Turn them off in the chat settings drawer if you want messages only when you initiate.
 
@@ -101,7 +103,7 @@ Conversation Mode supports characters sending you **selfies** — image-generati
 To enable:
 
 1. In the chat settings drawer, set a **Selfie Connection** (an image-generation provider — Stability AI, ComfyUI, AUTOMATIC1111, etc.).
-2. Optionally set a **Selfie Resolution** (default `512x768`).
+2. Optionally set a **Selfie Resolution** (default `896x1152`).
 3. Optionally edit per-character **selfie tags** — appearance prompts the character should always include in their selfies (e.g. specific clothing, settings, art style).
 
 Once configured, characters can send selfies as part of their messages, or you can ask them for one explicitly. Each selfie costs an image-generation API call.

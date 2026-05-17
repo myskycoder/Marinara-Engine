@@ -3,13 +3,13 @@
 // ──────────────────────────────────────────────
 import { X } from "lucide-react";
 import { useGameModeStore } from "../../stores/game-mode.store";
-import { getAvatarCropStyle } from "../../lib/utils";
+import { getAvatarCropStyle, type AvatarCropValue } from "../../lib/utils";
 
 interface PartyBarMember {
   id: string;
   name: string;
   avatarUrl?: string | null;
-  avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null;
+  avatarCrop?: AvatarCropValue | null;
   nameColor?: string;
   canRemove?: boolean;
 }
@@ -21,7 +21,7 @@ interface PartyBarCard {
   status?: string;
   level?: number;
   avatarUrl?: string | null;
-  avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null;
+  avatarCrop?: AvatarCropValue | null;
   stats?: Array<{ name: string; value: number; max?: number; color?: string }>;
   inventory?: Array<{ name: string; quantity?: number; location?: string }>;
   customFields?: Record<string, string>;
@@ -45,7 +45,7 @@ export function GamePartyBar({
   if (partyMembers.length === 0) return null;
 
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="scrollbar-hide flex max-w-full touch-pan-x items-center gap-1.5 overflow-x-auto px-0.5 py-1 [-webkit-overflow-scrolling:touch]">
       {partyMembers.map((member) => {
         const card = partyCards[member.id];
         const avatarSrc = card?.avatarUrl ?? member.avatarUrl;
@@ -56,11 +56,11 @@ export function GamePartyBar({
             <button
               type="button"
               onClick={() => openCharacterSheet(member.id)}
-              className="block"
+              className="block rounded-full focus:outline-none focus:ring-2 focus:ring-white/45"
               title={`${member.name} - Click to open character sheet`}
             >
               {avatarSrc ? (
-                <span className="block h-9 w-9 overflow-hidden rounded-full border-2 border-white/20 shadow-lg transition-colors group-hover:border-white/40">
+                <span className="relative block h-9 w-9 overflow-hidden rounded-full border-2 border-white/20 shadow-lg transition-colors group-hover:border-white/40">
                   <img
                     src={avatarSrc}
                     alt={member.name}

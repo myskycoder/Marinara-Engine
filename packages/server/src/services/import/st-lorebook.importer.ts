@@ -33,6 +33,8 @@ interface STWorldInfoEntry {
   position?: number | string;
   depth?: number;
   probability?: number | null;
+  useProbability?: boolean;
+  use_probability?: boolean;
   scanDepth?: number | null;
   matchWholeWords?: boolean | null;
   caseSensitive?: boolean | null;
@@ -186,7 +188,20 @@ function asNumber(value: unknown, fallback: number): number {
 }
 
 function asNullableNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+  const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : null;
+  return parsed !== null && Number.isFinite(parsed) ? parsed : null;
+}
+
+function asNullablePercentage(value: unknown): number | null {
+  const parsed = asNullableNumber(value);
+  if (parsed === null) return null;
+  return Math.max(0, Math.min(100, parsed));
+}
+
+function resolveProbability(entry: STWorldInfoEntry): number | null {
+  const useProbability = entry.useProbability ?? entry.use_probability;
+  if (useProbability === false) return null;
+  return asNullablePercentage(entry.probability);
 }
 
 function resolveSelectiveLogic(value: unknown): "and" | "or" | "not" {
@@ -390,7 +405,7 @@ export async function importSTLorebook(
       constant: entry.constant ?? false,
       selective: entry.selective ?? false,
       selectiveLogic: resolveSelectiveLogic(entry.selectiveLogic),
-      probability: asNullableNumber(entry.probability),
+      probability: resolveProbability(entry),
       scanDepth: asNullableNumber(entry.scanDepth ?? entry.scan_depth),
       matchWholeWords: resolvedMatchWholeWords,
       caseSensitive: resolvedCaseSensitive,

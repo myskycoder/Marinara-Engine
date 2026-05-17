@@ -40,7 +40,7 @@ import {
   Tag,
 } from "lucide-react";
 import { showConfirmDialog } from "../../lib/app-dialogs";
-import { cn } from "../../lib/utils";
+import { cn, getAvatarCropStyle, parseAvatarCropJson } from "../../lib/utils";
 import { HelpTooltip } from "../ui/HelpTooltip";
 import { api } from "../../lib/api-client";
 import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatDialog";
@@ -55,6 +55,8 @@ type PersonaRow = {
   backstory: string;
   appearance: string;
   avatarPath: string | null;
+  /** JSON-encoded AvatarCrop, or empty string when unset. */
+  avatarCrop?: string;
   isActive: string | boolean;
   createdAt: string;
   tags?: string;
@@ -683,9 +685,14 @@ export function PersonasPanel() {
                             if (!p) return null;
                             return (
                               <div key={pid} className="flex items-center gap-2 rounded-lg px-1 py-1 text-xs">
-                                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-400 to-teal-500 text-white">
+                                <div className="relative flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-gradient-to-br from-emerald-400 to-teal-500 text-white">
                                   {p.avatarPath ? (
-                                    <img src={p.avatarPath} alt="" className="h-full w-full rounded-lg object-cover" />
+                                    <img
+                                      src={p.avatarPath}
+                                      alt=""
+                                      className="h-full w-full rounded-lg object-cover"
+                                      style={getAvatarCropStyle(parseAvatarCropJson(p.avatarCrop))}
+                                    />
                                   ) : (
                                     <User size="0.625rem" />
                                   )}
@@ -798,16 +805,26 @@ export function PersonasPanel() {
                 className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-400 to-teal-500 text-white shadow-sm group/avatar"
                 title="Change avatar"
               >
-                {persona.avatarPath ? (
-                  <img
-                    src={persona.avatarPath}
-                    alt=""
-                    loading="lazy"
-                    className="h-full w-full rounded-xl object-cover"
-                  />
-                ) : (
-                  <User size="1rem" />
-                )}
+                {/* Inner clip wrapper — needed because new-format avatarCrop renders the
+                    <img> with position:absolute and dimensions larger than the container.
+                    The wrapper provides both `position:relative` (so the absolute img
+                    resolves here) and `overflow:hidden` (so the oversized img is clipped
+                    to the rounded-xl shape). The wrapper can't be the button itself
+                    because the active-indicator star and the camera-hover overlay live
+                    outside the avatar bounds via negative offsets / absolute inset-0. */}
+                <div className="relative h-full w-full overflow-hidden rounded-xl">
+                  {persona.avatarPath ? (
+                    <img
+                      src={persona.avatarPath}
+                      alt=""
+                      loading="lazy"
+                      className="h-full w-full rounded-xl object-cover"
+                      style={getAvatarCropStyle(parseAvatarCropJson(persona.avatarCrop))}
+                    />
+                  ) : (
+                    <User size="1rem" />
+                  )}
+                </div>
                 <div className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/40 opacity-0 transition-opacity group-hover/avatar:opacity-100">
                   <Camera size="0.75rem" className="text-white" />
                 </div>

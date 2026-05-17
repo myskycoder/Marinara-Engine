@@ -20,7 +20,8 @@ import {
 } from "../../hooks/use-ai-audit";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ADMIN_SECRET_STORAGE_KEY, api, getAdminSecretHeader } from "../../lib/api-client";
+import { ADMIN_SECRET_STORAGE_KEY, ApiError, api, getAdminSecretHeader } from "../../lib/api-client";
+import { chatBackgroundUrlToMetadata } from "../../lib/backgrounds";
 import { forceRefreshSpa } from "@/lib/browser-runtime";
 import React, { useRef, useState, useCallback, useEffect } from "react";
 import { toast } from "sonner";
@@ -41,11 +42,13 @@ import {
   Image,
   Trash2,
   Check,
+  ChevronDown,
   Loader2,
   Palette,
   Puzzle,
   CloudRain,
   FileCode2,
+  FileText,
   Power,
   PowerOff,
   Paintbrush,
@@ -63,6 +66,8 @@ import {
   RotateCcw,
   ExternalLink,
   ScrollText,
+  UserCheck,
+  WandSparkles,
 } from "lucide-react";
 import { useClearAllData, useExpungeData, useUpdateChatMetadata, type ExpungeScope } from "../../hooks/use-chats";
 import { useChatStore } from "../../stores/chat.store";
@@ -74,6 +79,15 @@ import { ConversationSoundSetting, ToggleSetting } from "./settings/SettingContr
 import { DraftNumberInput } from "../ui/DraftNumberInput";
 import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatDialog";
 import { inspectCharacterFilesForEmbeddedLorebooks } from "../../lib/character-import";
+
+type CustomFontFace = {
+  filename: string;
+  family: string;
+  url: string;
+  weight?: string;
+  style?: string;
+  unicodeRange?: string;
+};
 
 const TABS = [
   { id: "general", label: "General" },
@@ -443,12 +457,16 @@ function GeneralSettings() {
   const setTrimIncompleteModelOutput = useUIStore((s) => s.setTrimIncompleteModelOutput);
   const speechToTextEnabled = useUIStore((s) => s.speechToTextEnabled);
   const setSpeechToTextEnabled = useUIStore((s) => s.setSpeechToTextEnabled);
+  const chibiProfessorMariEnabled = useUIStore((s) => s.chibiProfessorMariEnabled);
+  const setChibiProfessorMariEnabled = useUIStore((s) => s.setChibiProfessorMariEnabled);
   const spotifyPlayerEnabled = useUIStore((s) => s.spotifyPlayerEnabled);
   const setSpotifyPlayerEnabled = useUIStore((s) => s.setSpotifyPlayerEnabled);
   const intuitiveSwipeNavigation = useUIStore((s) => s.intuitiveSwipeNavigation);
   const setIntuitiveSwipeNavigation = useUIStore((s) => s.setIntuitiveSwipeNavigation);
   const intuitiveSwipeRerollLatest = useUIStore((s) => s.intuitiveSwipeRerollLatest);
   const setIntuitiveSwipeRerollLatest = useUIStore((s) => s.setIntuitiveSwipeRerollLatest);
+  const editLastMessageOnArrowUp = useUIStore((s) => s.editLastMessageOnArrowUp);
+  const setEditLastMessageOnArrowUp = useUIStore((s) => s.setEditLastMessageOnArrowUp);
   const rescanGameAssets = useGameAssetStore((s) => s.rescanAssets);
   const assetFileRef = useRef<HTMLInputElement>(null);
   const [assetCategory, setAssetCategory] = useState<GameAssetCategoryId>("backgrounds");
@@ -554,6 +572,13 @@ function GeneralSettings() {
         checked={spotifyPlayerEnabled}
         onChange={setSpotifyPlayerEnabled}
         help="Shows a compact Spotify player in the top bar on desktop and as a draggable floating widget on mobile. Requires the Spotify DJ agent to be connected."
+      />
+
+      <ToggleSetting
+        label="Mini Mari surprise visits"
+        checked={chibiProfessorMariEnabled}
+        onChange={setChibiProfessorMariEnabled}
+        help="Allows the rare Chibi Professor Mari message to appear while scrolling. Turn this off if it gets in the way of settings or other workflows."
       />
 
       {/* Streaming Speed */}
@@ -735,7 +760,7 @@ function GeneralSettings() {
         label="Intuitive swipe navigation"
         checked={intuitiveSwipeNavigation}
         onChange={setIntuitiveSwipeNavigation}
-        help="In Conversation and Roleplay modes, use Left/Right Arrow on desktop or horizontal touch swipes on mobile to move between alternate generations on the latest assistant message. Up Arrow edits your last sent message (only when the chat input is empty)."
+        help="In Conversation and Roleplay modes, use Left/Right Arrow on desktop or horizontal touch swipes on mobile to move between alternate generations on the latest assistant message."
       />
 
       <div className={cn("pl-5 transition-opacity", intuitiveSwipeNavigation ? "" : "pointer-events-none opacity-45")}>
@@ -746,6 +771,13 @@ function GeneralSettings() {
           help="When intuitive swipes are enabled, pressing Right Arrow or swiping left on the newest swipe of the latest assistant message creates a new reroll."
         />
       </div>
+
+      <ToggleSetting
+        label="Up Arrow edits last message"
+        checked={editLastMessageOnArrowUp}
+        onChange={setEditLastMessageOnArrowUp}
+        help="In Conversation and Roleplay modes, press Up Arrow while the chat input is empty to open the most recent message in the chat for editing — whether it's yours or the AI's."
+      />
 
       <div className="rounded-xl bg-[var(--secondary)]/50 p-4 ring-1 ring-[var(--border)]">
         <div className="mb-3 flex flex-col gap-1">
@@ -896,6 +928,8 @@ function AppearanceSettings() {
   const setVisualTheme = useUIStore((s) => s.setVisualTheme);
   const chatBackground = useUIStore((s) => s.chatBackground);
   const setChatBackgroundRaw = useUIStore((s) => s.setChatBackground);
+  const chatBackgroundBlur = useUIStore((s) => s.chatBackgroundBlur);
+  const setChatBackgroundBlur = useUIStore((s) => s.setChatBackgroundBlur);
   const activeChatId = useChatStore((s) => s.activeChatId);
   const updateMeta = useUpdateChatMetadata();
   // Persist background changes to the active chat's metadata immediately so
@@ -907,8 +941,7 @@ function AppearanceSettings() {
     (url: string | null) => {
       setChatBackgroundRaw(url);
       if (!activeChatId) return;
-      const filename = url ? decodeURIComponent(url.replace(/^\/api\/backgrounds\/file\//, "")) : null;
-      updateMeta.mutate({ id: activeChatId, background: filename });
+      updateMeta.mutate({ id: activeChatId, background: chatBackgroundUrlToMetadata(url) });
     },
     [setChatBackgroundRaw, activeChatId, updateMeta],
   );
@@ -965,18 +998,29 @@ function AppearanceSettings() {
   const [draftStrokeColor, setDraftStrokeColor] = useState(textStrokeColor);
 
   // Custom fonts — query is pre-warmed in App.tsx, no fetch here
-  const { data: customFonts } = useQuery<{ filename: string; family: string; url: string }[]>({
+  const { data: customFonts } = useQuery<CustomFontFace[]>({
     queryKey: ["custom-fonts"],
     queryFn: () => api.get("/fonts"),
     staleTime: Infinity,
   });
+  const customFontOptions = React.useMemo(() => {
+    const seen = new Set<string>();
+    return (customFonts ?? []).filter((font) => {
+      const family = font.family.trim();
+      if (!family || seen.has(family)) return false;
+      seen.add(family);
+      return true;
+    });
+  }, [customFonts]);
 
   // Google Fonts download
   const [googleFontName, setGoogleFontName] = useState("");
   const queryClient = useQueryClient();
   const googleFontMutation = useMutation({
     mutationFn: (family: string) =>
-      api.post<{ filename: string; family: string; url: string }>("/fonts/google/download", { family }),
+      api.post<{ filename: string; family: string; url: string; files?: CustomFontFace[] }>("/fonts/google/download", {
+        family,
+      }),
     onSuccess: (data) => {
       toast.success(`Installed "${data.family}"`);
       setGoogleFontName("");
@@ -1054,7 +1098,7 @@ function AppearanceSettings() {
           className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]"
         >
           <option value="">Default (Inter)</option>
-          {customFonts?.map((f) => (
+          {customFontOptions.map((f) => (
             <option key={f.family} value={f.family}>
               {f.family}
             </option>
@@ -1655,7 +1699,7 @@ function AppearanceSettings() {
         <div className="flex items-center justify-between">
           <span className="text-xs font-medium inline-flex items-center gap-1">
             Chat Background{" "}
-            <HelpTooltip text="Upload a custom image to use as the background of the chat area. Supports JPG, PNG, and WebP. Remove to use the default background." />
+            <HelpTooltip text="Import one or more custom images, or choose from your game asset backgrounds. Supports JPG, PNG, GIF, WebP, and AVIF. Remove to use the default background." />
           </span>
           {chatBackground && (
             <button
@@ -1666,11 +1710,52 @@ function AppearanceSettings() {
             </button>
           )}
         </div>
+        <label className="flex flex-col gap-1 rounded-lg bg-[var(--secondary)]/45 p-3 ring-1 ring-[var(--border)]/70">
+          <span className="inline-flex items-center gap-1 text-[0.6875rem] font-medium">
+            Background Blur
+            <HelpTooltip text="Softens selected Roleplay and Game mode background images behind the chat UI. Set to 0px to keep backgrounds sharp." />
+          </span>
+          <div className="flex items-center gap-3">
+            <input
+              type="range"
+              min={0}
+              max={24}
+              step={1}
+              value={chatBackgroundBlur}
+              onChange={(e) => setChatBackgroundBlur(Number(e.target.value))}
+              className="min-w-0 flex-1 accent-[var(--primary)]"
+            />
+            <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
+              {chatBackgroundBlur === 0 ? "Off" : `${chatBackgroundBlur}px`}
+            </span>
+          </div>
+        </label>
         <BackgroundPicker selected={chatBackground} onSelect={setChatBackground} />
       </div>
     </div>
   );
 }
+
+type BackgroundLibraryItem = {
+  id?: string;
+  filename: string;
+  url: string;
+  originalName: string | null;
+  tags: string[];
+  source?: "user" | "game_asset";
+  tag?: string;
+  editable?: boolean;
+  deletable?: boolean;
+  renameable?: boolean;
+};
+
+type BackgroundUploadResponse = {
+  success: boolean;
+  filename: string;
+  url: string;
+  originalName: string;
+  tags: string[];
+};
 
 function BackgroundPicker({ selected, onSelect }: { selected: string | null; onSelect: (url: string | null) => void }) {
   const fileRef = useRef<HTMLInputElement>(null);
@@ -1679,12 +1764,12 @@ function BackgroundPicker({ selected, onSelect }: { selected: string | null; onS
   const [tagInput, setTagInput] = useState("");
   const [renamingFile, setRenamingFile] = useState<string | null>(null);
   const [renameInput, setRenameInput] = useState("");
+  const refreshGameAssetManifest = useGameAssetStore((s) => s.fetchManifest);
   const qc = useQueryClient();
 
   const { data: backgrounds } = useQuery({
     queryKey: ["backgrounds"],
-    queryFn: () =>
-      api.get<Array<{ filename: string; url: string; originalName: string | null; tags: string[] }>>("/backgrounds"),
+    queryFn: () => api.get<BackgroundLibraryItem[]>("/backgrounds"),
   });
 
   const { data: allTags } = useQuery({
@@ -1716,7 +1801,6 @@ function BackgroundPicker({ selected, onSelect }: { selected: string | null; onS
         { name },
       ),
     onSuccess: (data) => {
-      // If the renamed file was the selected background, update the selection
       const oldUrl = `/api/backgrounds/file/${encodeURIComponent(data.oldFilename)}`;
       if (selected === oldUrl) {
         onSelect(data.url);
@@ -1727,20 +1811,41 @@ function BackgroundPicker({ selected, onSelect }: { selected: string | null; onS
   });
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0) return;
     setUploading(true);
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      const res = await fetch("/api/backgrounds/upload", { method: "POST", body: formData });
-      const data = await res.json();
-      if (data.success) {
+      const uploads = await Promise.allSettled(
+        files.map((file) => {
+          const formData = new FormData();
+          formData.append("file", file);
+          return api.upload<BackgroundUploadResponse>("/backgrounds/upload", formData);
+        }),
+      );
+      const successfulUploads = uploads
+        .filter((result): result is PromiseFulfilledResult<BackgroundUploadResponse> => result.status === "fulfilled")
+        .map((result) => result.value)
+        .filter((result) => result.success);
+      const failed = uploads.length - successfulUploads.length;
+
+      if (successfulUploads.length > 0) {
         qc.invalidateQueries({ queryKey: ["backgrounds"] });
-        onSelect(data.url);
+        qc.invalidateQueries({ queryKey: ["background-tags"] });
+        void refreshGameAssetManifest().catch(() => undefined);
+        onSelect(successfulUploads[successfulUploads.length - 1]!.url);
+        toast.success(`Imported ${successfulUploads.length} background${successfulUploads.length === 1 ? "" : "s"}.`);
+      }
+
+      if (failed > 0) {
+        const rejected = uploads.find((result) => result.status === "rejected");
+        toast.error(
+          rejected?.status === "rejected" && rejected.reason instanceof Error
+            ? rejected.reason.message
+            : `${failed} background import${failed === 1 ? "" : "s"} failed.`,
+        );
       }
     } catch {
-      // ignore
+      toast.error("Background import failed.");
     } finally {
       setUploading(false);
       e.target.value = "";
@@ -1770,24 +1875,32 @@ function BackgroundPicker({ selected, onSelect }: { selected: string | null; onS
         className="flex items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-[var(--border)] p-3 text-xs text-[var(--muted-foreground)] transition-all hover:border-[var(--primary)]/40 hover:bg-[var(--secondary)]/50"
       >
         {uploading ? <Loader2 size="0.875rem" className="animate-spin" /> : <Upload size="0.875rem" />}
-        {uploading ? "Uploading..." : "Upload Background"}
+        {uploading ? "Importing..." : "Import Backgrounds"}
       </button>
-      <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleUpload} />
+      <input ref={fileRef} type="file" accept="image/*" multiple className="hidden" onChange={handleUpload} />
 
       {/* Background grid */}
       {backgrounds && backgrounds.length > 0 && (
         <div className="flex flex-col gap-2">
           {backgrounds.map((bg) => {
+            const itemKey = bg.id ?? bg.url;
             const isSelected = selected === bg.url;
-            const isEditing = editingTags === bg.filename;
+            const isUserBackground = bg.source !== "game_asset";
+            const isEditable = bg.editable !== false && isUserBackground;
+            const canRename = bg.renameable !== false && isUserBackground;
+            const canDelete = bg.deletable !== false && isUserBackground;
+            const isEditing = editingTags === itemKey;
+            const isRenaming = renamingFile === itemKey;
+            const title = bg.originalName ?? bg.tag ?? bg.filename;
+            const sourceLabel = bg.source === "game_asset" ? "Game asset" : "Library";
             return (
-              <div key={bg.filename} className="flex flex-col gap-1">
+              <div key={itemKey} className="flex flex-col gap-1">
                 {/* Thumbnail row */}
                 <div className="group relative flex gap-2">
                   <button
                     onClick={() => onSelect(isSelected ? null : bg.url)}
                     className={cn(
-                      "aspect-video w-24 shrink-0 overflow-hidden rounded-lg border-2 transition-all",
+                      "relative aspect-video w-24 shrink-0 overflow-hidden rounded-lg border-2 transition-all",
                       isSelected
                         ? "border-[var(--primary)] shadow-md shadow-[var(--primary)]/20"
                         : "border-transparent hover:border-[var(--muted-foreground)]/30",
@@ -1795,17 +1908,14 @@ function BackgroundPicker({ selected, onSelect }: { selected: string | null; onS
                   >
                     <img src={bg.url} alt="" className="h-full w-full object-cover" loading="lazy" />
                     {isSelected && (
-                      <div
-                        className="absolute inset-0 flex items-center justify-center bg-black/30"
-                        style={{ width: "6rem" }}
-                      >
+                      <div className="absolute inset-0 flex items-center justify-center bg-black/30">
                         <Check size="0.875rem" className="text-white" />
                       </div>
                     )}
                   </button>
                   <div className="flex min-w-0 flex-1 flex-col gap-1 py-0.5">
                     <div className="flex items-center gap-1">
-                      {renamingFile === bg.filename ? (
+                      {isRenaming ? (
                         <form
                           className="flex min-w-0 flex-1 items-center gap-1"
                           onSubmit={(e) => {
@@ -1834,31 +1944,46 @@ function BackgroundPicker({ selected, onSelect }: { selected: string | null; onS
                         </form>
                       ) : (
                         <>
-                          <span className="truncate text-[0.625rem] text-[var(--muted-foreground)]">{bg.filename}</span>
-                          <button
-                            onClick={() => {
-                              // Pre-fill with filename without extension
-                              const nameWithoutExt = bg.filename.replace(/\.[^.]+$/, "");
-                              setRenameInput(nameWithoutExt);
-                              setRenamingFile(bg.filename);
-                            }}
-                            className="shrink-0 rounded-md p-0.5 text-[var(--muted-foreground)] opacity-0 transition-opacity hover:text-[var(--primary)] group-hover:opacity-100"
-                            title="Rename"
+                          <span className="truncate text-[0.625rem] text-[var(--muted-foreground)]" title={title}>
+                            {bg.filename}
+                          </span>
+                          <span
+                            className={cn(
+                              "shrink-0 rounded-full px-1.5 py-0 text-[0.5625rem]",
+                              bg.source === "game_asset"
+                                ? "bg-[var(--primary)]/10 text-[var(--primary)]"
+                                : "bg-[var(--secondary)] text-[var(--muted-foreground)]",
+                            )}
                           >
-                            <Pencil size="0.5625rem" />
-                          </button>
+                            {sourceLabel}
+                          </span>
+                          {canRename && (
+                            <button
+                              onClick={() => {
+                                const nameWithoutExt = bg.filename.replace(/\.[^.]+$/, "");
+                                setRenameInput(nameWithoutExt);
+                                setRenamingFile(itemKey);
+                              }}
+                              className="shrink-0 rounded-md p-0.5 text-[var(--muted-foreground)] opacity-0 transition-opacity hover:text-[var(--primary)] group-hover:opacity-100"
+                              title="Rename"
+                            >
+                              <Pencil size="0.5625rem" />
+                            </button>
+                          )}
                         </>
                       )}
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (selected === bg.url) onSelect(null);
-                          deleteBg.mutate(bg.filename);
-                        }}
-                        className="ml-auto shrink-0 rounded-md p-0.5 text-[var(--muted-foreground)] opacity-0 transition-opacity hover:text-[var(--destructive)] group-hover:opacity-100"
-                      >
-                        <Trash2 size="0.625rem" />
-                      </button>
+                      {canDelete && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (selected === bg.url) onSelect(null);
+                            deleteBg.mutate(bg.filename);
+                          }}
+                          className="ml-auto shrink-0 rounded-md p-0.5 text-[var(--muted-foreground)] opacity-0 transition-opacity hover:text-[var(--destructive)] group-hover:opacity-100"
+                        >
+                          <Trash2 size="0.625rem" />
+                        </button>
+                      )}
                     </div>
                     {/* Tags */}
                     <div className="flex flex-wrap items-center gap-1">
@@ -1868,7 +1993,7 @@ function BackgroundPicker({ selected, onSelect }: { selected: string | null; onS
                           className="inline-flex items-center gap-0.5 rounded-full bg-[var(--secondary)] px-1.5 py-0 text-[0.5625rem] text-[var(--muted-foreground)]"
                         >
                           {tag}
-                          {isEditing && (
+                          {isEditing && isEditable && (
                             <button
                               onClick={() => removeTag(bg.filename, bg.tags, tag)}
                               className="ml-0.5 hover:text-[var(--destructive)]"
@@ -1878,24 +2003,26 @@ function BackgroundPicker({ selected, onSelect }: { selected: string | null; onS
                           )}
                         </span>
                       ))}
-                      <button
-                        onClick={() => {
-                          setEditingTags(isEditing ? null : bg.filename);
-                          setTagInput("");
-                        }}
-                        className={cn(
-                          "rounded-full p-0.5 transition-colors",
-                          isEditing
-                            ? "bg-[var(--primary)]/20 text-[var(--primary)]"
-                            : "text-[var(--muted-foreground)]/60 hover:text-[var(--primary)]",
-                        )}
-                        title="Edit tags"
-                      >
-                        <Tag size="0.5625rem" />
-                      </button>
+                      {isEditable && (
+                        <button
+                          onClick={() => {
+                            setEditingTags(isEditing ? null : itemKey);
+                            setTagInput("");
+                          }}
+                          className={cn(
+                            "rounded-full p-0.5 transition-colors",
+                            isEditing
+                              ? "bg-[var(--primary)]/20 text-[var(--primary)]"
+                              : "text-[var(--muted-foreground)]/60 hover:text-[var(--primary)]",
+                          )}
+                          title="Edit tags"
+                        >
+                          <Tag size="0.5625rem" />
+                        </button>
+                      )}
                     </div>
                     {/* Tag input */}
-                    {isEditing && (
+                    {isEditing && isEditable && (
                       <div className="flex items-center gap-1">
                         <input
                           type="text"
@@ -1911,9 +2038,9 @@ function BackgroundPicker({ selected, onSelect }: { selected: string | null; onS
                           placeholder="Add tag…"
                           className="w-full min-w-0 rounded border border-[var(--border)] bg-[var(--background)] px-1.5 py-0.5 text-[0.625rem] text-[var(--foreground)] outline-none focus:border-[var(--primary)]"
                           autoFocus
-                          list={`tag-suggestions-${bg.filename}`}
+                          list={`tag-suggestions-${itemKey}`}
                         />
-                        <datalist id={`tag-suggestions-${bg.filename}`}>
+                        <datalist id={`tag-suggestions-${itemKey}`}>
                           {(allTags ?? [])
                             .filter((t) => !bg.tags.includes(t))
                             .map((t) => (
@@ -1940,7 +2067,7 @@ function BackgroundPicker({ selected, onSelect }: { selected: string | null; onS
       {(!backgrounds || backgrounds.length === 0) && (
         <div className="flex flex-col items-center gap-1.5 py-4 text-center">
           <Image size="1.25rem" className="text-[var(--muted-foreground)]/40" />
-          <p className="text-[0.625rem] text-[var(--muted-foreground)]">No backgrounds uploaded yet</p>
+          <p className="text-[0.625rem] text-[var(--muted-foreground)]">No backgrounds available yet</p>
         </div>
       )}
     </div>
@@ -2461,31 +2588,185 @@ function ExtensionsSettings() {
   );
 }
 
+type ProfileImportStats = {
+  characters?: number;
+  personas?: number;
+  lorebooks?: number;
+  presets?: number;
+  agents?: number;
+  themes?: number;
+  chats?: number;
+  messages?: number;
+  connections?: number;
+  files?: number;
+};
+
+type ProfileImportProgressData = {
+  phase: string;
+  label: string;
+  completedItems: number;
+  totalItems: number;
+  imported?: ProfileImportStats;
+};
+
+type ProfileImportProgressState = {
+  status: "reading" | "starting" | "running" | "success" | "error";
+  label: string;
+  completedItems: number;
+  totalItems: number;
+  startedAt: number;
+  elapsedSeconds: number;
+  imported?: ProfileImportStats;
+  error?: string;
+};
+
+type ProfileImportStreamEvent =
+  | { type: "started"; data?: { label?: string; totalItems?: number } }
+  | { type: "progress"; data?: ProfileImportProgressData }
+  | { type: "done"; data?: { success?: boolean; imported?: ProfileImportStats; error?: string; message?: string } }
+  | { type: "error"; data?: string | { error?: string; message?: string } };
+
+function formatProfileImportDuration(seconds: number) {
+  const safeSeconds = Math.max(0, Math.round(seconds));
+  if (safeSeconds < 60) return `${safeSeconds}s`;
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainingSeconds = safeSeconds % 60;
+  return remainingSeconds ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+}
+
+function estimateProfileImportRemainingSeconds(progress: ProfileImportProgressState) {
+  if (progress.status !== "running" || progress.completedItems <= 0 || progress.totalItems <= progress.completedItems) {
+    return null;
+  }
+  const secondsPerItem = progress.elapsedSeconds / progress.completedItems;
+  return Math.max(1, Math.round(secondsPerItem * (progress.totalItems - progress.completedItems)));
+}
+
+function getProfileImportPercent(progress: ProfileImportProgressState) {
+  if (progress.status === "success") return 100;
+  if (progress.totalItems <= 0) return progress.status === "running" ? 8 : 0;
+  const percent = Math.round((progress.completedItems / progress.totalItems) * 100);
+  return Math.min(99, Math.max(progress.status === "running" ? 8 : 0, percent));
+}
+
+function formatProfileImportStats(stats?: ProfileImportStats) {
+  if (!stats) return "";
+  const entries: Array<[number | undefined, string]> = [
+    [stats.characters, "characters"],
+    [stats.personas, "personas"],
+    [stats.lorebooks, "lorebooks"],
+    [stats.presets, "presets"],
+    [stats.agents, "agents"],
+    [stats.themes, "themes"],
+    [stats.chats, "chats"],
+    [stats.messages, "messages"],
+    [stats.connections, "connections"],
+    [stats.files, "files"],
+  ];
+  return entries
+    .filter(([count]) => typeof count === "number" && count > 0)
+    .map(([count, label]) => `${count} ${label}`)
+    .join(", ");
+}
+
+function getProfileImportErrorMessage(data: unknown) {
+  if (typeof data === "string") return data;
+  if (data && typeof data === "object") {
+    const record = data as { message?: unknown; error?: unknown };
+    if (typeof record.message === "string") return record.message;
+    if (typeof record.error === "string") return record.error;
+  }
+  return "Unknown error";
+}
+
+async function* readProfileImportStream(res: Response): AsyncGenerator<ProfileImportStreamEvent> {
+  if (!res.body) throw new Error("Import started but no progress stream was returned.");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      try {
+        yield JSON.parse(line.slice(6)) as ProfileImportStreamEvent;
+      } catch {
+        /* ignore malformed progress chunks */
+      }
+    }
+  }
+}
+
 function ImportSettings() {
   const openModal = useUIStore((s) => s.openModal);
   const qc = useQueryClient();
   const setActiveChatId = useChatStore((s) => s.setActiveChatId);
+  const [profileImportProgress, setProfileImportProgress] = useState<ProfileImportProgressState | null>(null);
+  const profileImportBusy =
+    profileImportProgress?.status === "reading" ||
+    profileImportProgress?.status === "starting" ||
+    profileImportProgress?.status === "running";
+
+  useEffect(() => {
+    if (!profileImportBusy) return;
+    const timer = window.setInterval(() => {
+      setProfileImportProgress((current) =>
+        current && (current.status === "reading" || current.status === "starting" || current.status === "running")
+          ? { ...current, elapsedSeconds: Math.floor((Date.now() - current.startedAt) / 1000) }
+          : current,
+      );
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [profileImportBusy]);
 
   const handleMarinaraImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const text = await file.text();
-      const envelope = JSON.parse(text);
-      const res = await fetch("/api/import/marinara", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(envelope),
-      });
-      const data = await res.json();
-      if (data.success) {
+      const head = file.size >= 4 ? new Uint8Array(await file.slice(0, 4).arrayBuffer()) : new Uint8Array();
+      const isZip = head.length >= 2 && head[0] === 0x50 && head[1] === 0x4b;
+      let res: Response;
+      if (isZip) {
+        const form = new FormData();
+        form.append("file", file, file.name);
+        res = await fetch("/api/import/marinara-package", { method: "POST", body: form });
+      } else {
+        let envelope: unknown;
+        try {
+          envelope = JSON.parse(await file.text());
+        } catch {
+          throw new Error("parse");
+        }
+        res = await fetch("/api/import/marinara", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(envelope),
+        });
+      }
+      const data = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        name?: string;
+        type?: string;
+        error?: string;
+      };
+      if (res.ok && data.success) {
         qc.invalidateQueries();
         toast.success(`Imported ${data.name ?? data.type} successfully!`);
       } else {
-        toast.error(`Import failed: ${data.error ?? "Unknown error"}`);
+        toast.error(`Import failed: ${data.error ?? res.statusText ?? "Unknown error"}`);
       }
-    } catch {
-      toast.error("Import failed. Make sure this is a valid .marinara.json file.");
+    } catch (err) {
+      if (err instanceof Error && err.message === "parse") {
+        toast.error("Import failed. Make sure this is a valid .marinara or .json file.");
+      } else {
+        toast.error(`Import failed: ${err instanceof Error ? err.message : "network/server error"}`);
+      }
     }
     e.target.value = "";
   };
@@ -2493,33 +2774,116 @@ function ImportSettings() {
   const handleProfileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    const startedAt = Date.now();
+    setProfileImportProgress({
+      status: "reading",
+      label: "Reading profile file",
+      completedItems: 0,
+      totalItems: 1,
+      startedAt,
+      elapsedSeconds: 0,
+    });
     try {
       const text = await file.text();
-      const envelope = JSON.parse(text);
+      const envelope = JSON.parse(text) as { type?: string };
       if (envelope.type !== "marinara_profile") {
+        setProfileImportProgress({
+          status: "error",
+          label: "Profile import failed",
+          completedItems: 0,
+          totalItems: 1,
+          startedAt,
+          elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000),
+          error: "Not a valid profile export file.",
+        });
         toast.error("Not a valid profile export file.");
         return;
       }
+      setProfileImportProgress((current) =>
+        current
+          ? {
+              ...current,
+              status: "starting",
+              label: "Starting profile import",
+              elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000),
+            }
+          : current,
+      );
       const res = await fetch("/api/backup/import-profile", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Accept: "text/event-stream",
           ...getAdminSecretHeader(),
         },
         body: text,
       });
-      const data = await res.json();
-      if (data.success) {
-        qc.invalidateQueries();
-        const s = data.imported;
-        toast.success(
-          `Imported: ${s.characters} characters, ${s.personas} personas, ${s.lorebooks} lorebooks, ${s.presets} presets, ${s.agents} agents, ${s.themes ?? 0} themes`,
-        );
-      } else {
-        toast.error(`Import failed: ${data.error ?? "Unknown error"}`);
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+        throw new Error(data.message ?? data.error ?? res.statusText ?? "Unknown error");
       }
-    } catch {
-      toast.error("Import failed. Make sure this is a valid profile JSON file.");
+      for await (const event of readProfileImportStream(res)) {
+        if (event.type === "started") {
+          setProfileImportProgress((current) => ({
+            status: "running",
+            label: event.data?.label ?? "Profile import started",
+            completedItems: 0,
+            totalItems: Math.max(1, event.data?.totalItems ?? current?.totalItems ?? 1),
+            startedAt,
+            elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000),
+          }));
+          continue;
+        }
+        if (event.type === "progress" && event.data) {
+          setProfileImportProgress((current) => ({
+            status: "running",
+            label: event.data?.label ?? "Importing profile",
+            completedItems: event.data?.completedItems ?? current?.completedItems ?? 0,
+            totalItems: Math.max(1, event.data?.totalItems ?? current?.totalItems ?? 1),
+            startedAt,
+            elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000),
+            imported: event.data?.imported,
+          }));
+          continue;
+        }
+        if (event.type === "error") {
+          throw new Error(getProfileImportErrorMessage(event.data));
+        }
+        if (event.type === "done") {
+          if (event.data?.success === false) throw new Error(event.data.error ?? event.data.message ?? "Unknown error");
+          qc.invalidateQueries();
+          const imported = event.data?.imported;
+          const summary = formatProfileImportStats(imported);
+          setProfileImportProgress((current) => {
+            const totalItems = Math.max(1, current?.totalItems ?? 1);
+            return {
+              status: "success",
+              label: "Profile import complete",
+              completedItems: totalItems,
+              totalItems,
+              startedAt,
+              elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000),
+              imported,
+            };
+          });
+          toast.success(summary ? `Imported: ${summary}` : "Profile imported.");
+        }
+      }
+    } catch (err) {
+      const message =
+        err instanceof SyntaxError
+          ? "Import failed. Make sure this is a valid profile JSON file."
+          : `Import failed: ${err instanceof Error ? err.message : "network/server error"}`;
+      setProfileImportProgress({
+        status: "error",
+        label: "Profile import failed",
+        completedItems: 0,
+        totalItems: 1,
+        startedAt,
+        elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000),
+        error: message.replace(/^Import failed:\s*/, ""),
+      });
+      toast.error(message);
     }
     e.target.value = "";
   };
@@ -2532,17 +2896,92 @@ function ImportSettings() {
       </div>
 
       {/* Profile import */}
-      <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500/20 to-teal-500/20 px-3 py-3 text-xs font-semibold ring-1 ring-emerald-500/30 transition-all hover:ring-emerald-500/50 active:scale-[0.98]">
-        <Download size="1rem" />
-        Import Profile (JSON)
-        <input type="file" accept=".json" onChange={handleProfileImport} className="hidden" />
+      <label
+        className={cn(
+          "flex cursor-pointer items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500/20 to-teal-500/20 px-3 py-3 text-xs font-semibold ring-1 ring-emerald-500/30 transition-all hover:ring-emerald-500/50 active:scale-[0.98]",
+          profileImportBusy && "pointer-events-none opacity-75",
+        )}
+      >
+        {profileImportBusy ? <Loader2 size="1rem" className="animate-spin" /> : <Download size="1rem" />}
+        {profileImportBusy ? "Importing Profile..." : "Import Profile (JSON)"}
+        <input
+          type="file"
+          accept=".json"
+          onChange={handleProfileImport}
+          disabled={profileImportBusy}
+          className="hidden"
+        />
       </label>
+
+      {profileImportProgress && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={cn(
+            "flex flex-col gap-2 rounded-lg border px-3 py-2 text-xs",
+            profileImportProgress.status === "error"
+              ? "border-[var(--destructive)]/40 bg-[var(--destructive)]/10 text-[var(--destructive)]"
+              : profileImportProgress.status === "success"
+                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300"
+                : "border-emerald-500/30 bg-emerald-500/10 text-[var(--foreground)]",
+          )}
+        >
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2">
+              {profileImportProgress.status === "success" ? (
+                <Check size="0.875rem" className="shrink-0" />
+              ) : profileImportProgress.status === "error" ? (
+                <AlertTriangle size="0.875rem" className="shrink-0" />
+              ) : (
+                <Loader2 size="0.875rem" className="shrink-0 animate-spin text-emerald-500" />
+              )}
+              <span className="truncate font-medium">{profileImportProgress.label}</span>
+            </div>
+            <span className="shrink-0 text-[0.6875rem] text-[var(--muted-foreground)]">
+              {formatProfileImportDuration(profileImportProgress.elapsedSeconds)}
+            </span>
+          </div>
+
+          {profileImportProgress.status !== "error" && (
+            <>
+              <div className="h-1.5 overflow-hidden rounded-full bg-[var(--border)]">
+                <div
+                  className={cn(
+                    "h-full rounded-full transition-all duration-300",
+                    profileImportProgress.status === "success" ? "bg-emerald-500" : "bg-emerald-400",
+                  )}
+                  style={{ width: `${getProfileImportPercent(profileImportProgress)}%` }}
+                />
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[0.6875rem] text-[var(--muted-foreground)]">
+                <span>
+                  {profileImportProgress.completedItems}/{profileImportProgress.totalItems} items
+                </span>
+                {estimateProfileImportRemainingSeconds(profileImportProgress) !== null && (
+                  <span>
+                    ETA {formatProfileImportDuration(estimateProfileImportRemainingSeconds(profileImportProgress) ?? 0)}
+                  </span>
+                )}
+              </div>
+              {formatProfileImportStats(profileImportProgress.imported) && (
+                <div className="text-[0.6875rem] text-[var(--muted-foreground)]">
+                  Imported so far: {formatProfileImportStats(profileImportProgress.imported)}
+                </div>
+              )}
+            </>
+          )}
+
+          {profileImportProgress.status === "error" && profileImportProgress.error && (
+            <div className="text-[0.6875rem]">{profileImportProgress.error}</div>
+          )}
+        </div>
+      )}
 
       {/* Marinara import */}
       <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-pink-500/20 to-orange-500/20 px-3 py-3 text-xs font-semibold ring-1 ring-pink-500/30 transition-all hover:ring-pink-500/50 active:scale-[0.98]">
         <Download size="1rem" />
-        Import Marinara File (.marinara.json)
-        <input type="file" accept=".json" onChange={handleMarinaraImport} className="hidden" />
+        Import Marinara File (.marinara / .json)
+        <input type="file" accept=".json,.marinara" onChange={handleMarinaraImport} className="hidden" />
       </label>
 
       <div className="retro-divider" />
@@ -2887,6 +3326,14 @@ function AdvancedSettings() {
   const setShowMessageNumbers = useUIStore((s) => s.setShowMessageNumbers);
   const guideGenerations = useUIStore((s) => s.guideGenerations);
   const setGuideGenerations = useUIStore((s) => s.setGuideGenerations);
+  const showQuickRepliesMenu = useUIStore((s) => s.showQuickRepliesMenu);
+  const setShowQuickRepliesMenu = useUIStore((s) => s.setShowQuickRepliesMenu);
+  const showQuickReplyPostOnly = useUIStore((s) => s.showQuickReplyPostOnly);
+  const setShowQuickReplyPostOnly = useUIStore((s) => s.setShowQuickReplyPostOnly);
+  const showQuickReplyGuide = useUIStore((s) => s.showQuickReplyGuide);
+  const setShowQuickReplyGuide = useUIStore((s) => s.setShowQuickReplyGuide);
+  const showQuickReplyImpersonate = useUIStore((s) => s.showQuickReplyImpersonate);
+  const setShowQuickReplyImpersonate = useUIStore((s) => s.setShowQuickReplyImpersonate);
   const debugMode = useUIStore((s) => s.debugMode);
   const setDebugMode = useUIStore((s) => s.setDebugMode);
   const clearAllData = useClearAllData();
@@ -2897,6 +3344,12 @@ function AdvancedSettings() {
   const [exportProfileDialogOpen, setExportProfileDialogOpen] = useState(false);
   const [refreshingSpa, setRefreshingSpa] = useState(false);
   const [adminSecret, setAdminSecret] = useState(() => localStorage.getItem(ADMIN_SECRET_STORAGE_KEY) ?? "");
+  const [quickRepliesDrawerOpen, setQuickRepliesDrawerOpen] = useState(true);
+
+  const handleQuickRepliesMenuChange = (enabled: boolean) => {
+    setShowQuickRepliesMenu(enabled);
+    if (enabled) setQuickRepliesDrawerOpen(true);
+  };
 
   const handleExportProfile = async (format: ExportFormatChoice) => {
     setExportingProfile(true);
@@ -3070,6 +3523,7 @@ function AdvancedSettings() {
     applyAvailable?: boolean;
     updatesApplyEnabled?: boolean;
     applyUnavailableReason?: "disabled" | "unsupported-install" | null;
+    manualUpdateCommand?: string | null;
   }>({
     queryKey: ["update-check"],
     queryFn: () => api.get("/updates/check"),
@@ -3095,7 +3549,16 @@ function AdvancedSettings() {
       }
     },
     onError: (err: unknown) => {
-      const message = err instanceof Error ? err.message : "Update failed";
+      const message =
+        err instanceof ApiError &&
+        err.payload &&
+        typeof err.payload === "object" &&
+        "message" in err.payload &&
+        typeof err.payload.message === "string"
+          ? err.payload.message
+          : err instanceof Error
+            ? err.message
+            : "Update failed";
       toast.error(message);
     },
   });
@@ -3105,9 +3568,10 @@ function AdvancedSettings() {
   const currentBuildLabel = currentCommit ? `Build: ${currentCommit.slice(0, 7)}` : "Build: unavailable";
   const commitsBehind = updateCheck.data?.commitsBehind ?? 0;
   const applyUnavailableReason = updateCheck.data?.applyUnavailableReason ?? null;
+  const manualUpdateCommand = updateCheck.data?.manualUpdateCommand ?? null;
   const applyUnavailableCopy =
     applyUnavailableReason === "disabled"
-      ? "This install can check for updates, but applying them from the browser is disabled. Relaunch the app if you use the launcher, or update manually. Advanced git installs can enable server-side apply with UPDATES_APPLY_ENABLED=true."
+      ? "This install can check for updates, but applying them from the browser is disabled. Update manually with the command below. Advanced git installs can enable server-side apply with UPDATES_APPLY_ENABLED=true."
       : "This install can check for updates, but it cannot apply them from the browser. Relaunch the app if you use the launcher, or update manually for your install type.";
   const isClearing = clearAllData.isPending || expungeData.isPending;
   const isAllScopesSelected = selectedScopes.length === EXPUNGE_SCOPE_OPTIONS.length;
@@ -3279,12 +3743,15 @@ function AdvancedSettings() {
                     Download v{updateCheck.data.latestVersion}
                   </a>
                 )}
-                {applyUnavailableReason === "unsupported-install" && (
+                {updateCheck.data.versionUpdate && (
                   <span className="text-[0.625rem] text-[var(--muted-foreground)]">
-                    Docker users:{" "}
-                    <code className="rounded bg-[var(--background)] px-1 py-0.5">
-                      docker compose pull && docker compose up -d
-                    </code>
+                    Android APK assets are WebView shells, not standalone apps. Start Marinara in Termux first.
+                  </span>
+                )}
+                {manualUpdateCommand && (
+                  <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+                    Manual update:{" "}
+                    <code className="break-all rounded bg-[var(--background)] px-1 py-0.5">{manualUpdateCommand}</code>
                   </span>
                 )}
               </div>
@@ -3325,6 +3792,152 @@ function AdvancedSettings() {
       </div>
 
       <div className="retro-divider" />
+      <div
+        className={cn(
+          "overflow-hidden rounded-xl border transition-colors",
+          showQuickRepliesMenu
+            ? "border-[var(--primary)]/30 bg-[var(--secondary)]/15"
+            : "border-transparent bg-transparent hover:bg-[var(--secondary)]/30",
+        )}
+      >
+        <div className="flex min-h-9 items-stretch">
+          <div className="flex min-w-0 items-center gap-1.5 py-2 pl-1.5 pr-2">
+            <label className="flex min-w-0 cursor-pointer items-center gap-2.5">
+              <input
+                type="checkbox"
+                checked={showQuickRepliesMenu}
+                onChange={(e) => handleQuickRepliesMenuChange(e.target.checked)}
+                className="h-3.5 w-3.5 shrink-0 rounded border-[var(--border)] accent-[var(--primary)]"
+              />
+              <span className="min-w-0 text-xs">Quick replies</span>
+            </label>
+            <span className="shrink-0" onClick={(e) => e.preventDefault()}>
+              <HelpTooltip text="Adds alternate draft actions beside Send. One action appears directly; multiple actions open from the ellipsis." />
+            </span>
+          </div>
+          <button
+            type="button"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!showQuickRepliesMenu) return;
+              setQuickRepliesDrawerOpen((open) => !open);
+            }}
+            aria-disabled={!showQuickRepliesMenu}
+            aria-controls="quick-replies-actions-drawer"
+            aria-expanded={showQuickRepliesMenu && quickRepliesDrawerOpen}
+            aria-label={
+              !showQuickRepliesMenu
+                ? "Quick replies options disabled"
+                : quickRepliesDrawerOpen
+                  ? "Collapse Quick replies options"
+                  : "Expand Quick replies options"
+            }
+            title={
+              !showQuickRepliesMenu
+                ? "Enable Quick replies to configure options"
+                : quickRepliesDrawerOpen
+                  ? "Collapse options"
+                  : "Expand options"
+            }
+            className={cn(
+              "flex min-w-10 flex-1 items-center justify-end py-2 pl-2 pr-2 text-[var(--muted-foreground)] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]",
+              showQuickRepliesMenu && quickRepliesDrawerOpen ? "rounded-tr-xl" : "rounded-r-xl",
+              showQuickRepliesMenu
+                ? "cursor-pointer hover:bg-[var(--secondary)]/35 hover:text-[var(--foreground)] active:scale-[0.99]"
+                : "cursor-not-allowed opacity-35",
+            )}
+            tabIndex={showQuickRepliesMenu ? 0 : -1}
+          >
+            <span className="flex h-7 w-7 items-center justify-center rounded-lg">
+              <ChevronDown
+                size="0.875rem"
+                aria-hidden="true"
+                className={cn(
+                  "transition-transform",
+                  showQuickRepliesMenu && quickRepliesDrawerOpen ? "" : "-rotate-90",
+                )}
+              />
+            </span>
+          </button>
+        </div>
+        {showQuickRepliesMenu && quickRepliesDrawerOpen && (
+          <div
+            id="quick-replies-actions-drawer"
+            className="grid gap-1 border-t border-[var(--border)]/60 bg-[var(--background)]/25 p-1"
+            role="group"
+            aria-label="Quick replies actions to include"
+          >
+            {[
+              {
+                label: "Post only",
+                checked: showQuickReplyPostOnly,
+                onChange: setShowQuickReplyPostOnly,
+                description: "Add persona message without triggering a reply.",
+                icon: FileText,
+              },
+              {
+                label: "Guide reply",
+                checked: showQuickReplyGuide,
+                onChange: setShowQuickReplyGuide,
+                description: "Use draft as /guided direction.",
+                icon: WandSparkles,
+              },
+              {
+                label: "Impersonate",
+                checked: showQuickReplyImpersonate,
+                onChange: setShowQuickReplyImpersonate,
+                description: "Generate a persona-side user reply.",
+                icon: UserCheck,
+              },
+            ].map((option) => {
+              const Icon = option.icon;
+              return (
+                <button
+                  type="button"
+                  key={option.label}
+                  aria-pressed={option.checked}
+                  onClick={() => option.onChange(!option.checked)}
+                  className={cn(
+                    "group flex min-h-10 w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)] active:scale-[0.99]",
+                    option.checked
+                      ? "bg-[var(--primary)]/8 text-[var(--foreground)] ring-1 ring-[var(--primary)]/30"
+                      : "text-[var(--muted-foreground)] ring-1 ring-transparent hover:bg-[var(--secondary)]/45 hover:text-[var(--foreground)]",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "flex h-7 w-7 shrink-0 items-center justify-center rounded-md ring-1 transition-colors",
+                      option.checked
+                        ? "bg-[var(--primary)]/12 text-[var(--primary)] ring-[var(--primary)]/30"
+                        : "bg-[var(--secondary)]/35 text-[var(--muted-foreground)] ring-[var(--border)]/60 group-hover:text-[var(--foreground)]",
+                    )}
+                  >
+                    <Icon size="0.8125rem" aria-hidden="true" />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-xs font-semibold">{option.label}</span>
+                    <span className="block text-[0.65rem] leading-tight text-[var(--muted-foreground)]">
+                      {option.description}
+                    </span>
+                  </span>
+                  <span
+                    className={cn(
+                      "flex h-4 w-4 shrink-0 items-center justify-center rounded-full ring-1 transition-colors",
+                      option.checked
+                        ? "bg-[var(--primary)] text-[var(--primary-foreground)] ring-[var(--primary)]"
+                        : "bg-[var(--background)]/45 text-transparent ring-[var(--border)]/70 group-hover:text-[var(--muted-foreground)]",
+                    )}
+                    aria-hidden="true"
+                  >
+                    <Check size="0.625rem" strokeWidth={3} />
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
       <ToggleSetting
         label="Group consecutive messages"
         checked={messageGrouping}
@@ -3353,13 +3966,13 @@ function AdvancedSettings() {
         label="Show message numbers"
         checked={showMessageNumbers}
         onChange={setShowMessageNumbers}
-        help="Displays a message number below each avatar in roleplay chats."
+        help="Displays message numbers in roleplay and conversation chats."
       />
       <ToggleSetting
-        label="Guide generations with chat input"
+        label="Guide swipes/regens with chat input"
         checked={guideGenerations}
         onChange={setGuideGenerations}
-        help="Uses chat input to guide regenerations and manually triggered responses."
+        help="Uses the current draft as direction when regenerating a message or manually triggering a character response."
       />
       <ToggleSetting
         label="Debug mode"

@@ -39,6 +39,7 @@ import { botBrowserPygmalionRoutes } from "./bot-browser-pygmalion.routes.js";
 import { botBrowserWyvernRoutes } from "./bot-browser-wyvern.routes.js";
 import { botBrowserDatacatRoutes } from "./bot-browser-datacat.routes.js";
 import { chatFoldersRoutes } from "./chat-folders.routes.js";
+import { connectionFoldersRoutes } from "./connection-folders.routes.js";
 import { chatPresetsRoutes } from "./chat-presets.routes.js";
 import { updatesRoutes } from "./updates.routes.js";
 import { themesRoutes } from "./themes.routes.js";
@@ -49,6 +50,7 @@ import { gameAssetsRoutes } from "./game-assets.routes.js";
 import { sidecarRoutes } from "./sidecar.routes.js";
 import { ttsRoutes } from "./tts.routes.js";
 import { promptOverridesRoutes } from "./prompt-overrides.routes.js";
+import { csrfDiagnosticsRoutes } from "./csrf-diagnostics.routes.js";
 
 export async function registerRoutes(app: FastifyInstance) {
   await app.register(chatsRoutes, { prefix: "/api/chats" });
@@ -58,6 +60,7 @@ export async function registerRoutes(app: FastifyInstance) {
   await app.register(lorebooksRoutes, { prefix: "/api/lorebooks" });
   await app.register(promptsRoutes, { prefix: "/api/prompts" });
   await app.register(connectionsRoutes, { prefix: "/api/connections" });
+  await app.register(connectionFoldersRoutes, { prefix: "/api/connection-folders" });
   await app.register(agentsRoutes, { prefix: "/api/agents" });
   await app.register(customToolsRoutes, { prefix: "/api/custom-tools" });
   await app.register(generateRoutes, { prefix: "/api/generate" });
@@ -97,6 +100,7 @@ export async function registerRoutes(app: FastifyInstance) {
   await app.register(gameAssetsRoutes, { prefix: "/api/game-assets" });
   await app.register(ttsRoutes, { prefix: "/api/tts" });
   await app.register(promptOverridesRoutes, { prefix: "/api/prompt-overrides" });
+  await app.register(csrfDiagnosticsRoutes, { prefix: "/api/csrf" });
   if (process.env.MARINARA_LITE !== "true" && process.env.MARINARA_LITE !== "1") {
     await app.register(sidecarRoutes, { prefix: "/api/sidecar" });
   }

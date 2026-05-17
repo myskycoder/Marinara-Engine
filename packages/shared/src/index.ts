@@ -49,6 +49,7 @@ export * from "./constants/impersonate.js";
 export * from "./constants/image-generation-defaults.js";
 export * from "./constants/image-model-families.js";
 export * from "./constants/security.js";
+export * from "./constants/game-assets.js";
 
 // Utils
 export * from "./utils/macro-engine.js";
@@ -57,3 +58,10 @@ export * from "./utils/music-score.js";
 export * from "./utils/npc-name.js";
 export * from "./utils/game-narration-strip.js";
 export * from "./utils/agent-cost.js";
+export * from "./utils/regex-replacement.js";
+export * from "./utils/skill-check-format.js";
+export * from "./utils/generation-guide.js";
+export * from "./utils/lorebook-keyword-matching.js";
+export * from "./utils/regex-safety.js";
+export * from "./utils/game-state-text.js";
+export * from "./utils/chat-summary-entries.js";
