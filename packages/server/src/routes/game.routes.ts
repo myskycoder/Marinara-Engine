@@ -7521,22 +7521,10 @@ export async function gameRoutes(app: FastifyInstance) {
     if (input.backgroundTag) {
       const slug = generatedBackgroundSlug(input.backgroundTag);
       const prompt = await buildBackgroundImagePrompt({
-        chatId: input.chatId,
-        locationId: slug,
-        conditions: { weather: null, timeOfDay: null, season: null },
         backgroundPrompt: input.backgroundTag.replace(/:/g, " ").replace(/-/g, " "),
         setting,
         artStyle,
-        imgSource,
-        imgModel,
-        imgBaseUrl,
-        imgApiKey,
-        imgService: imgServiceHint,
-        imgEndpointId,
-        imgComfyWorkflow,
-        imgDefaults,
         promptOverridesStorage,
-        size: backgroundSize,
       });
       items.push({
         id: gameImagePromptReviewId("background", slug),

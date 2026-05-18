@@ -576,22 +576,29 @@ export function findCachedBackground(
   return { tag: backgroundTagForChat(chatId, key), path, key };
 }
 
-export interface BackgroundGenRequest {
-  chatId: string;
-  /** Stable kebab-case id for the location (e.g. `chernorechye-village-edge`). */
-  locationId: string;
-  /** Visual conditions that vary the cache key (weather × timeOfDay × season). */
-  conditions: BackgroundConditions;
-  /**
-   * Rich 1–2 sentence visual brief from the scene-analyzer. This is the
-   * primary description fed to the image model — NOT the location id.
-   */
+/**
+ * Inputs the background prompt builder actually reads. Both the cache-keyed
+ * `BackgroundGenRequest` and the one-off `ChatBackgroundGenRequest` satisfy
+ * this — kept separate so the chat path doesn't have to fabricate dummy
+ * `locationId` + `conditions` values it never uses.
+ */
+export interface BackgroundPromptInput {
+  /** Rich 1–2 sentence visual brief fed to the image model. */
   backgroundPrompt: string;
+  /** Visual conditions used to compose an "atmosphere" line. Optional. */
+  conditions?: BackgroundConditions;
   /** The game's broader cultural/era context (e.g. "Snowy Russian village, 1992"). */
   setting?: string;
   /** Unified art-style prompt for visual consistency. */
   artStyle?: string;
-  /** Connection credentials. */
+  /** Verbatim prompt that bypasses the builder. */
+  promptOverride?: string;
+  /** Storage for user-supplied prompt overrides. Optional — falls back to default builder when omitted. */
+  promptOverridesStorage?: PromptOverridesStorage;
+}
+
+/** Image-provider credentials + io knobs shared by all asset-generation paths. */
+export interface ImageProviderCredentials {
   imgSource?: string | null;
   imgModel: string;
   imgBaseUrl: string;
@@ -601,10 +608,15 @@ export interface BackgroundGenRequest {
   imgComfyWorkflow?: string | undefined;
   imgDefaults?: ImageGenerationDefaultsProfile | null;
   debugLog?: (message: string, ...args: any[]) => void;
-  /** Storage for user-supplied prompt overrides. Optional — falls back to default builder when omitted. */
-  promptOverridesStorage?: PromptOverridesStorage;
   size?: ImageGenerationSize;
-  promptOverride?: string;
+}
+
+export interface BackgroundGenRequest extends BackgroundPromptInput, ImageProviderCredentials {
+  chatId: string;
+  /** Stable kebab-case id for the location (e.g. `chernorechye-village-edge`). */
+  locationId: string;
+  /** Visual conditions that vary the cache key (weather × timeOfDay × season). */
+  conditions: BackgroundConditions;
   /**
    * When true, do not reuse an existing PNG on disk — call the image API and
    * overwrite the file (used for user-triggered background regeneration).
@@ -624,13 +636,22 @@ export interface BackgroundGenResult {
   prompt?: string;
 }
 
-export interface ChatBackgroundGenRequest extends BackgroundGenRequest {
+export interface ChatBackgroundGenRequest extends ImageProviderCredentials {
+  chatId: string;
   /** Why the background agent asked for generation. Stored as background metadata. */
   reason?: string;
   /** Stable slug used to compose the saved filename and originalName label. */
   locationSlug?: string;
-  /** Narrative description of the scene; falls back to slug when missing. */
-  sceneDescription?: string;
+  /** Narrative description of the scene — fed to the image model and used to build the slug. */
+  sceneDescription: string;
+  /** Verbatim prompt that bypasses the builder. */
+  promptOverride?: string;
+  /** Storage for user-supplied prompt overrides. */
+  promptOverridesStorage?: PromptOverridesStorage;
+  /** Optional cinematic context — adds an atmosphere line when present. */
+  conditions?: BackgroundConditions;
+  setting?: string;
+  artStyle?: string;
 }
 
 export interface SceneIllustrationGenRequest {
@@ -663,13 +684,15 @@ export interface SceneIllustrationGenRequest {
   promptOverride?: string;
 }
 
-export async function buildBackgroundImagePrompt(req: BackgroundGenRequest): Promise<string> {
+export async function buildBackgroundImagePrompt(req: BackgroundPromptInput): Promise<string> {
   if (req.promptOverride?.trim()) return req.promptOverride.trim().slice(0, 1500);
-  const conditionParts = [
-    req.conditions.timeOfDay && `time of day: ${req.conditions.timeOfDay}`,
-    req.conditions.weather && `weather: ${req.conditions.weather}`,
-    req.conditions.season && `season: ${req.conditions.season}`,
-  ].filter(Boolean);
+  const conditionParts = req.conditions
+    ? [
+        req.conditions.timeOfDay && `time of day: ${req.conditions.timeOfDay}`,
+        req.conditions.weather && `weather: ${req.conditions.weather}`,
+        req.conditions.season && `season: ${req.conditions.season}`,
+      ].filter(Boolean)
+    : [];
   const atmosphereLine = conditionParts.length ? ` Atmosphere — ${conditionParts.join(", ")}.` : "";
 
   const styleHint = [req.artStyle, req.setting].filter(Boolean).join(", ");
@@ -864,7 +887,7 @@ export async function generateBackground(req: BackgroundGenRequest): Promise<Bac
  * Returns the saved filename on success, or null on failure.
  */
 export async function generateChatBackground(req: ChatBackgroundGenRequest): Promise<string | null> {
-  const baseSlug = safeGeneratedAssetSlug(req.locationSlug || (req.sceneDescription ?? "").slice(0, 80), {
+  const baseSlug = safeGeneratedAssetSlug(req.locationSlug || req.sceneDescription.slice(0, 80), {
     maxBytes: 160,
   });
   if (!baseSlug) return null;
@@ -875,7 +898,14 @@ export async function generateChatBackground(req: ChatBackgroundGenRequest): Pro
   const existingPath = existingGeneratedBackgroundPath(CHAT_BACKGROUND_DIR, slug);
   if (existingPath) return basename(existingPath);
 
-  const prompt = await buildBackgroundImagePrompt(req);
+  const prompt = await buildBackgroundImagePrompt({
+    backgroundPrompt: req.sceneDescription,
+    conditions: req.conditions,
+    setting: req.setting,
+    artStyle: req.artStyle,
+    promptOverride: req.promptOverride,
+    promptOverridesStorage: req.promptOverridesStorage,
+  });
   const size = resolvedSize(req.size, DEFAULT_GAME_BACKGROUND_SIZE);
   req.debugLog?.(
     "[debug/background-agent/image-generation] request slug=%s model=%s source=%s targetSize=%dx%d prompt:\n%s",

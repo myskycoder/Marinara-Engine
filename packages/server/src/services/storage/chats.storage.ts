@@ -64,7 +64,6 @@ export const CONVERSATION_NOTES_BUDGET_CHARS = 4000;
 export type MetadataPatch = Record<string, unknown>;
 export type MetadataUpdater = (current: MetadataPatch) => MetadataPatch | Promise<MetadataPatch>;
 
-const metadataPatchQueues = new Map<string, Promise<void>>();
 const messageExtraPatchQueues = new Map<string, Promise<void>>();
 const swipeExtraPatchQueues = new Map<string, Promise<void>>();
 
@@ -90,8 +89,15 @@ async function withPatchQueue<T>(
   }
 }
 
+/**
+ * Serialize chat metadata R-M-W operations through the same per-chat lock
+ * used by `updateMetadataWithMerge`. Both shallow patches (`patchMetadata`)
+ * and explicit-merge callbacks (`updateMetadataWithMerge`) read-modify-write
+ * the same `chat.metadata` column, so they MUST share the same lock chain.
+ * Using two separate queues here would let one branch overwrite the other.
+ */
 async function withMetadataPatchQueue<T>(chatId: string, operation: () => Promise<T>): Promise<T> {
-  return withPatchQueue(metadataPatchQueues, chatId, operation);
+  return withChatLock(chatId, operation);
 }
 
 function parseMetadata(raw: unknown): MetadataPatch {

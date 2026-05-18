@@ -12937,9 +12937,6 @@ export async function generateRoutes(app: FastifyInstance) {
                       const promptOverridesStorage = createPromptOverridesStorage(app.db);
                       const generatedFilename = await generateChatBackground({
                         chatId: input.chatId,
-                        locationId: locationText.slice(0, 120),
-                        conditions: { weather: null, timeOfDay: null, season: null },
-                        backgroundPrompt: promptText.slice(0, 1000),
                         locationSlug: locationText.slice(0, 120),
                         sceneDescription: promptText.slice(0, 1000),
                         reason:
@@ -13262,10 +13259,15 @@ export async function generateRoutes(app: FastifyInstance) {
                 );
 
                 // ── Auto-generate NPC avatars if enabled ──
+                // Skipped when the v18 materializer is active (autoMaterializeNpcs=true),
+                // because materializeGameNpcs below handles avatars + sprites + persistence
+                // and racing it with this inline path would cause duplicate image API calls
+                // and concurrent writes to the same NPC avatar file.
                 const charTrackerAgent = resolvedAgents.find((a) => a.type === "character-tracker");
                 const autoGenAvatars = !!charTrackerAgent?.settings?.autoGenerateAvatars;
+                const useMaterializer = charTrackerAgent?.settings?.autoMaterializeNpcs === true;
                 const npcImgConnId = (charTrackerAgent?.settings?.imageConnectionId as string) ?? null;
-                if (autoGenAvatars && npcImgConnId) {
+                if (autoGenAvatars && npcImgConnId && !useMaterializer) {
                   const charsNeedingAvatars = chars.filter(
                     (c: any) => !c.avatarPath && (c.name as string) && (c.appearance as string),
                   );
@@ -13372,6 +13374,39 @@ export async function generateRoutes(app: FastifyInstance) {
                   );
                 } catch {
                   /* stream closed */
+                }
+
+                // Persist tracked NPCs into chatMeta.gameNpcs and (optionally) generate
+                // their portraits + full-body sprites. Without this call new NPCs surfaced
+                // by Character Tracker stay ephemeral and lose sprite assets across turns.
+                const charTrackerSettings = charTrackerAgent?.settings ?? {};
+                try {
+                  await materializeGameNpcs({
+                    db: app.db,
+                    connections,
+                    chatId: input.chatId,
+                    presentCharacters: chars as PresentCharacter[],
+                    existingCharacterNames: charInfo.map((c) => c.name),
+                    personaName,
+                    gameMap: (chatMeta.gameMap as GameMap | null) ?? null,
+                    artStylePrompt:
+                      ((chatMeta.gameSetupConfig as Record<string, unknown> | null)?.artStylePrompt as
+                        | string
+                        | undefined) ?? null,
+                    settings: {
+                      autoMaterializeNpcs: charTrackerSettings.autoMaterializeNpcs === true,
+                      autoGenerateNpcAvatars:
+                        charTrackerSettings.autoGenerateNpcAvatars === true ||
+                        charTrackerSettings.autoGenerateAvatars === true,
+                      autoGenerateNpcSprites: charTrackerSettings.autoGenerateNpcSprites === true,
+                      npcSpriteExpressions: Array.isArray(charTrackerSettings.npcSpriteExpressions)
+                        ? (charTrackerSettings.npcSpriteExpressions as string[])
+                        : undefined,
+                      imageConnectionId: (charTrackerSettings.imageConnectionId as string | undefined) ?? null,
+                    },
+                  });
+                } catch (err) {
+                  logger.warn(err, "[generate] NPC materialization failed");
                 }
 
                 // Auto-populate journal: NPC encounters
