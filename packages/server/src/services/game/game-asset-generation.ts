@@ -684,6 +684,46 @@ export interface SceneIllustrationGenRequest {
   promptOverride?: string;
 }
 
+/**
+ * Tokens that describe people / figures and conflict with the background plate's
+ * "no humans, no figures, no characters" hard-negative. We strip art-style
+ * tokens that mention any of these words so the prompt doesn't simultaneously
+ * ask for and forbid people — that mixed signal pushes image models (notably
+ * `google/gemini-2.5-flash-image`) to refuse with a text reply instead of bytes.
+ */
+const BACKGROUND_FIGURE_TOKEN_PATTERN =
+  /\b(?:figures?|characters?|portraits?|faces?|persons?|people|humans?|sensual|cleavage|breasts?|nude|nudity|nsfw|anatomy)\b/i;
+
+/**
+ * Strip figure/character/NSFW tokens from a persona-level `artStyle` string so
+ * it's safe to feed into a background-plate prompt. Splits on commas that are
+ * NOT inside parentheses to keep parenthesised qualifiers intact.
+ * Returns `undefined` when nothing usable remains.
+ */
+function sanitizeArtStyleForBackground(artStyle?: string): string | undefined {
+  const trimmed = artStyle?.trim();
+  if (!trimmed) return undefined;
+
+  const tokens: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const ch of trimmed) {
+    if (ch === "(") depth++;
+    else if (ch === ")") depth = Math.max(0, depth - 1);
+    if (ch === "," && depth === 0) {
+      if (current.trim()) tokens.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  if (current.trim()) tokens.push(current);
+
+  const kept = tokens.map((t) => t.trim()).filter((t) => t.length > 0 && !BACKGROUND_FIGURE_TOKEN_PATTERN.test(t));
+  const joined = kept.join(", ").replace(/\s+/g, " ").trim();
+  return joined.length > 0 ? joined : undefined;
+}
+
 export async function buildBackgroundImagePrompt(req: BackgroundPromptInput): Promise<string> {
   if (req.promptOverride?.trim()) return req.promptOverride.trim().slice(0, 1500);
   const conditionParts = req.conditions
@@ -695,7 +735,8 @@ export async function buildBackgroundImagePrompt(req: BackgroundPromptInput): Pr
     : [];
   const atmosphereLine = conditionParts.length ? ` Atmosphere — ${conditionParts.join(", ")}.` : "";
 
-  const styleHint = [req.artStyle, req.setting].filter(Boolean).join(", ");
+  const sanitizedArt = sanitizeArtStyleForBackground(req.artStyle);
+  const styleHint = [sanitizedArt, req.setting].filter(Boolean).join(", ");
   const backgroundVars = {
     sceneDescription: `${req.backgroundPrompt.trim().replace(/\s+/g, " ")}${atmosphereLine}`,
     styleLine: styleHint ? `Style: ${styleHint}.` : "",

@@ -170,6 +170,7 @@ import {
   validateSpriteExpressionEntries,
 } from "./generate/expression-agent-utils.js";
 import { logger, logDebugOverride } from "../lib/logger.js";
+import { validateOrResolveSkillCheckTags } from "../services/game/skill-check-validator.js";
 import {
   buildHistoricalLorebookKeeperContext,
   getLorebookKeeperAutomaticPendingCount,
@@ -6555,6 +6556,28 @@ export async function generateRoutes(app: FastifyInstance) {
             }
           }
 
+          if (chatMode === "game" && !input.impersonate && fullResponse.includes("[skill_check:")) {
+            try {
+              const validation = await validateOrResolveSkillCheckTags(
+                fullResponse,
+                input.chatId,
+                app.db,
+                { messageId: input.regenerateMessageId ?? null },
+              );
+              if (validation.content !== fullResponse) {
+                logger.info(
+                  "[generate] skill_check tags canonicalised for chat %s (%d entries)",
+                  input.chatId,
+                  validation.report.length,
+                );
+                fullResponse = validation.content;
+                contentReplaced = true;
+              }
+            } catch (err) {
+              logger.warn(err, "[generate] skill_check validation failed; persisting raw content");
+            }
+          }
+
           if (contentReplaced) {
             reply.raw.write(`data: ${JSON.stringify({ type: "content_replace", data: fullResponse })}\n\n`);
           }
@@ -8536,9 +8559,6 @@ export async function generateRoutes(app: FastifyInstance) {
           }
         }
 
-        const agentConnectionWarnings: AgentConnectionWarning[] = [];
-        const skippedLocalSidecarAgents: string[] = [];
-        const defaultAgentConnectionAgents: string[] = [];
         let responseOrchestratorSelectorAgent: ResolvedAgent | null = null;
         let responseOrchestratorSelectorUnavailable = false;
         for (const cfg of enabledConfigs) {
@@ -8557,16 +8577,12 @@ export async function generateRoutes(app: FastifyInstance) {
           });
 
           if (effectiveConnectionId === "skip-local-sidecar") {
-            skippedLocalSidecarAgents.push(cfg.name ?? cfg.type);
             logger.warn(
               "[generate] Skipping agent %s for chat %s because Local Model was requested but the sidecar is unavailable",
               cfg.type,
               input.chatId,
             );
             continue;
-          }
-          if (defaultAgentConn && effectiveConnectionId === defaultAgentConn.id) {
-            defaultAgentConnectionAgents.push(cfg.name ?? cfg.type);
           }
           if (effectiveConnectionId) {
             const cached = agentProviderCache.get(effectiveConnectionId);
@@ -8612,9 +8628,6 @@ export async function generateRoutes(app: FastifyInstance) {
             maxParallelJobs: agentMaxParallelJobs,
           });
         }
-        if (skippedLocalSidecarAgents.length > 0) {
-          agentConnectionWarnings.push(buildLocalSidecarUnavailableWarning(skippedLocalSidecarAgents));
-        }
 
         // Built-in agents with no DB row → use defaults only if explicitly in the per-chat list
         const resolvedTypes = new Set(resolvedAgents.map((a) => a.type));
@@ -8629,9 +8642,6 @@ export async function generateRoutes(app: FastifyInstance) {
         for (const builtIn of builtInFallbacks) {
           // Built-in agents also respect the default-for-agents connection
           const builtInCached = defaultAgentConn ? agentProviderCache.get(defaultAgentConn.id) : null;
-          if (defaultAgentConn) {
-            defaultAgentConnectionAgents.push(builtIn.name);
-          }
           const builtInSettings = getDefaultBuiltInAgentSettings(builtIn.id);
           if (builtIn.id === "spotify" && !Array.isArray(builtInSettings.enabledTools)) {
             builtInSettings.enabledTools = DEFAULT_AGENT_TOOLS.spotify ?? [];
@@ -8697,20 +8707,11 @@ export async function generateRoutes(app: FastifyInstance) {
 
               if (effectiveConnectionId === "skip-local-sidecar") {
                 responseOrchestratorSelectorUnavailable = true;
-                const alreadyWarned = skippedLocalSidecarAgents.some(
-                  (agentName) => agentName === "Response Orchestrator",
-                );
-                if (!alreadyWarned) {
-                  agentConnectionWarnings.push(buildLocalSidecarUnavailableWarning(["Response Orchestrator"]));
-                }
                 logger.warn(
                   "[group-smart] Skipping Response Orchestrator Local Model override for chat %s because the sidecar is unavailable",
                   input.chatId,
                 );
               } else {
-                if (defaultAgentConn && effectiveConnectionId === defaultAgentConn.id) {
-                  defaultAgentConnectionAgents.push("Response Orchestrator");
-                }
                 if (effectiveConnectionId) {
                   const cached = agentProviderCache.get(effectiveConnectionId);
                   if (cached) {
@@ -8757,16 +8758,6 @@ export async function generateRoutes(app: FastifyInstance) {
               }
             }
           }
-        }
-
-        if (defaultAgentConn && defaultAgentConnectionAgents.length > 0) {
-          agentConnectionWarnings.push(
-            buildDefaultAgentConnectionWarning({
-              agentNames: defaultAgentConnectionAgents,
-              connectionName: defaultAgentConn.name,
-              model: defaultAgentConn.model,
-            }),
-          );
         }
 
         logger.info(
@@ -10370,10 +10361,6 @@ export async function generateRoutes(app: FastifyInstance) {
             },
           });
         };
-
-        for (const warning of agentConnectionWarnings) {
-          trySendSseEvent(reply, { type: "agent_warning", data: warning });
-        }
 
         // Create the pipeline (exclude text rewrite/editor agents — they run last,
         // after all other post-processing agents have produced their context).
@@ -12270,6 +12257,28 @@ export async function generateRoutes(app: FastifyInstance) {
                   beforeTrim.length,
                   fullResponse.length,
                 );
+              }
+            }
+
+            if (chatMode === "game" && !input.impersonate && fullResponse.includes("[skill_check:")) {
+              try {
+                const validation = await validateOrResolveSkillCheckTags(
+                  fullResponse,
+                  input.chatId,
+                  app.db,
+                  { messageId: input.regenerateMessageId ?? null },
+                );
+                if (validation.content !== fullResponse) {
+                  logger.info(
+                    "[generate] skill_check tags canonicalised for chat %s (%d entries)",
+                    input.chatId,
+                    validation.report.length,
+                  );
+                  fullResponse = validation.content;
+                  contentReplaced = true;
+                }
+              } catch (err) {
+                logger.warn(err, "[generate] skill_check validation failed; persisting raw content");
               }
             }
 

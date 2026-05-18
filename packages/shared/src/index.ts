@@ -51,6 +51,9 @@ export * from "./constants/image-model-families.js";
 export * from "./constants/security.js";
 export * from "./constants/game-assets.js";
 
+// Game helpers
+export * from "./game/cg-frequency.js";
+
 // Utils
 export * from "./utils/macro-engine.js";
 export * from "./utils/xml-wrapper.js";

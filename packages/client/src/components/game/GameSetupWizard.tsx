@@ -20,7 +20,12 @@ import {
   Volume2,
   VolumeX,
 } from "lucide-react";
-import type { GameSetupConfig, GameGmMode } from "@marinara-engine/shared";
+import {
+  GAME_CG_FREQUENCY_OPTIONS,
+  type GameCgFrequencyPreset,
+  type GameSetupConfig,
+  type GameGmMode,
+} from "@marinara-engine/shared";
 import { getCharacterTitle } from "../../lib/character-display";
 import { api } from "../../lib/api-client";
 import { cn, getAvatarCropStyle, parseAvatarCropJson, type AvatarCropValue } from "../../lib/utils";
@@ -293,6 +298,7 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
   const [rating, setRating] = useState<"sfw" | "nsfw">("sfw");
   const [useLocalScene, setUseLocalScene] = useState(true);
   const [enableSpriteGeneration, setEnableSpriteGeneration] = useState(false);
+  const [gameCgFrequency, setGameCgFrequency] = useState<GameCgFrequencyPreset>("rare");
   const [enableSpotifyDj, setEnableSpotifyDj] = useState(false);
   const [gameSpotifySourceType, setGameSpotifySourceType] = useState<GameSpotifySourceType>("liked");
   const [gameSpotifyPlaylistId, setGameSpotifyPlaylistId] = useState("");
@@ -541,6 +547,7 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
         personaId: personaId ?? undefined,
         sceneConnectionId: sceneModelValue && sceneModelValue !== "local" ? sceneModelValue : undefined,
         enableSpriteGeneration: enableSpriteGeneration || undefined,
+        gameCgFrequency: enableSpriteGeneration ? gameCgFrequency : undefined,
         imageConnectionId: enableSpriteGeneration && imageConnectionId ? imageConnectionId : undefined,
         activeLorebookIds: activeLorebookIds.length > 0 ? activeLorebookIds : undefined,
         enableCustomWidgets,
@@ -1467,6 +1474,25 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                         Generates portraits for new NPCs and backgrounds for new locations using the scene analysis
                         pipeline.
                       </p>
+                      <label className="mt-3 flex flex-col gap-1">
+                        <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                          Частота CG (авто)
+                        </span>
+                        <select
+                          value={gameCgFrequency}
+                          onChange={(e) => setGameCgFrequency(e.target.value as GameCgFrequencyPreset)}
+                          className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)]"
+                        >
+                          {GAME_CG_FREQUENCY_OPTIONS.map((opt) => (
+                            <option key={opt.id} value={opt.id}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-[0.55rem] text-[var(--muted-foreground)]">
+                          {GAME_CG_FREQUENCY_OPTIONS.find((o) => o.id === gameCgFrequency)?.description}
+                        </p>
+                      </label>
                     </div>
                   )}
                 </div>

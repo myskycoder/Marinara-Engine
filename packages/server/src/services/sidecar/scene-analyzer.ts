@@ -11,6 +11,8 @@ import {
   LOCATION_KINDS,
   MUSIC_GENRES,
   MUSIC_INTENSITIES,
+  normalizeGameCgFrequency,
+  type GameCgFrequencyPreset,
   type HudWidget,
   type GameNpc,
   type GameActiveState,
@@ -64,6 +66,8 @@ export interface SceneAnalyzerContext {
   knownLocationIds?: string[];
   /** Whether image generation is configured and this turn is allowed to request a rare CG illustration. */
   canGenerateIllustrations?: boolean;
+  /** Player-selected auto CG frequency preset (drives illustration prompt strictness). */
+  cgFrequency?: GameCgFrequencyPreset;
   /** Whether image generation is configured for missing location/background assets. */
   canGenerateBackgrounds?: boolean;
   /** Unified image style for generated game art. */
@@ -178,6 +182,90 @@ function compactPromptLabel(value: string | null | undefined): string {
     .slice(0, 180);
 }
 
+export interface IllustrationPromptGuidance {
+  /** Numbered TASK lines for the CG illustration item (empty when illustrations disabled). */
+  taskLines: string[];
+  /** RULES bullets for the illustration object (empty when illustrations disabled). */
+  ruleLines: string[];
+}
+
+/** Scene-analyzer TASK + RULES text for VN CG, keyed by player frequency preset. */
+export function buildIllustrationPromptGuidance(
+  preset: GameCgFrequencyPreset,
+  ctx: Pick<SceneAnalyzerContext, "turnNumber" | "artStylePrompt" | "imagePromptInstructions"> | undefined,
+  canGenerateIllustrations: boolean,
+  taskNumber: string,
+): IllustrationPromptGuidance {
+  if (!canGenerateIllustrations) {
+    return { taskLines: [], ruleLines: [] };
+  }
+
+  const artStyleSuffix = ctx?.artStylePrompt ? ` (${ctx.artStylePrompt})` : "";
+  const povLine = `   The image must be from the player protagonist's POV, in the game's established art style${artStyleSuffix}. The protagonist should not be visible except hands/arms when the narration explicitly requires it.`;
+  const imageInstructions =
+    ctx?.imagePromptInstructions?.trim() ?
+      [`- When writing "illustration.prompt", obey these user image instructions: ${compactImagePromptInstructions(ctx.imagePromptInstructions)}`]
+    : [];
+
+  const commonRules = [
+    `- Set "illustration.segment" to the narration line index [N] where the CG beat STARTS (same numbering as segmentEffects). Keep top-level "background" as the room/area plate for the turn; the engine shows CG only when the player reaches that segment, then restores the room on the next segment.`,
+    `- "illustration.characters" MUST name every visible on-screen character who appears in the CG (same names as in narration), so reference portraits attach correctly — never invent a different cast.`,
+    `- The illustration prompt MUST stay in the SAME location as the current scene: reuse props, architecture, and weather/lighting from the narration and from top-level "background" / "backgroundPrompt" / "locationId" — do not relocate to a generic stock setting.`,
+    ...imageInstructions,
+  ];
+
+  switch (preset) {
+    case "cinematic":
+      return {
+        taskLines: [
+          `${taskNumber}. VN CG ILLUSTRATION — Request ONE generated CG when this turn has a vivid, memorable visual beat (arrival somewhere new, confrontation, reveal, emotional spike, combat highlight, intimate dialogue with characters on screen). Aim for cinematic coverage: if the narration is visually interesting, include "illustration". Still at most ONE CG per turn.`,
+          povLine,
+        ],
+        ruleLines: [
+          `- Prefer including "illustration" on turns with strong imagery; keep null only for dry logistics, pure inventory chatter, or beats with nothing to show.`,
+          `- If you request it, the prompt must describe the exact illustrated moment, visible characters, player POV, mood, lighting, and composition.`,
+          ...commonRules,
+        ],
+      };
+    case "frequent":
+      return {
+        taskLines: [
+          `${taskNumber}. VN CG ILLUSTRATION — You may request ONE generated CG when the turn contains a memorable visual moment: dialogue with visible characters, tension, action, discovery, or emotional beat. Target roughly every 1–2 turns when the prose supports a striking still. Do not request CG for filler travel with no drama or empty exposition.`,
+          povLine,
+        ],
+        ruleLines: [
+          `- Request "illustration" on many turns with a clear visual hook; null is fine when the beat is purely logistical.`,
+          `- If you request it, the prompt must describe the exact illustrated moment, visible characters, player POV, mood, lighting, and composition.`,
+          ...commonRules,
+        ],
+      };
+    case "balanced":
+      return {
+        taskLines: [
+          `${taskNumber}. VN CG ILLUSTRATION — You may request ONE generated CG for a strong visual beat: emotional turn, conflict, revelation, notable combat moment, or intimate character scene. Skip routine travel and flat exposition with no dramatic visual.`,
+          povLine,
+        ],
+        ruleLines: [
+          `- Use "illustration" on turns with a clear dramatic or visual peak; most low-key turns should keep it null.`,
+          `- If you request it, the prompt must describe the exact illustrated moment, visible characters, player POV, mood, lighting, and composition.`,
+          ...commonRules,
+        ],
+      };
+    case "rare":
+    default:
+      return {
+        taskLines: [
+          `${taskNumber}. RARE SPECIAL-SCENE CG ILLUSTRATION — You may request ONE generated VN CG illustration only for a major, story-defining moment: first kiss, duel climax, major revelation, sacrifice, council confrontation, boss entrance, or emotional peak. Do not request one for routine travel, normal dialogue, regular combat blows, room changes, shopping, exposition, or scenery.`,
+          povLine,
+        ],
+        ruleLines: [
+          `- Use "illustration" rarely. Most turns MUST keep it null. If you request it, the prompt must describe the exact illustrated moment, visible characters, player POV, mood, lighting, and composition.`,
+          ...commonRules,
+        ],
+      };
+  }
+}
+
 /** Build the user prompt with all choices inline in a JSON template. */
 export function buildSceneAnalyzerUserPrompt(
   narration: string,
@@ -186,6 +274,7 @@ export function buildSceneAnalyzerUserPrompt(
 ): string {
   const parts: string[] = [];
   const canGenerateIllustrations = !!ctx?.canGenerateIllustrations;
+  const cgFrequency = normalizeGameCgFrequency(ctx?.cgFrequency);
   const canGenerateBackgrounds = !!ctx?.canGenerateBackgrounds;
   const imagePromptInstructions = compactImagePromptInstructions(ctx?.imagePromptInstructions);
   const musicGenreOptions = [...MUSIC_GENRES, "null"].join(" | ");
@@ -249,7 +338,7 @@ export function buildSceneAnalyzerUserPrompt(
     ``,
     `TASK: You are the scene director for a visual novel game. Read the narration above and decide:`,
     // music and ambient are scored deterministically on the server — not requested from the model
-    `1. SCENE SETTING — Pick the BEST overall background, weather, time of day, and season that fit the narration. The top-level "background" is what the player sees first when this message appears — it MUST match where the narration ENDS (the room/area the party occupies after the turn). If characters move house → office (or any room change), top-level "background" MUST be the office (tag or backgrounds:generated:...) and top-level "locationId" MUST match — do NOT leave "background": null just because the move happens mid-text; null is ONLY when the party stays in the exact same place with no plate change.`,
+    `1. SCENE SETTING — Pick the BEST overall background, weather, time of day, and season that fit the narration. Top-level "background" + "locationId" are the CANONICAL END-OF-TURN state (where the party stands after this message) — used for the next turn's context, metadata, and illustration grounding. They are NOT necessarily the first on-screen frame: the client keeps showing the previous turn's location plate until a segmentEffect at the matching beat changes "background". If characters move house → office (or any room change), top-level "background" MUST be the office (tag or backgrounds:generated:...) and top-level "locationId" MUST match — do NOT leave "background": null just because the move happens mid-text; null is ONLY when the party stays in the exact same place with no plate change.`,
     `2. LOCATION ID — Output a stable kebab-case "locationId" for the place currently in frame (e.g. "chernorechye-village-edge", "aunt-zoya-izba-kitchen", "abandoned-bell-tower"). REUSE the same id whenever the narration returns to a previously-visited place — even if phrasing differs. Inventing a new id for an already-visited location creates a duplicate cadre and wastes generation.`,
     `3. BACKGROUND PROMPT — When you cannot find a STRONG match in the listed availableBackgrounds (locale, era, geography, language/cultural context — e.g. nothing matches a snowy Russian village or a 1990s post-Soviet bus stop), set "background" to "backgrounds:generated:<short-slug>" AND fill "backgroundPrompt" with a rich 1–2 sentence visual description: location type, materials, lighting, atmosphere, and key visual details from the narration. For generated backgrounds, describe a composition that works behind full-body character sprites: keep the lower foreground and bottom-center relatively clear; put focal interest, important props, doors, and readable text-like signage in mid-ground or upper frame or off-center so sprites are not parked on top of the scene's key beats. When you DO pick a tag from availableBackgrounds, set "backgroundPrompt": null.`,
     useSpotifyMusic
@@ -271,12 +360,12 @@ export function buildSceneAnalyzerUserPrompt(
           `${canGenerateBackgrounds ? "8" : "7"}. CINEMATIC DIRECTIONS — If the narration warrants an opening/establishing or turn-wide visual effect, include it. Otherwise empty array. Available: fade_from_black, fade_to_black, flash, screen_shake, blur, vignette, letterbox, color_grade (presets: warm, cold_blue, horror, noir, vintage, neon, dreamy), focus, pulse, slow_zoom, impact_zoom, tilt, desaturate, chromatic_aberration, film_grain, rain_streaks, spotlight.`,
         ]
       : []),
-    ...(canGenerateIllustrations
-      ? [
-          `${(ctx?.turnNumber ?? 1) > 1 ? (canGenerateBackgrounds ? "9" : "8") : canGenerateBackgrounds ? "8" : "7"}. RARE SPECIAL-SCENE CG ILLUSTRATION — You may request ONE generated VN CG illustration only for a major, story-defining moment: first kiss, duel climax, major revelation, sacrifice, council confrontation, boss entrance, or emotional peak. Do not request one for routine travel, normal dialogue, regular combat blows, room changes, shopping, exposition, or scenery.`,
-          `   The image must be from the player protagonist's POV, in the game's established art style${ctx?.artStylePrompt ? ` (${ctx.artStylePrompt})` : ""}. The protagonist should not be visible except hands/arms when the narration explicitly requires it.`,
-        ]
-      : []),
+    ...buildIllustrationPromptGuidance(
+      cgFrequency,
+      ctx,
+      canGenerateIllustrations,
+      (ctx?.turnNumber ?? 1) > 1 ? (canGenerateBackgrounds ? "9" : "8") : canGenerateBackgrounds ? "8" : "7",
+    ).taskLines,
     ``,
     `RULES:`,
     `- For "background" use ONE of: a tag from availableBackgrounds (exact spelling), or "backgrounds:generated:<short-slug>". Nothing else.`,
@@ -301,16 +390,14 @@ export function buildSceneAnalyzerUserPrompt(
     `- Cinematic directions are spice, not punctuation. Use at most 2 total directions per turn, and never more than 1 direction in any 3-beat span. Prefer none for routine dialogue.`,
     `- Use directions for real visual beats: a door slamming, a blade impact, thunder, a memory fracture, a kiss/reveal close-up, a panic spike, a scene transition, or a major emotional turn. Do not attach directions to every line.`,
     `- The background should stay the SAME as long as the characters remain in the same location. Only change it in a segment when characters physically move to a different place.`,
+    `- If the first narration lines are still in the PREVIOUS location and the first location change is at segment N>0, that is valid: put the first new plate on segment N only; do not duplicate the old plate on segment 0 unless you also need sfx/directions there.`,
     ...(canGenerateIllustrations
-      ? [
-          `- Use "illustration" rarely. Most turns MUST keep it null. If you request it, the prompt must describe the exact illustrated moment, visible characters, player POV, mood, lighting, and composition.`,
-          `- Set "illustration.segment" to the narration line index [N] where the CG beat STARTS (same numbering as segmentEffects). Keep top-level "background" as the room/area plate for the turn; the engine shows CG only when the player reaches that segment, then restores the room on the next segment.`,
-          `- "illustration.characters" MUST name every visible on-screen character who appears in the CG (same names as in narration), so reference portraits attach correctly — never invent a different cast.`,
-          `- The illustration prompt MUST stay in the SAME location as the current scene: reuse props, architecture, and weather/lighting from the narration and from top-level "background" / "backgroundPrompt" / "locationId" — do not relocate to a generic stock setting.`,
-          ...(imagePromptInstructions
-            ? [`- When writing "illustration.prompt", obey these user image instructions: ${imagePromptInstructions}`]
-            : []),
-        ]
+      ? buildIllustrationPromptGuidance(
+          cgFrequency,
+          ctx,
+          canGenerateIllustrations,
+          (ctx?.turnNumber ?? 1) > 1 ? (canGenerateBackgrounds ? "9" : "8") : canGenerateBackgrounds ? "8" : "7",
+        ).ruleLines
       : canGenerateBackgrounds
         ? [
             `- Do not include the rare "illustration" object this turn. Generated reusable location backgrounds are still allowed via backgrounds:generated:<short-location-slug>.`,

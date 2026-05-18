@@ -93,7 +93,12 @@ import type {
   SceneSpotifyTrackSelection,
 } from "@marinara-engine/shared";
 import type { SceneSegmentEffect } from "@marinara-engine/shared";
-import { scoreMusic, scoreAmbient } from "@marinara-engine/shared";
+import {
+  scoreMusic,
+  scoreAmbient,
+  canRequestAutoCgIllustration,
+  normalizeGameCgFrequency,
+} from "@marinara-engine/shared";
 import { GameNarration, formatNarration } from "./GameNarration";
 import { GameInput } from "./GameInput";
 import { GameMapPanel, MobileMapButton } from "./GameMap";
@@ -381,6 +386,32 @@ function pickNonIllustrationSegmentPlate(segmentEffects: SceneSegmentEffect[] | 
     return bg;
   }
   return null;
+}
+
+/** Location plates that drive travel beats (excludes VN CG tags — those use a separate defer path). */
+function isMeaningfulLocationPlateBackground(bg: string | undefined | null): boolean {
+  const t = typeof bg === "string" ? bg.trim() : "";
+  if (!t || t === "black" || t === "none") return false;
+  if (t.startsWith("backgrounds:illustrations:")) return false;
+  return true;
+}
+
+/** Min/max segment indices that set a reusable location plate within one message. */
+function segmentLocationPlateBounds(
+  segmentEffects: SceneSegmentEffect[] | undefined,
+): { min: number; max: number } | null {
+  if (!segmentEffects?.length) return null;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const fx of segmentEffects) {
+    if (!isMeaningfulLocationPlateBackground(fx.background)) continue;
+    const s = fx.segment;
+    if (typeof s !== "number" || !Number.isFinite(s)) continue;
+    if (s < min) min = s;
+    if (s > max) max = s;
+  }
+  if (min === Infinity || max < 0) return null;
+  return { min, max };
 }
 
 type LocationCatalogRow = { variants?: Array<{ tag: string }> };
@@ -2632,64 +2663,6 @@ export function GameSurface({
     window.setTimeout(() => setActiveDirections(directions), 0);
   }, []);
 
-  // Apply segment-tied effects when the user progresses to a new segment
-  const handleSegmentEnter = useCallback(
-    (segmentIndex: number) => {
-      useGameModeStore.getState().setDiceRollResult(null);
-      const sceneEffectsApplied = appliedSegmentsRef.current.has(segmentIndex);
-      const inventoryApplied = appliedInventorySegmentsRef.current.has(segmentIndex);
-      const effects = sceneEffectsApplied ? [] : pendingSegmentEffects.filter((e) => e.segment === segmentIndex);
-      const inventoryUpdates = (inventoryApplied ? [] : pendingInventorySegmentUpdates)
-        .filter((entry) => entry.segment === segmentIndex)
-        .map((entry) => entry.update);
-      if (effects.length === 0 && inventoryUpdates.length === 0) return;
-
-      const assetMap = scopedAssetMap;
-      if (effects.length > 0) {
-        appliedSegmentsRef.current.add(segmentIndex);
-        for (const fx of effects) {
-          if (fx.background) {
-            const resolved = resolveAssetTag(fx.background, "backgrounds", assetMap);
-            useGameAssetStore.getState().setCurrentBackground(resolved);
-          }
-          if (fx.music && !useSpotifyGameMusic) {
-            const resolved = resolveAssetTag(fx.music, "music", assetMap);
-            audioManager.playMusic(resolved, assetMap);
-            useGameAssetStore.getState().setCurrentMusic(resolved);
-          }
-          if (fx.sfx?.length) {
-            for (const sfx of fx.sfx) {
-              const resolved = resolveAssetTag(sfx, "sfx", assetMap);
-              audioManager.playSfx(resolved, assetMap);
-            }
-          }
-          if (fx.ambient) {
-            const resolved = resolveAssetTag(fx.ambient, "ambient", assetMap);
-            audioManager.playAmbient(resolved, assetMap);
-            useGameAssetStore.getState().setCurrentAmbient(resolved);
-          }
-          if (fx.directions?.length) {
-            playDirections(fx.directions);
-          }
-          // Widget updates handled by GM model via inline [widget:] tags
-        }
-      }
-
-      if (inventoryUpdates.length > 0) {
-        appliedInventorySegmentsRef.current.add(segmentIndex);
-        applyInventoryUpdates(inventoryUpdates);
-      }
-    },
-    [
-      pendingSegmentEffects,
-      pendingInventorySegmentUpdates,
-      scopedAssetMap,
-      applyInventoryUpdates,
-      playDirections,
-      useSpotifyGameMusic,
-    ],
-  );
-
   // Fetch asset manifest on mount
   useEffect(() => {
     fetchManifest();
@@ -3056,6 +3029,85 @@ export function GameSurface({
   const latestAssistantMsgRef = useRef(latestAssistantMsg);
   latestAssistantMsgRef.current = latestAssistantMsg;
 
+  /** After the last segment-driven location plate, apply the deferred top-level end plate if the model omitted that segment. */
+  const tryReconcileDeferredEndPlate = useCallback((segmentIndex: number) => {
+    const pending = sceneDeferredEndPlateRef.current;
+    const activeId = latestAssistantMsgRef.current?.id;
+    if (!pending || pending.messageId !== activeId) return;
+    if (pending.skipBgUpdate) return;
+    if (segmentIndex <= pending.maxBgSegment) return;
+    const map = scopedAssetMap;
+    const resolved = resolveAssetTag(pending.endPlateTag, "backgrounds", map);
+    const cur = useGameAssetStore.getState().currentBackground;
+    if (cur !== resolved) {
+      useGameAssetStore.getState().setCurrentBackground(resolved);
+    }
+    sceneDeferredEndPlateRef.current = null;
+  }, [scopedAssetMap]);
+
+  // Apply segment-tied effects when the user progresses to a new segment
+  const handleSegmentEnter = useCallback(
+    (segmentIndex: number) => {
+      useGameModeStore.getState().setDiceRollResult(null);
+      const sceneEffectsApplied = appliedSegmentsRef.current.has(segmentIndex);
+      const inventoryApplied = appliedInventorySegmentsRef.current.has(segmentIndex);
+      const effects = sceneEffectsApplied ? [] : pendingSegmentEffects.filter((e) => e.segment === segmentIndex);
+      const inventoryUpdates = (inventoryApplied ? [] : pendingInventorySegmentUpdates)
+        .filter((entry) => entry.segment === segmentIndex)
+        .map((entry) => entry.update);
+      if (effects.length === 0 && inventoryUpdates.length === 0) {
+        tryReconcileDeferredEndPlate(segmentIndex);
+        return;
+      }
+
+      const assetMap = scopedAssetMap;
+      if (effects.length > 0) {
+        appliedSegmentsRef.current.add(segmentIndex);
+        for (const fx of effects) {
+          if (fx.background) {
+            const resolved = resolveAssetTag(fx.background, "backgrounds", assetMap);
+            useGameAssetStore.getState().setCurrentBackground(resolved);
+          }
+          if (fx.music && !useSpotifyGameMusic) {
+            const resolved = resolveAssetTag(fx.music, "music", assetMap);
+            audioManager.playMusic(resolved, assetMap);
+            useGameAssetStore.getState().setCurrentMusic(resolved);
+          }
+          if (fx.sfx?.length) {
+            for (const sfx of fx.sfx) {
+              const resolved = resolveAssetTag(sfx, "sfx", assetMap);
+              audioManager.playSfx(resolved, assetMap);
+            }
+          }
+          if (fx.ambient) {
+            const resolved = resolveAssetTag(fx.ambient, "ambient", assetMap);
+            audioManager.playAmbient(resolved, assetMap);
+            useGameAssetStore.getState().setCurrentAmbient(resolved);
+          }
+          if (fx.directions?.length) {
+            playDirections(fx.directions);
+          }
+          // Widget updates handled by GM model via inline [widget:] tags
+        }
+      }
+
+      if (inventoryUpdates.length > 0) {
+        appliedInventorySegmentsRef.current.add(segmentIndex);
+        applyInventoryUpdates(inventoryUpdates);
+      }
+      tryReconcileDeferredEndPlate(segmentIndex);
+    },
+    [
+      pendingSegmentEffects,
+      pendingInventorySegmentUpdates,
+      scopedAssetMap,
+      applyInventoryUpdates,
+      playDirections,
+      useSpotifyGameMusic,
+      tryReconcileDeferredEndPlate,
+    ],
+  );
+
   // Derived per-render: completion is only "done" for the *current* assistant message.
   // A stale completion ID from the previous turn falls through to false because
   // `latestAssistantMsg.id` has already advanced. The `typeof === "string"` guards
@@ -3143,6 +3195,46 @@ export function GameSurface({
     chatMeta.enableSpriteGeneration === true &&
     typeof chatMeta.gameImageConnectionId === "string" &&
     chatMeta.gameImageConnectionId.trim().length > 0;
+
+  const approxGameTurnNumber = useMemo(
+    () => Math.max(1, messages.filter((m) => m.role === "user").length + 1),
+    [messages],
+  );
+
+  const autoCgSceneGate = useMemo(() => {
+    const imageGenEnabled = chatMeta.enableSpriteGeneration === true;
+    const hasImageConnection =
+      typeof chatMeta.gameImageConnectionId === "string" && chatMeta.gameImageConnectionId.trim().length > 0;
+    const cgFrequency = normalizeGameCgFrequency(chatMeta.gameCgFrequency);
+    return {
+      cgFrequency,
+      canGenerateIllustrations: canRequestAutoCgIllustration({
+        preset: cgFrequency,
+        turnNumber: approxGameTurnNumber,
+        lastIllustrationTurn:
+          typeof chatMeta.gameLastIllustrationTurn === "number" ? chatMeta.gameLastIllustrationTurn : 0,
+        sessionNumber:
+          typeof chatMeta.gameSessionNumber === "number" && Number.isFinite(chatMeta.gameSessionNumber)
+            ? chatMeta.gameSessionNumber
+            : null,
+        lastIllustrationSession:
+          typeof chatMeta.gameLastIllustrationSessionNumber === "number" &&
+          Number.isFinite(chatMeta.gameLastIllustrationSessionNumber)
+            ? chatMeta.gameLastIllustrationSessionNumber
+            : null,
+        imageGenEnabled,
+        hasImageConnection,
+      }),
+    };
+  }, [
+    approxGameTurnNumber,
+    chatMeta.enableSpriteGeneration,
+    chatMeta.gameImageConnectionId,
+    chatMeta.gameCgFrequency,
+    chatMeta.gameLastIllustrationTurn,
+    chatMeta.gameLastIllustrationSessionNumber,
+    chatMeta.gameSessionNumber,
+  ]);
 
   const missingSceneAssetGeneration = useMemo(() => {
     return buildMissingSceneAssetGenerationPayload({
@@ -3346,6 +3438,13 @@ export function GameSurface({
   // Track which message has had its scene effects prepared so narration
   // isn't displayed until backgrounds/music/etc. are ready.
   const sceneReadyMsgIdRef = useRef<string | undefined>(undefined);
+  /** When the top-level end plate is deferred, reconcile to it after the last segment-driven plate change. */
+  const sceneDeferredEndPlateRef = useRef<{
+    messageId: string;
+    maxBgSegment: number;
+    endPlateTag: string;
+    skipBgUpdate: boolean;
+  } | null>(null);
   const applySceneResultRef = useRef<
     ((result: import("@marinara-engine/shared").SceneAnalysis) => void | Promise<void>) | null
   >(null);
@@ -3881,6 +3980,7 @@ export function GameSurface({
     setPendingSegmentEffects([]);
     setPendingInventorySegmentUpdates([]);
     appliedSegmentsRef.current = new Set();
+    sceneDeferredEndPlateRef.current = null;
     // Cancel any pending segment persist timer to prevent it from overwriting our reset
     if (segmentPersistTimer.current) {
       clearTimeout(segmentPersistTimer.current);
@@ -4089,7 +4189,8 @@ export function GameSurface({
       currentWeather: gameSnapshot?.weather ?? null,
       currentTimeOfDay: gameSnapshot?.time ?? null,
       canGenerateBackgrounds: !!chatMeta.enableSpriteGeneration && !!chatMeta.gameImageConnectionId,
-      canGenerateIllustrations: !!chatMeta.enableSpriteGeneration && !!chatMeta.gameImageConnectionId,
+      canGenerateIllustrations: autoCgSceneGate.canGenerateIllustrations,
+      cgFrequency: autoCgSceneGate.cgFrequency,
       artStylePrompt:
         ((chatMeta.gameSetupConfig as Record<string, unknown> | undefined)?.artStylePrompt as string | undefined) ??
         null,
@@ -4411,6 +4512,7 @@ export function GameSurface({
   async function applySceneResult(result: import("@marinara-engine/shared").SceneAnalysis, msg: { id: string }) {
     console.log("[scene-analysis] Result from model:", JSON.stringify(result, null, 2));
     setSceneAnalysisFailed(false);
+    sceneDeferredEndPlateRef.current = null;
     // NOTE: Game state transitions are owned exclusively by the GM model via [state: ...] tags.
     // The scene model no longer emits stateChange to avoid conflicting state flips.
 
@@ -4502,7 +4604,19 @@ export function GameSurface({
       !rawTopBg.startsWith("backgrounds:generated:") &&
       !rawTopBg.startsWith("backgrounds:chat:");
 
-    if (plateTag && !skipBgUpdate) {
+    const plateBounds = segmentLocationPlateBounds(result.segmentEffects);
+    const deferTopLevelPlate =
+      !skipBgUpdate && !!plateTag && plateBounds !== null && plateBounds.min > 0;
+    if (deferTopLevelPlate) {
+      sceneDeferredEndPlateRef.current = {
+        messageId: msg.id,
+        maxBgSegment: plateBounds.max,
+        endPlateTag: plateTag!,
+        skipBgUpdate,
+      };
+    }
+
+    if (plateTag && !skipBgUpdate && !deferTopLevelPlate) {
       const resolved = resolveAssetTag(plateTag, "backgrounds", assetMap);
       useGameAssetStore.getState().setCurrentBackground(resolved);
     } else if (!useGameAssetStore.getState().currentBackground && !skipBgUpdate) {
@@ -4610,9 +4724,12 @@ export function GameSurface({
     }
 
     // Location changed but scene still pointed at a stale CG plate — drop it so the next catalog / async path can show.
+    // When the end plate is deferred (travel mid-message), keep the CG until segment beats replace it.
     if (locationMoved && !skipBgUpdate) {
       const cur = useGameAssetStore.getState().currentBackground;
-      if (cur?.startsWith("backgrounds:illustrations:")) {
+      const skipCgClearForDeferredTravel =
+        deferTopLevelPlate && cur?.startsWith("backgrounds:illustrations:");
+      if (!skipCgClearForDeferredTravel && cur?.startsWith("backgrounds:illustrations:")) {
         const bgKeys = Object.keys(assetMap ?? {}).filter(
           (k) => k.startsWith("backgrounds:") && !k.startsWith("backgrounds:illustrations:"),
         );
@@ -5206,6 +5323,7 @@ export function GameSurface({
     setPendingSegmentEffects([]);
     setPendingInventorySegmentUpdates([]);
     appliedSegmentsRef.current = new Set();
+    sceneDeferredEndPlateRef.current = null;
     appliedInventorySegmentsRef.current = new Set();
     setNarrationDoneMsgId(null);
     interruptedInteractiveCommandKeysRef.current.delete(interactiveCommandKey(activeChatId, msg.id));
@@ -5269,7 +5387,8 @@ export function GameSurface({
       currentWeather: gameSnapshot?.weather ?? null,
       currentTimeOfDay: gameSnapshot?.time ?? null,
       canGenerateBackgrounds: !!chatMeta.enableSpriteGeneration && !!chatMeta.gameImageConnectionId,
-      canGenerateIllustrations: !!chatMeta.enableSpriteGeneration && !!chatMeta.gameImageConnectionId,
+      canGenerateIllustrations: autoCgSceneGate.canGenerateIllustrations,
+      cgFrequency: autoCgSceneGate.cgFrequency,
       artStylePrompt:
         ((chatMeta.gameSetupConfig as Record<string, unknown> | undefined)?.artStylePrompt as string | undefined) ??
         null,
@@ -5341,6 +5460,8 @@ export function GameSurface({
     sidecarConfig.useForGameScene,
     sidecarReady,
     useSpotifyGameMusic,
+    autoCgSceneGate.canGenerateIllustrations,
+    autoCgSceneGate.cgFrequency,
   ]);
 
   const sendMessage = useCallback(
@@ -7839,6 +7960,7 @@ export function GameSurface({
     setPendingSegmentEffects([]);
     setPendingInventorySegmentUpdates([]);
     appliedSegmentsRef.current = new Set();
+    sceneDeferredEndPlateRef.current = null;
     appliedInventorySegmentsRef.current = new Set();
     appliedInventorySegmentsRef.current = new Set();
 
@@ -7868,7 +7990,8 @@ export function GameSurface({
       currentWeather: gameSnapshot?.weather ?? null,
       currentTimeOfDay: gameSnapshot?.time ?? null,
       canGenerateBackgrounds: !!chatMeta.enableSpriteGeneration && !!chatMeta.gameImageConnectionId,
-      canGenerateIllustrations: !!chatMeta.enableSpriteGeneration && !!chatMeta.gameImageConnectionId,
+      canGenerateIllustrations: autoCgSceneGate.canGenerateIllustrations,
+      cgFrequency: autoCgSceneGate.cgFrequency,
       artStylePrompt: (setupConfig?.artStylePrompt as string | undefined) ?? null,
       imagePromptInstructions:
         typeof chatMeta.gameImagePromptInstructions === "string" ? chatMeta.gameImagePromptInstructions : null,
@@ -7910,6 +8033,8 @@ export function GameSurface({
     sceneAnalysis,
     sceneWrapCharacterNames,
     sceneAnalysisEnabled,
+    autoCgSceneGate.canGenerateIllustrations,
+    autoCgSceneGate.cgFrequency,
   ]);
 
   // Remap legacy hud_bottom widgets to left/right (hud_bottom was removed)

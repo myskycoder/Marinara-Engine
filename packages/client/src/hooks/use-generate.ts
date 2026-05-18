@@ -52,10 +52,10 @@ function showAgentWarning(raw: unknown) {
   const data = raw && typeof raw === "object" ? (raw as { code?: unknown; message?: unknown }) : null;
   const message = typeof data?.message === "string" ? data.message : "Agent warning";
   const warningKey = `${typeof data?.code === "string" ? data.code : "agent_warning"}:${message}`;
-  console.warn("[Agent warning]", raw);
   if (shownAgentWarnings.has(warningKey)) return;
   shownAgentWarnings.add(warningKey);
-  toast.warning(message, { duration: 20000 });
+  console.warn("[Agent warning]", raw);
+  toast.warning(message, { id: warningKey, duration: 20000 });
 }
 
 function applyAgentBackgroundChoice(chosen: string | null | undefined) {

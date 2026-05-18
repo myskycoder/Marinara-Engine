@@ -319,6 +319,7 @@ export const sidecarRoutes: FastifyPluginAsync = async (app) => {
       currentTimeOfDay: z.string().nullable().optional(),
       canGenerateBackgrounds: z.boolean().optional(),
       canGenerateIllustrations: z.boolean().optional(),
+      cgFrequency: z.enum(["off", "rare", "balanced", "frequent", "cinematic"]).optional(),
       artStylePrompt: z.string().nullable().optional(),
       imagePromptInstructions: z.string().max(1200).nullable().optional(),
     }),
@@ -340,7 +341,10 @@ export const sidecarRoutes: FastifyPluginAsync = async (app) => {
     const bgTags = body.context.availableBackgrounds ?? [];
     const sfxTags = body.context.availableSfx ?? [];
 
-    const sceneCtx = body.context as SceneAnalyzerContext;
+    const sceneCtx: SceneAnalyzerContext = {
+      ...(body.context as SceneAnalyzerContext),
+      cgFrequency: body.context.cgFrequency,
+    };
     const systemPrompt = buildSceneAnalyzerSystemPrompt(sceneCtx);
     const userPrompt = buildSceneAnalyzerUserPrompt(body.narration, body.playerAction, sceneCtx);
 

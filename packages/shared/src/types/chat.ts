@@ -360,6 +360,8 @@ export interface ChatMetadata {
   gameLastIllustrationTag?: string;
   /** Extra user instructions for game scene illustration prompts. */
   gameImagePromptInstructions?: string | null;
+  /** Auto VN CG frequency preset. Omitted = rare (legacy default). */
+  gameCgFrequency?: import("../game/cg-frequency.js").GameCgFrequencyPreset;
   /** Per-game asset browser folder exclusions. Omitted/null means every asset folder is available. */
   gameAssetSelection?: { excludedFolders?: string[] } | null;
   /** When true, Game Mode uses Spotify DJ for music instead of local music assets. */

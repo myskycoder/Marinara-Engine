@@ -200,6 +200,8 @@ export interface GameSetupConfig {
   sceneConnectionId?: string;
   /** Enable automatic sprite generation for characters using image model */
   enableSpriteGeneration?: boolean;
+  /** Auto VN CG frequency preset. Defaults to rare when omitted. */
+  gameCgFrequency?: import("../game/cg-frequency.js").GameCgFrequencyPreset;
   /** Connection ID for image generation (NPC portraits + location backgrounds; SFW illustrations) */
   imageConnectionId?: string;
   /**

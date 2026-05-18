@@ -74,12 +74,11 @@ import { createCheckpointService, type CheckpointTrigger } from "../services/gam
 import { copyBranchMessagesAndSnapshots } from "../services/chats/branch-chat-copy.service.js";
 import { remapBackgroundChatTagsInMetadata } from "../services/game/game-fork-metadata.service.js";
 import { copyGameCheckpointsForFork } from "../services/game/copy-checkpoints-for-fork.service.js";
+import { resolveSkillCheck } from "../services/game/skill-check.service.js";
 import {
-  resolveSkillCheck,
-  attributeModifier,
-  getGoverningAttribute,
-  mapSheetAttributesToRPG,
-} from "../services/game/skill-check.service.js";
+  lookupPlayerModifiers,
+  validateOrResolveSkillCheckTags,
+} from "../services/game/skill-check-validator.js";
 import { applyAllSegmentEdits, stripGmCommandTags } from "../services/game/segment-edits.js";
 import { processLorebooks } from "../services/lorebook/index.js";
 import { GAME_LOREBOOK_KEEPER_SOURCE_ID } from "../services/lorebook/game-lorebook-scope.js";
@@ -109,7 +108,6 @@ import {
   scoreAmbient,
   GAME_MODE_DEFAULT_AGENT_IDS,
   stripGameInlineTagsForContext,
-  serializeResolvedSkillCheckTag,
 } from "@marinara-engine/shared";
 import { mergeCustomParameters } from "./generate/generate-route-utils.js";
 import { postToDiscordWebhook } from "../services/discord-webhook.js";
@@ -131,6 +129,13 @@ import type {
   PendingBackgroundGeneration,
   HudWidget,
 } from "@marinara-engine/shared";
+import type { IllustrationCooldownInput } from "@marinara-engine/shared";
+import {
+  canRequestAutoCgIllustration,
+  isIllustrationCooldownSatisfied,
+  normalizeGameCgFrequency,
+  isGameCgAutoEnabled,
+} from "@marinara-engine/shared";
 import { getAssetManifest, GAME_ASSETS_DIR } from "../services/game/asset-manifest.service.js";
 import {
   GENERATED_GAME_BACKGROUND_EXTS,
@@ -148,6 +153,7 @@ import {
 } from "../services/game/game-asset-generation.js";
 import { buildIllustrationContinuity, excerptNarrationForIllustration } from "../services/game/scene-illustration-context.js";
 import { rewriteIllustrationPrompt } from "../services/game/image-prompt-writer.js";
+import { recordIllustrationSkip, type IllustrationSkipReason } from "../services/game/illustration-audit.js";
 import {
   regenerateNpcAssets,
   scheduleNpcFullBodyEmotionSet,
@@ -273,40 +279,44 @@ export function findCharAvatarFuzzy(npcName: string, charAvatarByName: Map<strin
   return undefined;
 }
 
-const ILLUSTRATION_COOLDOWN_TURNS = 2;
-
 function currentGameSessionNumber(meta: Record<string, unknown>): number | null {
   return typeof meta.gameSessionNumber === "number" && Number.isFinite(meta.gameSessionNumber)
     ? meta.gameSessionNumber
     : null;
 }
 
-function isIllustrationAllowed(
+function illustrationCooldownInputFromMeta(
   meta: Record<string, unknown>,
   turnNumber: number,
-  sessionNumber?: number | null,
+): IllustrationCooldownInput {
+  return {
+    preset: normalizeGameCgFrequency(meta.gameCgFrequency),
+    turnNumber,
+    lastIllustrationTurn: typeof meta.gameLastIllustrationTurn === "number" ? meta.gameLastIllustrationTurn : 0,
+    sessionNumber: currentGameSessionNumber(meta),
+    lastIllustrationSession:
+      typeof meta.gameLastIllustrationSessionNumber === "number" &&
+      Number.isFinite(meta.gameLastIllustrationSessionNumber)
+        ? meta.gameLastIllustrationSessionNumber
+        : null,
+  };
+}
+
+function isIllustrationAllowed(meta: Record<string, unknown>, turnNumber: number): boolean {
+  return isIllustrationCooldownSatisfied(illustrationCooldownInputFromMeta(meta, turnNumber));
+}
+
+function canAutoCgIllustrationForChat(
+  meta: Record<string, unknown>,
+  turnNumber: number,
+  enableGen: boolean,
+  imgConnId: string | null | undefined,
 ): boolean {
-  const lastTurn = typeof meta.gameLastIllustrationTurn === "number" ? meta.gameLastIllustrationTurn : 0;
-  const lastSession =
-    typeof meta.gameLastIllustrationSessionNumber === "number" &&
-    Number.isFinite(meta.gameLastIllustrationSessionNumber)
-      ? meta.gameLastIllustrationSessionNumber
-      : null;
-  if (lastSession !== null && sessionNumber !== null && sessionNumber !== undefined && lastSession !== sessionNumber) {
-    return true;
-  }
-  // Legacy metadata did not record the session. In multi-session games, assume
-  // that old shape came from a carried previous session and let the new session
-  // establish a fresh session-aware cooldown.
-  if (lastSession === null && sessionNumber !== null && sessionNumber !== undefined && sessionNumber > 1) {
-    return true;
-  }
-  // Older metadata stored only a turn number. If the current session turn count
-  // restarted below it, the saved cooldown came from a previous session.
-  if (lastSession === null && lastTurn > turnNumber) {
-    return true;
-  }
-  return lastTurn <= 0 || turnNumber - lastTurn >= ILLUSTRATION_COOLDOWN_TURNS;
+  return canRequestAutoCgIllustration({
+    ...illustrationCooldownInputFromMeta(meta, turnNumber),
+    imageGenEnabled: enableGen,
+    hasImageConnection: !!imgConnId,
+  });
 }
 
 function extractCharacterAppearanceText(characterData: Record<string, unknown>): string {
@@ -857,6 +867,7 @@ const gameSetupConfigSchema = z.object({
   personaId: z.string().nullable().optional(),
   sceneConnectionId: z.string().optional(),
   enableSpriteGeneration: z.boolean().optional(),
+  gameCgFrequency: z.enum(["off", "rare", "balanced", "frequent", "cinematic"]).optional(),
   imageConnectionId: z.string().optional(),
   artStylePrompt: z.string().max(500).optional(),
   activeLorebookIds: z.array(z.string()).optional(),
@@ -2981,31 +2992,6 @@ function reconcileJournal(
   return next;
 }
 
-function parseSkillCheckAttribute(body: string, key: string): string | null {
-  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = body.match(new RegExp(`\\b${escapedKey}\\s*=\\s*("[^"]*"|'[^']*'|[^\\s\\]]+)`, "i"));
-  return match?.[1]?.trim().replace(/^['"]|['"]$/g, "") ?? null;
-}
-
-function replaceFirstUnresolvedSkillCheckTag(
-  content: string,
-  request: { skill: string; dc: number },
-  result: ReturnType<typeof resolveSkillCheck>,
-): string {
-  let replaced = false;
-  return content.replace(/\[skill_check:\s*([^\]]+)\]/gi, (fullTag, body: string) => {
-    if (replaced || /\bresult\s*=/i.test(body)) return fullTag;
-
-    const skill = parseSkillCheckAttribute(body, "skill");
-    const dc = Number.parseInt(parseSkillCheckAttribute(body, "dc") ?? "", 10);
-    if (skill && skill.trim().toLowerCase() !== request.skill.trim().toLowerCase()) return fullTag;
-    if (Number.isFinite(dc) && dc !== request.dc) return fullTag;
-
-    replaced = true;
-    return serializeResolvedSkillCheckTag(result);
-  });
-}
-
 // ──────────────────────────────────────────────
 // Route Registration
 // ──────────────────────────────────────────────
@@ -3480,6 +3466,7 @@ export async function gameRoutes(app: FastifyInstance) {
       ),
       gameModeAutoSeeded: true,
       enableSpriteGeneration: setupConfig.enableSpriteGeneration || false,
+      gameCgFrequency: setupConfig.gameCgFrequency ?? "rare",
       gameImageConnectionId: setupConfig.imageConnectionId || null,
       activeLorebookIds: setupConfig.activeLorebookIds || [],
       enableCustomWidgets: setupConfig.enableCustomWidgets !== false,
@@ -5412,64 +5399,51 @@ export async function gameRoutes(app: FastifyInstance) {
 
   app.post("/skill-check", async (req) => {
     const input = skillCheckSchema.parse(req.body);
-    const stateStore = createGameStateStorage(app.db);
 
-    const snapshot = await stateStore.getLatest(input.chatId);
-    const playerStats = snapshot?.playerStats ? JSON.parse(snapshot.playerStats as string) : null;
-
-    // Look up skill modifier
-    const skillMod = playerStats?.skills?.[input.skill] ?? playerStats?.skills?.[input.skill.toLowerCase()] ?? 0;
-
-    // Look up governing attribute modifier. Prefer playerStats.attributes
-    // (engine-shape), fall back to the player's character-sheet rpgStats
-    // (free-form names) since playerStats.attributes is never seeded today.
-    const attr = getGoverningAttribute(input.skill);
-    let attrMod = 0;
-    let attrScore: number | null = null;
-    if (playerStats?.attributes && Number.isFinite(Number(playerStats.attributes[attr]))) {
-      attrScore = Number(playerStats.attributes[attr]);
-    } else {
-      const chats = createChatsStorage(app.db);
-      const chat = await chats.getById(input.chatId);
-      const meta = chat ? parseMeta(chat.metadata) : {};
-      const cards = Array.isArray(meta.gameCharacterCards)
-        ? (meta.gameCharacterCards as Array<Record<string, unknown>>)
-        : [];
-      const playerCard = cards[0];
-      const rpgStats = playerCard?.rpgStats as { attributes?: Array<{ name: string; value: number }> } | undefined;
-      const mapped = mapSheetAttributesToRPG(rpgStats?.attributes);
-      if (mapped[attr] != null) attrScore = mapped[attr]!;
-    }
-    if (attrScore != null) attrMod = attributeModifier(attrScore);
-
-    const result = resolveSkillCheck({
-      skill: input.skill,
-      dc: input.dc,
-      skillModifier: skillMod,
-      attributeModifier: attrMod,
-      advantage: input.advantage,
-      disadvantage: input.disadvantage,
-      preRolledD20: input.preRolledD20,
-    });
-
-    let updatedContent: string | undefined;
+    // When the client passes a messageId, run the full validator against the
+    // stored message so the tag is canonicalised in the same place the
+    // generate.routes hook would have placed it. Without messageId, just
+    // resolve the roll using the player's real modifiers and return it.
     if (input.messageId) {
       const chats = createChatsStorage(app.db);
       const message = await chats.getMessage(input.messageId);
       if (message?.chatId === input.chatId && (message.role === "assistant" || message.role === "narrator")) {
-        const nextContent = replaceFirstUnresolvedSkillCheckTag(
+        const { content: nextContent, lastResolved } = await validateOrResolveSkillCheckTags(
           message.content,
-          { skill: input.skill, dc: input.dc },
-          result,
+          input.chatId,
+          app.db,
+          {
+            matchSkill: input.skill,
+            matchDc: input.dc,
+            firstMatchOnly: true,
+            preRolledD20: input.preRolledD20,
+            forceAdvantage: input.advantage,
+            forceDisadvantage: input.disadvantage,
+            messageId: input.messageId,
+          },
         );
+        let updatedContent: string | undefined;
         if (nextContent !== message.content) {
           await chats.updateMessageContent(input.messageId, nextContent);
           updatedContent = nextContent;
         }
+        if (lastResolved) return { result: lastResolved, updatedContent };
       }
     }
 
-    return { result, updatedContent };
+    // Fallback: no messageId (or message not found) — resolve a fresh roll
+    // for the client without touching any persisted narration.
+    const lookup = await lookupPlayerModifiers(app.db, input.chatId, input.skill);
+    const result = resolveSkillCheck({
+      skill: input.skill,
+      dc: input.dc,
+      skillModifier: lookup.skillModifier,
+      attributeModifier: lookup.attributeModifier,
+      advantage: input.advantage,
+      disadvantage: input.disadvantage,
+      preRolledD20: input.preRolledD20,
+    });
+    return { result };
   });
 
   // ── POST /game/morale ──
@@ -6563,6 +6537,7 @@ export async function gameRoutes(app: FastifyInstance) {
       currentTimeOfDay: z.string().nullable(),
       canGenerateBackgrounds: z.boolean().optional(),
       canGenerateIllustrations: z.boolean().optional(),
+      cgFrequency: z.enum(["off", "rare", "balanced", "frequent", "cinematic"]).optional(),
       artStylePrompt: z.string().nullable().optional(),
       imagePromptInstructions: z.string().max(1200).nullable().optional(),
     }),
@@ -6672,6 +6647,7 @@ export async function gameRoutes(app: FastifyInstance) {
     );
     const currentLocationId = (meta.currentLocationId as string | null | undefined) ?? null;
     const currentSeason = coerceSeason(meta.gameCurrentSeason);
+    const cgPreset = normalizeGameCgFrequency(meta.gameCgFrequency);
     const sessionNumber = currentGameSessionNumber(meta);
 
     const sceneCtx: SceneAnalyzerContext = {
@@ -6682,8 +6658,8 @@ export async function gameRoutes(app: FastifyInstance) {
       knownLocationIds,
       currentSeason,
       canGenerateBackgrounds: enableGen && !!imgConnId,
-      canGenerateIllustrations:
-        enableGen && !!imgConnId && isIllustrationAllowed(meta, approxTurnNumber, sessionNumber),
+      canGenerateIllustrations: canAutoCgIllustrationForChat(meta, approxTurnNumber, enableGen, imgConnId),
+      cgFrequency: cgPreset,
       artStylePrompt: artStyleForScene || null,
       imagePromptInstructions: imagePromptInstructions || null,
     };
@@ -6842,6 +6818,33 @@ export async function gameRoutes(app: FastifyInstance) {
       }
 
       if (!sceneCtx.canGenerateIllustrations) {
+        const suppressedIllustration = (parsed as { illustration?: SceneIllustrationRequest | null } | null)
+          ?.illustration;
+        if (suppressedIllustration) {
+          const skipReason: IllustrationSkipReason = !enableGen
+            ? "image_generation_disabled"
+            : !imgConnId
+              ? "no_image_connection"
+              : !isGameCgAutoEnabled(cgPreset)
+                ? "cg_frequency_off"
+                : "cooldown_active";
+          const lastIllustrationTurn =
+            typeof meta.gameLastIllustrationTurn === "number" ? meta.gameLastIllustrationTurn : null;
+          recordIllustrationSkip({
+            chatId: input.chatId,
+            reason: skipReason,
+            illustration: suppressedIllustration,
+            turnNumber: approxTurnNumber,
+            lastIllustrationTurn,
+            note: "game/scene-wrap",
+          });
+          logger.info(
+            "[game/scene-wrap] illustration suppressed: reason=%s slug=%s segment=%s",
+            skipReason,
+            suppressedIllustration.slug ?? "?",
+            suppressedIllustration.segment ?? "?",
+          );
+        }
         (parsed as unknown as Record<string, unknown>).illustration = null;
       }
 
@@ -7540,7 +7543,7 @@ export async function gameRoutes(app: FastifyInstance) {
       const allMsgs = await chats.listMessages(input.chatId);
       const approxTurnNumber = Math.max(1, allMsgs.filter((message) => message.role === "user").length + 1);
       const sessionNumber = currentGameSessionNumber(meta);
-      if (isIllustrationAllowed(meta, approxTurnNumber, sessionNumber)) {
+      if (isIllustrationAllowed(meta, approxTurnNumber)) {
         // Mirror the per-illustration connection override from /generate-assets
         // so the preview shows the prompt rendered for the model that will
         // actually run when the user clicks +1 SFW or +1 NSFW.
@@ -8157,9 +8160,23 @@ export async function gameRoutes(app: FastifyInstance) {
       const approxTurnNumber = Math.max(1, allMsgs.filter((message) => message.role === "user").length + 1);
       const sessionNumber = currentGameSessionNumber(meta);
       const illustrationAllowed =
-        input.skipIllustrationCooldown === true || isIllustrationAllowed(meta, approxTurnNumber, sessionNumber);
+        input.skipIllustrationCooldown === true || isIllustrationAllowed(meta, approxTurnNumber);
       if (!illustrationAllowed) {
-        logger.debug("[game/generate-assets] illustration skipped: cooldown active");
+        const lastIllustrationTurn =
+          typeof meta.gameLastIllustrationTurn === "number" ? meta.gameLastIllustrationTurn : null;
+        logger.info(
+          "[game/generate-assets] illustration skipped: cooldown active (turn=%d, lastIllustrationTurn=%s)",
+          approxTurnNumber,
+          lastIllustrationTurn ?? "?",
+        );
+        recordIllustrationSkip({
+          chatId: input.chatId,
+          reason: "cooldown_active",
+          illustration: input.illustration,
+          turnNumber: approxTurnNumber,
+          lastIllustrationTurn,
+          note: "game/generate-assets",
+        });
       } else {
         // Per-illustration connection override (gallery "+1 SFW / +1 NSFW").
         // Only the illustration call uses this — backgrounds and NPC avatars

@@ -1481,9 +1481,33 @@ function openRouterModalities(model?: string): string[] {
 }
 
 /**
+ * Sentinel error class for the case where an OpenRouter image model (notably
+ * `google/gemini-2.5-flash-image`) returns a conversational text reply instead
+ * of an actual image payload. It lets the outer retry wrapper distinguish this
+ * intermittent failure from real HTTP / network / auth errors.
+ */
+class OpenRouterTextRefusalError extends Error {
+  readonly code = "OPENROUTER_TEXT_REFUSAL";
+  readonly preview: string;
+  constructor(preview: string) {
+    super(`No image data in OpenRouter response: ${preview.slice(0, 200)}`);
+    this.name = "OpenRouterTextRefusalError";
+    this.preview = preview;
+  }
+}
+
+/** Total attempts (initial + retries) when OpenRouter returns text instead of an image. */
+const OPENROUTER_TEXT_REFUSAL_MAX_ATTEMPTS = 2;
+
+/**
  * Some OpenRouter image models refuse multimodal "reference + generate" and return text only;
  * in that case we retry once with the same text prompt and no reference images so NPC sprites /
  * img2img-style flows can still complete (consistency falls back to the written prompt only).
+ *
+ * Separately, `google/gemini-2.5-flash-image` intermittently returns a conversational text
+ * reply (e.g. "Sure, here's an image of...") with no image bytes — even for plain text-to-image
+ * requests with no references. We retry that case once with the same prompt; the model usually
+ * succeeds on the second attempt.
  */
 async function generateOpenRouter(baseUrl: string, apiKey: string, request: ImageGenRequest): Promise<ImageGenResult> {
   const url = chatCompletionsUrl(baseUrl);
@@ -1539,13 +1563,40 @@ async function generateOpenRouter(baseUrl: string, apiKey: string, request: Imag
         );
         return runOnce(false);
       }
-      throw new Error(`No image data in OpenRouter response: ${content.slice(0, 200)}`);
+      throw new OpenRouterTextRefusalError(content);
     }
 
     return downloadImageUrl(imageUrl, scopedRequest.allowLocalUrls);
   };
 
-  return runOnce(true);
+  let lastTextRefusal: OpenRouterTextRefusalError | undefined;
+  for (let attempt = 1; attempt <= OPENROUTER_TEXT_REFUSAL_MAX_ATTEMPTS; attempt++) {
+    try {
+      return await runOnce(true);
+    } catch (err) {
+      if (err instanceof OpenRouterTextRefusalError) {
+        lastTextRefusal = err;
+        if (attempt < OPENROUTER_TEXT_REFUSAL_MAX_ATTEMPTS) {
+          const backoffMs = 400 + Math.floor(Math.random() * 400);
+          logger.warn(
+            {
+              attempt,
+              maxAttempts: OPENROUTER_TEXT_REFUSAL_MAX_ATTEMPTS,
+              backoffMs,
+              preview: err.preview.slice(0, 240),
+              model: request.model ?? null,
+            },
+            "[image-gen][openrouter] Model returned text instead of image bytes; retrying with same prompt",
+          );
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
+          continue;
+        }
+      }
+      throw err;
+    }
+  }
+  // All attempts exhausted with text-refusal errors — surface the last one.
+  throw lastTextRefusal ?? new Error("OpenRouter image generation failed: text refusal with no captured error");
 }
 
 /**

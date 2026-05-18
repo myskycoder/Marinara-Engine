@@ -16,6 +16,7 @@ import type {
   GameNpc,
   GameActiveState,
   SceneSpotifyTrackCandidate,
+  GameCgFrequencyPreset,
 } from "@marinara-engine/shared";
 import { useUIStore } from "../stores/ui.store";
 
@@ -41,6 +42,7 @@ interface AnalyzeSceneInput {
     currentTimeOfDay: string | null;
     canGenerateBackgrounds?: boolean;
     canGenerateIllustrations?: boolean;
+    cgFrequency?: GameCgFrequencyPreset;
     artStylePrompt?: string | null;
     imagePromptInstructions?: string | null;
   };

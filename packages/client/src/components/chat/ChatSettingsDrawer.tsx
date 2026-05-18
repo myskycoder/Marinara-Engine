@@ -139,7 +139,10 @@ import {
   AGENT_COST_HIGH_CALLS,
   AGENT_COST_HIGH_TOKENS,
   getDefaultBuiltInAgentSettings,
+  GAME_CG_FREQUENCY_OPTIONS,
+  normalizeGameCgFrequency,
 } from "@marinara-engine/shared";
+import type { GameCgFrequencyPreset } from "@marinara-engine/shared";
 import type { Chat, CharacterGroup, Lorebook } from "@marinara-engine/shared";
 import {
   isCustomToolSelectable,
@@ -4287,6 +4290,35 @@ export function ChatSettingsDrawer({
                               </option>
                             ))}
                           </select>
+                        </label>
+                        <label className="flex flex-col gap-1">
+                          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                            Частота CG (авто)
+                          </span>
+                          <select
+                            value={normalizeGameCgFrequency(metadata.gameCgFrequency)}
+                            onChange={(e) =>
+                              updateMeta.mutate({
+                                id: chat.id,
+                                gameCgFrequency: e.target.value as GameCgFrequencyPreset,
+                              })
+                            }
+                            className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)]"
+                          >
+                            {GAME_CG_FREQUENCY_OPTIONS.map((opt) => (
+                              <option key={opt.id} value={opt.id}>
+                                {opt.label}
+                              </option>
+                            ))}
+                          </select>
+                          <p className="text-[0.55rem] text-[var(--muted-foreground)]">
+                            {
+                              GAME_CG_FREQUENCY_OPTIONS.find(
+                                (o) => o.id === normalizeGameCgFrequency(metadata.gameCgFrequency),
+                              )?.description
+                            }{" "}
+                            Кнопки «+1» в галерее не ограничиваются этим пресетом.
+                          </p>
                         </label>
                         <label className="flex flex-col gap-1">
                           <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
