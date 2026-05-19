@@ -16,6 +16,9 @@
 // validated to round-trip cleanly.
 
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import type { ChatMessage } from "../../base-provider.js";
 import { logger } from "../../../../lib/logger.js";
 
@@ -284,3 +287,183 @@ export function serializeEntries(entries: readonly SyntheticEntry[]): string {
   if (entries.length === 0) return "";
   return entries.map((e) => JSON.stringify(e)).join("\n") + "\n";
 }
+
+// ──────────────────────────────────────────────
+// History split for SDK resume + current-turn shaping
+// ──────────────────────────────────────────────
+
+/** Synthetic user prompt when no history exists (connection-test pings, dry runs). */
+const SYNTHETIC_START = "[Start]";
+/**
+ * Synthetic user prompt when the trailing message is an assistant turn
+ * (prefill / "continue this" flows). This is the closest in-SDK approximation
+ * of Anthropic Messages API native prefill — the SDK's `prompt` is user-only,
+ * so we can't author a trailing assistant in the outbound API call. The
+ * trailing assistant turn stays in JSONL (real assistant entry) and this
+ * synthetic user message asks the model to continue.
+ *
+ * TODO(passthrough): If/when the loopback-passthrough is added, rewrite the
+ * outbound API body to keep the trailing assistant in its proper position and
+ * elide this synthetic continuation — that unlocks native prefill semantics
+ * (model extends the prefill turn rather than producing a new turn).
+ */
+const SYNTHETIC_CONTINUE = "(continue)";
+
+export interface SplitResult {
+  /** Messages that go into the JSONL session file as prior history. */
+  history: ChatMessage[];
+  /** The message used to build the SDK `query()` prompt. */
+  current: ChatMessage;
+  /** Diagnostic tag describing which branch shaped `current`. */
+  shape: "trailing-user" | "trailing-tool" | "trailing-assistant-continue" | "synthetic-start";
+}
+
+/**
+ * Split a flat ChatMessage history into the (history → JSONL) + (current →
+ * SDK prompt) shape the resume path needs.
+ *
+ * - Trailing `user` or `tool`: JSONL = all-but-trailing; prompt source = trailing.
+ * - Trailing `assistant`: JSONL = all messages (prefill stays in JSONL);
+ *   prompt source = synthetic "(continue)" user turn.
+ * - Empty or system-only: JSONL = [] (system messages ride `systemPrompt`,
+ *   not the JSONL); prompt source = synthetic "[Start]" user turn.
+ *
+ * No "drop trailing assistants" logic — Marinara's regen flows trim the
+ * to-be-regenerated assistant upstream in generate.routes.ts before reaching
+ * the provider, so a trailing assistant arriving here is intentional
+ * (assistantPrefill, packages/shared/src/types/prompt.ts:177).
+ */
+export function splitHistoryForResume(messages: readonly ChatMessage[]): SplitResult {
+  // Find last non-system index (system messages are transparent for this split).
+  let lastIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role !== "system") {
+      lastIdx = i;
+      break;
+    }
+  }
+
+  if (lastIdx === -1) {
+    return {
+      history: [],
+      current: { role: "user", content: SYNTHETIC_START },
+      shape: "synthetic-start",
+    };
+  }
+
+  const trailing = messages[lastIdx]!;
+
+  if (trailing.role === "assistant") {
+    return {
+      history: messages.slice(0, lastIdx + 1) as ChatMessage[],
+      current: { role: "user", content: SYNTHETIC_CONTINUE },
+      shape: "trailing-assistant-continue",
+    };
+  }
+
+  return {
+    history: messages.slice(0, lastIdx) as ChatMessage[],
+    current: trailing,
+    shape: trailing.role === "tool" ? "trailing-tool" : "trailing-user",
+  };
+}
+
+// ──────────────────────────────────────────────
+// Current-turn → SDK prompt message shape
+// ──────────────────────────────────────────────
+
+/**
+ * Shape of `SDKUserMessage` from `@anthropic-ai/claude-agent-sdk` that the
+ * SDK accepts when `prompt` is an AsyncIterable. Re-declared locally so this
+ * module stays SDK-free (the provider does the SDK import at call time).
+ *
+ * The SDK's actual type has more optional fields (priority, origin,
+ * tool_use_result, etc.) but only `type`, `message`, and `parent_tool_use_id`
+ * are mandatory for the resume + prompt path.
+ */
+export interface SdkUserMessageForPrompt {
+  type: "user";
+  message: {
+    role: "user";
+    content: string | Array<TextBlock | ToolResultBlock | ImageBlock>;
+  };
+  parent_tool_use_id: null;
+}
+
+/**
+ * Convert a Marinara `ChatMessage` into an `SDKUserMessage`-shaped object the
+ * SDK accepts as the yielded prompt value.
+ *
+ *  - role "tool" → single `tool_result` block (with empty `tool_use_id` if
+ *    upstream omitted it; matches the same defensive policy as `buildUserEntry`).
+ *  - images present → image blocks followed by an optional text block.
+ *  - plain text → string content (smaller wire form; same semantics).
+ */
+export function currentToSdkUserMessage(message: ChatMessage): SdkUserMessageForPrompt {
+  const text = message.content ?? "";
+  let content: SdkUserMessageForPrompt["message"]["content"] = text;
+
+  if (message.role === "tool") {
+    if (!message.tool_call_id) {
+      logger.warn(
+        "[claude-subscription/jsonl] role=tool current turn missing tool_call_id; emitting tool_result with empty tool_use_id",
+      );
+    }
+    content = [
+      { type: "tool_result", tool_use_id: message.tool_call_id ?? "", content: text },
+    ];
+  } else {
+    const images: ImageBlock[] = [];
+    for (const url of message.images ?? []) {
+      const match = url.match(DATA_URL_RE);
+      if (!match) {
+        logger.warn("[claude-subscription/jsonl] dropping current-turn image: not a base64 data URL");
+        continue;
+      }
+      images.push({
+        type: "image",
+        source: { type: "base64", media_type: match[1]!, data: match[2]! },
+      });
+    }
+    if (images.length > 0) {
+      const blocks: Array<TextBlock | ImageBlock> = [...images];
+      if (text) blocks.push({ type: "text", text });
+      content = blocks;
+    }
+  }
+
+  return {
+    type: "user",
+    message: { role: "user", content },
+    parent_tool_use_id: null,
+  };
+}
+
+// ──────────────────────────────────────────────
+// SDK version stamp
+// ──────────────────────────────────────────────
+
+/**
+ * Read the @anthropic-ai/claude-agent-sdk version once at module load and
+ * cache. Used to stamp `version` on synthetic JSONL entries so the SDK can
+ * validate the file format. Falls back to "unknown" on any failure — the SDK
+ * accepts that during resume (validated against live sessions).
+ *
+ * Assumption: the SDK's `main` entry lives at the package root next to its
+ * `package.json` (true for v0.2.x). If a future version moves the entry into
+ * a subdir, this falls back cleanly to "unknown".
+ */
+function detectSdkVersion(): string {
+  try {
+    const req = createRequire(import.meta.url);
+    const mainPath = req.resolve("@anthropic-ai/claude-agent-sdk");
+    const pkgPath = join(dirname(mainPath), "package.json");
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: unknown };
+    if (typeof pkg.version === "string" && pkg.version.length > 0) return pkg.version;
+  } catch {
+    // fall through to "unknown"
+  }
+  return "unknown";
+}
+
+export const SDK_VERSION: string = detectSdkVersion();

@@ -10,7 +10,10 @@ import { describe, it } from "node:test";
 import {
   buildAssistantEntry,
   buildUserEntry,
+  currentToSdkUserMessage,
+  SDK_VERSION,
   serializeEntries,
+  splitHistoryForResume,
   type CommonSessionMeta,
 } from "../jsonl-entries.ts";
 import type { ChatMessage } from "../../../base-provider.ts";
@@ -315,5 +318,149 @@ describe("serializeEntries", () => {
     assert.equal(parsed0["type"], "user");
     assert.equal(parsed1["type"], "assistant");
     assert.equal(parsed1["parentUuid"], "u1");
+  });
+});
+
+describe("splitHistoryForResume", () => {
+  it("emits trailing-user split for a normal multi-turn history", () => {
+    const history: ChatMessage[] = [
+      { role: "system", content: "be helpful" },
+      { role: "user", content: "1" },
+      { role: "assistant", content: "2" },
+      { role: "user", content: "3" },
+    ];
+    const split = splitHistoryForResume(history);
+    assert.equal(split.shape, "trailing-user");
+    assert.equal(split.history.length, 3);
+    assert.equal(split.history[2]!.role, "assistant");
+    assert.equal(split.current.role, "user");
+    assert.equal(split.current.content, "3");
+  });
+
+  it("emits trailing-tool split for an agent-loop mid-stream history", () => {
+    const history: ChatMessage[] = [
+      { role: "user", content: "do a thing" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "t1", type: "function", function: { name: "f", arguments: "{}" } }],
+      },
+      { role: "tool", content: "result", tool_call_id: "t1" },
+    ];
+    const split = splitHistoryForResume(history);
+    assert.equal(split.shape, "trailing-tool");
+    assert.equal(split.history.length, 2);
+    assert.equal(split.current.role, "tool");
+    assert.equal(split.current.tool_call_id, "t1");
+  });
+
+  it("keeps trailing assistant in JSONL and synthesizes a continuation prompt (prefill path)", () => {
+    // Marinara's assistantPrefill feature lands here (generate.routes.ts).
+    const history: ChatMessage[] = [
+      { role: "user", content: "story start: " },
+      { role: "assistant", content: "Once upon a time," },
+    ];
+    const split = splitHistoryForResume(history);
+    assert.equal(split.shape, "trailing-assistant-continue");
+    assert.equal(split.history.length, 2, "trailing assistant must stay in JSONL for prefill visibility");
+    assert.equal(split.history[1]!.role, "assistant");
+    assert.equal(split.history[1]!.content, "Once upon a time,");
+    assert.equal(split.current.role, "user");
+    assert.ok(split.current.content.length > 0, "synthetic continuation must be non-empty for the Anthropic API");
+  });
+
+  it("synthesizes a [Start] prompt for empty history", () => {
+    const split = splitHistoryForResume([]);
+    assert.equal(split.shape, "synthetic-start");
+    assert.equal(split.history.length, 0);
+    assert.equal(split.current.role, "user");
+    assert.ok(split.current.content.length > 0);
+  });
+
+  it("synthesizes a [Start] prompt for system-only history", () => {
+    const split = splitHistoryForResume([{ role: "system", content: "be helpful" }]);
+    assert.equal(split.shape, "synthetic-start");
+    assert.equal(split.history.length, 0);
+    assert.equal(split.current.role, "user");
+  });
+
+  it("treats system messages as transparent for the trailing-message determination", () => {
+    // A system message appearing AFTER the last user/assistant shouldn't
+    // change the split — system rides systemPrompt, not the JSONL.
+    const history: ChatMessage[] = [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+      { role: "system", content: "remember to be concise" },
+    ];
+    const split = splitHistoryForResume(history);
+    assert.equal(split.shape, "trailing-assistant-continue");
+    // The trailing assistant (not the trailing system) drives the shape.
+  });
+});
+
+describe("currentToSdkUserMessage", () => {
+  it("emits string content for a plain-text user message", () => {
+    const m: ChatMessage = { role: "user", content: "hello" };
+    const msg = currentToSdkUserMessage(m);
+    assert.equal(msg.type, "user");
+    assert.equal(msg.message.role, "user");
+    assert.equal(msg.message.content, "hello");
+    assert.equal(msg.parent_tool_use_id, null);
+  });
+
+  it("emits image blocks + optional text block when images are present", () => {
+    const dataUrl =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
+    const m: ChatMessage = { role: "user", content: "what is this?", images: [dataUrl] };
+    const msg = currentToSdkUserMessage(m);
+    assert.ok(Array.isArray(msg.message.content));
+    const blocks = msg.message.content as unknown as Array<Record<string, unknown>>;
+    assert.equal(blocks.length, 2);
+    assert.equal(blocks[0]!["type"], "image");
+    assert.deepEqual(blocks[1], { type: "text", text: "what is this?" });
+  });
+
+  it("emits a tool_result block when role=tool with tool_call_id", () => {
+    const m: ChatMessage = { role: "tool", content: "result", tool_call_id: "toolu_001" };
+    const msg = currentToSdkUserMessage(m);
+    assert.ok(Array.isArray(msg.message.content));
+    const blocks = msg.message.content as unknown as Array<Record<string, unknown>>;
+    assert.equal(blocks.length, 1);
+    assert.deepEqual(blocks[0], {
+      type: "tool_result",
+      tool_use_id: "toolu_001",
+      content: "result",
+    });
+  });
+
+  it("emits a tool_result block with empty tool_use_id when role=tool lacks tool_call_id", () => {
+    const m: ChatMessage = { role: "tool", content: "orphan" };
+    const msg = currentToSdkUserMessage(m);
+    const blocks = msg.message.content as unknown as Array<Record<string, unknown>>;
+    assert.equal(blocks[0]!["tool_use_id"], "");
+  });
+
+  it("drops images that are not base64 data URLs", () => {
+    const m: ChatMessage = {
+      role: "user",
+      content: "hi",
+      images: ["https://example.com/x.png", "not-a-data-url"],
+    };
+    const msg = currentToSdkUserMessage(m);
+    // All invalid → no image blocks → string content fallback.
+    assert.equal(msg.message.content, "hi");
+  });
+});
+
+describe("SDK_VERSION", () => {
+  it("is a non-empty string (the installed SDK version, or 'unknown' fallback)", () => {
+    assert.equal(typeof SDK_VERSION, "string");
+    assert.ok(SDK_VERSION.length > 0);
+  });
+
+  it("matches the installed @anthropic-ai/claude-agent-sdk package version when resolvable", () => {
+    // If the package is resolvable in this test env (it is, per devDependencies),
+    // SDK_VERSION should look like a semver, not "unknown".
+    assert.match(SDK_VERSION, /^\d+\.\d+\.\d+/, "expected semver-like; got " + SDK_VERSION);
   });
 });

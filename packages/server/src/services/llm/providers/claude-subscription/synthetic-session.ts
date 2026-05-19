@@ -24,6 +24,7 @@ import { logger } from "../../../../lib/logger.js";
 import {
   buildAssistantEntry,
   buildUserEntry,
+  SDK_VERSION,
   serializeEntries,
   type CommonSessionMeta,
   type SyntheticEntry,
@@ -90,7 +91,7 @@ export async function constructSessionFile(
   const meta: CommonSessionMeta = {
     sessionId,
     cwd,
-    version: options.sdkVersion ?? "unknown",
+    version: options.sdkVersion ?? SDK_VERSION,
     gitBranch: options.gitBranch ?? (await detectGitBranch(cwd)),
     permissionMode: options.permissionMode ?? "bypassPermissions",
   };

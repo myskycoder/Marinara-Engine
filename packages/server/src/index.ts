@@ -9,6 +9,7 @@ import { getHost, getPort, getServerProtocol, loadTlsOptions, logStorageDiagnost
 import { logCsrfTrustSummary } from "./middleware/csrf-protection.js";
 import { startEnvWatcher } from "./config/env-watcher.js";
 import { migrateTaskbarShortcuts } from "./services/setup/taskbar-shortcut-migration.js";
+import { cleanupOrphanedSessions, sessionsDirFor } from "./services/llm/providers/claude-subscription/synthetic-session.js";
 
 function isAddressInUseError(err: unknown): err is NodeJS.ErrnoException {
   return err instanceof Error && "code" in err && err.code === "EADDRINUSE";
@@ -21,6 +22,32 @@ function scheduleTaskbarShortcutMigration() {
       logger.warn({ err }, "taskbar shortcut migration skipped");
     });
   }, 1_000);
+  timeout.unref?.();
+}
+
+/**
+ * Sweep stale `claude_subscription` synthetic session files once at startup.
+ * These are temp files written under `~/.claude/projects/<cwd-as-dashes>/`
+ * before each Claude Agent SDK `query({ resume })` call. The provider's
+ * `finally` block cleans them on the happy path; this sweep is the GC for
+ * cases where the process crashed or was killed mid-request.
+ *
+ * Gated on non-win32 — the resume path is *nix-only.
+ */
+const ORPHAN_SWEEP_MAX_AGE_MS = 15 * 60 * 1000;
+function scheduleClaudeSubscriptionOrphanSweep() {
+  if (process.platform === "win32") return;
+  const timeout = setTimeout(() => {
+    const dir = sessionsDirFor(process.cwd());
+    void cleanupOrphanedSessions(ORPHAN_SWEEP_MAX_AGE_MS, Date.now(), dir).then(
+      (removed) => {
+        if (removed > 0) {
+          logger.info("[claude-subscription/jsonl] swept %d orphaned session file(s) from %s", removed, dir);
+        }
+      },
+      (err) => logger.warn({ err, dir }, "[claude-subscription/jsonl] orphan sweep failed"),
+    );
+  }, 5_000);
   timeout.unref?.();
 }
 
@@ -66,6 +93,7 @@ async function main() {
     logger.info(`Marinara Engine server listening on ${protocol}://${host}:${port}`);
     logCsrfTrustSummary();
     scheduleTaskbarShortcutMigration();
+    scheduleClaudeSubscriptionOrphanSweep();
   } catch (err) {
     if (isShuttingDown) {
       logger.info("Startup interrupted by shutdown");
