@@ -24,19 +24,43 @@ import { sessionsDirFor } from "../claude-subscription/synthetic-session.ts";
 interface CapturedQuery {
   prompt: unknown;
   options: Record<string, unknown>;
+  /**
+   * Snapshot of the JSONL session file content, captured INSIDE the fake's
+   * generator before the first yield. By the time the provider's `finally`
+   * block runs `cleanupSessionFile`, the on-disk file is gone — tests that
+   * want to inspect the JSONL must read it from this snapshot, not from
+   * the filesystem. Empty string when the resume path didn't write a file
+   * (single-turn / empty-history requests).
+   */
+  jsonlSnapshot: string;
 }
 
 function makeFakeSdk(captured: CapturedQuery[]): { query: (args: unknown) => AsyncIterable<unknown> } {
   return {
     query(args: unknown) {
       const { prompt, options } = args as { prompt: unknown; options: Record<string, unknown> };
-      captured.push({ prompt, options });
-      // Return an AsyncIterable that emits one text delta and then a `result`
-      // message. The text delta is required so the provider's emittedText
-      // tracker flips true — without it, the "SDK completed without usable
-      // text" guard (added upstream to surface silent empty responses) throws
-      // and the wiring tests fail unrelated to what they're verifying.
+      const entry: CapturedQuery = { prompt, options, jsonlSnapshot: "" };
+      captured.push(entry);
+      // resume + cwd are absent on fold-path calls and on empty-history
+      // resume sub-paths, which means there's no file to snapshot below.
+      const resumeId = typeof options["resume"] === "string" ? (options["resume"] as string) : null;
+      const cwdOpt = typeof options["cwd"] === "string" ? (options["cwd"] as string) : null;
+      const sessionPath = resumeId && cwdOpt ? join(sessionsDirFor(cwdOpt), `${resumeId}.jsonl`) : null;
+
       async function* iter(): AsyncIterable<unknown> {
+        // The provider's `finally` cleanup runs AFTER the for-await loop
+        // exits, so as long as we read here (before yielding anything),
+        // the JSONL is guaranteed to still exist on disk.
+        if (sessionPath) {
+          try {
+            entry.jsonlSnapshot = await readFile(sessionPath, "utf8");
+          } catch {
+            // No file (race or empty-history); leave snapshot empty.
+          }
+        }
+        // Without a text delta the provider's empty-response guard throws
+        // before any assertion runs — every wiring test would fail for an
+        // irrelevant reason. Emit a minimal one to keep the guard quiet.
         yield {
           type: "stream_event",
           event: { type: "content_block_delta", delta: { type: "text_delta", text: "ok" } },
@@ -163,22 +187,13 @@ describe("ClaudeSubscriptionProvider — resume path wiring", () => {
     assert.equal(currentBlocks[0]!["type"], "image", "first block is the image");
     assert.deepEqual(currentBlocks[1], { type: "text", text: "and this one?" });
 
-    // Historical-turn image must appear in the JSONL session file.
-    const sessionId = call.options["resume"] as string;
-    const sessionPath = join(sessionsDirFor(tmpCwd), `${sessionId}.jsonl`);
-    // The provider may have cleaned up by now — read before afterEach removes the dir.
-    // The cleanup runs as `void cleanupSessionFile(...).catch(...)` so timing is racy;
-    // give it a moment to either land or not.
-    let fileText: string | null = null;
-    try {
-      fileText = await readFile(sessionPath, "utf8");
-    } catch {
-      // File already cleaned (best-effort), can't verify historical image directly.
-      // The current-turn assertion above is sufficient to prove the wiring works.
-      return;
-    }
-    if (!fileText) return;
-    const firstLine = fileText.split("\n")[0]!;
+    // Historical-turn image must appear in the JSONL session file. We read
+    // from the snapshot captured by the fake SDK before the provider's
+    // finally-cleanup ran — reading from disk here would race the cleanup
+    // and skip the assertion silently. The snapshot must be non-empty for
+    // any resume call with prior history.
+    assert.ok(call.jsonlSnapshot.length > 0, "fake should have captured the JSONL before cleanup");
+    const firstLine = call.jsonlSnapshot.split("\n")[0]!;
     const parsed = JSON.parse(firstLine) as {
       type: string;
       message: { content: Array<Record<string, unknown>> };
@@ -250,8 +265,9 @@ describe("ClaudeSubscriptionProvider — resume path wiring", () => {
   it("skips the resume path entirely for single-turn requests (empty history)", async () => {
     // Regression for the "No conversation found" failure we hit in dev:
     // writing an empty JSONL and passing it to resume makes the SDK reject
-    // it. Matches the proxy's behavior (chat-completions.ts L134): construct
-    // a session file ONLY when there's prior history to resume from.
+    // it, so we only construct a session file when there's prior history
+    // to resume from. Single-turn requests send `current` directly via
+    // the AsyncIterable prompt instead.
     const captured: CapturedQuery[] = [];
     __setSdkForTesting(makeFakeSdk(captured) as unknown as Parameters<typeof __setSdkForTesting>[0]);
 
@@ -330,31 +346,36 @@ describe("ClaudeSubscriptionProvider — resume path wiring", () => {
       { role: "user", content: "hi" },
     ];
 
-    // ── Resume path (env unset → default true) ──
+    // Snapshot the developer's shell env so we always leave it the way we
+    // found it — without this, a contributor whose shell has the kill
+    // switch set would see it silently cleared after running this test.
+    const priorKill = process.env.CLAUDE_SUBSCRIPTION_USE_RESUME;
     const capturedResume: CapturedQuery[] = [];
-    __setSdkForTesting(makeFakeSdk(capturedResume) as unknown as Parameters<typeof __setSdkForTesting>[0]);
-    delete process.env.CLAUDE_SUBSCRIPTION_USE_RESUME;
-    const providerResume = new ClaudeSubscriptionProvider("", "");
-    await drainProviderChat(providerResume, messages, { model: "claude-test-model", stream: false });
-
-    // ── Fold path (env=false) ──
     const capturedFold: CapturedQuery[] = [];
-    __setSdkForTesting(makeFakeSdk(capturedFold) as unknown as Parameters<typeof __setSdkForTesting>[0]);
-    process.env.CLAUDE_SUBSCRIPTION_USE_RESUME = "false";
     try {
+      // ── Resume path (env unset → default true) ──
+      __setSdkForTesting(makeFakeSdk(capturedResume) as unknown as Parameters<typeof __setSdkForTesting>[0]);
+      delete process.env.CLAUDE_SUBSCRIPTION_USE_RESUME;
+      const providerResume = new ClaudeSubscriptionProvider("", "");
+      await drainProviderChat(providerResume, messages, { model: "claude-test-model", stream: false });
+
+      // ── Fold path (env=false) ──
+      __setSdkForTesting(makeFakeSdk(capturedFold) as unknown as Parameters<typeof __setSdkForTesting>[0]);
+      process.env.CLAUDE_SUBSCRIPTION_USE_RESUME = "false";
       const providerFold = new ClaudeSubscriptionProvider("", "");
       await drainProviderChat(providerFold, messages, { model: "claude-test-model", stream: false });
     } finally {
-      delete process.env.CLAUDE_SUBSCRIPTION_USE_RESUME;
+      if (priorKill === undefined) delete process.env.CLAUDE_SUBSCRIPTION_USE_RESUME;
+      else process.env.CLAUDE_SUBSCRIPTION_USE_RESUME = priorKill;
     }
 
     assert.equal(capturedResume.length, 1);
     assert.equal(capturedFold.length, 1);
 
-    // After the strip work (proxy parity): systemPrompt is now a plain
-    // string of the caller's content — no `claude_code` preset wrap.
-    // Both paths (resume + fold) must produce the same string from the
-    // same input messages.
+    // systemPrompt is a plain string of the caller's content (not a preset
+    // wrap) on both paths, and concatenating multiple system messages with
+    // `\n\n` is the contract both branches must honor. Asserting equality
+    // here catches a future refactor that accidentally diverges them.
     const systemResume = capturedResume[0]!.options["systemPrompt"];
     const systemFold = capturedFold[0]!.options["systemPrompt"];
     assert.equal(typeof systemResume, "string");

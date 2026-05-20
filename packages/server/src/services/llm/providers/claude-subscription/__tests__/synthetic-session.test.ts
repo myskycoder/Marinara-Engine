@@ -147,6 +147,17 @@ describe("constructSessionFile", () => {
     assert.equal(u["version"], "test-1.0.0");
   });
 
+  it("writes a sidecar marker (.mr) alongside the JSONL so the sweep knows the file is ours", async () => {
+    const { path } = await constructSessionFile(
+      [{ role: "user", content: "hi" }],
+      baseOpts(dir),
+    );
+    const sidecar = `${path}.mr`;
+    const s = await stat(sidecar);
+    assert.ok(s.isFile(), "sidecar should exist as a regular file");
+    assert.equal(s.size, 0, "sidecar is a presence marker — content is not meaningful");
+  });
+
   it("creates the sessions directory if it does not already exist", async () => {
     const nested = join(dir, "nested", "dir");
     await constructSessionFile([{ role: "user", content: "x" }], baseOpts(nested));
@@ -174,15 +185,30 @@ describe("cleanupSessionFile", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it("removes the named session file", async () => {
+  it("removes the named session file and its sidecar", async () => {
     const path = join(dir, "abc-123.jsonl");
+    const sidecar = `${path}.mr`;
     await writeFile(path, "x\n", "utf8");
+    await writeFile(sidecar, "", "utf8");
     await cleanupSessionFile(path);
     await assert.rejects(() => stat(path), /ENOENT/);
+    await assert.rejects(() => stat(sidecar), /ENOENT/);
   });
 
-  it("swallows ENOENT (file already gone is fine)", async () => {
+  it("swallows ENOENT on both files (already gone is fine)", async () => {
+    // Neither file exists; cleanup must not throw on either ENOENT.
     await cleanupSessionFile(join(dir, "does-not-exist.jsonl"));
+  });
+
+  it("removes the sidecar even if the JSONL was already gone (partial cleanup state)", async () => {
+    // Simulates: sweep deleted JSONL, then crashed before deleting sidecar.
+    // Next provider call invokes cleanupSessionFile which should still finish
+    // the job — sidecar gone, no throw.
+    const path = join(dir, "partial.jsonl");
+    const sidecar = `${path}.mr`;
+    await writeFile(sidecar, "", "utf8");
+    await cleanupSessionFile(path);
+    await assert.rejects(() => stat(sidecar), /ENOENT/);
   });
 
   it("integrates with constructSessionFile's returned path (no dir threading)", async () => {
@@ -195,6 +221,7 @@ describe("cleanupSessionFile", () => {
     );
     await cleanupSessionFile(path);
     await assert.rejects(() => stat(path), /ENOENT/);
+    await assert.rejects(() => stat(`${path}.mr`), /ENOENT/);
   });
 });
 
@@ -212,24 +239,59 @@ describe("cleanupOrphanedSessions", () => {
     assert.equal(removed, 0);
   });
 
-  it("removes files older than maxAgeMs and keeps recent ones", async () => {
+  it("removes sessions (jsonl + sidecar) older than maxAgeMs and keeps recent ones", async () => {
     const recentPath = join(dir, "recent.jsonl");
     const oldPath = join(dir, "old.jsonl");
     await writeFile(recentPath, "x", "utf8");
+    await writeFile(`${recentPath}.mr`, "", "utf8");
     await writeFile(oldPath, "x", "utf8");
+    await writeFile(`${oldPath}.mr`, "", "utf8");
 
     const now = Date.now();
     const oneHourAgo = (now - 60 * 60 * 1000) / 1000;
-    // Use utimes to backdate the old file's mtime by 1h.
-    await utimes(oldPath, oneHourAgo, oneHourAgo);
+    // Backdate only the OLD session's sidecar — the sweep keys off sidecar
+    // mtime, so this is what makes the session eligible for eviction.
+    await utimes(`${oldPath}.mr`, oneHourAgo, oneHourAgo);
 
     const removed = await cleanupOrphanedSessions(30 * 60 * 1000, now, dir);
     assert.equal(removed, 1);
     await stat(recentPath); // still there
+    await stat(`${recentPath}.mr`); // sidecar still there
     await assert.rejects(() => stat(oldPath), /ENOENT/);
+    await assert.rejects(() => stat(`${oldPath}.mr`), /ENOENT/);
   });
 
-  it("ignores non-.jsonl files in the directory", async () => {
+  it("never touches a .jsonl that lacks a sidecar (real CLI sessions share this directory)", async () => {
+    // This is THE invariant the sidecar mechanism exists to protect. The
+    // user's `claude` CLI writes its real session history into the same
+    // `<cwd>/projects/<cwd-as-dashes>/` directory we use. Sweeping a JSONL
+    // without a sidecar would destroy genuine CLI session data.
+    const cliSession = join(dir, "cli-real-session.jsonl");
+    await writeFile(cliSession, "x", "utf8");
+    const oneHourAgo = (Date.now() - 60 * 60 * 1000) / 1000;
+    await utimes(cliSession, oneHourAgo, oneHourAgo);
+
+    const removed = await cleanupOrphanedSessions(30 * 60 * 1000, Date.now(), dir);
+    assert.equal(removed, 0);
+    await stat(cliSession); // still there — sweep MUST not touch it
+  });
+
+  it("cleans up an orphan sidecar whose JSONL was already removed", async () => {
+    // Crash scenario: cleanupSessionFile removed the JSONL, then the process
+    // died before it could remove the sidecar. The next sweep should reap
+    // the orphan sidecar so it doesn't linger forever.
+    const sidecar = join(dir, "orphan.jsonl.mr");
+    await writeFile(sidecar, "", "utf8");
+    const oneHourAgo = (Date.now() - 60 * 60 * 1000) / 1000;
+    await utimes(sidecar, oneHourAgo, oneHourAgo);
+
+    const removed = await cleanupOrphanedSessions(30 * 60 * 1000, Date.now(), dir);
+    assert.equal(removed, 1);
+    await assert.rejects(() => stat(sidecar), /ENOENT/);
+  });
+
+  it("ignores non-sidecar files in the directory", async () => {
+    // Sanity check: a stray .txt with an old mtime must not be deleted.
     const other = join(dir, "notes.txt");
     await writeFile(other, "x", "utf8");
     const oneHourAgo = (Date.now() - 60 * 60 * 1000) / 1000;

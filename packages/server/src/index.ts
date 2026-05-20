@@ -42,20 +42,21 @@ function scheduleTaskbarShortcutMigration() {
  * drop the gate.
  */
 const ORPHAN_SWEEP_MAX_AGE_MS = 15 * 60 * 1000;
-function scheduleClaudeSubscriptionOrphanSweep() {
+function runClaudeSubscriptionOrphanSweep() {
   if (process.platform === "win32") return;
-  const timeout = setTimeout(() => {
-    const dir = sessionsDirFor(process.cwd());
-    void cleanupOrphanedSessions(ORPHAN_SWEEP_MAX_AGE_MS, Date.now(), dir).then(
-      (removed) => {
-        if (removed > 0) {
-          logger.info("[claude-subscription/jsonl] swept %d orphaned session file(s) from %s", removed, dir);
-        }
-      },
-      (err) => logger.warn({ err, dir }, "[claude-subscription/jsonl] orphan sweep failed"),
-    );
-  }, 5_000);
-  timeout.unref?.();
+  const dir = sessionsDirFor(process.cwd());
+  // `void` + the .then/.catch pair means this never blocks boot or rejects
+  // unhandled. The 15-minute age threshold inside `cleanupOrphanedSessions`
+  // protects any session file an in-flight request might have just written,
+  // so no deferral is needed to avoid racing them.
+  void cleanupOrphanedSessions(ORPHAN_SWEEP_MAX_AGE_MS, Date.now(), dir).then(
+    (removed) => {
+      if (removed > 0) {
+        logger.info("[claude-subscription/jsonl] swept %d orphaned session file(s) from %s", removed, dir);
+      }
+    },
+    (err) => logger.warn({ err, dir }, "[claude-subscription/jsonl] orphan sweep failed"),
+  );
 }
 
 async function main() {
@@ -100,7 +101,7 @@ async function main() {
     logger.info(`Marinara Engine server listening on ${protocol}://${host}:${port}`);
     logCsrfTrustSummary();
     scheduleTaskbarShortcutMigration();
-    scheduleClaudeSubscriptionOrphanSweep();
+    runClaudeSubscriptionOrphanSweep();
   } catch (err) {
     if (isShuttingDown) {
       logger.info("Startup interrupted by shutdown");
