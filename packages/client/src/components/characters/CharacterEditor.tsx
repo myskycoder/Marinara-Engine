@@ -1851,7 +1851,7 @@ function AdvancedTab({
         <div className="flex items-center justify-between">
           <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
             System Prompt{" "}
-            <HelpTooltip text="Overrides or appends to the main system prompt when this character is active. Use this for character-specific instructions the AI must follow." />
+            <HelpTooltip text="Character-specific instructions inserted by the prompt preset's character block or wherever the preset uses {{charSysInfo}}. This does not replace the chat's main system prompt." />
           </span>
           <button
             type="button"
@@ -1867,7 +1867,7 @@ function AdvancedTab({
           onChange={(e) => updateField("system_prompt", e.target.value)}
           rows={6}
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
-          placeholder="Override or append to the system prompt for this character…"
+          placeholder="Character-specific instructions inserted through {{charSysInfo}} or the character prompt block…"
         />
       </label>
 
@@ -1953,7 +1953,7 @@ function AdvancedTab({
         title="System Prompt"
         value={formData.system_prompt}
         onChange={(value) => updateField("system_prompt", value)}
-        placeholder="Override or append to the system prompt for this character…"
+        placeholder="Character-specific instructions inserted through {{charSysInfo}} or the character prompt block…"
       />
       <ExpandedTextarea
         open={expandedField === "post_history"}
