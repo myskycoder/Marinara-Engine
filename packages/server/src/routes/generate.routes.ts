@@ -888,6 +888,12 @@ function readChatCompletionsReasoningMetadata(value: unknown): Record<string, un
   return Object.keys(metadata).length ? metadata : undefined;
 }
 
+function shouldReplayStoredChatCompletionsReasoning(provider: string, model: string): boolean {
+  if (provider !== "openrouter") return true;
+  const normalizedModel = model.toLowerCase();
+  return !normalizedModel.startsWith("google/gemini") && !normalizedModel.includes("/gemini-");
+}
+
 function isStandaloneCharacterProfileBlock(content: string, characterName: string): boolean {
   const trimmed = content.trim();
   if (!trimmed) return false;
@@ -1227,7 +1233,9 @@ export async function generateRoutes(app: FastifyInstance) {
           providerMetadata.geminiParts = extra.geminiParts;
         }
         const chatCompletionsReasoning =
-          m.role === "assistant" ? readChatCompletionsReasoningMetadata(extra.chatCompletionsReasoning) : undefined;
+          m.role === "assistant" && shouldReplayStoredChatCompletionsReasoning(conn.provider, conn.model)
+            ? readChatCompletionsReasoningMetadata(extra.chatCompletionsReasoning)
+            : undefined;
         if (chatCompletionsReasoning) {
           Object.assign(providerMetadata, chatCompletionsReasoning);
         }
