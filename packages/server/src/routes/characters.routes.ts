@@ -644,9 +644,13 @@ export async function charactersRoutes(app: FastifyInstance) {
       const filename = char.avatarPath.split("?")[0]!.split("/").pop()!;
       const avatarFile = join(DATA_DIR, "avatars", filename);
       if (existsSync(avatarFile)) {
-        const avatarBuffer = await readFile(avatarFile);
-        const imageInfo = isAllowedImageBuffer(avatarBuffer, extname(filename));
-        pngBuffer = imageInfo?.mimeType === "image/png" ? avatarBuffer : createMinimalPng();
+        try {
+          const avatarBuffer = await readFile(avatarFile);
+          const imageInfo = isAllowedImageBuffer(avatarBuffer, extname(filename));
+          pngBuffer = imageInfo?.mimeType === "image/png" ? avatarBuffer : createMinimalPng();
+        } catch {
+          pngBuffer = createMinimalPng();
+        }
       } else {
         pngBuffer = createMinimalPng();
       }
