@@ -31,6 +31,12 @@ import { createGameStateStorage } from "../../services/storage/game-state.storag
 import { createLorebooksStorage } from "../../services/storage/lorebooks.storage.js";
 import { syncGameMapMetaPartyPosition } from "../../services/game/map-position.service.js";
 import { materializeGameNpcs } from "../../services/game/npc-materializer.service.js";
+import {
+  buildBracketLineCountByCharacterName,
+  collectProtectedCharacterNames,
+  finalizePresentCharactersAfterTracker,
+  getAssistantTurnIndex,
+} from "../../services/game/present-characters-context.js";
 import { gameStateSnapshots as gameStateSnapshotsTable } from "../../db/schema/index.js";
 import {
   isMessageHiddenFromAI,
@@ -1475,6 +1481,23 @@ async function applyRetryResultEffects(args: {
             previousCharacters = [];
           }
         }
+        const lineCountByCharacterName = buildBracketLineCountByCharacterName(currentResponseForRewrite);
+        const retryMessages = await chats.listMessages(chatId);
+        const currentAssistantTurn = getAssistantTurnIndex(retryMessages, retryMessageId);
+        const retryBaseSnapshot = await loadRetryBaseGameStateSnapshot();
+        const retryPreviousLocation =
+          typeof retryBaseSnapshot?.location === "string" ? retryBaseSnapshot.location.trim() || null : null;
+        finalizePresentCharactersAfterTracker(presentCharacters, {
+          location: previousSnapshot?.location ?? null,
+          previousLocation: retryPreviousLocation,
+          turn: currentAssistantTurn,
+          lineCountByCharacterName,
+          previousCharacters,
+          narration: currentResponseForRewrite,
+          protectedCharacterNames: collectProtectedCharacterNames(
+            agentContext.characters.map((character) => character.name),
+          ),
+        });
         preserveTrackerCharacterUiFields(presentCharacters, previousCharacters);
         await gameStateStore.updateByMessage(
           retryMessageId,
@@ -1495,6 +1518,7 @@ async function applyRetryResultEffects(args: {
           connections: conns,
           chatId,
           presentCharacters: presentCharacters as PresentCharacter[],
+          lineCountByCharacterName,
           existingCharacterNames: agentContext.characters.map((character) => character.name),
           personaName: agentContext.persona?.name ?? null,
           gameMap: (chatMeta.gameMap as GameMap | null) ?? null,

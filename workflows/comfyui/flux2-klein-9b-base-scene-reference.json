@@ -1,0 +1,825 @@
+{
+  "id": "c2d3e4f5-a6b7-8c9d-0e1f-2a3b4c5d6e7f",
+  "revision": 0,
+  "last_node_id": 143,
+  "last_link_id": 289,
+  "nodes": [
+    {
+      "id": 137,
+      "type": "MarkdownNote",
+      "pos": [
+        -2480,
+        -420
+      ],
+      "size": [
+        580,
+        440
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Klein 9B BASE — scene + character ref",
+      "properties": {},
+      "widgets_values": [
+        "## FLUX.2 Klein 9B **BASE** — **сцена + референс персонажа + LoRA**\n\n**ComfyUI 0.9+** + **ComfyUI-GGUF** + нода **`ReferenceLatent`** (core)\n\n### Модели\n| Файл | Папка |\n|------|--------|\n| `flux2-klein-9b-uncensored-q8_0.gguf` | `text_encoders/` |\n| `flux-2-klein-base-9b-fp8.safetensors` | `diffusion_models/` |\n| `flux2-vae.safetensors` | `vae/` |\n| **LoRA под Klein 9B** | `loras/` |\n\n### Как работает\n1. **Load Image** — референс персонажа (`full_neutral` / avatar)\n2. **VAEEncode** → **ReferenceLatent** — Klein держит внешность\n3. **LoraLoaderModelOnly** — стиль/качество (только model, без CLIP)\n4. **EmptyFlux2LatentImage** — холст сцены (`%width%` × `%height%`)\n5. Промпт описывает **сцену** (инструкционный стиль Klein)\n\n### LoRA\n- Только LoRA **для FLUX.2 Klein 9B** (не FLUX.1 / Z-Image)\n- При конфликте с референсом снизьте **strength** (0.5–0.7)\n\n### Marinara\n- API: `flux2-klein-9b-base-scene-reference.api.json`\n- Плейсхолдеры: `%prompt%`, `%reference_image_name%`, `%width%`, `%height%`, `%seed%`\n- Game Mode передаёт `referenceImages` из спрайтов персонажа\n\n### Параметры BASE\n- **Steps:** 28 · **CFG:** 1 · **Sampler:** euler / simple\n- Без референса не работает — для txt2img используйте `flux2-klein-9b-base-lora-uncensored-text2image.json`\n\nБыстрый черновик → `flux2-klein-9b-scene-reference.json` (distilled, 4 steps)\n"
+      ],
+      "color": "#432",
+      "bgcolor": "#000"
+    },
+    {
+      "id": 104,
+      "type": "VAEDecode",
+      "pos": [
+        -690,
+        -27
+      ],
+      "size": [
+        210,
+        46
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 272
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 212
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            213
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "VAEDecode"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 9,
+      "type": "SaveImage",
+      "pos": [
+        -448,
+        -27
+      ],
+      "size": [
+        460,
+        480
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 213
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "flux2_klein9b_scene"
+      ]
+    },
+    {
+      "id": 135,
+      "type": "ConditioningZeroOut",
+      "pos": [
+        -1226,
+        220
+      ],
+      "size": [
+        204,
+        26
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": 279
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            286
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "ConditioningZeroOut"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 102,
+      "type": "VAELoader",
+      "pos": [
+        -1988,
+        212
+      ],
+      "size": [
+        271,
+        59
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "slot_index": 0,
+          "links": [
+            212,
+            287
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "VAELoader",
+        "models": [
+          {
+            "name": "flux2-vae.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors",
+            "directory": "vae"
+          }
+        ]
+      },
+      "widgets_values": [
+        "flux2-vae.safetensors"
+      ]
+    },
+    {
+      "id": 105,
+      "type": "EmptyFlux2LatentImage",
+      "pos": [
+        -1989,
+        322
+      ],
+      "size": [
+        270,
+        106
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            273
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "EmptyFlux2LatentImage"
+      },
+      "widgets_values": [
+        1280,
+        720,
+        1
+      ]
+    },
+    {
+      "id": 134,
+      "type": "KSampler",
+      "pos": [
+        -977,
+        -27
+      ],
+      "size": [
+        270,
+        262
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 281
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 274
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 276
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 273
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            272
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "KSampler"
+      },
+      "widgets_values": [
+        0,
+        "randomize",
+        28,
+        1,
+        "euler",
+        "simple",
+        1
+      ]
+    },
+    {
+      "id": 126,
+      "type": "UNETLoader",
+      "pos": [
+        -1989,
+        -78
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            289
+          ]
+        }
+      ],
+      "title": "DiT BASE 9B",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "UNETLoader",
+        "models": [
+          {
+            "name": "flux-2-klein-base-9b-fp8.safetensors",
+            "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/resolve/main/flux-2-klein-base-9b-fp8.safetensors",
+            "directory": "diffusion_models"
+          }
+        ]
+      },
+      "widgets_values": [
+        "flux-2-klein-base-9b-fp8.safetensors",
+        "default"
+      ],
+      "color": "#223",
+      "bgcolor": "#335"
+    },
+    {
+      "id": 136,
+      "type": "CLIPLoaderGGUF",
+      "pos": [
+        -1990,
+        55
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            280
+          ]
+        }
+      ],
+      "title": "UNCENSORED encoder (GGUF Q8)",
+      "properties": {
+        "cnr_id": "ComfyUI-GGUF",
+        "ver": "1.0.0",
+        "Node name for S&R": "CLIPLoaderGGUF",
+        "models": [
+          {
+            "name": "flux2-klein-9b-uncensored-q8_0.gguf",
+            "url": "https://huggingface.co/ponpoke/flux2-klein-9b-uncensored-text-encoder/resolve/main/flux2-klein-9b-uncensored-q8_0.gguf",
+            "directory": "text_encoders"
+          }
+        ]
+      },
+      "widgets_values": [
+        "flux2-klein-9b-uncensored-q8_0.gguf",
+        "flux2"
+      ],
+      "color": "#322",
+      "bgcolor": "#533"
+    },
+    {
+      "id": 138,
+      "type": "LoraLoaderModelOnly",
+      "pos": [
+        -1680,
+        -78
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 289
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            281
+          ]
+        }
+      ],
+      "title": "Load LoRA (Model Only)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "LoraLoaderModelOnly"
+      },
+      "widgets_values": [
+        null,
+        0.85
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 107,
+      "type": "CLIPTextEncode",
+      "pos": [
+        -1687,
+        50
+      ],
+      "size": [
+        430,
+        260
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 280
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            279,
+            284
+          ]
+        }
+      ],
+      "title": "Scene prompt",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        "Place this character in a dim medieval tavern at night. Warm torch light, wooden tables, visual novel CG composition. Keep the character's face, hair, outfit and colors exactly as in the reference. Wide cinematic shot."
+      ],
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 58,
+      "type": "LoadImage",
+      "pos": [
+        -2480,
+        80
+      ],
+      "size": [
+        320,
+        340
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            282
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "title": "Character reference",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "character_reference.png",
+        "image"
+      ],
+      "color": "#234",
+      "bgcolor": "#456"
+    },
+    {
+      "id": 80,
+      "type": "ImageScaleToTotalPixels",
+      "pos": [
+        -2120,
+        80
+      ],
+      "size": [
+        270,
+        106
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 282
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            283
+          ]
+        }
+      ],
+      "title": "Scale reference (~1MP)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "ImageScaleToTotalPixels"
+      },
+      "widgets_values": [
+        "lanczos",
+        1,
+        1
+      ],
+      "color": "#234",
+      "bgcolor": "#456"
+    },
+    {
+      "id": 124,
+      "type": "VAEEncode",
+      "pos": [
+        -2120,
+        220
+      ],
+      "size": [
+        210,
+        46
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "pixels",
+          "type": "IMAGE",
+          "link": 283
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 287
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            285,
+            288
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "VAEEncode"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 125,
+      "type": "ReferenceLatent",
+      "pos": [
+        -1235,
+        48
+      ],
+      "size": [
+        240,
+        82
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": 284
+        },
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "link": 285
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            274
+          ]
+        }
+      ],
+      "title": "ReferenceLatent (positive)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "ReferenceLatent"
+      },
+      "widgets_values": [],
+      "color": "#323",
+      "bgcolor": "#535"
+    },
+    {
+      "id": 123,
+      "type": "ReferenceLatent",
+      "pos": [
+        -1235,
+        280
+      ],
+      "size": [
+        240,
+        82
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": 286
+        },
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "link": 285
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            276
+          ]
+        }
+      ],
+      "title": "ReferenceLatent (negative)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "ReferenceLatent"
+      },
+      "widgets_values": [],
+      "color": "#323",
+      "bgcolor": "#535"
+    }
+  ],
+  "links": [
+    [
+      212,
+      102,
+      0,
+      104,
+      1,
+      "VAE"
+    ],
+    [
+      213,
+      104,
+      0,
+      9,
+      0,
+      "IMAGE"
+    ],
+    [
+      272,
+      134,
+      0,
+      104,
+      0,
+      "LATENT"
+    ],
+    [
+      273,
+      105,
+      0,
+      134,
+      3,
+      "LATENT"
+    ],
+    [
+      274,
+      125,
+      0,
+      134,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      276,
+      123,
+      0,
+      134,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      279,
+      107,
+      0,
+      135,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      280,
+      136,
+      0,
+      107,
+      0,
+      "CLIP"
+    ],
+    [
+      281,
+      138,
+      0,
+      134,
+      0,
+      "MODEL"
+    ],
+    [
+      289,
+      126,
+      0,
+      138,
+      0,
+      "MODEL"
+    ],
+    [
+      282,
+      58,
+      0,
+      80,
+      0,
+      "IMAGE"
+    ],
+    [
+      283,
+      80,
+      0,
+      124,
+      0,
+      "IMAGE"
+    ],
+    [
+      284,
+      107,
+      0,
+      125,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      285,
+      124,
+      0,
+      125,
+      1,
+      "LATENT"
+    ],
+    [
+      286,
+      135,
+      0,
+      123,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      287,
+      102,
+      0,
+      124,
+      1,
+      "VAE"
+    ],
+    [
+      288,
+      124,
+      0,
+      123,
+      1,
+      "LATENT"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.85,
+      "offset": [
+        2500,
+        420
+      ]
+    },
+    "workflowRendererVersion": "LG"
+  },
+  "version": 0.4
+}

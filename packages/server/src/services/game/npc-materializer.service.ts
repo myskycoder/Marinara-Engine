@@ -67,6 +67,7 @@ export interface MaterializeGameNpcsInput {
   connections: ConnectionsStorage;
   chatId: string;
   presentCharacters: PresentCharacter[];
+  lineCountByCharacterName?: Map<string, number>;
   existingCharacterNames: string[];
   partyCharacterNames?: string[];
   personaName?: string | null;
@@ -98,7 +99,66 @@ const GENERIC_NAME_KEYS = new Set([
   "person",
   "customer",
   "worker",
+  "ефрейтор",
+  "сержант",
+  "офицер",
+  "караульный",
+  "часовой",
+  "дежурный",
+  "ординарец",
+  "посыльный",
+  "стражник",
+  "прохожий",
+  "крестьянин",
+  "крестьянка",
+  "банщица",
+  "повариха",
+  "кухарка",
+  "торговец",
+  "торговка",
+  "лавочник",
+  "ребёнок",
+  "ребенок",
+  "мальчик",
+  "девочка",
+  "старик",
+  "старуха",
+  "странник",
+  "путник",
+  "officer",
+  "sergeant",
+  "corporal",
+  "sentry",
+  "watchman",
+  "passerby",
+  "peasant",
+  "cook",
+  "child",
+  "boy",
+  "girl",
+  "old man",
+  "old woman",
+  "wanderer",
 ]);
+
+const BODYLESS_EMOJIS = new Set(["👻", "👁", "👁️", "🌫", "🌫️", "🕯", "🕯️", "💀", "🦴"]);
+const BODYLESS_TEXT_MARKERS = [
+  "disembodied",
+  "bodyless",
+  "voice only",
+  "shadow only",
+  "hand only",
+  "floating hand",
+  "ghostly",
+  "бестелесн",
+  "отрублен",
+  "без тела",
+  "рука без",
+  "только голос",
+  "только тень",
+  "только рука",
+  "только пальц",
+];
 
 function parseMetadata(raw: unknown): Record<string, unknown> {
   if (!raw) return {};
@@ -122,6 +182,23 @@ function ensureUniqueNpcId(baseId: string, existingIds: Set<string>): string {
 
 function isGenericName(name: string): boolean {
   return GENERIC_NAME_KEYS.has(npcNameKey(name));
+}
+
+function isBodylessText(value: string): boolean {
+  const normalized = npcNameKey(value);
+  return BODYLESS_TEXT_MARKERS.some((marker) => normalized.includes(npcNameKey(marker)));
+}
+
+function isBodylessCharacter(char: PresentCharacter): boolean {
+  const emoji = char.emoji?.trim();
+  if (emoji && BODYLESS_EMOJIS.has(emoji)) return true;
+  return isBodylessText([char.appearance, char.outfit, char.thoughts].filter(Boolean).join(" "));
+}
+
+function isBodylessNpc(npc: GameNpc): boolean {
+  const emoji = npc.emoji?.trim();
+  if (emoji && BODYLESS_EMOJIS.has(emoji)) return true;
+  return isBodylessText(npc.description ?? "");
 }
 
 function describePresentCharacter(char: PresentCharacter): string {
@@ -174,7 +251,10 @@ type MaterializeDecision =
         | "existing-character"
         | "already-materialized"
         | "generic-too-thin"
-        | "generic-duplicate";
+        | "generic-duplicate"
+        | "cameo-only"
+        | "mentioned-only"
+        | "bodyless-skip";
       detail?: string;
     };
 
@@ -183,9 +263,11 @@ function shouldMaterializeCharacter(args: {
   existingNpcs: GameNpc[];
   existingCharacterNames: string[];
   protectedNames: string[];
+  lineCountByCharacterName?: Map<string, number>;
 }): MaterializeDecision {
   const name = args.char.name?.trim();
   if (!name) return { ok: false, reason: "empty-name" };
+  if (isBodylessCharacter(args.char)) return { ok: false, reason: "bodyless-skip" };
 
   const protectedHit = args.protectedNames.find((protectedName) => isSameNpcName(name, protectedName));
   if (protectedHit) return { ok: false, reason: "protected-name", detail: protectedHit };
@@ -197,6 +279,16 @@ function shouldMaterializeCharacter(args: {
   if (npcHit) return { ok: false, reason: "already-materialized", detail: npcHit.name };
 
   const descriptor = describePresentCharacter(args.char);
+  if (args.lineCountByCharacterName && args.lineCountByCharacterName.size > 0) {
+    const lineCount = args.lineCountByCharacterName.get(npcNameKey(name)) ?? 0;
+    const visualDescriptionLength = [args.char.appearance, args.char.outfit]
+      .filter((value): value is string => !!value?.trim())
+      .join(" ")
+      .trim().length;
+    if (lineCount === 0) return { ok: false, reason: "mentioned-only" };
+    if (lineCount < 2 && visualDescriptionLength < 40) return { ok: false, reason: "cameo-only" };
+  }
+
   if (isGenericName(name)) {
     if (descriptor.trim().length < 12) return { ok: false, reason: "generic-too-thin" };
     const matchingGeneric = args.existingNpcs.find(
@@ -932,6 +1024,7 @@ export async function materializeGameNpcs(input: MaterializeGameNpcsInput): Prom
         existingNpcs: [...existingNpcs, ...created],
         existingCharacterNames: input.existingCharacterNames,
         protectedNames,
+        lineCountByCharacterName: input.lineCountByCharacterName,
       });
       if (!decision.ok) {
         skipped += 1;
@@ -1011,9 +1104,15 @@ export async function materializeGameNpcs(input: MaterializeGameNpcsInput): Prom
     nextNpcs.length,
   );
 
-  const assetCandidates = nextNpcs.filter(
-    (npc) => isPresentNpc(npc, input.presentCharacters) && (createdIds.has(npc.id) || !npc.avatarUrl || npc.spriteStatus !== "ready"),
-  );
+  const assetCandidates = nextNpcs.filter((npc) => {
+    const presentChar = input.presentCharacters.find(
+      (char) =>
+        isSameNpcName(char.name, npc.name) || isNpcNameStrictPrefixClusterMatch(char.name, npc.name),
+    );
+    if (!presentChar) return false;
+    if (isBodylessCharacter(presentChar) || isBodylessNpc(npc)) return false;
+    return createdIds.has(npc.id) || !npc.avatarUrl || npc.spriteStatus !== "ready";
+  });
 
   if (imageConnectionId && (input.settings.autoGenerateNpcAvatars || input.settings.autoGenerateNpcSprites)) {
     startNpcAssetPipeline({

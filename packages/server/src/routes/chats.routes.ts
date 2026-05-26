@@ -74,6 +74,11 @@ import {
 } from "../services/memory-recall-embedding.js";
 import { applyRegexScriptsToPromptMessages } from "../services/regex/regex-application.js";
 import { sanitizeGameNpcAvatarUrls } from "../services/game/npc-avatar-utils.js";
+import {
+  buildPresentCharacterContextLines,
+  filterPresentCharactersForContext,
+  getGeneratingAssistantTurn,
+} from "../services/game/present-characters-context.js";
 
 type TrackerWrapFormat = "xml" | "markdown" | "none";
 type EntryStateOverrides = Record<string, { ephemeral?: number | null; enabled?: boolean }>;
@@ -198,8 +203,10 @@ function formatPeekTrackerContextBlock(args: {
   snap: typeof gameStateSnapshots.$inferSelect;
   chatMeta: Record<string, unknown>;
   activeAgentIds: string[];
+  currentTurn?: number | null;
+  protectedCharacterNames?: string[];
 }): string | null {
-  const { wrapFormat, snap, chatMeta, activeAgentIds } = args;
+  const { wrapFormat, snap, chatMeta, activeAgentIds, currentTurn, protectedCharacterNames } = args;
   const active = new Set(activeAgentIds);
   const hasWorldState = active.has("world-state");
   const hasCharTracker = active.has("character-tracker");
@@ -223,22 +230,13 @@ function formatPeekTrackerContextBlock(args: {
 
   if (hasCharTracker) {
     try {
-      const presentChars = JSON.parse(snap.presentCharacters);
-      if (Array.isArray(presentChars) && presentChars.length > 0) {
-        const charLines = presentChars.map((c: any) => {
-          if (typeof c === "string") return `- ${c}`;
-          const details: string[] = [];
-          if (c.mood) details.push(`mood: ${c.mood}`);
-          if (c.appearance) details.push(`appearance: ${c.appearance}`);
-          if (c.outfit) details.push(`outfit: ${c.outfit}`);
-          if (c.thoughts) details.push(`thoughts: ${c.thoughts}`);
-          if (Array.isArray(c.stats) && c.stats.length > 0) {
-            const statStr = c.stats.map((s: any) => `${s.name}: ${s.value}${s.max ? `/${s.max}` : ""}`).join(", ");
-            details.push(`stats: ${statStr}`);
-          }
-          const detailStr = details.length > 0 ? ` (${details.join("; ")})` : "";
-          return `- ${c.emoji ?? ""} ${c.name ?? c}${detailStr}`;
-        });
+      const presentChars = filterPresentCharactersForContext(JSON.parse(snap.presentCharacters), {
+        location: snap.location,
+        currentTurn,
+        protectedCharacterNames,
+      });
+      const charLines = buildPresentCharacterContextLines(presentChars);
+      if (charLines.length > 0) {
         trackerParts.push(wrapContent(charLines.join("\n"), "Present Characters", wrapFormat));
       }
     } catch {
@@ -1679,12 +1677,15 @@ export async function chatsRoutes(app: FastifyInstance) {
           const wrapFormat = ((preset as any).wrapFormat as "xml" | "markdown" | "none") || "xml";
           const allContent = assembled.messages.map((m) => m.content).join("\n");
 
+          const protectedCharacterNames: string[] = [];
+
           // Character info fallback
           for (const cid of characterIds) {
             const charRow = await charStore.getById(cid);
             if (!charRow) continue;
             const charData = JSON.parse(charRow.data as string);
             const charName = charData.name ?? "Unknown";
+            if (typeof charName === "string" && charName.trim()) protectedCharacterNames.push(charName.trim());
             const charDesc = getCharacterDescriptionWithExtensions(charData);
             const xmlTag = nameToXmlTag(charName);
             const hasCharInfo =
@@ -1811,7 +1812,14 @@ export async function chatsRoutes(app: FastifyInstance) {
           if (chatEnableAgents && activeAgentIds.length > 0) {
             const snap = await loadLatestChatGameSnapshot(app, req.params.id, visibleGameStateAnchor);
             const contextBlock = snap
-              ? formatPeekTrackerContextBlock({ wrapFormat, snap, chatMeta, activeAgentIds })
+              ? formatPeekTrackerContextBlock({
+                  wrapFormat,
+                  snap,
+                  chatMeta,
+                  activeAgentIds,
+                  currentTurn: getGeneratingAssistantTurn(chatMessages),
+                  protectedCharacterNames,
+                })
               : null;
 
             if (contextBlock) {

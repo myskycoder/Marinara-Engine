@@ -63,6 +63,10 @@ export interface PresentCharacter {
   stats: CharacterStat[];
   /** What the character is thinking */
   thoughts: string | null;
+  /** Location where the tracker last saw this character physically on-screen. */
+  lastSeenLocation?: string | null;
+  /** Assistant / GM turn index where this character was last physically on-screen. */
+  lastSeenTurn?: number | null;
 }
 
 /** A numeric stat for a character. */

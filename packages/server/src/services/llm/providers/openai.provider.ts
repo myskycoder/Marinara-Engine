@@ -757,7 +757,7 @@ export class OpenAIProvider extends BaseLLMProvider {
         choices: Array<{ message: Record<string, unknown> & { content: string | unknown[] | null; refusal?: string } }>;
         usage?: ChatCompletionsUsagePayload;
       }>(response, "OpenAI chat() non-stream response");
-      const msg = json.choices[0]?.message;
+      const msg = json.choices?.[0]?.message;
       const refusal = typeof msg?.refusal === "string" && msg.refusal ? msg.refusal : "";
       const reasoningMetadata = OpenAIProvider.extractReasoningMetadata(msg);
       OpenAIProvider.emitChatCompletionsReasoning(options, reasoningMetadata);
@@ -964,7 +964,7 @@ export class OpenAIProvider extends BaseLLMProvider {
         usage?: ChatCompletionsUsagePayload;
       }>(response, "OpenAI chatComplete() non-stream response");
 
-      const choice = json.choices[0];
+      const choice = json.choices?.[0];
       const reasoningMetadata = OpenAIProvider.extractReasoningMetadata(choice?.message);
       OpenAIProvider.emitChatCompletionsReasoning(options, reasoningMetadata);
       const reasoning = OpenAIProvider.extractReasoning(choice?.message);
@@ -1046,7 +1046,7 @@ export class OpenAIProvider extends BaseLLMProvider {
             streamUsage = OpenAIProvider.extractChatCompletionsUsage(parsed.usage);
           }
 
-          const choice = parsed.choices[0];
+          const choice = parsed.choices?.[0];
           if (!choice) continue;
 
           if (choice.finish_reason) {

@@ -456,13 +456,17 @@ Schema:
   ]
 }
 Instructions:
-1. Use inference. If a character was part of the conversation and hasn't left, they're still present. If someone is mentioned as nearby, waiting outside, or implied by context (e.g., a shopkeeper in a shop scene), include them.
-  1a. Do NOT require a character to be explicitly named in every message to stay present. Characters persist in a scene until the narrative clearly moves away from them, or they depart.
-  1b. Characters who clearly left, were dismissed, or are no longer in the scene should be removed.
-2. Track HP and any other RPG stats defined on the character card; adjust values based on narrative events (combat damage, healing, etc.). Use the card's initial values as maximums.
-3. Fill in appearance and outfit from the character's description or card if not mentioned in the current message. Don't leave them null just because this specific message didn't repeat the description.
-4. Preserve continuity with the previous state.
-5. If a new character enters the scene, add them with full details immediately.`,
+1. NEVER invent a personal first/last name for unnamed background characters. If the narration tags a character only by role/profession in brackets (e.g. [Ефрейтор], [Караульный], [Прохожий], [Стражник], [Банщица], [Кухарка], [Guard], [Soldier], [Stranger]), keep "name" equal to that exact role word and set "characterId" to the same lowercase role. Do NOT promote one-line side characters into full named NPCs.
+2. Use inference. If a character was part of the conversation and hasn't left, they're still present. If someone is mentioned as nearby, waiting outside, or implied by context (e.g., a shopkeeper in a shop scene), include them.
+  2a. Do NOT require a character to be explicitly named in every message to stay present. Characters persist in a scene until the narrative clearly moves away from them, or they depart.
+  2b. Characters who clearly left, were dismissed, or are no longer in the scene should be removed.
+  2c. Specifically: a shopkeeper, cook, guard, or other location-bound NPC from a previous scene MUST be removed from presentCharacters as soon as the party leaves their establishment/location. Do not carry NPCs across location changes "just in case".
+  2d. Do NOT treat <committed_tracker_state>.presentCharacters as proof of current presence. That block shows who WAS present last turn. For each entry, verify against the CURRENT narration: if the character is neither mentioned, acting, nor implied to be physically in the new World State location THIS turn, drop them from your output.
+3. Track HP and any other RPG stats defined on the character card; adjust values based on narrative events (combat damage, healing, etc.). Use the card's initial values as maximums.
+4. Fill in appearance and outfit from the character's description or card if not mentioned in the current message. Don't leave them null just because this specific message didn't repeat the description.
+5. Preserve continuity with the previous state.
+6. If a new character enters the scene, add them with full details immediately.
+7. Do NOT output lastSeenLocation or lastSeenTurn — the server computes presence metadata after your response.`,
 
   /* ────────────────────────────────────────── */
   "persona-stats": `Track the PLAYER PERSONA's needs and condition bars. These represent physical and mental well-being, NOT combat stats (HP, Strength are handled by the World State agent).

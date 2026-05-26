@@ -13,6 +13,11 @@ import {
 import { isDebugAgentsEnabled } from "../../config/runtime-config.js";
 import { logger } from "../../lib/logger.js";
 import { withAiAuditContext, deriveAiAuditContext } from "../ai-audit/audit-context.js";
+import {
+  collectProtectedCharacterNames,
+  filterPresentCharactersForContext,
+  getAssistantTurnIndex,
+} from "../game/present-characters-context.js";
 
 const MAX_AGENT_CONTEXT_MESSAGES = 200;
 const EXPRESSION_AGENT_RECENT_CONTEXT_MESSAGES = 2;
@@ -1008,7 +1013,16 @@ function buildAgentMessages(
             ...(gs.temperature ? { temperature: gs.temperature } : {}),
           };
         }
-        if (gs.presentCharacters?.length) trackerSummary.presentCharacters = gs.presentCharacters;
+        if (gs.presentCharacters?.length) {
+          const globalIdx = context.recentMessages.length - recent.length + msgIdx;
+          const turnAtMessage =
+            getAssistantTurnIndex(context.recentMessages.slice(0, globalIdx + 1)) ?? undefined;
+          trackerSummary.presentCharacters = filterPresentCharactersForContext(gs.presentCharacters, {
+            location: gs.location,
+            currentTurn: turnAtMessage,
+            protectedCharacterNames: collectProtectedCharacterNames(context.characters.map((character) => character.name)),
+          });
+        }
         if (gs.recentEvents?.length) trackerSummary.recentEvents = gs.recentEvents;
         if (gs.playerStats) trackerSummary.playerStats = gs.playerStats;
         if (gs.personaStats?.length) trackerSummary.personaStats = gs.personaStats;

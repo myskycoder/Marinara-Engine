@@ -1,0 +1,120 @@
+{
+  "9": {
+    "inputs": {
+      "filename_prefix": "flux2_klein9b_base_lora",
+      "images": ["104", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "100": {
+    "inputs": {
+      "guidance": 4,
+      "conditioning": ["107", 0]
+    },
+    "class_type": "FluxGuidance",
+    "_meta": {
+      "title": "Flux Guidance"
+    }
+  },
+  "102": {
+    "inputs": {
+      "vae_name": "flux2-vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "104": {
+    "inputs": {
+      "samples": ["134", 0],
+      "vae": ["102", 0]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "105": {
+    "inputs": {
+      "width": "%width%",
+      "height": "%height%",
+      "batch_size": 1
+    },
+    "class_type": "EmptyFlux2LatentImage",
+    "_meta": {
+      "title": "Empty Flux 2 Latent"
+    }
+  },
+  "107": {
+    "inputs": {
+      "text": "%prompt%",
+      "clip": ["136", 0]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    }
+  },
+  "126": {
+    "inputs": {
+      "unet_name": "flux-2-klein-9b-fp8.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "DiT Klein 9B"
+    }
+  },
+  "134": {
+    "inputs": {
+      "seed": 501632142584740,
+      "steps": 28,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": ["138", 0],
+      "positive": ["100", 0],
+      "negative": ["135", 0],
+      "latent_image": ["105", 0]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "135": {
+    "inputs": {
+      "conditioning": ["107", 0]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "Conditioning Zero Out"
+    }
+  },
+  "136": {
+    "inputs": {
+      "clip_name": "flux2-klein-9b-uncensored-q8_0.gguf",
+      "type": "flux2"
+    },
+    "class_type": "CLIPLoaderGGUF",
+    "_meta": {
+      "title": "UNCENSORED encoder (GGUF Q8)"
+    }
+  },
+  "138": {
+    "inputs": {
+      "lora_name": "klein_snofs_v1_4.safetensors",
+      "strength_model": 1,
+      "model": ["126", 0]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA (Model Only)"
+    }
+  }
+}

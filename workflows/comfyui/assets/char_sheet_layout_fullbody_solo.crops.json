@@ -1,0 +1,16 @@
+{
+  "canvas": {
+    "width": 1024,
+    "height": 1024,
+    "templateFile": "char_sheet_layout_fullbody_solo.png"
+  },
+  "regions": {
+    "full_body": {
+      "x": 32,
+      "y": 32,
+      "width": 960,
+      "height": 960,
+      "label": "Full body (single panel, full canvas)"
+    }
+  }
+}

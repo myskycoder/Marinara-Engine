@@ -54,6 +54,12 @@ import {
   getStoredGameContextSummary,
   normalizeContextMessageLimit,
 } from "../../services/game/context-summary.service.js";
+import {
+  buildPresentCharacterContextLines,
+  filterPresentCharactersForContext,
+  getGeneratingAssistantTurn,
+  loadProtectedCharacterNames,
+} from "../../services/game/present-characters-context.js";
 
 type WrapFormat = "xml" | "markdown" | "none";
 
@@ -105,8 +111,10 @@ function formatTrackersContextBlock(args: {
   wrapFormat: WrapFormat;
   snap: any;
   chatMeta: Record<string, unknown>;
+  currentTurn?: number | null;
+  protectedCharacterNames?: string[];
 }): string | null {
-  const { wrapFormat, snap, chatMeta } = args;
+  const { wrapFormat, snap, chatMeta, currentTurn, protectedCharacterNames } = args;
 
   const trackerParts: string[] = [];
 
@@ -119,22 +127,13 @@ function formatTrackersContextBlock(args: {
   if (wsParts.length > 0) trackerParts.push(wrapContent(wsParts.join("\n"), "World", wrapFormat));
 
   try {
-    const presentChars = JSON.parse(snap.presentCharacters);
-    if (Array.isArray(presentChars) && presentChars.length > 0) {
-      const charLines = presentChars.map((c: any) => {
-        if (typeof c === "string") return `- ${c}`;
-        const details: string[] = [];
-        if (c.mood) details.push(`mood: ${c.mood}`);
-        if (c.appearance) details.push(`appearance: ${c.appearance}`);
-        if (c.outfit) details.push(`outfit: ${c.outfit}`);
-        if (c.thoughts) details.push(`thoughts: ${c.thoughts}`);
-        if (Array.isArray(c.stats) && c.stats.length > 0) {
-          const statStr = c.stats.map((s: any) => `${s.name}: ${s.value}${s.max ? `/${s.max}` : ""}`).join(", ");
-          details.push(`stats: ${statStr}`);
-        }
-        const detailStr = details.length > 0 ? ` (${details.join("; ")})` : "";
-        return `- ${c.emoji ?? ""} ${c.name ?? c}${detailStr}`;
-      });
+    const presentChars = filterPresentCharactersForContext(JSON.parse(snap.presentCharacters), {
+      location: snap.location,
+      currentTurn,
+      protectedCharacterNames,
+    });
+    const charLines = buildPresentCharacterContextLines(presentChars);
+    if (charLines.length > 0) {
       trackerParts.push(wrapContent(charLines.join("\n"), "Present Characters", wrapFormat));
     }
   } catch {
@@ -730,6 +729,7 @@ export async function registerDryRunRoute(app: FastifyInstance) {
         return [];
       }
     })();
+    const protectedCharacterNames = await loadProtectedCharacterNames(app.db, characterIds);
 
     // Persona resolution (same strategy as generation; read-only)
     let personaId: string | null = null;
@@ -1087,7 +1087,13 @@ export async function registerDryRunRoute(app: FastifyInstance) {
         ? await (async () => {
             const snap = await loadLatestGameSnapshot(app, chatId, visibleGameStateAnchor, regenerateMessageId);
             if (!snap) return null;
-            return formatTrackersContextBlock({ wrapFormat, snap, chatMeta });
+            return formatTrackersContextBlock({
+              wrapFormat,
+              snap,
+              chatMeta,
+              currentTurn: getGeneratingAssistantTurn(mappedMessages),
+              protectedCharacterNames,
+            });
           })()
         : null;
 
@@ -1382,7 +1388,15 @@ export async function registerDryRunRoute(app: FastifyInstance) {
     const resolvedInjectTrackersForRun = usePromptParts ? false : resolvedInjectTrackers;
     if (resolvedInjectTrackersForRun) {
       const snap = await loadLatestGameSnapshot(app, chatId, visibleGameStateAnchor, regenerateMessageId);
-      const contextBlock = snap ? formatTrackersContextBlock({ wrapFormat, snap, chatMeta }) : null;
+      const contextBlock = snap
+        ? formatTrackersContextBlock({
+            wrapFormat,
+            snap,
+            chatMeta,
+            currentTurn: getGeneratingAssistantTurn(mappedMessages),
+            protectedCharacterNames,
+          })
+        : null;
       if (contextBlock) {
         finalMessages = injectTrackerContext(finalMessages, contextBlock, "beforeLastUser");
       }

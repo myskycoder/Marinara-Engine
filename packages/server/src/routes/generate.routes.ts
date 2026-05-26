@@ -224,6 +224,15 @@ import {
 import { applyAllSegmentEdits, stripGmCommandTags } from "../services/game/segment-edits.js";
 import { listPartySprites, readPreferredFullBodySpriteBase64 } from "../services/game/sprite.service.js";
 import { materializeGameNpcs } from "../services/game/npc-materializer.service.js";
+import {
+  buildBracketLineCountByCharacterName,
+  buildPresentCharacterContextLines,
+  collectProtectedCharacterNames,
+  filterPresentCharactersForContext,
+  finalizePresentCharactersAfterTracker,
+  getAssistantTurnIndex,
+  getGeneratingAssistantTurn,
+} from "../services/game/present-characters-context.js";
 import { resolvePresentCharacterAvatars } from "../services/game/npc-avatar-resolver.js";
 import {
   generatePerceptionHints,
@@ -4669,24 +4678,13 @@ export async function generateRoutes(app: FastifyInstance) {
 
             // Present Characters
             if (hasCharTracker) {
-              const presentChars = JSON.parse(snap.presentCharacters);
-              if (Array.isArray(presentChars) && presentChars.length > 0) {
-                const charLines = presentChars.map((c: any) => {
-                  if (typeof c === "string") return `- ${c}`;
-                  const details: string[] = [];
-                  if (c.mood) details.push(`mood: ${c.mood}`);
-                  if (c.appearance) details.push(`appearance: ${c.appearance}`);
-                  if (c.outfit) details.push(`outfit: ${c.outfit}`);
-                  if (c.thoughts) details.push(`thoughts: ${c.thoughts}`);
-                  if (Array.isArray(c.stats) && c.stats.length > 0) {
-                    const statStr = c.stats
-                      .map((s: any) => `${s.name}: ${s.value}${s.max ? `/${s.max}` : ""}`)
-                      .join(", ");
-                    details.push(`stats: ${statStr}`);
-                  }
-                  const detailStr = details.length > 0 ? ` (${details.join("; ")})` : "";
-                  return `- ${c.emoji ?? ""} ${c.name ?? c}${detailStr}`;
-                });
+              const presentChars = filterPresentCharactersForContext(JSON.parse(snap.presentCharacters), {
+                location: snap.location,
+                currentTurn: getGeneratingAssistantTurn(allChatMessages),
+                protectedCharacterNames: collectProtectedCharacterNames(charInfo.map((character) => character.name)),
+              });
+              const charLines = buildPresentCharacterContextLines(presentChars);
+              if (charLines.length > 0) {
                 trackerParts.push(wrapContent(charLines.join("\n"), "Present Characters", wrapFormat));
               }
             }
@@ -10234,24 +10232,13 @@ export async function generateRoutes(app: FastifyInstance) {
 
               // Present Characters
               if (hasCharTracker) {
-                const presentChars = JSON.parse(snap.presentCharacters);
-                if (Array.isArray(presentChars) && presentChars.length > 0) {
-                  const charLines = presentChars.map((c: any) => {
-                    if (typeof c === "string") return `- ${c}`;
-                    const details: string[] = [];
-                    if (c.mood) details.push(`mood: ${c.mood}`);
-                    if (c.appearance) details.push(`appearance: ${c.appearance}`);
-                    if (c.outfit) details.push(`outfit: ${c.outfit}`);
-                    if (c.thoughts) details.push(`thoughts: ${c.thoughts}`);
-                    if (Array.isArray(c.stats) && c.stats.length > 0) {
-                      const statStr = c.stats
-                        .map((s: any) => `${s.name}: ${s.value}${s.max ? `/${s.max}` : ""}`)
-                        .join(", ");
-                      details.push(`stats: ${statStr}`);
-                    }
-                    const detailStr = details.length > 0 ? ` (${details.join("; ")})` : "";
-                    return `- ${c.emoji ?? ""} ${c.name ?? c}${detailStr}`;
-                  });
+                const presentChars = filterPresentCharactersForContext(JSON.parse(snap.presentCharacters), {
+                  location: snap.location,
+                  currentTurn: getGeneratingAssistantTurn(allChatMessages),
+                  protectedCharacterNames: collectProtectedCharacterNames(charInfo.map((character) => character.name)),
+                });
+                const charLines = buildPresentCharacterContextLines(presentChars);
+                if (charLines.length > 0) {
                   trackerParts.push(wrapContent(charLines.join("\n"), "Present Characters", wrapFormat));
                 }
               }
@@ -12832,6 +12819,12 @@ export async function generateRoutes(app: FastifyInstance) {
             (a, b) => (RESULT_ORDER[a.type] ?? 1) - (RESULT_ORDER[b.type] ?? 1),
           );
           const messageId = (lastSavedMsg as any)?.id ?? "";
+          const lastSavedContent = typeof (lastSavedMsg as any)?.content === "string" ? (lastSavedMsg as any).content : "";
+          const lineCountByCharacterName = buildBracketLineCountByCharacterName(lastSavedContent);
+          const currentAssistantTurn = getAssistantTurnIndex(
+            [...allChatMessages, lastSavedMsg].filter(Boolean) as Array<{ id?: unknown; role?: unknown }>,
+            messageId,
+          );
           // Determine swipe index for this generation so ALL tracker agents target the
           // same (messageId, swipeIndex) snapshot that the world-state agent creates.
           let targetSwipeIndex = 0;
@@ -12851,6 +12844,8 @@ export async function generateRoutes(app: FastifyInstance) {
             }
             return imgConnId;
           };
+          const trackerPreviousLocation =
+            typeof baseGameStateSnapshot?.location === "string" ? baseGameStateSnapshot.location.trim() || null : null;
 
           for (const result of sortedResults) {
             const resultMessageId =
@@ -13220,6 +13215,15 @@ export async function generateRoutes(app: FastifyInstance) {
                     ? JSON.parse(snapBeforeUpdate.presentCharacters)
                     : snapBeforeUpdate.presentCharacters
                   : [];
+                finalizePresentCharactersAfterTracker(chars, {
+                  location: snapBeforeUpdate?.location ?? null,
+                  previousLocation: trackerPreviousLocation,
+                  turn: currentAssistantTurn,
+                  lineCountByCharacterName,
+                  previousCharacters: oldChars,
+                  narration: lastSavedContent,
+                  protectedCharacterNames: collectProtectedCharacterNames(charInfo.map((character) => character.name)),
+                });
                 preserveTrackerCharacterUiFields(chars, oldChars);
 
                 // ── Enrich with avatar paths ──
@@ -13395,6 +13399,7 @@ export async function generateRoutes(app: FastifyInstance) {
                     connections,
                     chatId: input.chatId,
                     presentCharacters: chars as PresentCharacter[],
+                    lineCountByCharacterName,
                     existingCharacterNames: charInfo.map((c) => c.name),
                     personaName,
                     gameMap: (chatMeta.gameMap as GameMap | null) ?? null,

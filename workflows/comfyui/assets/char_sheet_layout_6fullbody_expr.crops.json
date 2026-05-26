@@ -1,0 +1,51 @@
+{
+  "canvas": {
+    "width": 1024,
+    "height": 1024,
+    "templateFile": "char_sheet_layout_6fullbody_expr.png"
+  },
+  "regions": {
+    "pose_happy": {
+      "x": 32,
+      "y": 32,
+      "width": 309,
+      "height": 472,
+      "label": "Happy full body (top-left)"
+    },
+    "pose_angry": {
+      "x": 357,
+      "y": 32,
+      "width": 309,
+      "height": 472,
+      "label": "Angry full body (top-center)"
+    },
+    "pose_sad": {
+      "x": 682,
+      "y": 32,
+      "width": 309,
+      "height": 472,
+      "label": "Sad full body (top-right)"
+    },
+    "pose_surprised": {
+      "x": 32,
+      "y": 514,
+      "width": 309,
+      "height": 472,
+      "label": "Surprised full body (bottom-left)"
+    },
+    "pose_serious": {
+      "x": 357,
+      "y": 514,
+      "width": 309,
+      "height": 472,
+      "label": "Serious full body (bottom-center)"
+    },
+    "pose_neutral": {
+      "x": 682,
+      "y": 514,
+      "width": 309,
+      "height": 472,
+      "label": "Neutral full body (bottom-right)"
+    }
+  }
+}

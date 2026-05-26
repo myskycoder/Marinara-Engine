@@ -1,0 +1,93 @@
+{
+  "3": {
+    "inputs": {
+      "ckpt_name": "cyberrealisticPony_v160.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "CyberRealistic Pony v16"
+    }
+  },
+  "4": {
+    "inputs": {
+      "lora_name": "liza1_lora_crp-000010.safetensors",
+      "strength_model": 0.8,
+      "strength_clip": 0.8,
+      "model": ["3", 0],
+      "clip": ["3", 1]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "liza1_lora (epoch 10)"
+    }
+  },
+  "5": {
+    "inputs": {
+      "text": "score_9, score_8_up, score_7_up, liza1_lora, 1girl, solo, real photo, round eyewear, brown hair, smile, looking at viewer, upper body, soft natural light, shallow depth of field",
+      "clip": ["4", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Positive Prompt"
+    }
+  },
+  "6": {
+    "inputs": {
+      "text": "score_6, score_5, score_4, lowres, bad anatomy, bad hands, blurry, watermark, text, deformed, ugly",
+      "clip": ["4", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Negative Prompt"
+    }
+  },
+  "7": {
+    "inputs": {
+      "width": 832,
+      "height": 1216,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Empty Latent Image"
+    }
+  },
+  "8": {
+    "inputs": {
+      "seed": 42,
+      "steps": 28,
+      "cfg": 5.5,
+      "sampler_name": "euler_ancestral",
+      "scheduler": "karras",
+      "denoise": 1,
+      "model": ["4", 0],
+      "positive": ["5", 0],
+      "negative": ["6", 0],
+      "latent_image": ["7", 0]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "9": {
+    "inputs": {
+      "samples": ["8", 0],
+      "vae": ["3", 2]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "10": {
+    "inputs": {
+      "filename_prefix": "crp_liza1_lora",
+      "images": ["9", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}

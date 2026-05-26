@@ -21,6 +21,11 @@ import { getCharacterDescriptionWithExtensions } from "./character-description-e
 import { agentRuns } from "../../db/schema/index.js";
 import { gameStateSnapshots } from "../../db/schema/index.js";
 import { eq, and, desc } from "drizzle-orm";
+import {
+  buildPresentCharacterContextLines,
+  filterPresentCharactersForContext,
+  getGeneratingAssistantTurn,
+} from "../game/present-characters-context.js";
 
 /** Context required for expanding markers. */
 export interface MarkerContext {
@@ -42,6 +47,8 @@ export interface MarkerContext {
   /** Optional scan-only messages for lorebook matching. */
   lorebookScanMessages?: ChatMLMessage[];
   chatSummary: string | null;
+  /** Party / card character names protected from stale presence filtering. */
+  protectedCharacterNames?: string[];
   wrapFormat: WrapFormat;
   /** When false, agent_data markers expand to empty strings */
   enableAgents: boolean;
@@ -531,22 +538,13 @@ async function expandWorldStateAgent(ctx: MarkerContext): Promise<ExpandedMarker
   if (snap.temperature) parts.push(`Temperature: ${snap.temperature}`);
 
   if (hasCharTracker) {
-    const presentChars = JSON.parse(snap.presentCharacters);
-    if (Array.isArray(presentChars) && presentChars.length > 0) {
-      const charLines = presentChars.map((c: any) => {
-        if (typeof c === "string") return `- ${c}`;
-        const details: string[] = [];
-        if (c.mood) details.push(`mood: ${c.mood}`);
-        if (c.appearance) details.push(`appearance: ${c.appearance}`);
-        if (c.outfit) details.push(`outfit: ${c.outfit}`);
-        if (c.thoughts) details.push(`thoughts: ${c.thoughts}`);
-        if (Array.isArray(c.stats) && c.stats.length > 0) {
-          const statStr = c.stats.map((s: any) => `${s.name}: ${s.value}${s.max ? `/${s.max}` : ""}`).join(", ");
-          details.push(`stats: ${statStr}`);
-        }
-        const detailStr = details.length > 0 ? ` (${details.join("; ")})` : "";
-        return `- ${c.emoji ?? ""} ${c.name ?? c}${detailStr}`;
-      });
+    const presentChars = filterPresentCharactersForContext(JSON.parse(snap.presentCharacters), {
+      location: snap.location,
+      currentTurn: getGeneratingAssistantTurn(ctx.chatMessages),
+      protectedCharacterNames: ctx.protectedCharacterNames,
+    });
+    const charLines = buildPresentCharacterContextLines(presentChars);
+    if (charLines.length > 0) {
       parts.push(`Present Characters:\n${charLines.join("\n")}`);
     }
   }

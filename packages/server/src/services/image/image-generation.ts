@@ -1831,11 +1831,19 @@ async function generateComfyUI(baseUrl: string, request: ImageGenRequest): Promi
     replacements["%model%"] = request.model;
   }
   const reference = request.referenceImage ?? request.referenceImages?.[0];
+  const backgroundReference = request.referenceImages?.[1];
+  const workflowJson = JSON.stringify(workflow);
   if (reference) {
     replacements["%reference_image%"] = reference;
-    if (JSON.stringify(workflow).includes("%reference_image_name%")) {
+    if (workflowJson.includes("%reference_image_name%")) {
       replacements["%reference_image_name%"] = await uploadComfyReferenceImage(base, reference);
     }
+  }
+  if (backgroundReference && workflowJson.includes("%background_reference_image_name%")) {
+    replacements["%background_reference_image_name%"] = await uploadComfyReferenceImage(
+      base,
+      backgroundReference,
+    );
   }
   const resolvedWorkflow = replaceComfyUiPlaceholders(workflow, replacements);
 

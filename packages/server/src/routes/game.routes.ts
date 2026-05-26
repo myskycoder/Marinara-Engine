@@ -146,6 +146,7 @@ import {
   buildBackgroundCacheKey,
   backgroundTagForChat,
   readAvatarBase64,
+  readBackgroundBase64,
   type BackgroundConditions,
   buildBackgroundImagePrompt,
   buildNpcPortraitImagePrompt,
@@ -342,6 +343,7 @@ function collectIllustrationCharacterAssets(opts: {
   charReferenceByName: Map<string, string>;
   charAvatarByName: Map<string, string>;
   charDescriptionByName: Map<string, string>;
+  backgroundTag?: string | null;
 }): {
   referenceImages: string[];
   /**
@@ -365,6 +367,21 @@ function collectIllustrationCharacterAssets(opts: {
    */
   characterDescriptionsForRewriter: string[];
 } {
+  const dedupeNames = (names: string[], limit: number): string[] => {
+    const seenKeys = new Set<string>();
+    const out: string[] = [];
+    for (const name of names) {
+      const trimmed = name.trim();
+      if (!trimmed) continue;
+      const key = npcNameKey(trimmed);
+      if (!key || seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      out.push(trimmed);
+      if (out.length >= limit) break;
+    }
+    return out;
+  };
+
   const npcAvatarByName = new Map<string, string>();
   const npcDescriptionByName = new Map<string, string>();
   // `gameNpcs` (persisted metadata) is authoritative; `trackedNpcs` is often a snapshot and can lag after regen.
@@ -386,9 +403,7 @@ function collectIllustrationCharacterAssets(opts: {
   const requestedNames = (opts.illustration.characters?.length ? opts.illustration.characters : opts.characterNames)
     .map((name) => name.trim())
     .filter(Boolean);
-  const uniqueNames = Array.from(new Set(requestedNames.map((name) => name.toLowerCase())))
-    .map((lowerName) => requestedNames.find((name) => name.toLowerCase() === lowerName)!)
-    .slice(0, 6);
+  const uniqueNames = dedupeNames(requestedNames, 6);
 
   const references: string[] = [];
   const characterDescriptions: string[] = [];
@@ -412,42 +427,35 @@ function collectIllustrationCharacterAssets(opts: {
 
     const description =
       findCharAvatarFuzzy(name, opts.charDescriptionByName) ?? findCharAvatarFuzzy(name, npcDescriptionByName);
-    const normalizedName = name.toLowerCase();
+    const normalizedName = npcNameKey(name);
     if (description && !described.has(normalizedName)) {
       described.add(normalizedName);
       characterDescriptions.push(`${name}: ${description}`.slice(0, 300));
     }
   }
 
-  // Broader rewriter feed — union of (sidecar + tracker + NPC cards).
-  // Image-prompt-writer is text-only and benefits from descriptions for
-  // EVERY visible character, even those that already have an attached
-  // reference image (the rewriter doesn't see images, only text).
-  const broadNames = Array.from(
-    new Set(
-      [
-        ...(opts.illustration.characters ?? []),
-        ...opts.characterNames,
-        ...opts.gameNpcs.map((npc) => npc.name).filter((n): n is string => !!n),
-      ]
-        .map((name) => name?.trim())
-        .filter((n): n is string => !!n),
-    ),
-  );
-  const broadUniqueNames = Array.from(new Set(broadNames.map((name) => name.toLowerCase())))
-    .map((lowerName) => broadNames.find((name) => name.toLowerCase() === lowerName)!)
-    .slice(0, 8);
+  const rewriterNames = [
+    ...(opts.illustration.characters ?? []),
+    ...opts.characterNames,
+    ...opts.gameNpcs.map((npc) => npc.name).filter((n): n is string => !!n),
+  ];
+  const broadUniqueNames = dedupeNames(rewriterNames, 8);
 
   const characterDescriptionsForRewriter: string[] = [];
   const describedForRewriter = new Set<string>();
   for (const name of broadUniqueNames) {
     const description =
       findCharAvatarFuzzy(name, opts.charDescriptionByName) ?? findCharAvatarFuzzy(name, npcDescriptionByName);
-    const normalizedName = name.toLowerCase();
+    const normalizedName = npcNameKey(name);
     if (description && !describedForRewriter.has(normalizedName)) {
       describedForRewriter.add(normalizedName);
       characterDescriptionsForRewriter.push(`${name}: ${description}`.slice(0, 300));
     }
+  }
+
+  const backgroundBase64 = readBackgroundBase64(opts.backgroundTag);
+  if (backgroundBase64 && references.length > 0) {
+    references.splice(1, 0, backgroundBase64);
   }
 
   return {
@@ -474,11 +482,12 @@ function buildScenePresenceBlock(
   presentCharacters: PresentCharacter[] | null | undefined,
   gameNpcs: GameNpc[] | null | undefined,
   focusNames: string[],
-  options: { maxNpcs?: number; maxLineChars?: number; totalCharCap?: number } = {},
+  options: { maxNpcs?: number; maxLineChars?: number; totalCharCap?: number; allowExtraTrackerEntries?: boolean } = {},
 ): string | null {
   const maxNpcs = options.maxNpcs ?? 6;
   const maxLineChars = options.maxLineChars ?? 360;
   const totalCharCap = options.totalCharCap ?? 1800;
+  const allowExtraTrackerEntries = options.allowExtraTrackerEntries ?? true;
 
   const focusLowercase = new Set(focusNames.map((name) => name.trim().toLowerCase()).filter(Boolean));
   // Build a map of npcCard fallback data keyed by lowercase name.
@@ -500,14 +509,16 @@ function buildScenePresenceBlock(
     seenLower.add(lower);
     orderedNames.push(trimmed);
   }
-  for (const tracker of presentCharacters ?? []) {
-    const trimmed = tracker?.name?.trim();
-    if (!trimmed) continue;
-    const lower = trimmed.toLowerCase();
-    if (seenLower.has(lower)) continue;
-    if (lower === "player" || lower === "{{user}}" || lower === "user") continue;
-    seenLower.add(lower);
-    orderedNames.push(trimmed);
+  if (allowExtraTrackerEntries) {
+    for (const tracker of presentCharacters ?? []) {
+      const trimmed = tracker?.name?.trim();
+      if (!trimmed) continue;
+      const lower = trimmed.toLowerCase();
+      if (seenLower.has(lower)) continue;
+      if (lower === "player" || lower === "{{user}}" || lower === "user") continue;
+      seenLower.add(lower);
+      orderedNames.push(trimmed);
+    }
   }
 
   if (!orderedNames.length) return null;
@@ -6961,6 +6972,7 @@ export async function gameRoutes(app: FastifyInstance) {
                 charReferenceByName,
                 charAvatarByName,
                 charDescriptionByName,
+                backgroundTag: (sceneResult.background as string) ?? (meta.gameSceneBackground as string) ?? null,
               });
               const illustrationSeason =
                 coerceSeason((sceneResult as Record<string, unknown>).season) ?? coerceSeason(meta.gameCurrentSeason);
@@ -7600,6 +7612,7 @@ export async function gameRoutes(app: FastifyInstance) {
           charReferenceByName,
           charAvatarByName,
           charDescriptionByName,
+          backgroundTag: (meta.gameSceneBackground as string) ?? null,
         });
         const prompt = await buildSceneIllustrationImagePrompt({
           chatId: input.chatId,
@@ -8273,6 +8286,8 @@ export async function gameRoutes(app: FastifyInstance) {
         const illustrationPromptOverride = promptOverrideById.get(
           gameImagePromptReviewId("illustration", illustrationKey),
         );
+        const metaBg = (meta.gameSceneBackground as string) ?? null;
+        const metaLoc = (meta.currentLocationId as string) ?? null;
         const illustrationAssets = collectIllustrationCharacterAssets({
           illustration,
           characterNames: characterNamesForIll,
@@ -8281,9 +8296,8 @@ export async function gameRoutes(app: FastifyInstance) {
           charReferenceByName,
           charAvatarByName,
           charDescriptionByName,
+          backgroundTag: metaBg,
         });
-        const metaBg = (meta.gameSceneBackground as string) ?? null;
-        const metaLoc = (meta.currentLocationId as string) ?? null;
         const illustrationSeasonGen = input.conditions?.season ?? coerceSeason(meta.gameCurrentSeason);
         const illustrationContinuityGen = buildIllustrationContinuity({
           narrationExcerpt: narrationExcerptForIll,
@@ -8312,6 +8326,7 @@ export async function gameRoutes(app: FastifyInstance) {
             presentCharactersForIll,
             (meta.gameNpcs as GameNpc[]) ?? [],
             illustrationAssets.characterNamesForRewriter,
+            { allowExtraTrackerEntries: !(illustration.characters && illustration.characters.length > 0) },
           );
           logger.info(
             "[game/generate-assets] illustration: requesting image-prompt-writer rewrite (chat=%s, draftChars=%d, names=%d, descs=%d, sceneNpcs=%s)",

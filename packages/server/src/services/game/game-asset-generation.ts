@@ -14,7 +14,7 @@ import { basename, join } from "path";
 import { slugifyForFs } from "@marinara-engine/shared";
 import { DATA_DIR } from "../../utils/data-dir.js";
 import { generateImage, type ImageGenResult } from "../image/image-generation.js";
-import { buildAssetManifest, GAME_ASSETS_DIR } from "./asset-manifest.service.js";
+import { buildAssetManifest, GAME_ASSETS_DIR, getAssetManifest } from "./asset-manifest.service.js";
 import { sha1HexLegacy } from "./npc-name-server.js";
 import type { PromptOverridesStorage } from "../storage/prompt-overrides.storage.js";
 import { loadPrompt, GAME_NPC_PORTRAIT, GAME_BACKGROUND, GAME_SCENE_ILLUSTRATION } from "../prompt-overrides/index.js";
@@ -248,6 +248,52 @@ export function readAvatarBase64(avatarPath: string | null | undefined): string 
   } catch {
     return undefined;
   }
+}
+
+/** Resolve a background asset tag to raw base64 bytes for ComfyUI reference slots. */
+export function readBackgroundBase64(backgroundTag: string | null | undefined): string | undefined {
+  if (!backgroundTag?.trim()) return undefined;
+  const tag = backgroundTag.trim();
+
+  const manifestEntry = getAssetManifest().assets[tag];
+  if (manifestEntry?.path) {
+    const diskPath = join(GAME_ASSETS_DIR, manifestEntry.path);
+    try {
+      if (existsSync(diskPath)) return readFileSync(diskPath).toString("base64");
+    } catch {
+      /* fall through */
+    }
+  }
+
+  if (tag.startsWith("backgrounds:chat:")) {
+    const parts = tag.split(":");
+    const chatId = parts[2];
+    const key = parts.slice(3).join(":");
+    if (chatId && key) {
+      const diskPath = backgroundFilePath(chatId, key);
+      try {
+        if (existsSync(diskPath)) return readFileSync(diskPath).toString("base64");
+      } catch {
+        return undefined;
+      }
+    }
+  }
+
+  if (tag.startsWith("backgrounds:generated:") || tag.startsWith("backgrounds:illustrations:")) {
+    const slug = tag.split(":").slice(2).join("-");
+    const subdir = tag.startsWith("backgrounds:illustrations:") ? "illustrations" : "generated";
+    const targetDir = join(GAME_ASSETS_DIR, "backgrounds", subdir);
+    for (const ext of GENERATED_GAME_BACKGROUND_EXTS) {
+      const diskPath = join(targetDir, `${slug}.${ext}`);
+      try {
+        if (existsSync(diskPath)) return readFileSync(diskPath).toString("base64");
+      } catch {
+        /* try next ext */
+      }
+    }
+  }
+
+  return undefined;
 }
 
 /**

@@ -19,6 +19,7 @@ import type {
 } from "@marinara-engine/shared";
 import { resolveMacros } from "@marinara-engine/shared";
 import { wrapContent, wrapGroup } from "./format-engine.js";
+import { loadProtectedCharacterNames } from "../game/present-characters-context.js";
 import { expandMarker, type MarkerContext } from "./marker-expander.js";
 import { mergeAdjacentMessages, squashLeadingSystemMessages } from "./merger.js";
 import { injectAtDepth } from "../lorebook/prompt-injector.js";
@@ -275,10 +276,12 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
   }
 
   // Build marker context
+  const protectedCharacterNames = await loadProtectedCharacterNames(input.db, input.characterIds);
   const markerCtx: MarkerContext = {
     db: input.db,
     chatId: input.chatId,
     characterIds: input.characterIds,
+    protectedCharacterNames,
     personaId: input.personaId ?? null,
     personaName: input.personaName,
     personaDescription: input.personaDescription,

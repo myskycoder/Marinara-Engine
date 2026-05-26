@@ -1,0 +1,58 @@
+{
+  "canvas": {
+    "width": 1024,
+    "height": 1024,
+    "templateFile": "char_sheet_layout_fullbody_6expr.png"
+  },
+  "regions": {
+    "full_body": {
+      "x": 32,
+      "y": 32,
+      "width": 448,
+      "height": 960,
+      "label": "Full body (left panel)"
+    },
+    "emotion_happy": {
+      "x": 512,
+      "y": 32,
+      "width": 240,
+      "height": 240,
+      "label": "Happy (top-left of emotion grid)"
+    },
+    "emotion_angry": {
+      "x": 768,
+      "y": 32,
+      "width": 240,
+      "height": 240,
+      "label": "Angry (top-right)"
+    },
+    "emotion_sad": {
+      "x": 512,
+      "y": 288,
+      "width": 240,
+      "height": 240,
+      "label": "Sad (middle-left)"
+    },
+    "emotion_surprised": {
+      "x": 768,
+      "y": 288,
+      "width": 240,
+      "height": 240,
+      "label": "Surprised (middle-right)"
+    },
+    "emotion_serious": {
+      "x": 512,
+      "y": 544,
+      "width": 240,
+      "height": 240,
+      "label": "Serious (bottom-left)"
+    },
+    "emotion_neutral": {
+      "x": 768,
+      "y": 544,
+      "width": 240,
+      "height": 240,
+      "label": "Neutral (bottom-right)"
+    }
+  }
+}

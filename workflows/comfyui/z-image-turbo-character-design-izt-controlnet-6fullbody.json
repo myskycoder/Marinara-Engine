@@ -1,0 +1,864 @@
+{
+  "id": "a7b8c9d0-1e2f-3a4b-5c6d-7e8f90123456",
+  "revision": 0,
+  "last_node_id": 143,
+  "last_link_id": 289,
+  "nodes": [
+    {
+      "id": 137,
+      "type": "MarkdownNote",
+      "pos": [
+        -2280,
+        -520
+      ],
+      "size": [
+        620,
+        520
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Z-Image + IZT LoRA + 6 full bodies",
+      "properties": {},
+      "widgets_values": [
+        "## Z-Image Turbo + **CharacterDesignIZT** + **ControlNet Canny**\n\nLayout: **6 full body** с разными эмоциями (сетка 3×2, 1024×1024).\n\n### Модели\n| Файл | Папка |\n|------|--------|\n| `qwen_3_4b.safetensors` | `text_encoders/` |\n| `z_image_turbo_bf16.safetensors` | `diffusion_models/` |\n| `ae.safetensors` | `vae/` |\n| `Z-Image-Turbo-Fun-Controlnet-Union.safetensors` | `model_patches/` |\n| Character Design IZT LoRA | `loras/` |\n\n### Шаблон layout\n1. Скопируйте `workflows/comfyui/assets/char_sheet_layout_6fullbody_expr.png` → `ComfyUI/input/`\n2. Координаты нарезки: `char_sheet_layout_6fullbody_expr.crops.json`\n\n### Настройки\n- **LoRA strength:** 0.7 · **ControlNet strength:** 0.9\n- **Steps:** 8 · **CFG:** 1 · **1024×1024**\n- **Триггер:** `CharacterDesignIZT`\n\nMarinara API: `z-image-turbo-character-design-izt-controlnet-6fullbody.api.json`\n"
+      ],
+      "color": "#432",
+      "bgcolor": "#000"
+    },
+    {
+      "id": 8,
+      "type": "VAEDecode",
+      "pos": [
+        -690,
+        -27
+      ],
+      "size": [
+        210,
+        46
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 272
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 212
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            213
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "VAEDecode"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 9,
+      "type": "SaveImage",
+      "pos": [
+        -448,
+        -27
+      ],
+      "size": [
+        460,
+        480
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 213
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "z_image_char_sheet_6fullbody"
+      ]
+    },
+    {
+      "id": 33,
+      "type": "ConditioningZeroOut",
+      "pos": [
+        -1226,
+        149
+      ],
+      "size": [
+        204,
+        26
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": 279
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            276
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "ConditioningZeroOut"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 29,
+      "type": "VAELoader",
+      "pos": [
+        -1988,
+        212
+      ],
+      "size": [
+        271,
+        59
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "slot_index": 0,
+          "links": [
+            212,
+            285
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "VAELoader",
+        "models": [
+          {
+            "name": "ae.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors",
+            "directory": "vae"
+          }
+        ]
+      },
+      "widgets_values": [
+        "ae.safetensors"
+      ]
+    },
+    {
+      "id": 13,
+      "type": "EmptySD3LatentImage",
+      "pos": [
+        -1989,
+        322
+      ],
+      "size": [
+        270,
+        106
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            273
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "EmptySD3LatentImage"
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        1
+      ]
+    },
+    {
+      "id": 3,
+      "type": "KSampler",
+      "pos": [
+        -977,
+        -27
+      ],
+      "size": [
+        270,
+        262
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 288
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 274
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 276
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 273
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            272
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "KSampler"
+      },
+      "widgets_values": [
+        0,
+        "randomize",
+        8,
+        1,
+        "res_multistep",
+        "simple",
+        1
+      ]
+    },
+    {
+      "id": 28,
+      "type": "UNETLoader",
+      "pos": [
+        -1989,
+        -78
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            281
+          ]
+        }
+      ],
+      "title": "Z-Image Turbo DiT",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "UNETLoader",
+        "models": [
+          {
+            "name": "z_image_turbo_bf16.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors",
+            "directory": "diffusion_models"
+          }
+        ]
+      },
+      "widgets_values": [
+        "z_image_turbo_bf16.safetensors",
+        "default"
+      ],
+      "color": "#223",
+      "bgcolor": "#335"
+    },
+    {
+      "id": 30,
+      "type": "CLIPLoader",
+      "pos": [
+        -1990,
+        55
+      ],
+      "size": [
+        270,
+        106
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            280
+          ]
+        }
+      ],
+      "title": "Qwen Text Encoder",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "CLIPLoader",
+        "models": [
+          {
+            "name": "qwen_3_4b.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors",
+            "directory": "text_encoders"
+          }
+        ]
+      },
+      "widgets_values": [
+        "qwen_3_4b.safetensors",
+        "lumina2",
+        "default"
+      ],
+      "color": "#322",
+      "bgcolor": "#533"
+    },
+    {
+      "id": 38,
+      "type": "LoraLoaderModelOnly",
+      "pos": [
+        -1680,
+        -78
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 281
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            282
+          ]
+        }
+      ],
+      "title": "Character Design IZT LoRA",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "LoraLoaderModelOnly"
+      },
+      "widgets_values": [
+        null,
+        0.7
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 11,
+      "type": "ModelSamplingAuraFlow",
+      "pos": [
+        -1360,
+        -78
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 282
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            283
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "ModelSamplingAuraFlow"
+      },
+      "widgets_values": [
+        3
+      ],
+      "color": "#233",
+      "bgcolor": "#355"
+    },
+    {
+      "id": 64,
+      "type": "ModelPatchLoader",
+      "pos": [
+        -1989,
+        470
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL_PATCH",
+          "type": "MODEL_PATCH",
+          "links": [
+            284
+          ]
+        }
+      ],
+      "title": "ControlNet Union patch",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "ModelPatchLoader",
+        "models": [
+          {
+            "name": "Z-Image-Turbo-Fun-Controlnet-Union.safetensors",
+            "url": "https://huggingface.co/alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union/resolve/main/Z-Image-Turbo-Fun-Controlnet-Union.safetensors",
+            "directory": "model_patches"
+          }
+        ]
+      },
+      "widgets_values": [
+        "Z-Image-Turbo-Fun-Controlnet-Union.safetensors"
+      ],
+      "color": "#323",
+      "bgcolor": "#535"
+    },
+    {
+      "id": 58,
+      "type": "LoadImage",
+      "pos": [
+        -2280,
+        80
+      ],
+      "size": [
+        320,
+        340
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            287
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "title": "Layout template",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "char_sheet_layout_6fullbody_expr.png",
+        "image"
+      ],
+      "color": "#234",
+      "bgcolor": "#456"
+    },
+    {
+      "id": 57,
+      "type": "Canny",
+      "pos": [
+        -1920,
+        80
+      ],
+      "size": [
+        270,
+        106
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 287
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            286,
+            289
+          ]
+        }
+      ],
+      "title": "Canny (layout edges)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "Canny"
+      },
+      "widgets_values": [
+        0.1,
+        0.32
+      ],
+      "color": "#234",
+      "bgcolor": "#456"
+    },
+    {
+      "id": 60,
+      "type": "QwenImageDiffsynthControlnet",
+      "pos": [
+        -1180,
+        -78
+      ],
+      "size": [
+        290,
+        130
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 283
+        },
+        {
+          "name": "model_patch",
+          "type": "MODEL_PATCH",
+          "link": 284
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 285
+        },
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 286
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            288
+          ]
+        }
+      ],
+      "title": "Z-Image Union ControlNet",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "QwenImageDiffsynthControlnet"
+      },
+      "widgets_values": [
+        0.9
+      ],
+      "color": "#323",
+      "bgcolor": "#535"
+    },
+    {
+      "id": 27,
+      "type": "CLIPTextEncode",
+      "pos": [
+        -1687,
+        50
+      ],
+      "size": [
+        430,
+        320
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 280
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            274,
+            279
+          ]
+        }
+      ],
+      "title": "Positive Prompt",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        "CharacterDesignIZT. Character reference sheet, white background. Six full body views in fixed 3x2 grid, same character, different emotions: happy, angry, sad, surprised, serious, neutral. Each panel full figure head to toe, vibrant anime art style, high detail."
+      ],
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 143,
+      "type": "PreviewImage",
+      "pos": [
+        -1920,
+        220
+      ],
+      "size": [
+        270,
+        280
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 289
+        }
+      ],
+      "outputs": [],
+      "title": "Preview Canny map",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.9.0",
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [
+    [
+      212,
+      29,
+      0,
+      8,
+      1,
+      "VAE"
+    ],
+    [
+      213,
+      8,
+      0,
+      9,
+      0,
+      "IMAGE"
+    ],
+    [
+      272,
+      3,
+      0,
+      8,
+      0,
+      "LATENT"
+    ],
+    [
+      273,
+      13,
+      0,
+      3,
+      3,
+      "LATENT"
+    ],
+    [
+      274,
+      27,
+      0,
+      3,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      276,
+      33,
+      0,
+      3,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      279,
+      27,
+      0,
+      33,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      280,
+      30,
+      0,
+      27,
+      0,
+      "CLIP"
+    ],
+    [
+      281,
+      28,
+      0,
+      38,
+      0,
+      "MODEL"
+    ],
+    [
+      282,
+      38,
+      0,
+      11,
+      0,
+      "MODEL"
+    ],
+    [
+      283,
+      11,
+      0,
+      60,
+      0,
+      "MODEL"
+    ],
+    [
+      284,
+      64,
+      0,
+      60,
+      1,
+      "MODEL_PATCH"
+    ],
+    [
+      285,
+      29,
+      0,
+      60,
+      2,
+      "VAE"
+    ],
+    [
+      286,
+      57,
+      0,
+      60,
+      3,
+      "IMAGE"
+    ],
+    [
+      287,
+      58,
+      0,
+      57,
+      0,
+      "IMAGE"
+    ],
+    [
+      288,
+      60,
+      0,
+      3,
+      0,
+      "MODEL"
+    ],
+    [
+      289,
+      57,
+      0,
+      143,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.85,
+      "offset": [
+        2400,
+        450
+      ]
+    },
+    "workflowRendererVersion": "LG"
+  },
+  "version": 0.4
+}

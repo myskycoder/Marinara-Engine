@@ -76,6 +76,20 @@ const VALID_DIRECTION_EFFECTS = new Set<DirectionCommand["effect"]>([
 
 const VALID_DIRECTION_TARGETS = new Set<NonNullable<DirectionCommand["target"]>>(["background", "content", "all"]);
 
+function coerceLiteralNull(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  const normalized = trimmed.toLowerCase();
+  if (!trimmed || normalized === "null" || normalized === "undefined") return null;
+  return trimmed;
+}
+
+function normalizeBackgroundPrompt(value: unknown): string | null {
+  const coerced = coerceLiteralNull(value);
+  if (typeof coerced !== "string") return null;
+  return coerced.length > 1000 ? coerced.slice(0, 1000) : coerced;
+}
+
 function normalizeExpression(value: string): string {
   const lower = value.toLowerCase().trim();
   // Direct hit (e.g. "amused")
@@ -290,6 +304,9 @@ export function normalizeSceneLocationId(value: unknown): string | null {
  */
 function postProcessSegment(seg: SceneSegmentEffect, ctx: PostProcessContext): SceneSegmentEffect {
   const out = { ...seg };
+  out.background = coerceLiteralNull(out.background) as SceneSegmentEffect["background"];
+  out.locationId = coerceLiteralNull(out.locationId) as SceneSegmentEffect["locationId"];
+  out.backgroundPrompt = normalizeBackgroundPrompt(out.backgroundPrompt);
 
   // Background — fuzzy-match or synthesise generated tag
   if (out.background && out.background !== "null") {
@@ -362,7 +379,6 @@ function postProcessSegment(seg: SceneSegmentEffect, ctx: PostProcessContext): S
   }
 
   // locationId — same kebab rules as top-level (segments were missing this)
-  if ((out.locationId as unknown) === "null") out.locationId = null;
   if (out.locationId != null) {
     const cleaned = normalizeSceneLocationId(out.locationId);
     if (!cleaned) {
@@ -372,6 +388,10 @@ function postProcessSegment(seg: SceneSegmentEffect, ctx: PostProcessContext): S
       logger.debug(`[postprocess] seg[${seg.segment}] locationId: "${out.locationId}" → "${cleaned}"`);
       out.locationId = cleaned;
     }
+  }
+
+  if (out.backgroundPrompt && (!out.background || !out.background.startsWith("backgrounds:generated:"))) {
+    out.backgroundPrompt = null;
   }
 
   return out;
@@ -415,13 +435,13 @@ export function postProcessSceneResult(raw: SceneAnalysis, ctx: PostProcessConte
   const result = { ...raw };
   const rawRecord = raw as unknown as Record<string, unknown>;
 
-  // ── Sanitize string "null" → actual null (grammar sometimes emits the string) ──
-  if (result.background === "null") result.background = null;
-  if (result.weather === "null") result.weather = null;
-  if (result.timeOfDay === "null") result.timeOfDay = null;
-  if ((result.season as unknown) === "null") result.season = null;
-  if ((result.locationId as unknown) === "null") result.locationId = null;
-  if ((result.backgroundPrompt as unknown) === "null") result.backgroundPrompt = null;
+  // ── Sanitize string "null" / "undefined" / "" → actual null ──
+  result.background = coerceLiteralNull(result.background) as SceneAnalysis["background"];
+  result.weather = coerceLiteralNull(result.weather) as SceneAnalysis["weather"];
+  result.timeOfDay = coerceLiteralNull(result.timeOfDay) as SceneAnalysis["timeOfDay"];
+  result.season = coerceLiteralNull(result.season) as SceneAnalysis["season"];
+  result.locationId = coerceLiteralNull(result.locationId) as SceneAnalysis["locationId"];
+  result.backgroundPrompt = normalizeBackgroundPrompt(result.backgroundPrompt);
 
   // ── Season — clamp to known values ──
   if (result.season) {
@@ -449,16 +469,7 @@ export function postProcessSceneResult(raw: SceneAnalysis, ctx: PostProcessConte
   }
 
   // ── backgroundPrompt — only meaningful when background is generated:* ──
-  if (result.backgroundPrompt && typeof result.backgroundPrompt === "string") {
-    const trimmed = result.backgroundPrompt.trim();
-    if (!trimmed) {
-      result.backgroundPrompt = null;
-    } else if (trimmed.length > 1000) {
-      result.backgroundPrompt = trimmed.slice(0, 1000);
-    } else {
-      result.backgroundPrompt = trimmed;
-    }
-  }
+  result.backgroundPrompt = normalizeBackgroundPrompt(result.backgroundPrompt);
 
   result.music = null;
   result.ambient = null;
@@ -466,10 +477,10 @@ export function postProcessSceneResult(raw: SceneAnalysis, ctx: PostProcessConte
     result.musicGenre = null;
     result.musicIntensity = null;
   } else {
-    result.musicGenre = normalizeMusicGenre(rawRecord.musicGenre);
-    result.musicIntensity = normalizeMusicIntensity(rawRecord.musicIntensity);
+    result.musicGenre = normalizeMusicGenre(coerceLiteralNull(rawRecord.musicGenre));
+    result.musicIntensity = normalizeMusicIntensity(coerceLiteralNull(rawRecord.musicIntensity));
   }
-  result.locationKind = normalizeLocationKind(rawRecord.locationKind);
+  result.locationKind = normalizeLocationKind(coerceLiteralNull(rawRecord.locationKind));
   result.spotifyTrack = ctx.useSpotifyMusic
     ? sanitizeSpotifyTrack(rawRecord.spotifyTrack, ctx.availableSpotifyTracks)
     : null;

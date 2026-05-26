@@ -320,6 +320,11 @@ export function ConnectionEditor() {
       { token: "%model%", label: "%model%", critical: false },
       { token: "%reference_image%", label: "%reference_image%", critical: false },
       { token: "%reference_image_name%", label: "%reference_image_name%", critical: false },
+      {
+        token: "%background_reference_image_name%",
+        label: "%background_reference_image_name%",
+        critical: false,
+      },
     ];
     const hasReferenceImage = wf.includes("%reference_image%");
     const hasReferenceImageName = wf.includes("%reference_image_name%");
@@ -1387,7 +1392,7 @@ export function ConnectionEditor() {
                 help={
                   selectedImageService === "runpod_comfyui"
                     ? "Paste your ComfyUI workflow JSON (API format). RunPod needs the full workflow to execute; the endpoint sends this workflow to your serverless endpoint. Use placeholders like %prompt%, %seed%, %width%, %height%, and %reference_image% to let Marinara inject generation parameters."
-                    : "Paste a custom ComfyUI workflow JSON (API format). Use placeholders like %prompt%, %negative_prompt%, %width%, %height%, %seed%, %model%, %steps%, %cfg%, %sampler%, %scheduler%, and %denoise%. For reference images, use %reference_image% to inject a base64 string for workflows that decode it, or %reference_image_name% to upload the image to ComfyUI's input directory and inject the filename for a vanilla LoadImage node. Leave empty to use the built-in default txt2img workflow."
+                    : "Paste a custom ComfyUI workflow JSON (API format). Use placeholders like %prompt%, %negative_prompt%, %width%, %height%, %seed%, %model%, %steps%, %cfg%, %sampler%, %scheduler%, and %denoise%. For reference images, use %reference_image% to inject a base64 string for workflows that decode it, or %reference_image_name% to upload the image to ComfyUI's input directory and inject the filename for a vanilla LoadImage node. For a second reference (e.g. background), use %background_reference_image_name% with referenceImages[1]. Leave empty to use the built-in default txt2img workflow."
                 }
               >
                 <textarea

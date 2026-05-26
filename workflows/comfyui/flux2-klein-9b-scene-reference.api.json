@@ -1,0 +1,161 @@
+{
+  "9": {
+    "inputs": {
+      "filename_prefix": "flux2_klein9b_scene",
+      "images": ["104", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "58": {
+    "inputs": {
+      "image": "%reference_image_name%"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Character reference (Marinara upload)"
+    }
+  },
+  "80": {
+    "inputs": {
+      "image": ["58", 0],
+      "upscale_method": "lanczos",
+      "megapixels": 1,
+      "resolution_steps": 1
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "Scale reference (~1MP)"
+    }
+  },
+  "102": {
+    "inputs": {
+      "vae_name": "flux2-vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "104": {
+    "inputs": {
+      "samples": ["134", 0],
+      "vae": ["102", 0]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "105": {
+    "inputs": {
+      "width": "%width%",
+      "height": "%height%",
+      "batch_size": 1
+    },
+    "class_type": "EmptyFlux2LatentImage",
+    "_meta": {
+      "title": "Scene canvas"
+    }
+  },
+  "107": {
+    "inputs": {
+      "text": "%prompt%",
+      "clip": ["136", 0]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Scene prompt"
+    }
+  },
+  "123": {
+    "inputs": {
+      "conditioning": ["135", 0],
+      "latent": ["124", 0]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "ReferenceLatent (negative)"
+    }
+  },
+  "124": {
+    "inputs": {
+      "pixels": ["80", 0],
+      "vae": ["102", 0]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "Encode character reference"
+    }
+  },
+  "125": {
+    "inputs": {
+      "conditioning": ["107", 0],
+      "latent": ["124", 0]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "ReferenceLatent (positive)"
+    }
+  },
+  "126": {
+    "inputs": {
+      "unet_name": "flux-2-klein-9b-fp8.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "DiT Klein 9B DISTILLED"
+    }
+  },
+  "134": {
+    "inputs": {
+      "seed": "%seed%",
+      "steps": 4,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": ["138", 0],
+      "positive": ["125", 0],
+      "negative": ["123", 0],
+      "latent_image": ["105", 0]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "135": {
+    "inputs": {
+      "conditioning": ["107", 0]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "Negative (zero out)"
+    }
+  },
+  "136": {
+    "inputs": {
+      "clip_name": "flux2-klein-9b-uncensored-q8_0.gguf",
+      "type": "flux2"
+    },
+    "class_type": "CLIPLoaderGGUF",
+    "_meta": {
+      "title": "UNCENSORED encoder (GGUF Q8)"
+    }
+  },
+  "138": {
+    "inputs": {
+      "lora_name": "your_klein_lora.safetensors",
+      "strength_model": 0.85,
+      "model": ["126", 0]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA (Model Only)"
+    }
+  }
+}
