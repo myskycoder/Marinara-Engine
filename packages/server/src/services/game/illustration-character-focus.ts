@@ -3,7 +3,27 @@ import { isSameNpcName, npcNameKey } from "./npc-name-server.js";
 /** Bracket tags that are moods/flags, not character names. */
 const BRACKET_TAG_SKIP = new Set([
   "main",
+  "crying",
+  "thought",
   "thinking",
+  "speaking",
+  "whisper",
+  "whispering",
+  "moaning",
+  "gasping",
+  "panting",
+  "screaming",
+  "laughing",
+  "sobbing",
+  "sighing",
+  "yelling",
+  "shouting",
+  "muttering",
+  "mumbling",
+  "narration",
+  "dialogue",
+  "voice",
+  "sfx",
   "blushing",
   "embarrassed",
   "happy",
@@ -77,7 +97,8 @@ export function extractMentionedNpcNames(text: string, knownNames: string[]): st
         break;
       }
     }
-    if (!matched) add(inner);
+    // Only treat bracket tags as character names when they match the known roster.
+    if (!matched) continue;
   }
 
   const lowerText = text.toLowerCase();

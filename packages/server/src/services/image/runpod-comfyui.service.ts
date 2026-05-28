@@ -106,6 +106,16 @@ export async function generateRunPodComfyUI(
   const referenceImage = request.referenceImage || request.referenceImages?.[0];
   if (referenceImage) {
     wfStr = wfStr.replace(/%reference_image%/g, escapeJsonStr(referenceImage));
+    if (wfStr.includes("%reference_image_name%")) {
+      wfStr = wfStr.replace(/%reference_image_name%/g, escapeJsonStr(referenceImage));
+    }
+    if (wfStr.includes("%face_reference_image_name%")) {
+      wfStr = wfStr.replace(/%face_reference_image_name%/g, escapeJsonStr(referenceImage));
+    }
+  }
+  const bodyReference = request.referenceImages?.[1];
+  if (bodyReference && wfStr.includes("%body_reference_image_name%")) {
+    wfStr = wfStr.replace(/%body_reference_image_name%/g, escapeJsonStr(bodyReference));
   }
 
   let workflow: Record<string, unknown>;

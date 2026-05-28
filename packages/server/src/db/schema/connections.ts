@@ -51,6 +51,10 @@ export const apiConnections = sqliteTable("api_connections", {
   comfyuiWorkflow: text("comfyui_workflow"),
   /** ComfyUI: workflow JSON used when a reference image is attached to the request. */
   comfyuiWorkflowWithReference: text("comfyui_workflow_with_reference"),
+  /** ComfyUI: workflow with real negative conditioning (CFG) for NSFW scenes. */
+  comfyuiWorkflowWithNegative: text("comfyui_workflow_with_negative"),
+  /** ComfyUI: split face + body reference workflow. */
+  comfyuiSplitReferenceWorkflow: text("comfyui_split_reference_workflow"),
   /** Image generation: explicitly selected service ID (e.g. "comfyui", "automatic1111"). Overrides URL inference. */
   imageService: text("image_service"),
   /** For endpoint-based image services (e.g. RunPod Serverless ComfyUI): the endpoint ID. */

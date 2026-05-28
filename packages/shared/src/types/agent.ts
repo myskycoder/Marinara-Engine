@@ -330,7 +330,7 @@ export const BUILT_IN_AGENTS: BuiltInAgentMeta[] = [
     id: "image-prompt-writer",
     name: "Image Prompt Writer",
     description:
-      "Rewrites Game-mode CG illustration prompts before they hit the image model, adapting them to the configured image-model family (SDXL/Pony booru tags, Flux/DALL·E natural language, NovelAI v3/v4, Pollinations, ComfyUI, etc.). Runs on demand from the Game-mode pipeline — not on every chat turn.",
+      "Rewrites Game-mode CG illustration prompts before they hit the image model. Premium runs a 4-stage visual compiler pipeline: Scene Visual Compiler → Visual Saliency Reducer → Prompt Director (English 2-block Flux) → deterministic static style inject. Dual LLM connections: Scene Compiler (GPT-4.1 recommended) and Prompt Director (Claude Sonnet 4 recommended). Fast mode uses deterministic saliency + single director call. Avoid Gemini Flash for NSFW (content filter). Runs on demand — not every chat turn.",
     phase: "parallel",
     enabledByDefault: false,
     category: "misc",

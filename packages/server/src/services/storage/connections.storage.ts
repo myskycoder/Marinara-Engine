@@ -88,6 +88,8 @@ export function createConnectionsStorage(db: DB) {
         imageGenerationSource: input.imageGenerationSource ?? null,
         comfyuiWorkflow: input.comfyuiWorkflow ?? null,
         comfyuiWorkflowWithReference: input.comfyuiWorkflowWithReference ?? null,
+        comfyuiWorkflowWithNegative: input.comfyuiWorkflowWithNegative ?? null,
+        comfyuiSplitReferenceWorkflow: input.comfyuiSplitReferenceWorkflow ?? null,
         imageService: input.imageService ?? null,
         imageEndpointId: input.imageEndpointId ?? null,
         promptPresetId: input.promptPresetId ?? null,
@@ -167,6 +169,12 @@ export function createConnectionsStorage(db: DB) {
       }
       if (data.comfyuiWorkflowWithReference !== undefined) {
         updateFields.comfyuiWorkflowWithReference = data.comfyuiWorkflowWithReference;
+      }
+      if (data.comfyuiWorkflowWithNegative !== undefined) {
+        updateFields.comfyuiWorkflowWithNegative = data.comfyuiWorkflowWithNegative;
+      }
+      if (data.comfyuiSplitReferenceWorkflow !== undefined) {
+        updateFields.comfyuiSplitReferenceWorkflow = data.comfyuiSplitReferenceWorkflow;
       }
       if (data.imageService !== undefined) {
         updateFields.imageService = data.imageService;

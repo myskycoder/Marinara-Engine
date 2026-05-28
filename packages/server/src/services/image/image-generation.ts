@@ -27,6 +27,8 @@ import { isImageLocalUrlsEnabled } from "../../config/runtime-config.js";
 import { generateRunPodComfyUI } from "./runpod-comfyui.service.js";
 import {
   comfyWorkflowExpectsBackgroundReference,
+  comfyWorkflowExpectsFaceReference,
+  comfyWorkflowExpectsBodyReference,
   countActiveComfyReferenceImages,
   describeComfyWorkflowVariant,
   resolveActiveComfyWorkflow,
@@ -59,6 +61,14 @@ export interface ImageGenRequest {
   comfyWorkflow?: string;
   /** Optional ComfyUI workflow JSON used when a reference image is attached. */
   comfyWorkflowWithReference?: string;
+  /** Optional ComfyUI workflow with real CFG negative conditioning (NSFW). */
+  comfyWorkflowWithNegative?: string;
+  /** Optional ComfyUI split face + body reference workflow. */
+  comfyWorkflowSplitReference?: string;
+  /** Prefer comfyWorkflowWithNegative when set (typically NSFW scenes). */
+  preferNegativeWorkflow?: boolean;
+  /** Prefer comfyWorkflowSplitReference when set. */
+  preferSplitReference?: boolean;
   /** Optional connection-scoped defaults for local Stable Diffusion backends. */
   imageDefaults?: ImageGenerationDefaultsProfile | null;
   /** Allow this explicit image-generation connection to call local/private URLs. */
@@ -1860,6 +1870,7 @@ async function generateComfyUI(baseUrl: string, request: ImageGenRequest): Promi
   }
   const workflowJson = JSON.stringify(workflow);
   const reference = request.referenceImage ?? request.referenceImages?.[0];
+  const bodyReference = request.referenceImages?.[1];
   const backgroundReference = comfyWorkflowExpectsBackgroundReference(workflowJson)
     ? request.referenceImages?.[1]
     : undefined;
@@ -1868,6 +1879,12 @@ async function generateComfyUI(baseUrl: string, request: ImageGenRequest): Promi
     if (workflowJson.includes("%reference_image_name%")) {
       replacements["%reference_image_name%"] = await uploadComfyReferenceImage(base, reference);
     }
+    if (comfyWorkflowExpectsFaceReference(workflowJson) && workflowJson.includes("%face_reference_image_name%")) {
+      replacements["%face_reference_image_name%"] = await uploadComfyReferenceImage(base, reference);
+    }
+  }
+  if (bodyReference && comfyWorkflowExpectsBodyReference(workflowJson) && workflowJson.includes("%body_reference_image_name%")) {
+    replacements["%body_reference_image_name%"] = await uploadComfyReferenceImage(base, bodyReference);
   }
   if (backgroundReference && workflowJson.includes("%background_reference_image_name%")) {
     replacements["%background_reference_image_name%"] = await uploadComfyReferenceImage(

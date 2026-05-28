@@ -216,6 +216,8 @@ export function ConnectionEditor() {
   const [localImageGenerationSource, setLocalImageGenerationSource] = useState("");
   const [localComfyuiWorkflow, setLocalComfyuiWorkflow] = useState("");
   const [localComfyuiWorkflowWithReference, setLocalComfyuiWorkflowWithReference] = useState("");
+  const [localComfyuiWorkflowWithNegative, setLocalComfyuiWorkflowWithNegative] = useState("");
+  const [localComfyuiSplitReferenceWorkflow, setLocalComfyuiSplitReferenceWorkflow] = useState("");
   const [localImageService, setLocalImageService] = useState<string | null>(null);
   const [localImageEndpointId, setLocalImageEndpointId] = useState("");
   const [localMaxTokensOverride, setLocalMaxTokensOverride] = useState<number | null>(null);
@@ -328,6 +330,8 @@ export function ConnectionEditor() {
     setLocalImageGenerationSource(imageGenerationSource);
     setLocalComfyuiWorkflow((c.comfyuiWorkflow as string) ?? "");
     setLocalComfyuiWorkflowWithReference((c.comfyuiWorkflowWithReference as string) ?? "");
+    setLocalComfyuiWorkflowWithNegative((c.comfyuiWorkflowWithNegative as string) ?? "");
+    setLocalComfyuiSplitReferenceWorkflow((c.comfyuiSplitReferenceWorkflow as string) ?? "");
     setLocalImageService(imageService);
     setLocalImageEndpointId((c.imageEndpointId as string) ?? "");
     setLocalMaxTokensOverride(typeof c.maxTokensOverride === "number" ? (c.maxTokensOverride as number) : null);
@@ -440,6 +444,8 @@ export function ConnectionEditor() {
         localProvider === "image_generation" ? localImageGenerationSource || localImageService || null : null,
       comfyuiWorkflow: localComfyuiWorkflow || null,
       comfyuiWorkflowWithReference: localComfyuiWorkflowWithReference || null,
+      comfyuiWorkflowWithNegative: localComfyuiWorkflowWithNegative || null,
+      comfyuiSplitReferenceWorkflow: localComfyuiSplitReferenceWorkflow || null,
       imageService:
         localProvider === "image_generation" ? localImageGenerationSource || localImageService || null : null,
       imageEndpointId:
@@ -499,6 +505,8 @@ export function ConnectionEditor() {
     localImageGenerationSource,
     localComfyuiWorkflow,
     localComfyuiWorkflowWithReference,
+    localComfyuiWorkflowWithNegative,
+    localComfyuiSplitReferenceWorkflow,
     localImageService,
     localImageEndpointId,
     localMaxTokensOverride,
@@ -1543,6 +1551,33 @@ export function ConnectionEditor() {
                       </span>
                     </p>
                   )}
+
+                <p className="mb-2 mt-4 text-[0.625rem] font-medium text-[var(--foreground)]">
+                  With reference + CFG negative (NSFW)
+                </p>
+                <textarea
+                  value={localComfyuiWorkflowWithNegative}
+                  onChange={(e) => {
+                    setLocalComfyuiWorkflowWithNegative(e.target.value);
+                    markDirty();
+                  }}
+                  placeholder="Optional — uses %negative_prompt% with real CFG (not ConditioningZeroOut)"
+                  className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-xs font-mono outline-none ring-1 ring-[var(--border)] focus:ring-sky-400/50 min-h-[80px] max-h-[200px] resize-y placeholder:text-[var(--muted-foreground)]/50"
+                />
+
+                <p className="mb-2 mt-4 text-[0.625rem] font-medium text-[var(--foreground)]">
+                  Split face + body reference
+                </p>
+                <textarea
+                  value={localComfyuiSplitReferenceWorkflow}
+                  onChange={(e) => {
+                    setLocalComfyuiSplitReferenceWorkflow(e.target.value);
+                    markDirty();
+                  }}
+                  placeholder="Optional — %face_reference_image_name% and %body_reference_image_name%"
+                  className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-xs font-mono outline-none ring-1 ring-[var(--border)] focus:ring-sky-400/50 min-h-[80px] max-h-[200px] resize-y placeholder:text-[var(--muted-foreground)]/50"
+                />
+
                 {selectedImageService === "runpod_comfyui" &&
                   !localComfyuiWorkflow.trim() &&
                   !localComfyuiWorkflowWithReference.trim() && (

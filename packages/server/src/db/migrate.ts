@@ -683,6 +683,16 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
   },
   {
     table: "api_connections",
+    column: "comfyui_workflow_with_negative",
+    definition: "TEXT",
+  },
+  {
+    table: "api_connections",
+    column: "comfyui_split_reference_workflow",
+    definition: "TEXT",
+  },
+  {
+    table: "api_connections",
     column: "max_tokens_override",
     definition: "INTEGER",
   },

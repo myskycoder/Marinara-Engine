@@ -38,6 +38,8 @@ export const createConnectionSchema = z.object({
   imageGenerationSource: z.string().nullable().default(null),
   comfyuiWorkflow: z.string().nullable().default(null),
   comfyuiWorkflowWithReference: z.string().nullable().default(null),
+  comfyuiWorkflowWithNegative: z.string().nullable().default(null),
+  comfyuiSplitReferenceWorkflow: z.string().nullable().default(null),
   imageService: z.string().nullable().default(null),
   imageEndpointId: z.string().nullable().default(null),
   promptPresetId: z.string().nullable().default(null),

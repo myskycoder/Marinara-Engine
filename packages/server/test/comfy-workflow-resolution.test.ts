@@ -66,6 +66,37 @@ test("resolveActiveComfyWorkflow returns undefined when both slots are empty", (
   assert.equal(resolveActiveComfyWorkflow({}), undefined);
 });
 
+test("resolveActiveComfyWorkflow picks negative workflow when preferNegativeWorkflow is set", () => {
+  const withNeg = '{"prompt":"with-neg","negative":"%negative_prompt%","ref":"%reference_image_name%"}';
+  assert.equal(
+    resolveActiveComfyWorkflow({
+      comfyWorkflow: noRef,
+      comfyWorkflowWithReference: withRef,
+      comfyWorkflowWithNegative: withNeg,
+      referenceImage: "abc123",
+      preferNegativeWorkflow: true,
+    }),
+    withNeg,
+  );
+});
+
+test("comfyWorkflowFieldsFromConnection maps new workflow slots", () => {
+  assert.deepEqual(
+    comfyWorkflowFieldsFromConnection({
+      comfyuiWorkflow: '{"a":1}',
+      comfyuiWorkflowWithReference: '{"b":2}',
+      comfyuiWorkflowWithNegative: '{"c":3}',
+      comfyuiSplitReferenceWorkflow: '{"d":4}',
+    }),
+    {
+      comfyWorkflow: '{"a":1}',
+      comfyWorkflowWithReference: '{"b":2}',
+      comfyWorkflowWithNegative: '{"c":3}',
+      comfyWorkflowSplitReference: '{"d":4}',
+    },
+  );
+});
+
 test("comfyWorkflowFieldsFromConnection maps connection fields onto request spread fields", () => {
   assert.deepEqual(
     comfyWorkflowFieldsFromConnection({

@@ -53,6 +53,10 @@ export interface APIConnection {
   comfyuiWorkflow: string | null;
   /** ComfyUI workflow JSON used when a reference image is attached to the request. */
   comfyuiWorkflowWithReference: string | null;
+  /** ComfyUI workflow with real CFG negative conditioning for NSFW scenes. */
+  comfyuiWorkflowWithNegative: string | null;
+  /** ComfyUI split face + body reference workflow. */
+  comfyuiSplitReferenceWorkflow: string | null;
   /** Explicitly selected image generation service ID (e.g. "comfyui", "automatic1111"). Overrides URL inference when set. */
   imageService: string | null;
   /** For endpoint-based image services (e.g. RunPod Serverless): the endpoint ID sent alongside the base URL. */

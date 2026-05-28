@@ -224,6 +224,11 @@ export function AgentEditor() {
   const [localUseAvatarReferences, setLocalUseAvatarReferences] = useState(false);
   const [localImagePositivePrompt, setLocalImagePositivePrompt] = useState("");
   const [localImageNegativePrompt, setLocalImageNegativePrompt] = useState("");
+  const [localRewriteMode, setLocalRewriteMode] = useState<"auto" | "fast" | "premium">("auto");
+  const [localSceneCompile, setLocalSceneCompile] = useState<"premium" | "off">("premium");
+  const [localDirectorConnectionId, setLocalDirectorConnectionId] = useState("");
+  const [localPromptAssembly, setLocalPromptAssembly] = useState<"v4" | "v3-prose">("v4");
+  const [localQualityScorerConnectionId, setLocalQualityScorerConnectionId] = useState("");
   const [spotifyStatus, setSpotifyStatus] = useState<{
     connected: boolean;
     expired: boolean;
@@ -289,6 +294,15 @@ export function AgentEditor() {
       setLocalResultType(normalizeCustomResultType(settings.resultType));
       setLocalIncludePreGenInjections(settings.includePreGenInjections === true);
       setLocalIncludeParallelResults(settings.includeParallelResults === true);
+      setLocalRewriteMode(
+        settings.rewriteMode === "fast" || settings.rewriteMode === "premium" || settings.rewriteMode === "auto"
+          ? settings.rewriteMode
+          : "auto",
+      );
+      setLocalSceneCompile(settings.sceneCompile === "off" ? "off" : "premium");
+      setLocalDirectorConnectionId((settings.directorConnectionId as string) ?? "");
+      setLocalPromptAssembly(settings.promptAssembly === "v3-prose" ? "v3-prose" : "v4");
+      setLocalQualityScorerConnectionId((settings.qualityScorerConnectionId as string) ?? "");
       setLocalPrompt(dbConfig.promptTemplate || "");
     } else if (builtIn) {
       setLocalName(builtIn.name);
@@ -315,6 +329,11 @@ export function AgentEditor() {
       setLocalResultType("context_injection");
       setLocalIncludePreGenInjections(false);
       setLocalIncludeParallelResults(false);
+      setLocalRewriteMode("auto");
+      setLocalSceneCompile("premium");
+      setLocalDirectorConnectionId("");
+      setLocalPromptAssembly("v4");
+      setLocalQualityScorerConnectionId("");
       setLocalPrompt("");
     } else {
       // Brand new custom agent — start empty
@@ -367,6 +386,8 @@ export function AgentEditor() {
   const isKnowledgeRouterAgent = agentDetailId === "knowledge-router" || dbConfig?.type === "knowledge-router";
   // Background agent — can optionally generate missing roleplay backgrounds.
   const isBackgroundAgent = agentDetailId === "background" || dbConfig?.type === "background";
+  const isImagePromptWriterAgent =
+    agentDetailId === "image-prompt-writer" || dbConfig?.type === "image-prompt-writer";
 
   // Detect when both knowledge agents will actually run in parallel. Shows a
   // soft warning so users don't accidentally do overlapping work that bloats
@@ -526,6 +547,17 @@ export function AgentEditor() {
         ...(localUseAvatarReferences ? { useAvatarReferences: true } : {}),
         ...(localImagePositivePrompt.trim() ? { imagePositivePrompt: localImagePositivePrompt.trim() } : {}),
         ...(localImageNegativePrompt.trim() ? { imageNegativePrompt: localImageNegativePrompt.trim() } : {}),
+        ...(isImagePromptWriterAgent
+          ? {
+              rewriteMode: localRewriteMode,
+              sceneCompile: localSceneCompile,
+              promptAssembly: localPromptAssembly,
+              ...(localDirectorConnectionId ? { directorConnectionId: localDirectorConnectionId } : {}),
+              ...(localQualityScorerConnectionId
+                ? { qualityScorerConnectionId: localQualityScorerConnectionId }
+                : {}),
+            }
+          : {}),
       },
     };
 
@@ -578,6 +610,12 @@ export function AgentEditor() {
     localUseAvatarReferences,
     localImagePositivePrompt,
     localImageNegativePrompt,
+    isImagePromptWriterAgent,
+    localRewriteMode,
+    localSceneCompile,
+    localDirectorConnectionId,
+    localPromptAssembly,
+    localQualityScorerConnectionId,
     isCharacterTrackerAgent,
     dbConfig,
     builtIn,
@@ -901,9 +939,13 @@ export function AgentEditor() {
 
           {/* ── Connection Override ── */}
           <FieldGroup
-            label="Connection Override"
+            label={isImagePromptWriterAgent ? "Scene Compiler LLM" : "Connection Override"}
             icon={<Link2 size="0.875rem" className="text-[var(--primary)]" />}
-            help="Use a different AI connection for this agent. For example, use a faster/cheaper model for background processing tasks."
+            help={
+              isImagePromptWriterAgent
+                ? "LLM for Stage 1 Scene Visual Compiler (extracts structured YAML from the draft). Recommended: GPT-4.1, Gemini 2.5 Pro."
+                : "Use a different AI connection for this agent. For example, use a faster/cheaper model for background processing tasks."
+            }
           >
             <select
               value={localConnectionId}
@@ -1180,6 +1222,101 @@ export function AgentEditor() {
                   )}
                 </div>
               )}
+            </FieldGroup>
+          )}
+
+          {isImagePromptWriterAgent && (
+            <FieldGroup
+              label="Rewrite Quality"
+              icon={<Sparkles size="0.875rem" className="text-[var(--primary)]" />}
+              help="Fast uses compact prompts with deterministic saliency. Premium runs the full 3-stage pipeline (Compiler → Saliency → Director) plus static style inject. Auto picks Premium for gallery unlocks and player-requested CG."
+            >
+              <select
+                value={localRewriteMode}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  if (value === "auto" || value === "fast" || value === "premium") {
+                    setLocalRewriteMode(value);
+                    markDirty();
+                  }
+                }}
+                className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+              >
+                <option value="auto">Auto (gallery / player-requested → Premium)</option>
+                <option value="fast">Fast (deterministic saliency + director)</option>
+                <option value="premium">Premium (3-stage LLM pipeline)</option>
+              </select>
+              <select
+                value={localSceneCompile}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  if (value === "premium" || value === "off") {
+                    setLocalSceneCompile(value);
+                    markDirty();
+                  }
+                }}
+                className="mt-3 w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+              >
+                <option value="premium">Scene compile: Premium (LLM Stage 1)</option>
+                <option value="off">Scene compile: Off (deterministic schema only)</option>
+              </select>
+              <label className="mb-1 mt-3 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+                Prompt Assembly
+              </label>
+              <select
+                value={localPromptAssembly}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  if (value === "v4" || value === "v3-prose") {
+                    setLocalPromptAssembly(value);
+                    markDirty();
+                  }
+                }}
+                className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+              >
+                <option value="v4">Deterministic (v4) — token graph + code assembler</option>
+                <option value="v3-prose">LLM Prose (v3) — Prompt Director writes final text</option>
+              </select>
+              <label className="mb-1 mt-3 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+                Prompt Director LLM
+              </label>
+              <select
+                value={localDirectorConnectionId}
+                onChange={(e) => {
+                  setLocalDirectorConnectionId(e.target.value);
+                  markDirty();
+                }}
+                className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+              >
+                <option value="">Same as Scene Compiler</option>
+                {llmConnections.map((conn) => (
+                  <option key={conn.id} value={conn.id}>
+                    {conn.name} ({conn.provider})
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
+                v4: Stages 2–3 output token graphs; TypeScript assembles the final prompt. v3: Saliency + Prompt
+                Director write English prose (Blocks 1–2). Recommended director LLM: Claude Sonnet 4.
+              </p>
+              <label className="mb-1 mt-3 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+                Quality Scorer LLM (optional)
+              </label>
+              <select
+                value={localQualityScorerConnectionId}
+                onChange={(e) => {
+                  setLocalQualityScorerConnectionId(e.target.value);
+                  markDirty();
+                }}
+                className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+              >
+                <option value="">Off (skip VLM quality loop)</option>
+                {llmConnections.map((conn) => (
+                  <option key={conn.id} value={conn.id}>
+                    {conn.name} ({conn.provider})
+                  </option>
+                ))}
+              </select>
             </FieldGroup>
           )}
 

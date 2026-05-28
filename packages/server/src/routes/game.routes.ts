@@ -6952,6 +6952,8 @@ export async function gameRoutes(app: FastifyInstance) {
             const imgServiceHint = imgConn.imageService || imgSource;
             const imgComfyWorkflow = imgConn.comfyuiWorkflow || undefined;
             const imgComfyWorkflowWithReference = imgConn.comfyuiWorkflowWithReference || undefined;
+            const imgComfyWorkflowWithNegative = imgConn.comfyuiWorkflowWithNegative || undefined;
+            const imgComfySplitReferenceWorkflow = imgConn.comfyuiSplitReferenceWorkflow || undefined;
             const imgEndpointId = imgConn.imageEndpointId || undefined;
             const imgDefaults = resolveConnectionImageDefaults(imgConn);
 
@@ -6959,6 +6961,7 @@ export async function gameRoutes(app: FastifyInstance) {
             const genre = (setupCfg?.genre as string) || "";
             const setting = (setupCfg?.setting as string) || "";
             const artStyle = (setupCfg?.artStylePrompt as string) || "";
+            const gameRating = setupCfg?.rating === "nsfw" ? "nsfw" : "sfw";
 
             logger.debug(
               '[game/scene-wrap][bg] using imgConnection name="%s" provider=%s model=%s source=%s baseUrl=%s; setupCfg genre="%s" setting="%s" artStyle="%s"',
@@ -7053,6 +7056,11 @@ export async function gameRoutes(app: FastifyInstance) {
                 chatId: input.chatId,
                 draftPrompt: illustration.prompt,
                 sceneContinuity: illustrationContinuity || null,
+                locationId: (sceneResult.locationId as string) ?? null,
+                backgroundPrompt: (sceneResult.backgroundPrompt as string) ?? null,
+                weather: (sceneResult.weather as string) ?? input.context.currentWeather,
+                timeOfDay: (sceneResult.timeOfDay as string) ?? input.context.currentTimeOfDay,
+                season: illustrationSeason,
                 characters: illustrationAssets.characterNamesForRewriter,
                 characterDescriptions: illustrationAssets.characterDescriptionsForRewriter,
                 reason: illustration.reason ?? null,
@@ -7060,6 +7068,7 @@ export async function gameRoutes(app: FastifyInstance) {
                 setting,
                 artStyle,
                 imagePromptInstructions,
+                rating: gameRating,
                 imageConn: {
                   provider: imgConn.provider ?? null,
                   baseUrl: imgConn.baseUrl ?? null,
@@ -7090,10 +7099,18 @@ export async function gameRoutes(app: FastifyInstance) {
                 imgEndpointId,
                 imgComfyWorkflow,
                 imgComfyWorkflowWithReference,
+                imgComfyWorkflowWithNegative,
+                imgComfySplitReferenceWorkflow,
+                preferNegativeWorkflow: gameRating === "nsfw",
                 imgDefaults,
                 debugLog: debugLogsEnabled ? debugLog : undefined,
                 promptOverridesStorage: createPromptOverridesStorage(app.db),
-                ...(rewrittenIllustrationPrompt ? { promptOverride: rewrittenIllustrationPrompt } : {}),
+                ...(rewrittenIllustrationPrompt
+                  ? {
+                      promptOverride: rewrittenIllustrationPrompt.positive,
+                      negativePromptOverride: rewrittenIllustrationPrompt.negative,
+                    }
+                  : {}),
               });
               if (generatedTag) {
                 await addGeneratedIllustrationToGallery({
@@ -7572,6 +7589,8 @@ export async function gameRoutes(app: FastifyInstance) {
     const imgSource = (imgConn as any).imageGenerationSource || imgModel;
     const imgComfyWorkflow = imgConn.comfyuiWorkflow || undefined;
     const imgComfyWorkflowWithReference = imgConn.comfyuiWorkflowWithReference || undefined;
+    const imgComfyWorkflowWithNegative = imgConn.comfyuiWorkflowWithNegative || undefined;
+    const imgComfySplitReferenceWorkflow = imgConn.comfyuiSplitReferenceWorkflow || undefined;
     const imgServiceHint = imgConn.imageService || imgSource;
     const imgEndpointId = imgConn.imageEndpointId || undefined;
     const imgDefaults = resolveConnectionImageDefaults(imgConn);
@@ -7581,6 +7600,7 @@ export async function gameRoutes(app: FastifyInstance) {
     const genre = (setupCfg?.genre as string) || "";
     const setting = (setupCfg?.setting as string) || "";
     const artStyle = (setupCfg?.artStylePrompt as string) || "";
+    const gameRating = setupCfg?.rating === "nsfw" ? "nsfw" : "sfw";
     const imagePromptInstructions =
       typeof meta.gameImagePromptInstructions === "string"
         ? meta.gameImagePromptInstructions.trim().slice(0, 1200)
@@ -7628,6 +7648,8 @@ export async function gameRoutes(app: FastifyInstance) {
         let illImgServiceHint = imgServiceHint;
         let illImgComfyWorkflow = imgComfyWorkflow;
         let illImgComfyWorkflowWithReference = imgComfyWorkflowWithReference;
+        let illImgComfyWorkflowWithNegative = imgComfyWorkflowWithNegative;
+        let illImgComfySplitReferenceWorkflow = imgComfySplitReferenceWorkflow;
         let illImgDefaults = imgDefaults;
         if (input.illustrationConnectionId && input.illustrationConnectionId !== imgConnId) {
           const overrideConn = await connections.getWithKey(input.illustrationConnectionId);
@@ -7639,6 +7661,8 @@ export async function gameRoutes(app: FastifyInstance) {
             illImgServiceHint = overrideConn.imageService || illImgSource;
             illImgComfyWorkflow = overrideConn.comfyuiWorkflow || undefined;
             illImgComfyWorkflowWithReference = overrideConn.comfyuiWorkflowWithReference || undefined;
+            illImgComfyWorkflowWithNegative = overrideConn.comfyuiWorkflowWithNegative || undefined;
+            illImgComfySplitReferenceWorkflow = overrideConn.comfyuiSplitReferenceWorkflow || undefined;
             illImgDefaults = resolveConnectionImageDefaults(overrideConn);
           }
         }
@@ -7712,6 +7736,9 @@ export async function gameRoutes(app: FastifyInstance) {
           imgEndpointId,
           imgComfyWorkflow: illImgComfyWorkflow,
           imgComfyWorkflowWithReference: illImgComfyWorkflowWithReference,
+          imgComfyWorkflowWithNegative: illImgComfyWorkflowWithNegative,
+          imgComfySplitReferenceWorkflow: illImgComfySplitReferenceWorkflow,
+          preferNegativeWorkflow: gameRating === "nsfw",
           imgDefaults: illImgDefaults,
           promptOverridesStorage,
           size: backgroundSize,
@@ -7925,6 +7952,8 @@ export async function gameRoutes(app: FastifyInstance) {
     const imgSource = (imgConn as any).imageGenerationSource || imgModel;
     const imgComfyWorkflow = imgConn.comfyuiWorkflow || undefined;
     const imgComfyWorkflowWithReference = imgConn.comfyuiWorkflowWithReference || undefined;
+    const imgComfyWorkflowWithNegative = imgConn.comfyuiWorkflowWithNegative || undefined;
+    const imgComfySplitReferenceWorkflow = imgConn.comfyuiSplitReferenceWorkflow || undefined;
     const imgServiceHint = imgConn.imageService || imgSource;
     const imgEndpointId = imgConn.imageEndpointId || undefined;
     const imgDefaults = resolveConnectionImageDefaults(imgConn);
@@ -7934,6 +7963,7 @@ export async function gameRoutes(app: FastifyInstance) {
     const genre = (setupCfg?.genre as string) || "";
     const setting = (setupCfg?.setting as string) || "";
     const artStyle = (setupCfg?.artStylePrompt as string) || "";
+    const gameRating = setupCfg?.rating === "nsfw" ? "nsfw" : "sfw";
     const imagePromptInstructions =
       typeof meta.gameImagePromptInstructions === "string"
         ? meta.gameImagePromptInstructions.trim().slice(0, 1200)
@@ -8284,6 +8314,8 @@ export async function gameRoutes(app: FastifyInstance) {
         let illImgServiceHint = imgServiceHint;
         let illImgComfyWorkflow = imgComfyWorkflow;
         let illImgComfyWorkflowWithReference = imgComfyWorkflowWithReference;
+        let illImgComfyWorkflowWithNegative = imgComfyWorkflowWithNegative;
+        let illImgComfySplitReferenceWorkflow = imgComfySplitReferenceWorkflow;
         let illImgDefaults = imgDefaults;
         if (input.illustrationConnectionId && input.illustrationConnectionId !== imgConnId) {
           const overrideConn = await connections.getWithKey(input.illustrationConnectionId);
@@ -8308,6 +8340,8 @@ export async function gameRoutes(app: FastifyInstance) {
           illImgServiceHint = overrideConn.imageService || illImgSource;
           illImgComfyWorkflow = overrideConn.comfyuiWorkflow || undefined;
           illImgComfyWorkflowWithReference = overrideConn.comfyuiWorkflowWithReference || undefined;
+          illImgComfyWorkflowWithNegative = overrideConn.comfyuiWorkflowWithNegative || undefined;
+          illImgComfySplitReferenceWorkflow = overrideConn.comfyuiSplitReferenceWorkflow || undefined;
           illImgDefaults = resolveConnectionImageDefaults(overrideConn);
           logger.info(
             "[game/generate-assets] illustration: using override connection id=%s model=%s (default chat connection id=%s)",
@@ -8406,6 +8440,7 @@ export async function gameRoutes(app: FastifyInstance) {
         // image-prompt-writer agent rewrite the sidecar draft for the target
         // image-model family.
         let resolvedIllustrationPromptOverride = illustrationPromptOverride;
+        let resolvedIllustrationNegativeOverride: string | undefined;
         if (resolvedIllustrationPromptOverride?.trim()) {
           logger.info(
             "[game/generate-assets] illustration: user-supplied prompt override present — skipping image-prompt-writer",
@@ -8434,6 +8469,11 @@ export async function gameRoutes(app: FastifyInstance) {
             chatId: input.chatId,
             draftPrompt: illustration.prompt,
             sceneContinuity: illustrationContinuityGen || null,
+            locationId: input.locationId ?? metaLoc,
+            backgroundPrompt: input.backgroundPrompt ?? null,
+            weather: input.conditions?.weather ?? null,
+            timeOfDay: input.conditions?.timeOfDay ?? null,
+            season: illustrationSeasonGen,
             characters: illustrationAssets.characterNamesForRewriter,
             characterDescriptions: illustrationAssets.characterDescriptionsForRewriter,
             sceneNpcs: sceneNpcsBlock,
@@ -8442,6 +8482,7 @@ export async function gameRoutes(app: FastifyInstance) {
             setting,
             artStyle,
             imagePromptInstructions,
+            rating: gameRating,
             imageConn: {
               provider: illImgConn.provider ?? null,
               baseUrl: illImgConn.baseUrl ?? null,
@@ -8452,10 +8493,12 @@ export async function gameRoutes(app: FastifyInstance) {
             chatConnectionId: chat.connectionId ?? null,
           });
           if (rewritten) {
-            resolvedIllustrationPromptOverride = rewritten;
+            resolvedIllustrationPromptOverride = rewritten.positive;
+            resolvedIllustrationNegativeOverride = rewritten.negative;
             logger.info(
-              "[game/generate-assets] illustration: using rewritten prompt (%d chars)",
-              rewritten.length,
+              "[game/generate-assets] illustration: using rewritten prompt (%d chars, negative=%d chars)",
+              rewritten.positive.length,
+              rewritten.negative.length,
             );
           } else {
             logger.info(
@@ -8484,11 +8527,15 @@ export async function gameRoutes(app: FastifyInstance) {
           imgEndpointId,
           imgComfyWorkflow: illImgComfyWorkflow,
           imgComfyWorkflowWithReference: illImgComfyWorkflowWithReference,
+          imgComfyWorkflowWithNegative: illImgComfyWorkflowWithNegative,
+          imgComfySplitReferenceWorkflow: illImgComfySplitReferenceWorkflow,
+          preferNegativeWorkflow: gameRating === "nsfw",
           imgDefaults: illImgDefaults,
           debugLog: debugLogsEnabled ? debugLog : undefined,
           promptOverridesStorage,
           size: backgroundSize,
           promptOverride: resolvedIllustrationPromptOverride,
+          negativePromptOverride: resolvedIllustrationNegativeOverride,
         });
 
         if (tag) {

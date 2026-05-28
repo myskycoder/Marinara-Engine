@@ -48,6 +48,8 @@ export * from "./constants/agent-prompts.js";
 export * from "./constants/impersonate.js";
 export * from "./constants/image-generation-defaults.js";
 export * from "./constants/image-model-families.js";
+export * from "./constants/image-prompt-rewriter/index.js";
+export * from "./visual-prompt/index.js";
 export * from "./constants/security.js";
 export * from "./constants/game-assets.js";
 
