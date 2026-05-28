@@ -23,6 +23,12 @@ import {
   sanitizeNpcSpriteExpression,
   type NpcSpritePromptBundle,
 } from "./npc-sprite-generation.service.js";
+import { resolveConnectionImageDefaults } from "../image/image-generation-defaults.js";
+import {
+  findPresentCharacterForNpc,
+  loadLatestPresentCharacters,
+  resolveNpcVisualDescription,
+} from "./npc-visual-description.js";
 import { addNpcEntry, createJournal, type Journal } from "./journal.service.js";
 import {
   findSingleNpcCandidateByNameCluster,
@@ -523,7 +529,18 @@ function startNpcAssetPipeline(args: {
         return;
       }
 
+      const imgDefaults = resolveConnectionImageDefaults(connection);
+
+      const presentCharacters = await loadLatestPresentCharacters(args.db, args.chatId);
+
       for (const npc of npcsToProcess) {
+        const presentCharacter = findPresentCharacterForNpc(npc, presentCharacters);
+        const visualDescription = resolveNpcVisualDescription({
+          npc,
+          presentCharacter,
+          appearanceOverride: args.spriteAppearanceOverride ?? null,
+        });
+
         // ── Phase 1: Avatar (so the sprite below can use it as a reference) ──
         const wantAvatar = args.generateAvatars && !npc.avatarUrl && npc.id;
         if (wantAvatar) {
@@ -532,7 +549,7 @@ function startNpcAssetPipeline(args: {
               chatId: args.chatId,
               npcId: npc.id,
               npcName: npc.name,
-              appearance: npc.description,
+              appearance: visualDescription,
               artStyle: args.artStylePrompt || undefined,
               imgSource: connection.imageGenerationSource,
               imgModel: connection.model || "",
@@ -540,13 +557,15 @@ function startNpcAssetPipeline(args: {
               imgApiKey: connection.apiKey || "",
               imgService: connection.imageService || connection.imageGenerationSource,
               imgComfyWorkflow: connection.comfyuiWorkflow || undefined,
+              imgComfyWorkflowWithReference: connection.comfyuiWorkflowWithReference || undefined,
+              imgDefaults,
             });
             if (avatarUrl) {
               const portraitPrompt = await buildNpcPortraitImagePrompt({
                 chatId: args.chatId,
                 npcId: npc.id,
                 npcName: npc.name,
-                appearance: npc.description,
+                appearance: visualDescription,
                 artStyle: args.artStylePrompt || undefined,
                 imgSource: connection.imageGenerationSource,
                 imgModel: connection.model || "",
@@ -554,6 +573,7 @@ function startNpcAssetPipeline(args: {
                 imgApiKey: connection.apiKey || "",
                 imgService: connection.imageService || connection.imageGenerationSource,
                 imgComfyWorkflow: connection.comfyuiWorkflow || undefined,
+                imgComfyWorkflowWithReference: connection.comfyuiWorkflowWithReference || undefined,
               });
               await patchNpcAvatarUrl(args.db, args.chatId, npc.id, avatarUrl, portraitPrompt);
             }
@@ -598,7 +618,7 @@ function startNpcAssetPipeline(args: {
         const spriteAppearancePrompt = buildNpcSpriteAppearancePrompt(
           npc,
           args.artStylePrompt || null,
-          args.spriteAppearanceOverride ?? null,
+          visualDescription,
         );
         try {
           const spriteResult = await generateNpcSprites({
@@ -606,7 +626,7 @@ function startNpcAssetPipeline(args: {
             npc,
             spriteId,
             expressions: args.spriteExpressions,
-            appearanceOverride: args.spriteAppearanceOverride ?? null,
+            appearanceOverride: visualDescription,
             fullBodyExpression: args.spriteFullBodyExpression ?? null,
             artStyle: args.artStylePrompt || undefined,
             imgSource: connection.imageGenerationSource,
@@ -615,6 +635,8 @@ function startNpcAssetPipeline(args: {
             imgApiKey: connection.apiKey || "",
             imgService: connection.imageService || connection.imageGenerationSource,
             imgComfyWorkflow: connection.comfyuiWorkflow || undefined,
+            imgComfyWorkflowWithReference: connection.comfyuiWorkflowWithReference || undefined,
+            imgDefaults,
             referenceImage: referenceBase64,
           });
           if (spriteResult.ok) {
@@ -875,6 +897,8 @@ export async function scheduleNpcFullBodyEmotionSet(
     return { ok: false, reason: "no-image-connection" };
   }
 
+  const imgDefaults = resolveConnectionImageDefaults(connection);
+
   const setupCfg = (meta.gameSetupConfig as Record<string, unknown> | null | undefined) ?? null;
   const artStyle = (setupCfg?.artStylePrompt as string | undefined) ?? null;
   const fallbackExpressions = Array.isArray(meta.npcSpriteExpressions)
@@ -884,13 +908,20 @@ export async function scheduleNpcFullBodyEmotionSet(
 
   void (async () => {
     try {
+      const presentCharacters = await loadLatestPresentCharacters(input.db, input.chatId);
+      const presentCharacter = findPresentCharacterForNpc(npc, presentCharacters);
+      const visualDescription = resolveNpcVisualDescription({
+        npc,
+        presentCharacter,
+        appearanceOverride: input.spriteAppearanceOverride ?? null,
+      });
       const ref = readNpcAvatarBase64(input.chatId, npc.id);
       const result = await generateNpcFullBodyEmotionSet({
         chatId: input.chatId,
         npc,
         spriteId: sid,
         expressions,
-        appearanceOverride: input.spriteAppearanceOverride ?? null,
+        appearanceOverride: visualDescription,
         artStyle,
         force: input.force === true,
         imgSource: connection.imageGenerationSource,
@@ -899,6 +930,8 @@ export async function scheduleNpcFullBodyEmotionSet(
         imgApiKey: connection.apiKey || "",
         imgService: connection.imageService || connection.imageGenerationSource,
         imgComfyWorkflow: connection.comfyuiWorkflow || undefined,
+        imgComfyWorkflowWithReference: connection.comfyuiWorkflowWithReference || undefined,
+        imgDefaults,
         referenceImage: ref || undefined,
       });
       logger.info(

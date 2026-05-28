@@ -2,7 +2,10 @@
   "9": {
     "inputs": {
       "filename_prefix": "z_image_char_sheet_solo",
-      "images": ["8", 0]
+      "images": [
+        "8",
+        0
+      ]
     },
     "class_type": "SaveImage",
     "_meta": {
@@ -12,15 +15,27 @@
   "3": {
     "inputs": {
       "seed": "%seed%",
-      "steps": 8,
-      "cfg": 1,
-      "sampler_name": "res_multistep",
-      "scheduler": "simple",
-      "denoise": 1,
-      "model": ["60", 0],
-      "positive": ["27", 0],
-      "negative": ["33", 0],
-      "latent_image": ["13", 0]
+      "steps": "%steps%",
+      "cfg": "%cfg%",
+      "sampler_name": "%sampler%",
+      "scheduler": "%scheduler%",
+      "denoise": "%denoise%",
+      "model": [
+        "60",
+        0
+      ],
+      "positive": [
+        "27",
+        0
+      ],
+      "negative": [
+        "33",
+        0
+      ],
+      "latent_image": [
+        "13",
+        0
+      ]
     },
     "class_type": "KSampler",
     "_meta": {
@@ -29,8 +44,14 @@
   },
   "8": {
     "inputs": {
-      "samples": ["3", 0],
-      "vae": ["29", 0]
+      "samples": [
+        "3",
+        0
+      ],
+      "vae": [
+        "29",
+        0
+      ]
     },
     "class_type": "VAEDecode",
     "_meta": {
@@ -40,7 +61,10 @@
   "11": {
     "inputs": {
       "shift": 3,
-      "model": ["38", 0]
+      "model": [
+        "38",
+        0
+      ]
     },
     "class_type": "ModelSamplingAuraFlow",
     "_meta": {
@@ -61,7 +85,10 @@
   "27": {
     "inputs": {
       "text": "%prompt%",
-      "clip": ["30", 0]
+      "clip": [
+        "30",
+        0
+      ]
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
@@ -100,7 +127,10 @@
   },
   "33": {
     "inputs": {
-      "conditioning": ["27", 0]
+      "conditioning": [
+        "27",
+        0
+      ]
     },
     "class_type": "ConditioningZeroOut",
     "_meta": {
@@ -111,7 +141,10 @@
     "inputs": {
       "lora_name": "character_design_izt.safetensors",
       "strength_model": 0.7,
-      "model": ["28", 0]
+      "model": [
+        "28",
+        0
+      ]
     },
     "class_type": "LoraLoaderModelOnly",
     "_meta": {
@@ -120,7 +153,10 @@
   },
   "57": {
     "inputs": {
-      "image": ["58", 0],
+      "image": [
+        "58",
+        0
+      ],
       "low_threshold": 0.1,
       "high_threshold": 0.32
     },
@@ -141,10 +177,22 @@
   "60": {
     "inputs": {
       "strength": 0.9,
-      "model": ["11", 0],
-      "model_patch": ["64", 0],
-      "vae": ["29", 0],
-      "image": ["57", 0]
+      "model": [
+        "11",
+        0
+      ],
+      "model_patch": [
+        "64",
+        0
+      ],
+      "vae": [
+        "29",
+        0
+      ],
+      "image": [
+        "57",
+        0
+      ]
     },
     "class_type": "QwenImageDiffsynthControlnet",
     "_meta": {

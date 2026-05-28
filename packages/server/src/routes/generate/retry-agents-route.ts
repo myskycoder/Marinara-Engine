@@ -26,6 +26,7 @@ import { createCharactersStorage } from "../../services/storage/characters.stora
 import { createChatsStorage } from "../../services/storage/chats.storage.js";
 import { createConnectionsStorage } from "../../services/storage/connections.storage.js";
 import { resolveConnectionImageDefaults } from "../../services/image/image-generation-defaults.js";
+import { comfyWorkflowFieldsFromConnection } from "../../services/image/comfy-workflow.js";
 import { loadImageGenerationUserSettings } from "../../services/image/image-generation-settings.js";
 import { createGameStateStorage } from "../../services/storage/game-state.storage.js";
 import { createLorebooksStorage } from "../../services/storage/lorebooks.storage.js";
@@ -1884,7 +1885,7 @@ async function applyRetryResultEffects(args: {
                 width: imgWidth,
                 height: imgHeight,
                 imageEndpointId: imgConnFull.imageEndpointId || undefined,
-                comfyWorkflow: (imgConnFull as any).comfyuiWorkflow || undefined,
+                ...comfyWorkflowFieldsFromConnection(imgConnFull),
                 imageDefaults,
                 referenceImage,
                 referenceImages,

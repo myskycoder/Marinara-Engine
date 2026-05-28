@@ -2,7 +2,10 @@
   "9": {
     "inputs": {
       "filename_prefix": "flux2_klein9b_scene_char_bg",
-      "images": ["104", 0]
+      "images": [
+        "104",
+        0
+      ]
     },
     "class_type": "SaveImage",
     "_meta": {
@@ -20,7 +23,10 @@
   },
   "80": {
     "inputs": {
-      "image": ["58", 0],
+      "image": [
+        "58",
+        0
+      ],
       "upscale_method": "lanczos",
       "megapixels": 1,
       "resolution_steps": 1
@@ -41,8 +47,14 @@
   },
   "104": {
     "inputs": {
-      "samples": ["134", 0],
-      "vae": ["102", 0]
+      "samples": [
+        "134",
+        0
+      ],
+      "vae": [
+        "102",
+        0
+      ]
     },
     "class_type": "VAEDecode",
     "_meta": {
@@ -63,7 +75,10 @@
   "107": {
     "inputs": {
       "text": "%prompt%",
-      "clip": ["136", 0]
+      "clip": [
+        "136",
+        0
+      ]
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
@@ -72,8 +87,14 @@
   },
   "124": {
     "inputs": {
-      "pixels": ["80", 0],
-      "vae": ["102", 0]
+      "pixels": [
+        "80",
+        0
+      ],
+      "vae": [
+        "102",
+        0
+      ]
     },
     "class_type": "VAEEncode",
     "_meta": {
@@ -82,8 +103,14 @@
   },
   "125": {
     "inputs": {
-      "conditioning": ["107", 0],
-      "latent": ["124", 0]
+      "conditioning": [
+        "107",
+        0
+      ],
+      "latent": [
+        "124",
+        0
+      ]
     },
     "class_type": "ReferenceLatent",
     "_meta": {
@@ -103,15 +130,27 @@
   "134": {
     "inputs": {
       "seed": "%seed%",
-      "steps": 4,
-      "cfg": 1,
-      "sampler_name": "euler",
-      "scheduler": "simple",
-      "denoise": 1,
-      "model": ["138", 0],
-      "positive": ["140", 0],
-      "negative": ["144", 0],
-      "latent_image": ["105", 0]
+      "steps": "%steps%",
+      "cfg": "%cfg%",
+      "sampler_name": "%sampler%",
+      "scheduler": "%scheduler%",
+      "denoise": "%denoise%",
+      "model": [
+        "138",
+        0
+      ],
+      "positive": [
+        "140",
+        0
+      ],
+      "negative": [
+        "144",
+        0
+      ],
+      "latent_image": [
+        "105",
+        0
+      ]
     },
     "class_type": "KSampler",
     "_meta": {
@@ -120,7 +159,10 @@
   },
   "135": {
     "inputs": {
-      "conditioning": ["107", 0]
+      "conditioning": [
+        "107",
+        0
+      ]
     },
     "class_type": "ConditioningZeroOut",
     "_meta": {
@@ -141,7 +183,10 @@
     "inputs": {
       "lora_name": "your_klein_lora.safetensors",
       "strength_model": 0.85,
-      "model": ["126", 0]
+      "model": [
+        "126",
+        0
+      ]
     },
     "class_type": "LoraLoaderModelOnly",
     "_meta": {
@@ -150,8 +195,14 @@
   },
   "140": {
     "inputs": {
-      "conditioning": ["125", 0],
-      "latent": ["152", 0]
+      "conditioning": [
+        "125",
+        0
+      ],
+      "latent": [
+        "152",
+        0
+      ]
     },
     "class_type": "ReferenceLatent",
     "_meta": {
@@ -160,8 +211,14 @@
   },
   "143": {
     "inputs": {
-      "conditioning": ["135", 0],
-      "latent": ["124", 0]
+      "conditioning": [
+        "135",
+        0
+      ],
+      "latent": [
+        "124",
+        0
+      ]
     },
     "class_type": "ReferenceLatent",
     "_meta": {
@@ -170,8 +227,14 @@
   },
   "144": {
     "inputs": {
-      "conditioning": ["143", 0],
-      "latent": ["152", 0]
+      "conditioning": [
+        "143",
+        0
+      ],
+      "latent": [
+        "152",
+        0
+      ]
     },
     "class_type": "ReferenceLatent",
     "_meta": {
@@ -189,7 +252,10 @@
   },
   "151": {
     "inputs": {
-      "image": ["150", 0],
+      "image": [
+        "150",
+        0
+      ],
       "upscale_method": "lanczos",
       "megapixels": 1,
       "resolution_steps": 1
@@ -201,8 +267,14 @@
   },
   "152": {
     "inputs": {
-      "pixels": ["151", 0],
-      "vae": ["102", 0]
+      "pixels": [
+        "151",
+        0
+      ],
+      "vae": [
+        "102",
+        0
+      ]
     },
     "class_type": "VAEEncode",
     "_meta": {

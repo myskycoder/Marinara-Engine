@@ -33,6 +33,7 @@ async function getSpriteCapabilities() {
   }
 }
 import { generateImage } from "../services/image/image-generation.js";
+import { comfyWorkflowFieldsFromConnection } from "../services/image/comfy-workflow.js";
 import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { createPromptOverridesStorage } from "../services/storage/prompt-overrides.storage.js";
@@ -1516,7 +1517,7 @@ export async function spritesRoutes(app: FastifyInstance) {
               referenceImages: resolvedRefs.length > 1 ? resolvedRefs : undefined,
               transparentBackground: nativeTransparentPng,
               imageEndpointId: conn.imageEndpointId || undefined,
-              comfyWorkflow: conn.comfyuiWorkflow || undefined,
+              ...comfyWorkflowFieldsFromConnection(conn),
               imageDefaults,
             });
 
@@ -1574,7 +1575,7 @@ export async function spritesRoutes(app: FastifyInstance) {
         referenceImages: resolvedRefs.length > 1 ? resolvedRefs : undefined,
         transparentBackground: nativeTransparentPng,
         imageEndpointId: conn.imageEndpointId || undefined,
-        comfyWorkflow: conn.comfyuiWorkflow || undefined,
+        ...comfyWorkflowFieldsFromConnection(conn),
         imageDefaults,
       });
 

@@ -15,6 +15,7 @@
 // so placeholder substitution (%prompt%, %seed%, etc.) must happen BEFORE sending.
 
 import type { ImageGenRequest, ImageGenResult } from "./image-generation.js";
+import { resolveActiveComfyWorkflow } from "./comfy-workflow.js";
 import {
   DEFAULT_COMFYUI_DEFAULTS,
   mergeNegativePrompt,
@@ -65,9 +66,11 @@ export async function generateRunPodComfyUI(
     Authorization: `Bearer ${apiKey}`,
   };
 
+  const activeWorkflow = resolveActiveComfyWorkflow(request);
+
   // If there's no workflow, this is an error. RunPod needs the workflow because
   // the serverless endpoint executes the ComfyUI graph supplied in the request.
-  if (!request.comfyWorkflow) {
+  if (!activeWorkflow) {
     throw new Error(
       "RunPod ComfyUI requires a workflow JSON. " +
         "Paste your ComfyUI workflow (API format) in the connection's workflow field.",
@@ -82,7 +85,7 @@ export async function generateRunPodComfyUI(
   const prompt = mergePromptPrefix(defaults.promptPrefix, request.prompt || "");
   const negativePrompt = mergeNegativePrompt(defaults.negativePromptPrefix, request.negativePrompt);
 
-  let wfStr = request.comfyWorkflow;
+  let wfStr = activeWorkflow;
   wfStr = wfStr.replace(/%prompt%/g, escapeJsonStr(prompt));
   wfStr = wfStr.replace(/%negative_prompt%/g, escapeJsonStr(negativePrompt));
   wfStr = wfStr.replace(/%width%/g, String(request.width ?? 512));

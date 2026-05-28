@@ -2,7 +2,7 @@
 // Full-Page Connection Editor
 // Click a connection → opens this editor (like presets/characters)
 // ──────────────────────────────────────────────
-import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef, type RefObject } from "react";
 import { useUIStore } from "../../stores/ui.store";
 import {
   useConnection,
@@ -108,6 +108,66 @@ function normalizeMaxParallelJobs(value: unknown): number {
   return Math.min(MAX_PARALLEL_JOBS, Math.floor(numeric));
 }
 
+type ComfyWorkflowValidation =
+  | { parseError: true; label: string; charPos: number | null }
+  | { parseError: false; missing: Array<{ token: string; label: string; critical: boolean }>; warnNoReferencePlaceholder?: boolean };
+
+function validateComfyUiWorkflowJson(wf: string, options?: { expectReferencePlaceholder?: boolean }): ComfyWorkflowValidation | null {
+  if (!wf.trim()) return null;
+  try {
+    JSON.parse(wf);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    let charPos: number | null = null;
+    const byPos = msg.match(/at position (\d+)/);
+    if (byPos) {
+      charPos = parseInt(byPos[1]!, 10);
+    } else {
+      const byLineCol = msg.match(/at line (\d+) column[^\d]*(\d+)/i);
+      if (byLineCol) {
+        const targetLine = parseInt(byLineCol[1]!, 10) - 1;
+        const targetCol = parseInt(byLineCol[2]!, 10) - 1;
+        const lines = wf.split("\n");
+        let offset = 0;
+        for (let i = 0; i < Math.min(targetLine, lines.length); i++) offset += lines[i]!.length + 1;
+        charPos = offset + targetCol;
+      }
+    }
+    const lineNum = charPos !== null ? wf.slice(0, charPos).split("\n").length : null;
+    const labelMsg = lineNum !== null ? `Invalid JSON on line ${lineNum}` : "Invalid JSON";
+    const label = labelMsg + ": " + msg.split("\n")[0];
+    return { parseError: true, label, charPos };
+  }
+  const KNOWN_SUBS = [
+    { token: "%prompt%", label: "%prompt%", critical: true },
+    { token: "%negative_prompt%", label: "%negative_prompt%", critical: false },
+    { token: "%width%", label: "%width%", critical: false },
+    { token: "%height%", label: "%height%", critical: false },
+    { token: "%seed%", label: "%seed%", critical: false },
+    { token: "%model%", label: "%model%", critical: false },
+    { token: "%reference_image%", label: "%reference_image%", critical: false },
+    { token: "%reference_image_name%", label: "%reference_image_name%", critical: false },
+    {
+      token: "%background_reference_image_name%",
+      label: "%background_reference_image_name%",
+      critical: false,
+    },
+  ];
+  const hasReferenceImage = wf.includes("%reference_image%");
+  const hasReferenceImageName = wf.includes("%reference_image_name%");
+  const missing = KNOWN_SUBS.filter(({ token }) => {
+    if (token === "%reference_image%" && hasReferenceImageName) return false;
+    if (token === "%reference_image_name%" && hasReferenceImage) return false;
+    if (options?.expectReferencePlaceholder && (token === "%reference_image%" || token === "%reference_image_name%")) {
+      return false;
+    }
+    return !wf.includes(token);
+  });
+  const warnNoReferencePlaceholder =
+    options?.expectReferencePlaceholder === true && !hasReferenceImage && !hasReferenceImageName;
+  return { parseError: false, missing, warnNoReferencePlaceholder: warnNoReferencePlaceholder || undefined };
+}
+
 // ═══════════════════════════════════════════════
 //  Main Editor
 // ═══════════════════════════════════════════════
@@ -155,6 +215,7 @@ export function ConnectionEditor() {
   const [localOpenrouterProvider, setLocalOpenrouterProvider] = useState("");
   const [localImageGenerationSource, setLocalImageGenerationSource] = useState("");
   const [localComfyuiWorkflow, setLocalComfyuiWorkflow] = useState("");
+  const [localComfyuiWorkflowWithReference, setLocalComfyuiWorkflowWithReference] = useState("");
   const [localImageService, setLocalImageService] = useState<string | null>(null);
   const [localImageEndpointId, setLocalImageEndpointId] = useState("");
   const [localMaxTokensOverride, setLocalMaxTokensOverride] = useState<number | null>(null);
@@ -189,6 +250,7 @@ export function ConnectionEditor() {
   const modelTriggerRef = useRef<HTMLDivElement>(null);
   const modelSearchInputRef = useRef<HTMLInputElement>(null);
   const comfyWorkflowTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const comfyWorkflowWithReferenceTextareaRef = useRef<HTMLTextAreaElement>(null);
   const [dropdownRect, setDropdownRect] = useState<{ top: number; left: number; width: number; maxH: number } | null>(
     null,
   );
@@ -265,6 +327,7 @@ export function ConnectionEditor() {
       : null;
     setLocalImageGenerationSource(imageGenerationSource);
     setLocalComfyuiWorkflow((c.comfyuiWorkflow as string) ?? "");
+    setLocalComfyuiWorkflowWithReference((c.comfyuiWorkflowWithReference as string) ?? "");
     setLocalImageService(imageService);
     setLocalImageEndpointId((c.imageEndpointId as string) ?? "");
     setLocalMaxTokensOverride(typeof c.maxTokensOverride === "number" ? (c.maxTokensOverride as number) : null);
@@ -283,58 +346,14 @@ export function ConnectionEditor() {
     setClaudeDiagResult(null);
   }, [conn]);
 
-  const comfyWorkflowValidation = useMemo(() => {
-    const wf = localComfyuiWorkflow;
-    if (!wf.trim()) return null;
-    try {
-      JSON.parse(wf);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      // Extract character offset. "at position 123", "at line 5 column 12"
-      let charPos: number | null = null;
-      const byPos = msg.match(/at position (\d+)/);
-      if (byPos) {
-        charPos = parseInt(byPos[1]!, 10);
-      } else {
-        const byLineCol = msg.match(/at line (\d+) column[^\d]*(\d+)/i);
-        if (byLineCol) {
-          const targetLine = parseInt(byLineCol[1]!, 10) - 1;
-          const targetCol = parseInt(byLineCol[2]!, 10) - 1;
-          const lines = wf.split("\n");
-          let offset = 0;
-          for (let i = 0; i < Math.min(targetLine, lines.length); i++) offset += lines[i]!.length + 1;
-          charPos = offset + targetCol;
-        }
-      }
-      const lineNum = charPos !== null ? wf.slice(0, charPos).split("\n").length : null;
-      const labelMsg = lineNum !== null ? `Invalid JSON on line ${lineNum}` : "Invalid JSON";
-      const label = labelMsg + ": " + msg.split("\n")[0];
-      return { parseError: true as const, label, charPos };
-    }
-    const KNOWN_SUBS = [
-      { token: "%prompt%", label: "%prompt%", critical: true },
-      { token: "%negative_prompt%", label: "%negative_prompt%", critical: false },
-      { token: "%width%", label: "%width%", critical: false },
-      { token: "%height%", label: "%height%", critical: false },
-      { token: "%seed%", label: "%seed%", critical: false },
-      { token: "%model%", label: "%model%", critical: false },
-      { token: "%reference_image%", label: "%reference_image%", critical: false },
-      { token: "%reference_image_name%", label: "%reference_image_name%", critical: false },
-      {
-        token: "%background_reference_image_name%",
-        label: "%background_reference_image_name%",
-        critical: false,
-      },
-    ];
-    const hasReferenceImage = wf.includes("%reference_image%");
-    const hasReferenceImageName = wf.includes("%reference_image_name%");
-    const missing = KNOWN_SUBS.filter(({ token }) => {
-      if (token === "%reference_image%" && hasReferenceImageName) return false;
-      if (token === "%reference_image_name%" && hasReferenceImage) return false;
-      return !wf.includes(token);
-    });
-    return { parseError: false as const, missing };
-  }, [localComfyuiWorkflow]);
+  const comfyWorkflowValidation = useMemo(
+    () => validateComfyUiWorkflowJson(localComfyuiWorkflow),
+    [localComfyuiWorkflow],
+  );
+  const comfyWorkflowWithReferenceValidation = useMemo(
+    () => validateComfyUiWorkflowJson(localComfyuiWorkflowWithReference, { expectReferencePlaceholder: true }),
+    [localComfyuiWorkflowWithReference],
+  );
 
   const effectiveImageGenerationSource = useMemo(() => {
     if (localProvider !== "image_generation") return "";
@@ -420,6 +439,7 @@ export function ConnectionEditor() {
       imageGenerationSource:
         localProvider === "image_generation" ? localImageGenerationSource || localImageService || null : null,
       comfyuiWorkflow: localComfyuiWorkflow || null,
+      comfyuiWorkflowWithReference: localComfyuiWorkflowWithReference || null,
       imageService:
         localProvider === "image_generation" ? localImageGenerationSource || localImageService || null : null,
       imageEndpointId:
@@ -478,6 +498,7 @@ export function ConnectionEditor() {
     localOpenrouterProvider,
     localImageGenerationSource,
     localComfyuiWorkflow,
+    localComfyuiWorkflowWithReference,
     localImageService,
     localImageEndpointId,
     localMaxTokensOverride,
@@ -646,13 +667,16 @@ export function ConnectionEditor() {
 
   const markDirty = useCallback(() => setDirty(true), []);
 
-  const handleJumpToJsonError = useCallback(() => {
-    const ta = comfyWorkflowTextareaRef.current;
-    if (!ta || !comfyWorkflowValidation || !comfyWorkflowValidation.parseError) return;
-    const pos = comfyWorkflowValidation.charPos ?? 0;
-    ta.focus();
-    ta.setSelectionRange(pos, pos);
-  }, [comfyWorkflowValidation]);
+  const handleJumpToJsonError = useCallback(
+    (validation: ComfyWorkflowValidation | null, textareaRef: RefObject<HTMLTextAreaElement | null>) => {
+      const ta = textareaRef.current;
+      if (!ta || !validation || !validation.parseError) return;
+      const pos = validation.charPos ?? 0;
+      ta.focus();
+      ta.setSelectionRange(pos, pos);
+    },
+    [],
+  );
 
   const providerDef = PROVIDERS[localProvider];
   const isImageGenerationProvider = localProvider === "image_generation";
@@ -1383,18 +1407,19 @@ export function ConnectionEditor() {
             </FieldGroup>
           )}
 
-          {/* ── ComfyUI Workflow ── */}
+          {/* ── ComfyUI Workflows ── */}
           {localProvider === "image_generation" &&
             (selectedImageService === "comfyui" || selectedImageService === "runpod_comfyui") && (
               <FieldGroup
-                label={`ComfyUI Workflow (${selectedImageService === "runpod_comfyui" ? "Required" : "Optional"})`}
+                label={`ComfyUI Workflows (${selectedImageService === "runpod_comfyui" ? "Required" : "Optional"})`}
                 icon={<Zap size="0.875rem" className="text-sky-400" />}
                 help={
                   selectedImageService === "runpod_comfyui"
-                    ? "Paste your ComfyUI workflow JSON (API format). RunPod needs the full workflow to execute; the endpoint sends this workflow to your serverless endpoint. Use placeholders like %prompt%, %seed%, %width%, %height%, and %reference_image% to let Marinara inject generation parameters."
-                    : "Paste a custom ComfyUI workflow JSON (API format). Use placeholders like %prompt%, %negative_prompt%, %width%, %height%, %seed%, %model%, %steps%, %cfg%, %sampler%, %scheduler%, and %denoise%. For reference images, use %reference_image% to inject a base64 string for workflows that decode it, or %reference_image_name% to upload the image to ComfyUI's input directory and inject the filename for a vanilla LoadImage node. For a second reference (e.g. background), use %background_reference_image_name% with referenceImages[1]. Leave empty to use the built-in default txt2img workflow."
+                    ? "Provide one or two ComfyUI workflow JSON blobs (API format). Marinara picks the with-reference workflow when a reference image is attached to the request, otherwise the no-reference workflow. If only one field is filled, it is used as a fallback for both cases. RunPod requires at least one workflow."
+                    : "Provide separate workflows for requests with and without a reference image (portraits/backgrounds vs sprites/CG). Marinara selects automatically based on whether the caller attached referenceImage or referenceImages. If only one field is filled, it is used as a fallback for both cases. Leave both empty to use the built-in default txt2img workflow."
                 }
               >
+                <p className="mb-2 text-[0.625rem] font-medium text-[var(--foreground)]">No reference (txt2img)</p>
                 <textarea
                   ref={comfyWorkflowTextareaRef}
                   value={localComfyuiWorkflow}
@@ -1402,7 +1427,7 @@ export function ConnectionEditor() {
                     setLocalComfyuiWorkflow(e.target.value);
                     markDirty();
                   }}
-                  placeholder='Paste workflow JSON here (exported from ComfyUI via "Save (API Format)")…'
+                  placeholder='Paste no-reference workflow JSON (ComfyUI "Save (API Format)")…'
                   className={cn(
                     "w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-xs font-mono outline-none ring-1 transition-shadow placeholder:text-[var(--muted-foreground)]/50 min-h-[120px] max-h-[300px] resize-y",
                     comfyWorkflowValidation?.parseError
@@ -1415,7 +1440,8 @@ export function ConnectionEditor() {
                     <AlertCircle size="0.625rem" className="mt-px shrink-0" />
                     {comfyWorkflowValidation.charPos !== null ? (
                       <button
-                        onClick={handleJumpToJsonError}
+                        type="button"
+                        onClick={() => handleJumpToJsonError(comfyWorkflowValidation, comfyWorkflowTextareaRef)}
                         className="underline decoration-dotted cursor-pointer text-left hover:text-red-300"
                       >
                         {comfyWorkflowValidation.label}
@@ -1449,10 +1475,86 @@ export function ConnectionEditor() {
                       </span>
                     </p>
                   )}
-                <p className="text-[0.55rem] text-[var(--muted-foreground)] mt-1">
-                  Export your workflow from ComfyUI using <strong>Save (API Format)</strong> in the menu. Placeholders
-                  like <code>%prompt%</code>, <code>%steps%</code>, <code>%sampler%</code>, and reference-image
-                  placeholders will be replaced at generation time.
+
+                <p className="mb-2 mt-4 text-[0.625rem] font-medium text-[var(--foreground)]">With reference</p>
+                <textarea
+                  ref={comfyWorkflowWithReferenceTextareaRef}
+                  value={localComfyuiWorkflowWithReference}
+                  onChange={(e) => {
+                    setLocalComfyuiWorkflowWithReference(e.target.value);
+                    markDirty();
+                  }}
+                  placeholder='Paste with-reference workflow JSON — use %reference_image_name% or %reference_image%…'
+                  className={cn(
+                    "w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-xs font-mono outline-none ring-1 transition-shadow placeholder:text-[var(--muted-foreground)]/50 min-h-[120px] max-h-[300px] resize-y",
+                    comfyWorkflowWithReferenceValidation?.parseError
+                      ? "ring-red-400/60 focus:ring-red-400"
+                      : "ring-[var(--border)] focus:ring-sky-400/50",
+                  )}
+                />
+                {comfyWorkflowWithReferenceValidation?.parseError && (
+                  <p className="mt-1 flex items-start gap-1 text-[0.625rem] text-red-400">
+                    <AlertCircle size="0.625rem" className="mt-px shrink-0" />
+                    {comfyWorkflowWithReferenceValidation.charPos !== null ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleJumpToJsonError(comfyWorkflowWithReferenceValidation, comfyWorkflowWithReferenceTextareaRef)
+                        }
+                        className="underline decoration-dotted cursor-pointer text-left hover:text-red-300"
+                      >
+                        {comfyWorkflowWithReferenceValidation.label}
+                      </button>
+                    ) : (
+                      comfyWorkflowWithReferenceValidation.label
+                    )}
+                  </p>
+                )}
+                {comfyWorkflowWithReferenceValidation &&
+                  !comfyWorkflowWithReferenceValidation.parseError &&
+                  comfyWorkflowWithReferenceValidation.warnNoReferencePlaceholder && (
+                    <p className="mt-1 flex items-start gap-1 text-[0.625rem] text-amber-400">
+                      <AlertCircle size="0.625rem" className="mt-px shrink-0" />
+                      No <strong>%reference_image%</strong> or <strong>%reference_image_name%</strong> placeholder found
+                      — reference images won&apos;t be injected.
+                    </p>
+                  )}
+                {comfyWorkflowWithReferenceValidation &&
+                  !comfyWorkflowWithReferenceValidation.parseError &&
+                  comfyWorkflowWithReferenceValidation.missing.length > 0 && (
+                    <p className="mt-1 flex items-start gap-1 text-[0.625rem] text-amber-400">
+                      <AlertCircle size="0.625rem" className="mt-px shrink-0" />
+                      <span>
+                        {comfyWorkflowWithReferenceValidation.missing.some((m) => m.critical) && (
+                          <>
+                            <strong>%prompt%</strong> placeholder not found — prompts won&apos;t be injected.{" "}
+                          </>
+                        )}
+                        {comfyWorkflowWithReferenceValidation.missing.some((m) => !m.critical) && (
+                          <>
+                            Unused:{" "}
+                            {comfyWorkflowWithReferenceValidation.missing
+                              .filter((m) => !m.critical)
+                              .map((m) => m.label)
+                              .join(", ")}
+                            .
+                          </>
+                        )}
+                      </span>
+                    </p>
+                  )}
+                {selectedImageService === "runpod_comfyui" &&
+                  !localComfyuiWorkflow.trim() &&
+                  !localComfyuiWorkflowWithReference.trim() && (
+                    <p className="mt-2 flex items-start gap-1 text-[0.625rem] text-red-400">
+                      <AlertCircle size="0.625rem" className="mt-px shrink-0" />
+                      RunPod ComfyUI requires at least one workflow JSON.
+                    </p>
+                  )}
+                <p className="text-[0.55rem] text-[var(--muted-foreground)] mt-2">
+                  Export workflows from ComfyUI using <strong>Save (API Format)</strong>. Placeholders like{" "}
+                  <code>%prompt%</code>, <code>%steps%</code>, <code>%sampler%</code>, and reference-image placeholders
+                  are replaced at generation time.
                 </p>
               </FieldGroup>
             )}

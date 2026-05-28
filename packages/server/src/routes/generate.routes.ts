@@ -57,6 +57,7 @@ import { lorebookEntryPassesContextFilters, type GameStateForScanning } from "..
 import { injectAtDepth } from "../services/lorebook/prompt-injector.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
 import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
+import { comfyWorkflowFieldsFromConnection } from "../services/image/comfy-workflow.js";
 import { loadImageGenerationUserSettings } from "../services/image/image-generation-settings.js";
 import { extractLeadingThinkingBlocks } from "../services/llm/inline-thinking.js";
 import { resolveSpotifyCredentials, spotifyHasScope } from "../services/spotify/spotify.service.js";
@@ -12954,6 +12955,7 @@ export async function generateRoutes(app: FastifyInstance) {
                         imgService: imgConnFull.imageService || (imgConnFull as any).imageGenerationSource || "",
                         imgEndpointId: imgConnFull.imageEndpointId || undefined,
                         imgComfyWorkflow: imgConnFull.comfyuiWorkflow || undefined,
+                        imgComfyWorkflowWithReference: imgConnFull.comfyuiWorkflowWithReference || undefined,
                         imgDefaults: imageDefaults,
                         promptOverridesStorage,
                         size: {
@@ -13316,7 +13318,7 @@ export async function generateRoutes(app: FastifyInstance) {
                               width: imageSettings.portrait.width,
                               height: imageSettings.portrait.height,
                               imageEndpointId: imgConnFull.imageEndpointId || undefined,
-                              comfyWorkflow: imgConnFull.comfyuiWorkflow || undefined,
+                              ...comfyWorkflowFieldsFromConnection(imgConnFull),
                               imageDefaults,
                             });
 
@@ -13945,7 +13947,7 @@ export async function generateRoutes(app: FastifyInstance) {
                         width: imgWidth,
                         height: imgHeight,
                         imageEndpointId: imgConnFull.imageEndpointId || undefined,
-                        comfyWorkflow: imgConnFull.comfyuiWorkflow || undefined,
+                        ...comfyWorkflowFieldsFromConnection(imgConnFull),
                         imageDefaults,
                         referenceImages: illustratorRefImages,
                       });
@@ -14377,7 +14379,7 @@ export async function generateRoutes(app: FastifyInstance) {
                             width: selfieW || imageSettings.selfie.width,
                             height: selfieH || imageSettings.selfie.height,
                             imageEndpointId: imgConnFull.imageEndpointId || undefined,
-                            comfyWorkflow: imgConnFull.comfyuiWorkflow || undefined,
+                            ...comfyWorkflowFieldsFromConnection(imgConnFull),
                             imageDefaults,
                           },
                         );

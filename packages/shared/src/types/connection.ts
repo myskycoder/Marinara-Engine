@@ -49,8 +49,10 @@ export interface APIConnection {
   openrouterProvider: string | null;
   /** Explicit image backend selection for image-generation connections (e.g. ComfyUI on a remote host). */
   imageGenerationSource: string | null;
-  /** ComfyUI workflow JSON for image generation */
+  /** ComfyUI workflow JSON for image generation (no reference / txt2img). */
   comfyuiWorkflow: string | null;
+  /** ComfyUI workflow JSON used when a reference image is attached to the request. */
+  comfyuiWorkflowWithReference: string | null;
   /** Explicitly selected image generation service ID (e.g. "comfyui", "automatic1111"). Overrides URL inference when set. */
   imageService: string | null;
   /** For endpoint-based image services (e.g. RunPod Serverless): the endpoint ID sent alongside the base URL. */

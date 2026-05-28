@@ -25,6 +25,12 @@ import {
 } from "@marinara-engine/shared";
 import { isImageLocalUrlsEnabled } from "../../config/runtime-config.js";
 import { generateRunPodComfyUI } from "./runpod-comfyui.service.js";
+import {
+  comfyWorkflowExpectsBackgroundReference,
+  countActiveComfyReferenceImages,
+  describeComfyWorkflowVariant,
+  resolveActiveComfyWorkflow,
+} from "./comfy-workflow.js";
 import { normalizeLoopbackUrl, safeFetch, validateOutboundUrl } from "../../utils/security.js";
 import { recordAiRequest } from "../ai-audit/audit-logger.js";
 
@@ -49,8 +55,10 @@ export interface ImageGenRequest {
   model?: string;
   /** For endpoint-based image services (e.g. RunPod): the endpoint/instance ID. */
   imageEndpointId?: string;
-  /** Optional ComfyUI workflow JSON. Placeholders like %prompt%, %width%, %height%, %seed% will be replaced. */
+  /** Optional ComfyUI workflow JSON (no reference). Placeholders like %prompt%, %width%, %height%, %seed% will be replaced. */
   comfyWorkflow?: string;
+  /** Optional ComfyUI workflow JSON used when a reference image is attached. */
+  comfyWorkflowWithReference?: string;
   /** Optional connection-scoped defaults for local Stable Diffusion backends. */
   imageDefaults?: ImageGenerationDefaultsProfile | null;
   /** Allow this explicit image-generation connection to call local/private URLs. */
@@ -194,6 +202,10 @@ export async function generateImage(
   } finally {
     const status = finalError ? "error" : "ok";
     const errorMessage = finalError instanceof Error ? finalError.message : finalError ? String(finalError) : null;
+    const activeComfyWorkflow = resolveActiveComfyWorkflow(request);
+    const hasComfyWorkflowFields = Boolean(
+      request.comfyWorkflow?.trim() || request.comfyWorkflowWithReference?.trim(),
+    );
     recordAiRequest({
       kind: "image",
       provider: resolvedSource,
@@ -211,7 +223,16 @@ export async function generateImage(
         transparentBackground: request.transparentBackground,
         hasReferenceImage: !!(request.referenceImage || (request.referenceImages && request.referenceImages.length > 0)),
         referenceImageCount: request.referenceImages?.length ?? (request.referenceImage ? 1 : 0),
-        comfyWorkflowProvided: !!request.comfyWorkflow,
+        comfyWorkflowProvided: !!request.comfyWorkflow?.trim(),
+        ...(hasComfyWorkflowFields
+          ? {
+              comfyWorkflowWithReferenceProvided: !!request.comfyWorkflowWithReference?.trim(),
+              comfyWorkflowVariant: describeComfyWorkflowVariant(request),
+              comfyWorkflowExpectsBackgroundReference:
+                comfyWorkflowExpectsBackgroundReference(activeComfyWorkflow),
+              comfyReferenceImageCount: countActiveComfyReferenceImages(request, activeComfyWorkflow),
+            }
+          : {}),
         baseUrl: normalizedBaseUrl,
         serviceHint,
         sourceHint: source,
@@ -1799,11 +1820,18 @@ async function generateComfyUI(baseUrl: string, request: ImageGenRequest): Promi
   const prompt = mergePromptPrefix(defaults.promptPrefix, request.prompt || "");
   const negativePrompt = mergeNegativePrompt(defaults.negativePromptPrefix, request.negativePrompt);
 
+  const activeWorkflow = resolveActiveComfyWorkflow(request);
+  logger.debug(
+    "ComfyUI workflow variant=%s hasReference=%s",
+    describeComfyWorkflowVariant(request),
+    Boolean(request.referenceImage || request.referenceImages?.length),
+  );
+
   // Parse custom workflow or use default
   let workflow: Record<string, unknown>;
-  if (request.comfyWorkflow) {
+  if (activeWorkflow) {
     try {
-      workflow = JSON.parse(request.comfyWorkflow) as Record<string, unknown>;
+      workflow = JSON.parse(activeWorkflow) as Record<string, unknown>;
     } catch {
       throw new Error("Invalid ComfyUI workflow JSON");
     }
@@ -1830,9 +1858,11 @@ async function generateComfyUI(baseUrl: string, request: ImageGenRequest): Promi
   if (request.model) {
     replacements["%model%"] = request.model;
   }
-  const reference = request.referenceImage ?? request.referenceImages?.[0];
-  const backgroundReference = request.referenceImages?.[1];
   const workflowJson = JSON.stringify(workflow);
+  const reference = request.referenceImage ?? request.referenceImages?.[0];
+  const backgroundReference = comfyWorkflowExpectsBackgroundReference(workflowJson)
+    ? request.referenceImages?.[1]
+    : undefined;
   if (reference) {
     replacements["%reference_image%"] = reference;
     if (workflowJson.includes("%reference_image_name%")) {

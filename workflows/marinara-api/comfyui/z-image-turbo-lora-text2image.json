@@ -1,7 +1,7 @@
 {
   "9": {
     "inputs": {
-      "filename_prefix": "z_image_char_sheet_6expr",
+      "filename_prefix": "z_image_turbo_lora",
       "images": [
         "8",
         0
@@ -21,7 +21,7 @@
       "scheduler": "%scheduler%",
       "denoise": "%denoise%",
       "model": [
-        "60",
+        "11",
         0
       ],
       "positive": [
@@ -79,7 +79,7 @@
     },
     "class_type": "EmptySD3LatentImage",
     "_meta": {
-      "title": "Empty Latent (1024×1024 sheet)"
+      "title": "Empty Latent (Z-Image)"
     }
   },
   "27": {
@@ -139,8 +139,8 @@
   },
   "38": {
     "inputs": {
-      "lora_name": "character_design_izt.safetensors",
-      "strength_model": 0.7,
+      "lora_name": "your_z_image_lora.safetensors",
+      "strength_model": 0.75,
       "model": [
         "28",
         0
@@ -148,64 +148,7 @@
     },
     "class_type": "LoraLoaderModelOnly",
     "_meta": {
-      "title": "Character Design IZT LoRA"
-    }
-  },
-  "57": {
-    "inputs": {
-      "image": [
-        "58",
-        0
-      ],
-      "low_threshold": 0.1,
-      "high_threshold": 0.32
-    },
-    "class_type": "Canny",
-    "_meta": {
-      "title": "Canny (layout edges)"
-    }
-  },
-  "58": {
-    "inputs": {
-      "image": "char_sheet_layout_fullbody_6expr.png"
-    },
-    "class_type": "LoadImage",
-    "_meta": {
-      "title": "Layout template (copy to ComfyUI/input/)"
-    }
-  },
-  "60": {
-    "inputs": {
-      "strength": 0.9,
-      "model": [
-        "11",
-        0
-      ],
-      "model_patch": [
-        "64",
-        0
-      ],
-      "vae": [
-        "29",
-        0
-      ],
-      "image": [
-        "57",
-        0
-      ]
-    },
-    "class_type": "QwenImageDiffsynthControlnet",
-    "_meta": {
-      "title": "Z-Image Union ControlNet"
-    }
-  },
-  "64": {
-    "inputs": {
-      "name": "Z-Image-Turbo-Fun-Controlnet-Union.safetensors"
-    },
-    "class_type": "ModelPatchLoader",
-    "_meta": {
-      "title": "ControlNet Union patch"
+      "title": "Load LoRA (Model Only)"
     }
   }
 }

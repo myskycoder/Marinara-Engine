@@ -685,6 +685,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
     const baseUrl = (conn.baseUrl || providerDef?.defaultBaseUrl || "").replace(/\/+$/, "");
 
     const { generateImage } = await import("../services/image/image-generation.js");
+    const { comfyWorkflowFieldsFromConnection } = await import("../services/image/comfy-workflow.js");
     const imgModel = conn.model || "";
     const imgApiKey = conn.apiKey || "";
     const imgSource = conn.imageGenerationSource || imgModel;
@@ -701,7 +702,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
         imageEndpointId: (conn.imageEndpointId as string | undefined) ?? undefined,
         width: 512,
         height: 512,
-        comfyWorkflow: conn.comfyuiWorkflow || undefined,
+        ...comfyWorkflowFieldsFromConnection(conn),
         imageDefaults,
       });
       return {

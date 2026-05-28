@@ -394,6 +394,7 @@ export interface NpcPortraitRequest {
   imgService?: string | null;
   imgEndpointId?: string | null;
   imgComfyWorkflow?: string | undefined;
+  imgComfyWorkflowWithReference?: string | undefined;
   imgDefaults?: ImageGenerationDefaultsProfile | null;
   debugLog?: (message: string, ...args: any[]) => void;
   /** Storage for user-supplied prompt overrides. Optional — falls back to default builder when omitted. */
@@ -522,6 +523,7 @@ export async function generateNpcPortrait(req: NpcPortraitRequest): Promise<stri
           width: size.width,
           height: size.height,
           comfyWorkflow: req.imgComfyWorkflow || undefined,
+          comfyWorkflowWithReference: req.imgComfyWorkflowWithReference || undefined,
           imageDefaults: req.imgDefaults ?? undefined,
         },
       );
@@ -652,6 +654,7 @@ export interface ImageProviderCredentials {
   imgService?: string | null;
   imgEndpointId?: string | null;
   imgComfyWorkflow?: string | undefined;
+  imgComfyWorkflowWithReference?: string | undefined;
   imgDefaults?: ImageGenerationDefaultsProfile | null;
   debugLog?: (message: string, ...args: any[]) => void;
   size?: ImageGenerationSize;
@@ -722,6 +725,7 @@ export interface SceneIllustrationGenRequest {
   imgService?: string | null;
   imgEndpointId?: string | null;
   imgComfyWorkflow?: string | undefined;
+  imgComfyWorkflowWithReference?: string | undefined;
   imgDefaults?: ImageGenerationDefaultsProfile | null;
   debugLog?: (message: string, ...args: any[]) => void;
   /** Storage for user-supplied prompt overrides. Optional — falls back to default builder when omitted. */
@@ -930,6 +934,7 @@ export async function generateBackground(req: BackgroundGenRequest): Promise<Bac
         height: size.height,
         imageEndpointId: req.imgEndpointId || undefined,
         comfyWorkflow: req.imgComfyWorkflow || undefined,
+        comfyWorkflowWithReference: req.imgComfyWorkflowWithReference || undefined,
         imageDefaults: req.imgDefaults ?? undefined,
       },
     );
@@ -1018,6 +1023,7 @@ export async function generateChatBackground(req: ChatBackgroundGenRequest): Pro
         height: size.height,
         imageEndpointId: req.imgEndpointId || undefined,
         comfyWorkflow: req.imgComfyWorkflow || undefined,
+        comfyWorkflowWithReference: req.imgComfyWorkflowWithReference || undefined,
         imageDefaults: req.imgDefaults ?? undefined,
       },
     );
@@ -1082,6 +1088,7 @@ export async function generateSceneIllustration(req: SceneIllustrationGenRequest
         height: size.height,
         imageEndpointId: req.imgEndpointId || undefined,
         comfyWorkflow: req.imgComfyWorkflow || undefined,
+        comfyWorkflowWithReference: req.imgComfyWorkflowWithReference || undefined,
         imageDefaults: req.imgDefaults ?? undefined,
         referenceImages: req.referenceImages?.length ? req.referenceImages.slice(0, 4) : undefined,
       },

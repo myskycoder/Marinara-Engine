@@ -147,6 +147,7 @@ import {
   backgroundTagForChat,
   readAvatarBase64,
   readBackgroundBase64,
+  readNpcAvatarBase64,
   type BackgroundConditions,
   buildBackgroundImagePrompt,
   buildNpcPortraitImagePrompt,
@@ -154,14 +155,22 @@ import {
 } from "../services/game/game-asset-generation.js";
 import { buildIllustrationContinuity, excerptNarrationForIllustration } from "../services/game/scene-illustration-context.js";
 import { rewriteIllustrationPrompt } from "../services/game/image-prompt-writer.js";
+import {
+  resolveIllustrationFocusNames,
+} from "../services/game/illustration-character-focus.js";
 import { recordIllustrationSkip, type IllustrationSkipReason } from "../services/game/illustration-audit.js";
 import {
   regenerateNpcAssets,
   scheduleNpcFullBodyEmotionSet,
   setActiveNpcSpriteGeneration,
 } from "../services/game/npc-materializer.service.js";
-import { npcNameKey, sha1HexLegacy, slugifyForFs } from "../services/game/npc-name-server.js";
+import {
+  findPresentCharacterForNpc,
+  resolveNpcVisualDescription,
+} from "../services/game/npc-visual-description.js";
+import { isSameNpcName, npcNameKey, sha1HexLegacy, slugifyForFs } from "../services/game/npc-name-server.js";
 import { saveImageToDisk } from "../services/image/image-generation.js";
+import { comfyWorkflowExpectsBackgroundReference } from "../services/image/comfy-workflow.js";
 import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
 import {
   loadImageGenerationUserSettings,
@@ -250,6 +259,25 @@ function generatedStringValue(value: unknown): string | undefined {
 
 const generatedRequiredStringSchema = z.preprocess((value) => generatedStringValue(value) ?? value, z.string());
 const generatedOptionalStringSchema = z.preprocess((value) => generatedStringValue(value), z.string().optional());
+
+/** Full-body NPC sprites (then portrait avatars) keyed by fuzzy name aliases. */
+function buildGameNpcReferenceByName(chatId: string, gameNpcs: GameNpc[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const npc of gameNpcs) {
+    const name = npc.name?.trim();
+    if (!name) continue;
+    let base64: string | undefined;
+    const spriteId = npc.spriteId?.trim();
+    if (spriteId) {
+      base64 = readPreferredFullBodySpriteBase64(spriteId)?.base64;
+    }
+    if (!base64 && npc.id?.trim()) {
+      base64 = readNpcAvatarBase64(chatId, npc.id.trim());
+    }
+    if (base64) addNameLookupEntry(map, name, base64);
+  }
+  return map;
+}
 
 /**
  * Fuzzy-match an NPC name against the character-avatar/description map.
@@ -341,9 +369,18 @@ function collectIllustrationCharacterAssets(opts: {
   trackedNpcs: Array<Record<string, unknown>>;
   gameNpcs: GameNpc[];
   charReferenceByName: Map<string, string>;
+  npcReferenceByName: Map<string, string>;
   charAvatarByName: Map<string, string>;
   charDescriptionByName: Map<string, string>;
   backgroundTag?: string | null;
+  /**
+   * When true and a background plate is available, insert it at referenceImages[1]
+   * for ComfyUI workflows that declare `%background_reference_image_name%`.
+   * Otherwise only character/NPC references are attached.
+   */
+  includeBackgroundReference?: boolean;
+  /** Cap how many character reference images are collected (1 for single-ref ComfyUI). */
+  maxReferenceImages?: number;
 }): {
   referenceImages: string[];
   /**
@@ -398,20 +435,33 @@ function collectIllustrationCharacterAssets(opts: {
     if (name && key && description && !npcDescriptionByName.has(key)) npcDescriptionByName.set(key, description);
   }
 
-  // Existing logic: image-asset pipeline references + appearance fallback.
-  // Sidecar's `illustration.characters` wins when non-empty.
-  const requestedNames = (opts.illustration.characters?.length ? opts.illustration.characters : opts.characterNames)
-    .map((name) => name.trim())
+  // Reference images: draft-mentioned + present tracker only (not full party roster).
+  const presentTrackedNames = opts.trackedNpcs
+    .map((npc) => (typeof npc.name === "string" ? npc.name.trim() : ""))
     .filter(Boolean);
-  const uniqueNames = dedupeNames(requestedNames, 6);
+  const knownNames = [
+    ...opts.gameNpcs.map((npc) => npc.name).filter((n): n is string => !!n?.trim()),
+    ...opts.characterNames,
+    ...(opts.illustration.characters ?? []),
+  ];
+  const focusNames = resolveIllustrationFocusNames({
+    draftText: opts.illustration.prompt,
+    presentTrackedNames,
+    knownNames,
+    limit: 6,
+  });
+  const uniqueNames = focusNames;
+  const maxReferenceImages = Math.max(1, Math.min(4, opts.maxReferenceImages ?? 4));
 
   const references: string[] = [];
   const characterDescriptions: string[] = [];
   const seen = new Set<string>();
   const described = new Set<string>();
   for (const name of uniqueNames) {
-    const preferredReference = findCharAvatarFuzzy(name, opts.charReferenceByName);
-    if (preferredReference && !seen.has(preferredReference) && references.length < 4) {
+    const preferredReference =
+      findCharAvatarFuzzy(name, opts.npcReferenceByName) ??
+      findCharAvatarFuzzy(name, opts.charReferenceByName);
+    if (preferredReference && !seen.has(preferredReference) && references.length < maxReferenceImages) {
       seen.add(preferredReference);
       references.push(preferredReference);
       continue;
@@ -419,7 +469,7 @@ function collectIllustrationCharacterAssets(opts: {
 
     const avatarPath = findCharAvatarFuzzy(name, opts.charAvatarByName) ?? findCharAvatarFuzzy(name, npcAvatarByName);
     const base64 = avatarPath && !seen.has(avatarPath) ? readAvatarBase64(avatarPath) : undefined;
-    if (avatarPath && base64 && references.length < 4) {
+    if (avatarPath && base64 && references.length < maxReferenceImages) {
       seen.add(avatarPath);
       references.push(base64);
       continue;
@@ -434,16 +484,11 @@ function collectIllustrationCharacterAssets(opts: {
     }
   }
 
-  const rewriterNames = [
-    ...(opts.illustration.characters ?? []),
-    ...opts.characterNames,
-    ...opts.gameNpcs.map((npc) => npc.name).filter((n): n is string => !!n),
-  ];
-  const broadUniqueNames = dedupeNames(rewriterNames, 8);
+  const rewriterNames = focusNames.length > 0 ? focusNames : dedupeNames(presentTrackedNames, 6);
 
   const characterDescriptionsForRewriter: string[] = [];
   const describedForRewriter = new Set<string>();
-  for (const name of broadUniqueNames) {
+  for (const name of rewriterNames) {
     const description =
       findCharAvatarFuzzy(name, opts.charDescriptionByName) ?? findCharAvatarFuzzy(name, npcDescriptionByName);
     const normalizedName = npcNameKey(name);
@@ -454,14 +499,14 @@ function collectIllustrationCharacterAssets(opts: {
   }
 
   const backgroundBase64 = readBackgroundBase64(opts.backgroundTag);
-  if (backgroundBase64 && references.length > 0) {
+  if (opts.includeBackgroundReference && backgroundBase64 && references.length > 0) {
     references.splice(1, 0, backgroundBase64);
   }
 
   return {
     referenceImages: references,
     characterDescriptions: characterDescriptions.slice(0, 5),
-    characterNamesForRewriter: broadUniqueNames,
+    characterNamesForRewriter: rewriterNames,
     characterDescriptionsForRewriter: characterDescriptionsForRewriter.slice(0, 8),
   };
 }
@@ -6906,6 +6951,7 @@ export async function gameRoutes(app: FastifyInstance) {
             const imgSource = (imgConn as any).imageGenerationSource || imgModel;
             const imgServiceHint = imgConn.imageService || imgSource;
             const imgComfyWorkflow = imgConn.comfyuiWorkflow || undefined;
+            const imgComfyWorkflowWithReference = imgConn.comfyuiWorkflowWithReference || undefined;
             const imgEndpointId = imgConn.imageEndpointId || undefined;
             const imgDefaults = resolveConnectionImageDefaults(imgConn);
 
@@ -6964,15 +7010,28 @@ export async function gameRoutes(app: FastifyInstance) {
 
             const illustration = sceneResult.illustration as SceneIllustrationRequest | null | undefined;
             if (illustration && sceneCtx.canGenerateIllustrations && generateSceneWrapAssetsInline) {
+              const npcReferenceByName = buildGameNpcReferenceByName(
+                input.chatId,
+                (meta.gameNpcs as GameNpc[]) ?? [],
+              );
               const illustrationAssets = collectIllustrationCharacterAssets({
                 illustration,
                 characterNames: input.context.characterNames ?? [],
                 trackedNpcs: (input.context.trackedNpcs ?? []) as Array<Record<string, unknown>>,
                 gameNpcs: (meta.gameNpcs as GameNpc[]) ?? [],
                 charReferenceByName,
+                npcReferenceByName,
                 charAvatarByName,
                 charDescriptionByName,
                 backgroundTag: (sceneResult.background as string) ?? (meta.gameSceneBackground as string) ?? null,
+                includeBackgroundReference: comfyWorkflowExpectsBackgroundReference(
+                  imgComfyWorkflowWithReference ?? imgComfyWorkflow,
+                ),
+                maxReferenceImages: comfyWorkflowExpectsBackgroundReference(
+                  imgComfyWorkflowWithReference ?? imgComfyWorkflow,
+                )
+                  ? 4
+                  : 1,
               });
               const illustrationSeason =
                 coerceSeason((sceneResult as Record<string, unknown>).season) ?? coerceSeason(meta.gameCurrentSeason);
@@ -7009,7 +7068,6 @@ export async function gameRoutes(app: FastifyInstance) {
                   imageService: imgConn.imageService ?? null,
                 },
                 chatConnectionId: chat.connectionId ?? null,
-                rating: setupCfg?.rating === "nsfw" ? "nsfw" : "sfw",
               });
               const generatedTag = await generateSceneIllustration({
                 chatId: input.chatId,
@@ -7031,6 +7089,7 @@ export async function gameRoutes(app: FastifyInstance) {
                 imgService: imgServiceHint,
                 imgEndpointId,
                 imgComfyWorkflow,
+                imgComfyWorkflowWithReference,
                 imgDefaults,
                 debugLog: debugLogsEnabled ? debugLog : undefined,
                 promptOverridesStorage: createPromptOverridesStorage(app.db),
@@ -7142,6 +7201,7 @@ export async function gameRoutes(app: FastifyInstance) {
                   imgService: imgServiceHint,
                   imgEndpointId,
                   imgComfyWorkflow,
+                imgComfyWorkflowWithReference,
                   imgDefaults,
                   debugLog: debugLogsEnabled ? debugLog : undefined,
                   promptOverridesStorage: createPromptOverridesStorage(app.db),
@@ -7258,6 +7318,7 @@ export async function gameRoutes(app: FastifyInstance) {
                   imgService: imgServiceHint,
                   imgEndpointId,
                   imgComfyWorkflow,
+                imgComfyWorkflowWithReference,
                 });
                 if (segResult) {
                   fx.background = segResult.tag;
@@ -7510,6 +7571,7 @@ export async function gameRoutes(app: FastifyInstance) {
     const imgApiKey = imgConn.apiKey || "";
     const imgSource = (imgConn as any).imageGenerationSource || imgModel;
     const imgComfyWorkflow = imgConn.comfyuiWorkflow || undefined;
+    const imgComfyWorkflowWithReference = imgConn.comfyuiWorkflowWithReference || undefined;
     const imgServiceHint = imgConn.imageService || imgSource;
     const imgEndpointId = imgConn.imageEndpointId || undefined;
     const imgDefaults = resolveConnectionImageDefaults(imgConn);
@@ -7565,6 +7627,7 @@ export async function gameRoutes(app: FastifyInstance) {
         let illImgSource = imgSource;
         let illImgServiceHint = imgServiceHint;
         let illImgComfyWorkflow = imgComfyWorkflow;
+        let illImgComfyWorkflowWithReference = imgComfyWorkflowWithReference;
         let illImgDefaults = imgDefaults;
         if (input.illustrationConnectionId && input.illustrationConnectionId !== imgConnId) {
           const overrideConn = await connections.getWithKey(input.illustrationConnectionId);
@@ -7575,6 +7638,7 @@ export async function gameRoutes(app: FastifyInstance) {
             illImgSource = (overrideConn as any).imageGenerationSource || illImgModel;
             illImgServiceHint = overrideConn.imageService || illImgSource;
             illImgComfyWorkflow = overrideConn.comfyuiWorkflow || undefined;
+            illImgComfyWorkflowWithReference = overrideConn.comfyuiWorkflowWithReference || undefined;
             illImgDefaults = resolveConnectionImageDefaults(overrideConn);
           }
         }
@@ -7603,16 +7667,30 @@ export async function gameRoutes(app: FastifyInstance) {
           }
         }
 
+        const previewPresentState = await createGameStateStorage(app.db).getLatest(input.chatId);
+        const previewPresentCharacters =
+          parseStoredJson<PresentCharacter[]>(previewPresentState?.presentCharacters) ?? [];
+        const npcReferenceByName = buildGameNpcReferenceByName(input.chatId, (meta.gameNpcs as GameNpc[]) ?? []);
+
         const illustration = input.illustration as SceneIllustrationRequest;
         const illustrationAssets = collectIllustrationCharacterAssets({
           illustration,
           characterNames: illustration.characters ?? [],
-          trackedNpcs: [],
+          trackedNpcs: previewPresentCharacters as unknown as Array<Record<string, unknown>>,
           gameNpcs: (meta.gameNpcs as GameNpc[]) ?? [],
           charReferenceByName,
+          npcReferenceByName,
           charAvatarByName,
           charDescriptionByName,
           backgroundTag: (meta.gameSceneBackground as string) ?? null,
+          includeBackgroundReference: comfyWorkflowExpectsBackgroundReference(
+            illImgComfyWorkflowWithReference ?? illImgComfyWorkflow,
+          ),
+          maxReferenceImages: comfyWorkflowExpectsBackgroundReference(
+            illImgComfyWorkflowWithReference ?? illImgComfyWorkflow,
+          )
+            ? 4
+            : 1,
         });
         const prompt = await buildSceneIllustrationImagePrompt({
           chatId: input.chatId,
@@ -7633,6 +7711,7 @@ export async function gameRoutes(app: FastifyInstance) {
           imgService: illImgServiceHint,
           imgEndpointId,
           imgComfyWorkflow: illImgComfyWorkflow,
+          imgComfyWorkflowWithReference: illImgComfyWorkflowWithReference,
           imgDefaults: illImgDefaults,
           promptOverridesStorage,
           size: backgroundSize,
@@ -7713,6 +7792,7 @@ export async function gameRoutes(app: FastifyInstance) {
           imgService: imgServiceHint,
           imgEndpointId,
           imgComfyWorkflow,
+          imgComfyWorkflowWithReference,
           imgDefaults,
           promptOverridesStorage,
           size: portraitSize,
@@ -7844,6 +7924,7 @@ export async function gameRoutes(app: FastifyInstance) {
     const imgApiKey = imgConn.apiKey || "";
     const imgSource = (imgConn as any).imageGenerationSource || imgModel;
     const imgComfyWorkflow = imgConn.comfyuiWorkflow || undefined;
+    const imgComfyWorkflowWithReference = imgConn.comfyuiWorkflowWithReference || undefined;
     const imgServiceHint = imgConn.imageService || imgSource;
     const imgEndpointId = imgConn.imageEndpointId || undefined;
     const imgDefaults = resolveConnectionImageDefaults(imgConn);
@@ -8202,6 +8283,7 @@ export async function gameRoutes(app: FastifyInstance) {
         let illImgSource = imgSource;
         let illImgServiceHint = imgServiceHint;
         let illImgComfyWorkflow = imgComfyWorkflow;
+        let illImgComfyWorkflowWithReference = imgComfyWorkflowWithReference;
         let illImgDefaults = imgDefaults;
         if (input.illustrationConnectionId && input.illustrationConnectionId !== imgConnId) {
           const overrideConn = await connections.getWithKey(input.illustrationConnectionId);
@@ -8225,6 +8307,7 @@ export async function gameRoutes(app: FastifyInstance) {
           illImgSource = (overrideConn as any).imageGenerationSource || illImgModel;
           illImgServiceHint = overrideConn.imageService || illImgSource;
           illImgComfyWorkflow = overrideConn.comfyuiWorkflow || undefined;
+          illImgComfyWorkflowWithReference = overrideConn.comfyuiWorkflowWithReference || undefined;
           illImgDefaults = resolveConnectionImageDefaults(overrideConn);
           logger.info(
             "[game/generate-assets] illustration: using override connection id=%s model=%s (default chat connection id=%s)",
@@ -8288,15 +8371,25 @@ export async function gameRoutes(app: FastifyInstance) {
         );
         const metaBg = (meta.gameSceneBackground as string) ?? null;
         const metaLoc = (meta.currentLocationId as string) ?? null;
+        const npcReferenceByName = buildGameNpcReferenceByName(input.chatId, (meta.gameNpcs as GameNpc[]) ?? []);
         const illustrationAssets = collectIllustrationCharacterAssets({
           illustration,
           characterNames: characterNamesForIll,
-          trackedNpcs: ((meta.gameNpcs ?? []) as unknown as Array<Record<string, unknown>>) ?? [],
+          trackedNpcs: presentCharactersForIll as unknown as Array<Record<string, unknown>>,
           gameNpcs: (meta.gameNpcs as GameNpc[]) ?? [],
           charReferenceByName,
+          npcReferenceByName,
           charAvatarByName,
           charDescriptionByName,
           backgroundTag: metaBg,
+          includeBackgroundReference: comfyWorkflowExpectsBackgroundReference(
+            illImgComfyWorkflowWithReference ?? illImgComfyWorkflow,
+          ),
+          maxReferenceImages: comfyWorkflowExpectsBackgroundReference(
+            illImgComfyWorkflowWithReference ?? illImgComfyWorkflow,
+          )
+            ? 4
+            : 1,
         });
         const illustrationSeasonGen = input.conditions?.season ?? coerceSeason(meta.gameCurrentSeason);
         const illustrationContinuityGen = buildIllustrationContinuity({
@@ -8326,7 +8419,7 @@ export async function gameRoutes(app: FastifyInstance) {
             presentCharactersForIll,
             (meta.gameNpcs as GameNpc[]) ?? [],
             illustrationAssets.characterNamesForRewriter,
-            { allowExtraTrackerEntries: !(illustration.characters && illustration.characters.length > 0) },
+            { allowExtraTrackerEntries: false },
           );
           logger.info(
             "[game/generate-assets] illustration: requesting image-prompt-writer rewrite (chat=%s, draftChars=%d, names=%d, descs=%d, sceneNpcs=%s)",
@@ -8357,7 +8450,6 @@ export async function gameRoutes(app: FastifyInstance) {
               imageService: illImgConn.imageService ?? null,
             },
             chatConnectionId: chat.connectionId ?? null,
-            rating: setupCfg?.rating === "nsfw" ? "nsfw" : "sfw",
           });
           if (rewritten) {
             resolvedIllustrationPromptOverride = rewritten;
@@ -8391,6 +8483,7 @@ export async function gameRoutes(app: FastifyInstance) {
           imgService: illImgServiceHint,
           imgEndpointId,
           imgComfyWorkflow: illImgComfyWorkflow,
+          imgComfyWorkflowWithReference: illImgComfyWorkflowWithReference,
           imgDefaults: illImgDefaults,
           debugLog: debugLogsEnabled ? debugLog : undefined,
           promptOverridesStorage,
@@ -8492,11 +8585,29 @@ export async function gameRoutes(app: FastifyInstance) {
           npc.id?.trim() ||
           idByKey.get(npcNameKey(npc.name)) ||
           slugifyForFs(npc.name, { prefix: "s", hashHex: sha1HexLegacy });
+        const trackedNpc = existingGameNpcs.find((candidate) => isSameNpcName(candidate.name, npc.name));
+        const npcForVisual: GameNpc =
+          trackedNpc ??
+          ({
+            id: npcId,
+            name: npc.name,
+            emoji: "👤",
+            description: typeof npc.description === "string" ? npc.description : "",
+            location: "",
+            reputation: 0,
+            met: true,
+            notes: [],
+          } satisfies GameNpc);
+        const presentCharacter = findPresentCharacterForNpc(
+          npcForVisual,
+          presentCharacters as unknown as PresentCharacter[],
+        );
+        const visualDescription = resolveNpcVisualDescription({ npc: npcForVisual, presentCharacter });
         const avatarUrl = await generateNpcPortrait({
           chatId: input.chatId,
           npcId,
           npcName: npc.name,
-          appearance: npc.description,
+          appearance: visualDescription,
           artStyle,
           imgSource,
           imgModel,
@@ -8505,6 +8616,7 @@ export async function gameRoutes(app: FastifyInstance) {
           imgService: imgServiceHint,
           imgEndpointId,
           imgComfyWorkflow,
+          imgComfyWorkflowWithReference,
           imgDefaults,
           debugLog: debugLogsEnabled ? debugLog : undefined,
           promptOverridesStorage: createPromptOverridesStorage(app.db),

@@ -71,12 +71,12 @@
   },
   "134": {
     "inputs": {
-      "seed": "%seed%",
-      "steps": "%steps%",
-      "cfg": "%cfg%",
-      "sampler_name": "%sampler%",
-      "scheduler": "%scheduler%",
-      "denoise": "%denoise%",
+      "seed": 501632142584740,
+      "steps": 28,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
       "model": ["138", 0],
       "positive": ["100", 0],
       "negative": ["135", 0],
@@ -109,7 +109,7 @@
   "138": {
     "inputs": {
       "lora_name": "klein_snofs_v1_4.safetensors",
-      "strength_model": 0.85,
+      "strength_model": 1,
       "model": ["126", 0]
     },
     "class_type": "LoraLoaderModelOnly",

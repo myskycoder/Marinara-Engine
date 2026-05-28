@@ -36,6 +36,49 @@ import { withAiAuditContext } from "../ai-audit/audit-context.js";
 
 const HARD_PROMPT_CHAR_CAP = 2400;
 
+/** ComfyUI backends always use the Flux natural-language style guide. */
+const COMFYUI_FLUX_STYLE_GUIDE = getImageModelFamilyInfo("flux").promptStyleGuide;
+const COMFYUI_FLUX_FAMILY_LABEL = "FLUX / ComfyUI (natural-language)";
+
+function normalizeImageServiceHint(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function isComfyUiImageConnection(imageConn: RewriteIllustrationPromptRequest["imageConn"]): boolean {
+  const service = normalizeImageServiceHint(imageConn.imageService ?? imageConn.imageGenerationSource);
+  if (service === "comfyui" || service === "runpod_comfyui") return true;
+  const baseUrl = (imageConn.baseUrl ?? "").toLowerCase();
+  return baseUrl.includes(":8188") || baseUrl.includes("comfyui");
+}
+
+function resolveRewriteStyleGuide(imageConn: RewriteIllustrationPromptRequest["imageConn"]): {
+  family: string;
+  label: string;
+  styleGuide: string;
+} {
+  if (isComfyUiImageConnection(imageConn)) {
+    return {
+      family: "flux",
+      label: COMFYUI_FLUX_FAMILY_LABEL,
+      styleGuide: COMFYUI_FLUX_STYLE_GUIDE,
+    };
+  }
+  const service = normalizeImageServiceHint(imageConn.imageService ?? imageConn.imageGenerationSource);
+  const model = (imageConn.model ?? "").toLowerCase();
+  const baseUrl = (imageConn.baseUrl ?? "").toLowerCase();
+  const familyInfo = detectImageModelFamily({
+    service,
+    provider: imageConn.provider ?? null,
+    model,
+    baseUrl,
+  });
+  return {
+    family: familyInfo.family,
+    label: familyInfo.label,
+    styleGuide: getImageModelFamilyInfo(familyInfo.family).promptStyleGuide,
+  };
+}
+
 export interface RewriteIllustrationPromptRequest {
   app: FastifyInstance;
   chatId: string;
@@ -354,22 +397,15 @@ export async function rewriteIllustrationPrompt(req: RewriteIllustrationPromptRe
     return null;
   }
 
-  const familyInfo = detectImageModelFamily({
-    service: req.imageConn.imageService ?? req.imageConn.imageGenerationSource ?? null,
-    provider: req.imageConn.provider ?? null,
-    model: req.imageConn.model ?? null,
-    baseUrl: req.imageConn.baseUrl ?? null,
-  });
-  const styleGuide = getImageModelFamilyInfo(familyInfo.family).promptStyleGuide;
+  const styleGuideInfo = resolveRewriteStyleGuide(req.imageConn);
   const baseSystemPrompt = (agentPromptTemplate || DEFAULT_AGENT_PROMPTS["image-prompt-writer"] || "").trim();
   if (!baseSystemPrompt) {
     logger.warn("[image-prompt-writer] SKIPPED: no system prompt configured (and default is empty)");
     return null;
   }
-  const systemPrompt =
-    req.rating === "nsfw" ? `${baseSystemPrompt}\n\n${NSFW_REWRITER_JAILBREAK}` : baseSystemPrompt;
+  const systemPrompt = `${baseSystemPrompt}\n\n${NSFW_REWRITER_JAILBREAK}`;
 
-  const userMessage = buildUserMessage(req, familyInfo.label, styleGuide);
+  const userMessage = buildUserMessage(req, styleGuideInfo.label, styleGuideInfo.styleGuide);
 
   const provider = createLLMProvider(
     llmConn.conn.provider,
@@ -382,15 +418,13 @@ export async function rewriteIllustrationPrompt(req: RewriteIllustrationPromptRe
 
   const startedAt = Date.now();
   logger.info(
-    '[image-prompt-writer] rewriting draft (chars=%d) for family=%s via connection="%s" (source=%s, %s/%s) [rating=%s, jailbreak=%s]',
+    '[image-prompt-writer] rewriting draft (chars=%d) for family=%s via connection="%s" (source=%s, %s/%s) [rating=nsfw, jailbreak=on]',
     req.draftPrompt.length,
-    familyInfo.family,
+    styleGuideInfo.family,
     llmConn.name || "<unnamed>",
     llmConn.source,
     llmConn.conn.provider,
     llmConn.conn.model || "<no-model>",
-    req.rating ?? "?",
-    req.rating === "nsfw" ? "on" : "off",
   );
   logger.debug("[image-prompt-writer] system:\n%s", systemPrompt);
   logger.debug("[image-prompt-writer] user:\n%s", userMessage);
@@ -405,8 +439,8 @@ export async function rewriteIllustrationPrompt(req: RewriteIllustrationPromptRe
         chatId: req.chatId,
         metadata: {
           agentType: BUILT_IN_AGENT_IDS.IMAGE_PROMPT_WRITER,
-          imageModelFamily: familyInfo.family,
-          rating: req.rating ?? null,
+          imageModelFamily: styleGuideInfo.family,
+          rating: "nsfw",
         },
       },
       () =>
@@ -444,7 +478,7 @@ export async function rewriteIllustrationPrompt(req: RewriteIllustrationPromptRe
     "[image-prompt-writer] rewrite ok (chars=%d → %d, family=%s, %dms)",
     req.draftPrompt.length,
     cleaned.length,
-    familyInfo.family,
+    styleGuideInfo.family,
     Date.now() - startedAt,
   );
   logger.debug("[image-prompt-writer] rewritten prompt:\n%s", cleaned);

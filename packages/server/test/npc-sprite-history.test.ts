@@ -4,6 +4,7 @@ import type { GameNpcSpriteGeneration } from "@marinara-engine/shared";
 import {
   buildNpcSpriteAppearancePrompt,
   buildNpcSpritePromptBundle,
+  sanitizeNpcSpriteAppearanceSource,
 } from "../src/services/game/npc-sprite-generation.service.js";
 import {
   SPRITE_GEN_HISTORY_CAP,
@@ -46,6 +47,7 @@ test("buildNpcSpritePromptBundle embeds chosen full-body expression in fullBody 
       spriteId: "s1",
       expressions: ["neutral", "happy", "sad"],
       fullBodyExpression: "happy",
+      artStyle: "Bright anime with dreamy lakeside backgrounds.",
       imgModel: "m",
       imgBaseUrl: "https://example.com",
       imgApiKey: "k",
@@ -54,7 +56,56 @@ test("buildNpcSpritePromptBundle embeds chosen full-body expression in fullBody 
   );
   assert.match(bundle.fullBody, /full_idle/);
   assert.match(bundle.fullBody, /"happy"/);
-  assert.match(bundle.fullBody, /neutral, happy, sad/);
+  assert.match(bundle.fullBody, /plain white void/);
+  assert.match(bundle.fullBody, /VN game sprite style/);
+  assert.match(bundle.fullBody, /cel-shaded/);
+  assert.match(bundle.expressionSheet, /VN game sprite style/);
+  assert.doesNotMatch(bundle.fullBody, /Current location context/);
+  assert.doesNotMatch(bundle.fullBody, /multi-cell expression sheet/);
+  assert.match(bundle.fullBody, /no scenery or backgrounds/);
+});
+
+test("sanitizeNpcSpriteAppearanceSource removes repeated sprite boilerplate", () => {
+  const noisy =
+    "Tall woman. Match the described gender, age, build, hair, and features exactly — do not invent attributes. Current location context: Docks. Art style: anime ink. Subject is named River (name is for reference only, the description above is authoritative).. Match the described gender, age, build, hair, and features exactly — do not invent attributes. Current location context: Docks. Art style: anime ink. Subject is named River (name is for reference only, the description above is authoritative).";
+  const cleaned = sanitizeNpcSpriteAppearanceSource(noisy);
+  assert.equal(cleaned, "Tall woman");
+});
+
+test("buildNpcSpriteAppearancePrompt is idempotent when override contains prior spritePrompt", () => {
+  const npc = {
+    id: "npc-1",
+    name: "River",
+    emoji: "👤",
+    description: "Tall woman with silver hair.",
+    location: "Harbor docks",
+    reputation: 0,
+    met: true,
+    notes: [],
+  };
+  const prior = buildNpcSpriteAppearancePrompt(npc, "anime ink");
+  const rebuilt = buildNpcSpriteAppearancePrompt(npc, "anime ink", prior);
+  assert.equal(
+    (rebuilt.match(/Match the described gender/g) ?? []).length,
+    1,
+  );
+  assert.match(rebuilt, /Tall woman with silver hair/);
+});
+
+test("buildNpcSpriteAppearancePrompt keeps art style suffix when visual core is long", () => {
+  const npc = {
+    id: "npc-1",
+    name: "River",
+    emoji: "👤",
+    description: "A".repeat(1500),
+    location: "Harbor docks",
+    reputation: 0,
+    met: true,
+    notes: [],
+  };
+  const p = buildNpcSpriteAppearancePrompt(npc, "anime ink");
+  assert.match(p, /Art style: anime ink/);
+  assert.match(p, /Match the described gender/);
 });
 
 test("buildNpcSpriteAppearancePrompt uses override instead of npc.description when provided", () => {

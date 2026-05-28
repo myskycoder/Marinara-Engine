@@ -490,7 +490,7 @@ function NpcsView({
     (npc: GameNpc) => {
       setRegenNpc(npc);
       setRegenFullBodyExpr("");
-      setRegenAppearance(npc.spritePrompt?.trim() || npc.description?.trim() || "");
+      setRegenAppearance(npc.description?.trim() || "");
       const pool = npcSpriteExpressionPool(npcSpriteExpressions);
       setRegenExpressions(pool.slice(0, Math.min(6, pool.length)));
     },
@@ -616,7 +616,7 @@ function NpcsView({
             </div>
             <label className="mb-3 block">
               <span className="mb-1 block text-[0.65rem] font-semibold uppercase tracking-wide text-white/40">
-                Промпт внешности (спрайт)
+                Описание внешности (только персонаж; стиль и имя добавит сервер)
               </span>
               <textarea
                 value={regenAppearance}
@@ -625,6 +625,9 @@ function NpcsView({
                 rows={5}
                 className="w-full resize-y rounded-lg border border-white/10 bg-black/40 px-2 py-1.5 font-mono text-[0.7rem] text-white/80 outline-none focus:border-sky-500/40"
               />
+              <p className="mt-1 text-[0.65rem] leading-relaxed text-white/45">
+                Если поле пустое, сервер возьмёт описание из карточки и актуальные appearance/outfit из Character Tracker.
+              </p>
             </label>
             <div className="flex justify-end gap-2">
               <button

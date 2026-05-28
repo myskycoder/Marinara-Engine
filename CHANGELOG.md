@@ -4,6 +4,12 @@ This file is the release-notes source of truth for Marinara Engine. Reuse these 
 
 ## [Unreleased]
 
+### Added
+
+- Added optional dual ComfyUI workflow fields on image generation connections: a no-reference workflow and a with-reference workflow. Marinara automatically selects the appropriate JSON based on whether the request includes `referenceImage` or `referenceImages`; when only one field is configured, it is used as a fallback for both cases (backward compatible with existing single-workflow connections).
+- AI audit image-generation rows now include `comfyWorkflowVariant`, `comfyWorkflowWithReferenceProvided`, `comfyWorkflowExpectsBackgroundReference`, and `comfyReferenceImageCount` when a ComfyUI workflow is configured. Scene illustrations only attach a background plate as `referenceImages[1]` when the active with-reference workflow declares `%background_reference_image_name%`; otherwise only NPC/character references are sent. CG illustrations now resolve game-NPC full-body sprites (same folders as VN sprite sheets) before falling back to portrait avatars, prioritize on-screen tracker NPCs over the party roster, and skip the player protagonist when attaching reference images.
+- Image Prompt Writer now always applies the NSFW rewriter jailbreak and uses the Flux natural-language style guide for all ComfyUI image connections (local `:8188`, `comfyui`, and `runpod_comfyui`). CG cast selection for illustrations is narrowed to characters mentioned in the draft text plus live present-tracker entries; `<scene_npcs>` and ComfyUI reference slots no longer pull the full party roster, and single-reference workflows attach only one focal NPC sprite.
+
 ## [1.6.0]
 
 ### Added

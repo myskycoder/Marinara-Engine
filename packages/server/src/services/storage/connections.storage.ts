@@ -87,6 +87,7 @@ export function createConnectionsStorage(db: DB) {
         openrouterProvider: input.openrouterProvider ?? null,
         imageGenerationSource: input.imageGenerationSource ?? null,
         comfyuiWorkflow: input.comfyuiWorkflow ?? null,
+        comfyuiWorkflowWithReference: input.comfyuiWorkflowWithReference ?? null,
         imageService: input.imageService ?? null,
         imageEndpointId: input.imageEndpointId ?? null,
         promptPresetId: input.promptPresetId ?? null,
@@ -164,6 +165,9 @@ export function createConnectionsStorage(db: DB) {
       if (data.comfyuiWorkflow !== undefined) {
         updateFields.comfyuiWorkflow = data.comfyuiWorkflow;
       }
+      if (data.comfyuiWorkflowWithReference !== undefined) {
+        updateFields.comfyuiWorkflowWithReference = data.comfyuiWorkflowWithReference;
+      }
       if (data.imageService !== undefined) {
         updateFields.imageService = data.imageService;
       }
@@ -212,6 +216,7 @@ export function createConnectionsStorage(db: DB) {
         embeddingBaseUrl: source.embeddingBaseUrl,
         imageGenerationSource: source.imageGenerationSource,
         comfyuiWorkflow: source.comfyuiWorkflow,
+        comfyuiWorkflowWithReference: source.comfyuiWorkflowWithReference,
         imageService: source.imageService,
         imageEndpointId: source.imageEndpointId,
         promptPresetId: source.promptPresetId,

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { GameNpc } from "@marinara-engine/shared";
+import type { GameNpc, ImageGenerationDefaultsProfile } from "@marinara-engine/shared";
 import { DEFAULT_NPC_SPRITE_EXPRESSIONS } from "@marinara-engine/shared";
 import { logger } from "../../lib/logger.js";
 import { DATA_DIR } from "../../utils/data-dir.js";
@@ -39,6 +39,9 @@ export interface NpcSpriteGenerationRequest {
   imgApiKey: string;
   imgService?: string | null;
   imgComfyWorkflow?: string | undefined;
+  imgComfyWorkflowWithReference?: string | undefined;
+  /** Connection-scoped ComfyUI / A1111 / NovelAI defaults (steps, cfg, sampler, …). */
+  imgDefaults?: ImageGenerationDefaultsProfile | null;
   referenceImage?: string | null;
 }
 
@@ -119,6 +122,60 @@ function resolveFullBodyIdleExpression(
   return sheetExpressions[0]!;
 }
 
+const NPC_SPRITE_VISUAL_CORE_MAX_CHARS = 1000;
+const NPC_SPRITE_APPEARANCE_PROMPT_MAX_CHARS = 1600;
+
+const NPC_SPRITE_VN_STYLE_LINE =
+  "VN game sprite style, cel-shaded character art, clean readable silhouette, consistent proportions, detailed costume,";
+
+const NPC_SPRITE_GENDER_RULE =
+  "Match the described gender, age, build, hair, and features exactly — do not invent attributes.";
+
+const NPC_SPRITE_APPEARANCE_BOILERPLATE_PATTERNS: RegExp[] = [
+  /Match the described gender, age, build(?:, hair)?(?:, and features)? exactly — do not invent attributes\.?/gi,
+  /Current location context:\s*[^.]+\./gi,
+  /Art style:\s*[^.]+\./gi,
+  /Character art style \(linework, shading, costume only — no scenery or backgrounds\):\s*[^.]+\./gi,
+  /Subject is named [^(]+\(name is for reference only[^)]*\)\.?/gi,
+];
+
+function normalizeNpcSpriteAppearanceWhitespace(text: string): string {
+  return text
+    .replace(/\s+/g, " ")
+    .replace(/(?:\.\s*)+$/g, "")
+    .replace(/^\.\s*/g, "")
+    .trim();
+}
+
+/**
+ * Strip known sprite appearance boilerplate so re-generation with a stored
+ * `spritePrompt` (or a user-pasted full appearance block) stays idempotent.
+ */
+export function sanitizeNpcSpriteAppearanceSource(text: string, _npcName?: string | null): string {
+  let cleaned = text.trim();
+  if (!cleaned) return "";
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const pattern of NPC_SPRITE_APPEARANCE_BOILERPLATE_PATTERNS) {
+      const next = cleaned.replace(pattern, " ");
+      if (next !== cleaned) {
+        cleaned = next;
+        changed = true;
+      }
+    }
+  }
+
+  return normalizeNpcSpriteAppearanceWhitespace(cleaned);
+}
+
+export type NpcSpriteAppearancePurpose = "expression-sheet" | "full-body";
+
+export interface BuildNpcSpriteAppearancePromptOptions {
+  purpose?: NpcSpriteAppearancePurpose;
+}
+
 /**
  * Build a description block for sprite generation.
  *
@@ -133,23 +190,35 @@ export function buildNpcSpriteAppearancePrompt(
   npc: GameNpc,
   artStyle?: string | null,
   appearanceOverride?: string | null,
+  options?: BuildNpcSpriteAppearancePromptOptions,
 ): string {
+  const purpose = options?.purpose ?? "expression-sheet";
   const fromOverride =
     typeof appearanceOverride === "string" && appearanceOverride.trim()
       ? appearanceOverride.trim()
       : null;
   const fromNpc = npc.description?.trim() || null;
-  const description = (fromOverride ?? fromNpc) || `scene-relevant character`;
+  const rawDescription = (fromOverride ?? fromNpc) || `scene-relevant character`;
+  const description = sanitizeNpcSpriteAppearanceSource(rawDescription) || `scene-relevant character`;
+
+  const trimmedArtStyle = artStyle?.trim() || "";
+  const artStyleLine =
+    purpose === "full-body" && trimmedArtStyle
+      ? `Character art style (linework, shading, costume only — no scenery or backgrounds): ${trimmedArtStyle}.`
+      : trimmedArtStyle
+        ? `Art style: ${trimmedArtStyle}.`
+        : "";
+
   return [
-    `${description}.`,
-    `Match the described gender, age, build, hair, and features exactly — do not invent attributes.`,
-    npc.location ? `Current location context: ${npc.location}.` : "",
-    artStyle ? `Art style: ${artStyle}.` : "",
+    `${description.slice(0, NPC_SPRITE_VISUAL_CORE_MAX_CHARS)}.`,
+    NPC_SPRITE_GENDER_RULE,
+    purpose === "expression-sheet" && npc.location ? `Current location context: ${npc.location}.` : "",
+    artStyleLine,
     `Subject is named ${npc.name} (name is for reference only, the description above is authoritative).`,
   ]
     .filter(Boolean)
     .join(" ")
-    .slice(0, 1400);
+    .slice(0, NPC_SPRITE_APPEARANCE_PROMPT_MAX_CHARS);
 }
 
 /**
@@ -164,16 +233,20 @@ export function buildNpcSpriteFullBodyPromptForExpression(
   moodExpression: string,
   hasExistingFullIdle: boolean,
 ): string {
-  const appearance = buildNpcSpriteAppearancePrompt(npc, artStyle ?? null, appearanceOverride ?? null);
+  void allExpressions;
+  const appearance = buildNpcSpriteAppearancePrompt(npc, artStyle ?? null, appearanceOverride ?? null, {
+    purpose: "full-body",
+  });
   const idleHint = hasExistingFullIdle
     ? `General stance, silhouette, proportions, and outfit should stay consistent with the existing full-body idle reference for this character set (same sprite folder on disk). `
     : "";
   return [
     `single full-body character sprite, one character only, entire body visible from head to toe, centered in frame,`,
-    `solid white studio background, ${appearance},`,
+    `solid white studio background, plain white void, no environment, no scenery,`,
+    `${NPC_SPRITE_VN_STYLE_LINE} ${appearance},`,
     idleHint,
     `facial expression and overall mood for this render (asset full_${moodExpression}): clearly readable as "${moodExpression}", body language consistent with that mood,`,
-    `the character also has portrait head variants for expressions: ${allExpressions.join(", ")} — keep identity, costume, proportions, and art style consistent with those variants,`,
+    `single character only, one face with a clearly readable "${moodExpression}" expression, no grid, no panel borders, no multiple faces,`,
     `standing idle game pose, no text, no watermark`,
   ].join(" ");
 }
@@ -183,6 +256,9 @@ export function buildNpcSpritePromptBundle(
   expressions: string[],
 ): NpcSpritePromptBundle {
   const appearance = buildNpcSpriteAppearancePrompt(req.npc, req.artStyle, req.appearanceOverride ?? null);
+  const appearanceForFullBody = buildNpcSpriteAppearancePrompt(req.npc, req.artStyle, req.appearanceOverride ?? null, {
+    purpose: "full-body",
+  });
   const idleFace = resolveFullBodyIdleExpression(expressions, req.fullBodyExpression ?? null);
   const cols = 2;
   const rows = Math.ceil(expressions.length / cols);
@@ -191,6 +267,7 @@ export function buildNpcSpritePromptBundle(
     `${cols * rows} equally sized square cells arranged in a perfectly uniform grid,`,
     `solid white background, thin straight lines separating each cell,`,
     `same character in every cell, consistent art style,`,
+    `${NPC_SPRITE_VN_STYLE_LINE}`,
     `expressions left-to-right top-to-bottom: ${expressions.join(", ")},`,
     appearance,
     `each cell shows head and shoulders portrait with a different facial expression,`,
@@ -199,9 +276,10 @@ export function buildNpcSpritePromptBundle(
 
   const fullBody = [
     `single full-body character sprite, one character only, entire body visible from head to toe, centered in frame,`,
-    `solid white studio background, ${appearance},`,
+    `solid white studio background, plain white void, no environment, no scenery,`,
+    `${NPC_SPRITE_VN_STYLE_LINE} ${appearanceForFullBody},`,
     `facial expression and overall mood for this full-body idle reference (asset full_idle): clearly readable as "${idleFace}", body language consistent with that mood,`,
-    `the same character uses a separate multi-cell expression sheet with faces: ${expressions.join(", ")} — keep identity, costume, proportions, and art style consistent with those variants,`,
+    `single character only, one face with a clearly readable "${idleFace}" expression, no grid, no panel borders, no multiple faces,`,
     `standing idle game pose, no text, no watermark`,
   ].join(" ");
 
@@ -233,6 +311,8 @@ async function generateExpressionSprites(
     height: sheetHeight,
     referenceImage: req.referenceImage || undefined,
     comfyWorkflow: req.imgComfyWorkflow || undefined,
+    comfyWorkflowWithReference: req.imgComfyWorkflowWithReference || undefined,
+    imageDefaults: req.imgDefaults ?? undefined,
   });
 
   let sheetBuffer: Buffer = Buffer.from(imageResult.base64, "base64");
@@ -263,7 +343,15 @@ async function generateExpressionSprites(
 
 type FullBodyImageRequestFields = Pick<
   NpcSpriteGenerationRequest,
-  "imgModel" | "imgBaseUrl" | "imgApiKey" | "imgService" | "imgSource" | "imgComfyWorkflow" | "referenceImage"
+  | "imgModel"
+  | "imgBaseUrl"
+  | "imgApiKey"
+  | "imgService"
+  | "imgSource"
+  | "imgComfyWorkflow"
+  | "imgComfyWorkflowWithReference"
+  | "imgDefaults"
+  | "referenceImage"
 >;
 
 async function generateAndSaveFullBodyPng(
@@ -281,6 +369,8 @@ async function generateAndSaveFullBodyPng(
     height: targetHeight,
     referenceImage: req.referenceImage || undefined,
     comfyWorkflow: req.imgComfyWorkflow || undefined,
+    comfyWorkflowWithReference: req.imgComfyWorkflowWithReference || undefined,
+    imageDefaults: req.imgDefaults ?? undefined,
   });
 
   let spriteBuffer: Buffer = Buffer.from(imageResult.base64, "base64");
@@ -317,6 +407,8 @@ export interface NpcFullBodyEmotionSetRequest {
   imgApiKey: string;
   imgService?: string | null;
   imgComfyWorkflow?: string | undefined;
+  imgComfyWorkflowWithReference?: string | undefined;
+  imgDefaults?: ImageGenerationDefaultsProfile | null;
   referenceImage?: string | null;
 }
 
@@ -356,6 +448,8 @@ export async function generateNpcFullBodyEmotionSet(req: NpcFullBodyEmotionSetRe
       imgService: req.imgService,
       imgSource: req.imgSource,
       imgComfyWorkflow: req.imgComfyWorkflow,
+      imgComfyWorkflowWithReference: req.imgComfyWorkflowWithReference,
+      imgDefaults: req.imgDefaults,
       referenceImage: req.referenceImage,
     };
 

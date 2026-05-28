@@ -16,6 +16,7 @@ import { createCharactersStorage } from "../services/storage/characters.storage.
 import { createCharacterGalleryStorage } from "../services/storage/character-gallery.storage.js";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { generateImage } from "../services/image/image-generation.js";
+import { comfyWorkflowFieldsFromConnection } from "../services/image/comfy-workflow.js";
 import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
 import { loadImageGenerationUserSettings } from "../services/image/image-generation-settings.js";
 import { writeFile, mkdir, readFile, readdir } from "fs/promises";
@@ -333,7 +334,7 @@ export async function charactersRoutes(app: FastifyInstance) {
         referenceImage: referenceImages[0],
         referenceImages: referenceImages.length > 1 ? referenceImages : undefined,
         imageEndpointId: conn.imageEndpointId || undefined,
-        comfyWorkflow: conn.comfyuiWorkflow || undefined,
+        ...comfyWorkflowFieldsFromConnection(conn),
         imageDefaults,
       });
       return {
