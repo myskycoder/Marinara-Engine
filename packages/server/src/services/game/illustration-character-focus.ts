@@ -1,8 +1,15 @@
 import { isSameNpcName, npcNameKey } from "./npc-name-server.js";
 
-/** Bracket tags that are moods/flags, not character names. */
+/** Bracket tags that are VN channels, moods, or flags — not character names. */
 const BRACKET_TAG_SKIP = new Set([
+  // VN dialogue channels (PartyDialogueType)
   "main",
+  "side",
+  "extra",
+  "action",
+  "thought",
+  "react",
+  // Common expression / mood tags
   "thinking",
   "blushing",
   "embarrassed",
@@ -17,6 +24,13 @@ const BRACKET_TAG_SKIP = new Set([
   "excited",
   "determined",
   "observant",
+  "crying",
+  "laughing",
+  "smirk",
+  "focused",
+  "worried",
+  "amused",
+  // Meta / player aliases
   "player",
   "user",
   "{{user}}",
@@ -26,6 +40,16 @@ const BRACKET_TAG_SKIP = new Set([
   "sfw",
   "nsfw",
 ]);
+
+/** True when an unmatched bracket tag is likely a mood/channel token, not an NPC name. */
+function isLikelyNonCharacterBracketTag(inner: string): boolean {
+  const lower = inner.toLowerCase();
+  if (BRACKET_TAG_SKIP.has(lower)) return true;
+  if (/^whisper:/.test(lower)) return true;
+  // Single lowercase ASCII word with no Cyrillic — e.g. crying, thought, smirk
+  if (/^[a-z][a-z0-9_-]*$/.test(lower) && !/[а-яё]/i.test(inner)) return true;
+  return false;
+}
 
 export function isIllustrationReferenceSubject(name: string): boolean {
   const key = npcNameKey(name);
@@ -68,7 +92,7 @@ export function extractMentionedNpcNames(text: string, knownNames: string[]): st
 
   for (const match of text.matchAll(/\[([^\]\n]{1,80})\]/g)) {
     const inner = match[1]!.trim();
-    if (!inner || BRACKET_TAG_SKIP.has(inner.toLowerCase())) continue;
+    if (!inner || isLikelyNonCharacterBracketTag(inner)) continue;
     let matched = false;
     for (const known of knownNames) {
       if (isSameNpcName(inner, known)) {
@@ -77,7 +101,7 @@ export function extractMentionedNpcNames(text: string, knownNames: string[]): st
         break;
       }
     }
-    if (!matched) add(inner);
+    if (!matched && !isLikelyNonCharacterBracketTag(inner)) add(inner);
   }
 
   const lowerText = text.toLowerCase();

@@ -98,6 +98,8 @@ import {
   scoreAmbient,
   canRequestAutoCgIllustration,
   normalizeGameCgFrequency,
+  GAME_ILLUSTRATION_DRAFT_MAX,
+  GAME_ILLUSTRATION_NARRATION_EXCERPT_MAX,
 } from "@marinara-engine/shared";
 import { GameNarration, formatNarration } from "./GameNarration";
 import { GameInput } from "./GameInput";
@@ -4940,7 +4942,7 @@ export function GameSurface({
         toast.error("Уже идёт генерация ассетов сцены — подождите.");
         return;
       }
-      const excerpt = latestNarrationText.replace(/\s+/g, " ").trim().slice(0, 1000);
+      const excerpt = latestNarrationText.replace(/\s+/g, " ").trim().slice(0, GAME_ILLUSTRATION_NARRATION_EXCERPT_MAX);
       if (!excerpt) {
         toast.error("Нет текста последнего хода — сначала нужна реплика GM.");
         return;
@@ -4959,10 +4961,10 @@ export function GameSurface({
       if (prompt.length < 40) {
         prompt = `${preamble}Location: ${gameSnapshot?.location ?? "current"}. ${metaWeather ?? ""} ${metaTime ?? ""}\n\n${excerpt}`.slice(
           0,
-          1200,
+          GAME_ILLUSTRATION_DRAFT_MAX,
         );
       }
-      prompt = prompt.slice(0, 1200);
+      prompt = prompt.slice(0, GAME_ILLUSTRATION_DRAFT_MAX);
 
       const seasonRaw = chatMeta.gameCurrentSeason as string | undefined;
       const season =

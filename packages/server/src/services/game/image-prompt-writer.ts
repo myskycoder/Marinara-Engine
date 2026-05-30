@@ -273,6 +273,10 @@ function buildUserMessage(req: RewriteIllustrationPromptRequest, familyLabel: st
 
   if (req.sceneContinuity?.trim()) {
     parts.push("", "<scene_continuity>", req.sceneContinuity.trim(), "</scene_continuity>");
+    parts.push(
+      "",
+      "When <draft_prompt> and <scene_continuity> overlap, treat <scene_continuity> as authoritative for visual facts; preserve POV and composition cues from the draft preamble.",
+    );
   }
 
   if (req.characters?.length) {
@@ -398,12 +402,21 @@ export async function rewriteIllustrationPrompt(req: RewriteIllustrationPromptRe
   }
 
   const styleGuideInfo = resolveRewriteStyleGuide(req.imageConn);
-  const baseSystemPrompt = (agentPromptTemplate || DEFAULT_AGENT_PROMPTS["image-prompt-writer"] || "").trim();
+  const defaultBase = (DEFAULT_AGENT_PROMPTS["image-prompt-writer"] ?? "").trim();
+  const customAddendum = agentPromptTemplate.trim();
+  let baseSystemPrompt = defaultBase;
+  if (customAddendum && customAddendum !== defaultBase) {
+    baseSystemPrompt = `${defaultBase}\n\n<custom_agent_notes>\n${customAddendum}\n</custom_agent_notes>`;
+  }
   if (!baseSystemPrompt) {
     logger.warn("[image-prompt-writer] SKIPPED: no system prompt configured (and default is empty)");
     return null;
   }
-  const systemPrompt = `${baseSystemPrompt}\n\n${NSFW_REWRITER_JAILBREAK}`;
+  const rewriterRating = req.rating === "nsfw" ? "nsfw" : "sfw";
+  const jailbreakOn = rewriterRating === "nsfw";
+  const systemPrompt = jailbreakOn
+    ? `${baseSystemPrompt}\n\n${NSFW_REWRITER_JAILBREAK}`
+    : baseSystemPrompt;
 
   const userMessage = buildUserMessage(req, styleGuideInfo.label, styleGuideInfo.styleGuide);
 
@@ -418,13 +431,15 @@ export async function rewriteIllustrationPrompt(req: RewriteIllustrationPromptRe
 
   const startedAt = Date.now();
   logger.info(
-    '[image-prompt-writer] rewriting draft (chars=%d) for family=%s via connection="%s" (source=%s, %s/%s) [rating=nsfw, jailbreak=on]',
+    '[image-prompt-writer] rewriting draft (chars=%d) for family=%s via connection="%s" (source=%s, %s/%s) [rating=%s, jailbreak=%s]',
     req.draftPrompt.length,
     styleGuideInfo.family,
     llmConn.name || "<unnamed>",
     llmConn.source,
     llmConn.conn.provider,
     llmConn.conn.model || "<no-model>",
+    rewriterRating,
+    jailbreakOn ? "on" : "off",
   );
   logger.debug("[image-prompt-writer] system:\n%s", systemPrompt);
   logger.debug("[image-prompt-writer] user:\n%s", userMessage);
@@ -440,7 +455,7 @@ export async function rewriteIllustrationPrompt(req: RewriteIllustrationPromptRe
         metadata: {
           agentType: BUILT_IN_AGENT_IDS.IMAGE_PROMPT_WRITER,
           imageModelFamily: styleGuideInfo.family,
-          rating: "nsfw",
+          rating: rewriterRating,
         },
       },
       () =>

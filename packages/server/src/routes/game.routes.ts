@@ -135,6 +135,8 @@ import {
   isIllustrationCooldownSatisfied,
   normalizeGameCgFrequency,
   isGameCgAutoEnabled,
+  GAME_ILLUSTRATION_DRAFT_MAX,
+  GAME_ILLUSTRATION_NARRATION_EXCERPT_MAX,
 } from "@marinara-engine/shared";
 import { getAssetManifest, GAME_ASSETS_DIR } from "../services/game/asset-manifest.service.js";
 import {
@@ -155,6 +157,10 @@ import {
 } from "../services/game/game-asset-generation.js";
 import { buildIllustrationContinuity, excerptNarrationForIllustration } from "../services/game/scene-illustration-context.js";
 import { rewriteIllustrationPrompt } from "../services/game/image-prompt-writer.js";
+import {
+  buildScenePresenceBlock,
+  resolveIllustrationRewriterRating,
+} from "../services/game/illustration-rewriter-context.js";
 import {
   resolveIllustrationFocusNames,
 } from "../services/game/illustration-character-focus.js";
@@ -509,109 +515,6 @@ function collectIllustrationCharacterAssets(opts: {
     characterNamesForRewriter: rewriterNames,
     characterDescriptionsForRewriter: characterDescriptionsForRewriter.slice(0, 8),
   };
-}
-
-/**
- * Build a compact `<scene_npcs>` text block from the character-tracker's live
- * state, so the image-prompt-writer can translate mood/outfit/thoughts into
- * the right pose/expression/clothing tags.
- *
- * Output shape (one bullet per known character, missing fields skipped):
- *   - Rin: mood=sleepy/dazed; appearance=teen girl, short black hair, brown eyes, slim build; outfit=school sportswear, knee-high socks; thoughts=...
- *   - Kaede: mood=excited; appearance=...; outfit=...
- *
- * Returns null when there's nothing usable to emit (empty tracker, no
- * appearance/outfit data, no NPC cards). Caller passes the result verbatim.
- */
-function buildScenePresenceBlock(
-  presentCharacters: PresentCharacter[] | null | undefined,
-  gameNpcs: GameNpc[] | null | undefined,
-  focusNames: string[],
-  options: { maxNpcs?: number; maxLineChars?: number; totalCharCap?: number; allowExtraTrackerEntries?: boolean } = {},
-): string | null {
-  const maxNpcs = options.maxNpcs ?? 6;
-  const maxLineChars = options.maxLineChars ?? 360;
-  const totalCharCap = options.totalCharCap ?? 1800;
-  const allowExtraTrackerEntries = options.allowExtraTrackerEntries ?? true;
-
-  const focusLowercase = new Set(focusNames.map((name) => name.trim().toLowerCase()).filter(Boolean));
-  // Build a map of npcCard fallback data keyed by lowercase name.
-  const npcCardByName = new Map<string, GameNpc>();
-  for (const npc of gameNpcs ?? []) {
-    if (npc?.name) npcCardByName.set(npc.name.toLowerCase(), npc);
-  }
-
-  // Order: characters explicitly in the focus list FIRST (sidecar+tracker+cards
-  // union), then any extra tracker entries we have data for.
-  const seenLower = new Set<string>();
-  const orderedNames: string[] = [];
-  for (const name of focusNames) {
-    const trimmed = name.trim();
-    if (!trimmed) continue;
-    const lower = trimmed.toLowerCase();
-    if (seenLower.has(lower)) continue;
-    if (lower === "player" || lower === "{{user}}" || lower === "user") continue;
-    seenLower.add(lower);
-    orderedNames.push(trimmed);
-  }
-  if (allowExtraTrackerEntries) {
-    for (const tracker of presentCharacters ?? []) {
-      const trimmed = tracker?.name?.trim();
-      if (!trimmed) continue;
-      const lower = trimmed.toLowerCase();
-      if (seenLower.has(lower)) continue;
-      if (lower === "player" || lower === "{{user}}" || lower === "user") continue;
-      seenLower.add(lower);
-      orderedNames.push(trimmed);
-    }
-  }
-
-  if (!orderedNames.length) return null;
-
-  // Index tracker rows for quick lookup.
-  const trackerByName = new Map<string, PresentCharacter>();
-  for (const tracker of presentCharacters ?? []) {
-    if (tracker?.name) trackerByName.set(tracker.name.toLowerCase(), tracker);
-  }
-
-  const stripWhitespace = (value: string) => value.replace(/\s+/g, " ").trim();
-  const clamp = (value: string, max: number) =>
-    value.length > max ? `${value.slice(0, Math.max(0, max - 1))}…` : value;
-
-  const lines: string[] = [];
-  for (const name of orderedNames) {
-    if (lines.length >= maxNpcs) break;
-    const lower = name.toLowerCase();
-    const tracker = trackerByName.get(lower);
-    const card = npcCardByName.get(lower);
-    const inFocus = focusLowercase.has(lower);
-
-    const fields: string[] = [];
-    const mood = stripWhitespace(tracker?.mood ?? "");
-    if (mood) fields.push(`mood=${clamp(mood, 80)}`);
-    const appearance = stripWhitespace(tracker?.appearance ?? card?.description ?? "");
-    if (appearance) fields.push(`appearance=${clamp(appearance, 200)}`);
-    const outfit = stripWhitespace(tracker?.outfit ?? "");
-    if (outfit) fields.push(`outfit=${clamp(outfit, 160)}`);
-    const thoughts = stripWhitespace(tracker?.thoughts ?? "");
-    if (thoughts) fields.push(`thoughts=${clamp(thoughts, 160)}`);
-
-    // Skip characters we have no data for AND are not in the explicit focus
-    // list — they'd be just dead names with no visual cue.
-    if (!fields.length && !inFocus) continue;
-    if (!fields.length) continue;
-
-    const line = `- ${name}: ${fields.join("; ")}`;
-    lines.push(clamp(line, maxLineChars));
-  }
-
-  if (!lines.length) return null;
-
-  let block = lines.join("\n");
-  if (block.length > totalCharCap) {
-    block = `${block.slice(0, totalCharCap - 1)}…`;
-  }
-  return block;
 }
 
 function isIllustrationBgTag(tag: unknown): boolean {
@@ -7036,7 +6939,10 @@ export async function gameRoutes(app: FastifyInstance) {
               const illustrationSeason =
                 coerceSeason((sceneResult as Record<string, unknown>).season) ?? coerceSeason(meta.gameCurrentSeason);
               const illustrationContinuity = buildIllustrationContinuity({
-                narrationExcerpt: excerptNarrationForIllustration(input.narration, 1400),
+                narrationExcerpt: excerptNarrationForIllustration(
+                  input.narration,
+                  GAME_ILLUSTRATION_NARRATION_EXCERPT_MAX,
+                ),
                 backgroundTag: (sceneResult.background as string) ?? null,
                 backgroundPrompt: (sceneResult.backgroundPrompt as string) ?? null,
                 locationId: (sceneResult.locationId as string) ?? null,
@@ -7045,9 +6951,19 @@ export async function gameRoutes(app: FastifyInstance) {
                 season: illustrationSeason,
                 priorBackgroundTag: input.context.currentBackground,
               });
-              // Scene-wrap path: no live tracker snapshot here, so we feed
-              // the rewriter the broad union of (sidecar + characterNames +
-              // NPC cards) names+descriptions without the <scene_npcs> block.
+              const latestStateForIll = await createGameStateStorage(app.db).getLatest(input.chatId);
+              const presentCharactersForIll =
+                parseStoredJson<PresentCharacter[]>(latestStateForIll?.presentCharacters) ?? [];
+              const sceneNpcsBlock = buildScenePresenceBlock(
+                presentCharactersForIll,
+                (meta.gameNpcs as GameNpc[]) ?? [],
+                illustrationAssets.characterNamesForRewriter,
+                { allowExtraTrackerEntries: false },
+              );
+              const rewriterRating = resolveIllustrationRewriterRating({
+                gameRating: (setupCfg?.rating as "sfw" | "nsfw") ?? "sfw",
+                reason: illustration.reason ?? null,
+              });
               const rewrittenIllustrationPrompt = await rewriteIllustrationPrompt({
                 app,
                 chatId: input.chatId,
@@ -7055,11 +6971,13 @@ export async function gameRoutes(app: FastifyInstance) {
                 sceneContinuity: illustrationContinuity || null,
                 characters: illustrationAssets.characterNamesForRewriter,
                 characterDescriptions: illustrationAssets.characterDescriptionsForRewriter,
+                sceneNpcs: sceneNpcsBlock,
                 reason: illustration.reason ?? null,
                 genre,
                 setting,
                 artStyle,
                 imagePromptInstructions,
+                rating: rewriterRating,
                 imageConn: {
                   provider: imgConn.provider ?? null,
                   baseUrl: imgConn.baseUrl ?? null,
@@ -7526,7 +7444,7 @@ export async function gameRoutes(app: FastifyInstance) {
     illustration: z
       .object({
         segment: z.number().int().min(0).max(500).optional(),
-        prompt: z.string().min(40).max(1200),
+        prompt: z.string().min(40).max(GAME_ILLUSTRATION_DRAFT_MAX),
         characters: z.array(z.string().min(1).max(200)).max(6).optional(),
         reason: z.string().max(300).optional(),
         slug: z.string().max(80).optional(),
@@ -8346,7 +8264,10 @@ export async function gameRoutes(app: FastifyInstance) {
         for (let i = allMsgs.length - 1; i >= 0; i--) {
           const row = allMsgs[i];
           if (row && (row.role === "assistant" || row.role === "narrator") && row.content?.trim()) {
-            narrationExcerptForIll = excerptNarrationForIllustration(row.content, 1400);
+            narrationExcerptForIll = excerptNarrationForIllustration(
+              row.content,
+              GAME_ILLUSTRATION_NARRATION_EXCERPT_MAX,
+            );
             break;
           }
         }
@@ -8429,6 +8350,13 @@ export async function gameRoutes(app: FastifyInstance) {
             illustrationAssets.characterDescriptionsForRewriter.length,
             sceneNpcsBlock ? `${sceneNpcsBlock.split("\n").length}lines` : "off",
           );
+          const rewriterRating = resolveIllustrationRewriterRating({
+            gameRating: (setupCfg?.rating as "sfw" | "nsfw") ?? "sfw",
+            illustrationConnectionId: input.illustrationConnectionId ?? null,
+            nsfwImageConnectionId:
+              typeof meta.gameImageConnectionIdNsfw === "string" ? meta.gameImageConnectionIdNsfw : null,
+            reason: illustration.reason ?? null,
+          });
           const rewritten = await rewriteIllustrationPrompt({
             app,
             chatId: input.chatId,
@@ -8442,6 +8370,7 @@ export async function gameRoutes(app: FastifyInstance) {
             setting,
             artStyle,
             imagePromptInstructions,
+            rating: rewriterRating,
             imageConn: {
               provider: illImgConn.provider ?? null,
               baseUrl: illImgConn.baseUrl ?? null,

@@ -4,6 +4,12 @@
 
 export const GAME_CG_FREQUENCY_PRESETS = ["off", "rare", "balanced", "frequent", "cinematic"] as const;
 
+/** Max narration excerpt chars for illustration continuity (server-side). */
+export const GAME_ILLUSTRATION_NARRATION_EXCERPT_MAX = 1400;
+
+/** Max draft prompt chars for manual / generate-assets illustration requests (client + Zod). */
+export const GAME_ILLUSTRATION_DRAFT_MAX = 1800;
+
 export type GameCgFrequencyPreset = (typeof GAME_CG_FREQUENCY_PRESETS)[number];
 
 export interface GameCgFrequencyOption {

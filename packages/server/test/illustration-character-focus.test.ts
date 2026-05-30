@@ -28,3 +28,25 @@ test("resolveIllustrationFocusNames prioritizes draft mentions over stale tracke
   assert.equal(names[0], "Штерн");
   assert.ok(!names.includes("Player"));
 });
+
+test("extractMentionedNpcNames skips crying and thought mood tags", () => {
+  const known = ["Лина", "Игорь", "Player"];
+  const text =
+    '[Лина] [main] [crying]: "О бо-же..." [Лина] [thought] [blushing]: Плевать на время.';
+  const names = extractMentionedNpcNames(text, known);
+  assert.deepEqual(names, ["Лина"]);
+});
+
+test("extractMentionedNpcNames skips whisper channel tags", () => {
+  const known = ["Лина", "Player"];
+  const text = '[Лина] [whisper:"User"] [crying]: "Сильнее..."';
+  const names = extractMentionedNpcNames(text, known);
+  assert.deepEqual(names, ["Лина"]);
+});
+
+test("extractMentionedNpcNames keeps side NPC with neutral expression", () => {
+  const known = ["Игорь", "Лина", "Player"];
+  const text = '[Игорь] [side] [neutral]: "Время."';
+  const names = extractMentionedNpcNames(text, known);
+  assert.deepEqual(names, ["Игорь"]);
+});

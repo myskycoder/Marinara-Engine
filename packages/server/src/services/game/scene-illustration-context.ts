@@ -3,9 +3,13 @@
 // ──────────────────────────────────────────────
 
 import { stripGmCommandTags } from "./segment-edits.js";
+import { GAME_ILLUSTRATION_NARRATION_EXCERPT_MAX } from "@marinara-engine/shared";
 
 /** Strip GM tags and compress whitespace for a compact continuity excerpt. */
-export function excerptNarrationForIllustration(raw: string, maxLen: number): string {
+export function excerptNarrationForIllustration(
+  raw: string,
+  maxLen: number = GAME_ILLUSTRATION_NARRATION_EXCERPT_MAX,
+): string {
   const stripped = stripGmCommandTags(raw).replace(/\s+/g, " ").trim();
   return stripped.slice(0, maxLen);
 }

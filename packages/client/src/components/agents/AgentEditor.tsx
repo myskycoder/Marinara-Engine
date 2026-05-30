@@ -2037,7 +2037,9 @@ export function AgentEditor() {
             )}
             <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
               {builtIn
-                ? "Leave empty to use the built-in default prompt. Edit to override with your own instructions."
+                ? agentDetailId === "image-prompt-writer"
+                  ? "Leave empty to use the built-in default only. Custom text is appended as <custom_agent_notes> — it does not replace the default. Reset to default clears your addendum."
+                  : "Leave empty to use the built-in default prompt. Edit to override with your own instructions."
                 : localResultType === "text_rewrite"
                   ? 'Write the full system prompt for this custom editor. It must return JSON with "editedText" and "changes".'
                   : "Write the full system prompt for this custom agent."}
