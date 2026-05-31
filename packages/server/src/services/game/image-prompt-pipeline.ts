@@ -8,6 +8,17 @@ import type { BaseLLMProvider } from "../llm/base-provider.js";
 import { logger } from "../../lib/logger.js";
 import { withAiAuditContext } from "../ai-audit/audit-context.js";
 import {
+  auditFluxPrompt,
+  buildGeometryHint,
+  filterArtDirectionForFacts,
+  fluxComposeAuditRetryHint,
+  isFullSceneFacts,
+  normalizePromptNames,
+  postProcessFacts,
+  scoreFluxPrompt,
+} from "./flux-prompt-audit.js";
+import { isFullSceneIllustrationRequest } from "./illustration-character-focus.js";
+import {
   parseFactsJson,
   SCENE_FACTS_JSON_SCHEMA,
   validateFacts,
@@ -121,7 +132,11 @@ export function sanitizeRewriterOutput(raw: string): string {
   return cleaned;
 }
 
-export function validateComposedPrompt(raw: string, family: string): string {
+export function validateComposedPrompt(
+  raw: string,
+  family: string,
+  facts?: SceneFacts,
+): string {
   const cleaned = sanitizeRewriterOutput(raw);
   if (!cleaned) {
     throw new Error("composed prompt is empty after sanitize");
@@ -134,16 +149,28 @@ export function validateComposedPrompt(raw: string, family: string): string {
     if (lines.length !== 7) {
       throw new Error(`expected exactly 7 non-empty lines, got ${lines.length}`);
     }
-    return clampPrompt(lines.join("\n"));
+    const prompt = clampPrompt(normalizePromptNames(lines.join("\n")));
+    if (facts) {
+      auditFluxPrompt(prompt, facts);
+    }
+    return prompt;
   }
   return clampPrompt(cleaned);
 }
 
-function appendArtDirection(parts: string[], req: RewriteIllustrationPromptRequest): void {
+function appendArtDirection(
+  parts: string[],
+  req: RewriteIllustrationPromptRequest,
+  facts?: SceneFacts,
+): void {
+  const artStyle =
+    facts && req.artStyle?.trim()
+      ? filterArtDirectionForFacts(req.artStyle.trim(), facts)
+      : req.artStyle?.trim();
   const artLines = [
     req.genre?.trim() ? `genre: ${req.genre.trim()}` : null,
     req.setting?.trim() ? `setting: ${req.setting.trim()}` : null,
-    req.artStyle?.trim() ? `art style: ${req.artStyle.trim()}` : null,
+    artStyle ? `art style: ${artStyle}` : null,
   ].filter((line): line is string => !!line);
   if (artLines.length) {
     parts.push("", "<art_direction>", artLines.join("\n"), "</art_direction>");
@@ -216,7 +243,11 @@ export function buildComposerUserMessage(
     JSON.stringify(facts, null, 2),
     "</scene_facts>",
   ];
-  appendArtDirection(parts, req);
+  const geometryHint = buildGeometryHint(facts);
+  if (geometryHint) {
+    parts.push("", geometryHint);
+  }
+  appendArtDirection(parts, req, facts);
   if (req.imagePromptInstructions?.trim()) {
     parts.push(
       "",
@@ -284,8 +315,12 @@ export function getComposeSystemPrompt(
   family: string,
   customAddendum: string,
   rewriterRating: "sfw" | "nsfw",
+  fullScene = false,
 ): string {
-  const promptKey = family === "flux" ? "image-prompt-writer" : "image-prompt-writer-compose-generic";
+  let promptKey = family === "flux" ? "image-prompt-writer" : "image-prompt-writer-compose-generic";
+  if (family === "flux" && fullScene) {
+    promptKey = "image-prompt-writer-full-scene";
+  }
   const jailbreak = rewriterRating === "nsfw" ? NSFW_REWRITER_JAILBREAK : null;
   return buildSystemPrompt(promptKey, customAddendum, jailbreak);
 }
@@ -389,19 +424,21 @@ export async function runTwoStagePipeline(options: RunTwoStagePipelineOptions): 
     throw new Error("scene-fact-extractor system prompt is empty");
   }
 
-  const composeSystem = getComposeSystemPrompt(styleGuideInfo.family, customAgentAddendum, rewriterRating);
-  if (!composeSystem) {
-    throw new Error("compose system prompt is empty");
-  }
+  const fullSceneRequest = isFullSceneIllustrationRequest({
+    prompt: req.draftPrompt,
+    reason: req.reason ?? undefined,
+    slug: undefined,
+  });
 
   const startedAt = Date.now();
   logger.info(
-    "[image-prompt-pipeline] starting two-stage rewrite (family=%s, extract=%s/%s, compose=%s/%s)",
+    "[image-prompt-pipeline] starting two-stage rewrite (family=%s, extract=%s/%s, compose=%s/%s, fullScene=%s)",
     styleGuideInfo.family,
     extractConn.providerName,
     settings.extractModel,
     composeConn.providerName,
     settings.composeModel,
+    fullSceneRequest ? "yes" : "no",
   );
 
   const facts = await withRetry("extract-facts", settings.pipelineRetries, async () => {
@@ -427,35 +464,76 @@ export async function runTwoStagePipeline(options: RunTwoStagePipelineOptions): 
         composeModel: settings.composeModel,
       },
     );
-    return validateFacts(parseFactsJson(raw));
+    return postProcessFacts(validateFacts(parseFactsJson(raw)), { fullScene: fullSceneRequest });
   });
+
+  const composeSystem = getComposeSystemPrompt(
+    styleGuideInfo.family,
+    customAgentAddendum,
+    rewriterRating,
+    isFullSceneFacts(facts),
+  );
+  if (!composeSystem) {
+    throw new Error("compose system prompt is empty");
+  }
 
   logger.debug("[image-prompt-pipeline] extracted facts:\n%s", JSON.stringify(facts, null, 2));
 
-  const composed = await withRetry("compose-prompt", settings.pipelineRetries, async () => {
-    const raw = await callLlm(
-      composeConn,
-      composeSystem,
-      buildComposerUserMessage(req, facts, styleGuideInfo.label, styleGuideInfo.styleGuide),
-      {
-        model: settings.composeModel,
-        temperature: settings.composeTemperature,
-        maxTokens: settings.maxTokens,
-        signal: req.signal,
-        openrouterProvider: composeConn.openrouterProvider,
-      },
-      {
-        agentConfigId,
-        chatId: req.chatId,
-        stage: "compose-prompt",
-        family: styleGuideInfo.family,
-        rating: rewriterRating,
-        extractModel: settings.extractModel,
-        composeModel: settings.composeModel,
-      },
+  let lastComposeViolations: string[] | null = null;
+  const composed = await withRetry("compose-prompt", settings.pipelineRetries, async (attempt) => {
+    const baseUserMessage = buildComposerUserMessage(
+      req,
+      facts,
+      styleGuideInfo.label,
+      styleGuideInfo.styleGuide,
     );
-    return validateComposedPrompt(raw, styleGuideInfo.family);
+    const retryHint =
+      attempt > 1 && lastComposeViolations
+        ? `\n\n<audit_failures>\nPrevious output failed: ${lastComposeViolations.join("; ")}\n${fluxComposeAuditRetryHint(facts)}\n</audit_failures>`
+        : "";
+    try {
+      const raw = await callLlm(
+        composeConn,
+        composeSystem,
+        baseUserMessage + retryHint,
+        {
+          model: settings.composeModel,
+          temperature: settings.composeTemperature,
+          maxTokens: settings.maxTokens,
+          signal: req.signal,
+          openrouterProvider: composeConn.openrouterProvider,
+        },
+        {
+          agentConfigId,
+          chatId: req.chatId,
+          stage: "compose-prompt",
+          family: styleGuideInfo.family,
+          rating: rewriterRating,
+          extractModel: settings.extractModel,
+          composeModel: settings.composeModel,
+        },
+      );
+      return validateComposedPrompt(raw, styleGuideInfo.family, facts);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes("flux prompt audit failed:")) {
+        lastComposeViolations = message.replace(/^flux prompt audit failed:\s*/, "").split("; ");
+      }
+      throw err;
+    }
   });
+
+  if (styleGuideInfo.family === "flux") {
+    const quality = scoreFluxPrompt(composed, facts);
+    logger.info(
+      "[image-prompt-pipeline] flux prompt quality score=%d warnings=%d",
+      quality.score,
+      quality.warnings.length,
+    );
+    if (quality.warnings.length > 0) {
+      logger.debug("[image-prompt-pipeline] flux quality warnings: %s", quality.warnings.join("; "));
+    }
+  }
 
   logger.info(
     "[image-prompt-pipeline] two-stage ok (draftChars=%d → %d, family=%s, %dms)",

@@ -103,7 +103,7 @@ function parseAgentSettings(raw: unknown, connectionModel: string): ParsedAgentS
       ? settings.composeTemperature
       : typeof settings.temperature === "number" && settings.temperature >= 0 && settings.temperature <= 2
         ? settings.temperature
-        : 0.4;
+        : 0.45;
   const extractTemperature =
     typeof settings.extractTemperature === "number" &&
     settings.extractTemperature >= 0 &&
@@ -113,7 +113,7 @@ function parseAgentSettings(raw: unknown, connectionModel: string): ParsedAgentS
   const pipelineRetries =
     typeof settings.pipelineRetries === "number" && settings.pipelineRetries >= 1
       ? Math.min(5, Math.floor(settings.pipelineRetries))
-      : 2;
+      : 3;
   const extractModel =
     typeof settings.extractModel === "string" && settings.extractModel.trim()
       ? settings.extractModel.trim()
@@ -355,6 +355,13 @@ export async function rewriteIllustrationPrompt(req: RewriteIllustrationPromptRe
       customAgentAddendum: agentPromptTemplate,
     });
   } catch (pipelineErr) {
+    if (styleGuideInfo.family === "flux") {
+      logger.warn(
+        pipelineErr,
+        "[image-prompt-writer] two-stage flux pipeline failed — skipping un-audited single-shot fallback",
+      );
+      return null;
+    }
     logger.warn(pipelineErr, "[image-prompt-writer] two-stage pipeline failed — trying single-shot fallback");
     try {
       return await runSingleShotRewrite({
