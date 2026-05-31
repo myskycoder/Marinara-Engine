@@ -37,6 +37,7 @@ packages/server/data/
 
 # Logs
 *.log
+logs/
 
 # Custom agents (personal)
 .github/agents/qa.agent.md
@@ -48,3 +49,4 @@ release-artifacts/
 # Installer artifacts are published on GitHub Releases, not tracked in source
 installer/*.exe
 win/installer/*.exe
+libs

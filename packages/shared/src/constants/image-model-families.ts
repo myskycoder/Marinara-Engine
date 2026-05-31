@@ -102,8 +102,18 @@ const ILLUSTRIOUS_GUIDE = [
 ].join(" ");
 const PONY_GUIDE =
   "Pony Diffusion expects booru-style comma-separated tags PLUS the Pony-specific quality prefix `score_9, score_8_up, score_7_up, source_anime` (or `source_furry` / `source_pony` if relevant). Then lead with rating (`rating_safe` or `rating_explicit`), subject tags, composition, environment, style. Use lowercase snake_case tags.";
-const FLUX_GUIDE =
-  "Flux models respond best to descriptive natural-language prose (1–3 sentences, optionally followed by a short comma-joined modifier list). Be specific about composition, lighting, mood, lens/camera angle, and material/texture. Quality boilerplate ('masterpiece', 'best quality') is unhelpful — drop it.";
+const FLUX_GUIDE = [
+  "Target checkpoint: Flux 2 Klein (Black Forest Labs / ComfyUI).",
+  "Write natural-language English using exactly seven sentences, one per line, in this order:",
+  "1) Main subject (include first-person POV when applicable).",
+  "2) What the subject is doing — one cinematic frozen moment with poses and actions clear enough for an illustrator to draw without guessing.",
+  "3) Location and environment.",
+  "4) Important visual details.",
+  "5) Lighting description.",
+  "6) Mood and atmosphere.",
+  "7) Optional style/camera information.",
+  'No booru tags. No "masterpiece" / "best quality". NSFW drafts: be maximally explicit and anatomically detailed — open poses, garment state, contact, and acts; never euphemize.',
+].join(" ");
 const DALLE3_GUIDE =
   "DALL·E 3 expects fluent natural-language sentences as if briefing an art director. Describe subject, composition, lighting, mood, camera angle, and art style in plain English. No tag dumps, no quality boilerplate, no negative-prompt syntax. Keep it under ~400 words.";
 const GPT_IMAGE_GUIDE =
@@ -159,7 +169,7 @@ const FAMILY_INFO: Record<ImageModelFamily, ImageModelFamilyInfo> = {
   },
   flux: {
     family: "flux",
-    label: "FLUX (natural-language)",
+    label: "Flux 2 Klein (natural-language)",
     promptStyleGuide: FLUX_GUIDE,
     negativeStyleGuide: NATURAL_NEGATIVE,
   },

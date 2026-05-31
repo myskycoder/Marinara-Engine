@@ -1,3 +1,4 @@
+import type { SceneIllustrationRequest } from "@marinara-engine/shared";
 import { isSameNpcName, npcNameKey } from "./npc-name-server.js";
 
 /** Bracket tags that are VN channels, moods, or flags — not character names. */
@@ -54,6 +55,26 @@ function isLikelyNonCharacterBracketTag(inner: string): boolean {
 export function isIllustrationReferenceSubject(name: string): boolean {
   const key = npcNameKey(name);
   return key !== "player" && key !== "protagonist" && key !== "self";
+}
+
+/** Third-person Full SFW/NSFW gallery requests — player protagonist must be visible and described. */
+export function isFullSceneIllustrationRequest(
+  illustration: Pick<SceneIllustrationRequest, "prompt" | "reason" | "slug">,
+): boolean {
+  const reason = (illustration.reason ?? "").toLowerCase();
+  const slug = (illustration.slug ?? "").toLowerCase();
+  const prompt = illustration.prompt ?? "";
+  if (reason.includes("full-scene")) return true;
+  if (slug.startsWith("manual-full-")) return true;
+  if (/third-person wide-shot scene illustration/i.test(prompt)) return true;
+  if (/player protagonist IS visible/i.test(prompt)) return true;
+  return false;
+}
+
+export interface IllustrationPlayerProtagonist {
+  name: string;
+  appearanceText: string;
+  avatarPath?: string | null;
 }
 
 function dedupeNames(names: string[], limit: number): string[] {

@@ -163,6 +163,8 @@ import {
 } from "../services/game/illustration-rewriter-context.js";
 import {
   resolveIllustrationFocusNames,
+  isFullSceneIllustrationRequest,
+  type IllustrationPlayerProtagonist,
 } from "../services/game/illustration-character-focus.js";
 import { recordIllustrationSkip, type IllustrationSkipReason } from "../services/game/illustration-audit.js";
 import {
@@ -369,6 +371,39 @@ function extractCharacterAppearanceText(characterData: Record<string, unknown>):
   return [appearance, description].filter(Boolean).join("; ").slice(0, 500);
 }
 
+function extractPersonaAppearanceForIllustration(persona: {
+  appearance?: string | null;
+  description?: string | null;
+}): string {
+  const appearance = (persona.appearance ?? "").trim();
+  const description = (persona.description ?? "").trim();
+  return [appearance, description].filter(Boolean).join("; ").slice(0, 500);
+}
+
+async function resolveIllustrationPlayerProtagonist(
+  chars: ReturnType<typeof createCharactersStorage>,
+  chat: { personaId?: string | null },
+  meta: Record<string, unknown>,
+): Promise<IllustrationPlayerProtagonist | null> {
+  const setupConfig = meta.gameSetupConfig as { personaId?: string | null } | null | undefined;
+  const personaId = chat.personaId || setupConfig?.personaId;
+  if (!personaId) return null;
+  try {
+    const persona = await chars.getPersona(personaId);
+    if (!persona) return null;
+    const name = (persona.name ?? "Player").trim() || "Player";
+    const appearanceText = extractPersonaAppearanceForIllustration(persona);
+    const fallback = (persona.description ?? "").trim();
+    return {
+      name,
+      appearanceText: appearanceText || fallback || name,
+      avatarPath: persona.avatarPath ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function collectIllustrationCharacterAssets(opts: {
   illustration: SceneIllustrationRequest;
   characterNames: string[];
@@ -387,6 +422,8 @@ function collectIllustrationCharacterAssets(opts: {
   includeBackgroundReference?: boolean;
   /** Cap how many character reference images are collected (1 for single-ref ComfyUI). */
   maxReferenceImages?: number;
+  /** Active chat persona — included in rewriter payload for full-scene (third-person) CG. */
+  playerProtagonist?: IllustrationPlayerProtagonist | null;
 }): {
   referenceImages: string[];
   /**
@@ -504,6 +541,28 @@ function collectIllustrationCharacterAssets(opts: {
     }
   }
 
+  let characterNamesForRewriter = rewriterNames;
+  if (isFullSceneIllustrationRequest(opts.illustration) && opts.playerProtagonist?.name?.trim()) {
+    const playerName = opts.playerProtagonist.name.trim();
+    const playerKey = npcNameKey(playerName);
+    const playerDesc = opts.playerProtagonist.appearanceText?.trim();
+    if (playerKey && playerDesc && !describedForRewriter.has(playerKey)) {
+      describedForRewriter.add(playerKey);
+      characterDescriptionsForRewriter.unshift(`${playerName}: ${playerDesc}`.slice(0, 300));
+    }
+    if (playerKey && !characterNamesForRewriter.some((name) => npcNameKey(name) === playerKey)) {
+      characterNamesForRewriter = [playerName, ...characterNamesForRewriter].slice(0, 8);
+    }
+    const playerAvatarPath = opts.playerProtagonist.avatarPath?.trim();
+    if (playerAvatarPath) {
+      const playerRef = readAvatarBase64(playerAvatarPath);
+      if (playerRef && !seen.has(playerRef) && references.length < maxReferenceImages) {
+        references.unshift(playerRef);
+        seen.add(playerRef);
+      }
+    }
+  }
+
   const backgroundBase64 = readBackgroundBase64(opts.backgroundTag);
   if (opts.includeBackgroundReference && backgroundBase64 && references.length > 0) {
     references.splice(1, 0, backgroundBase64);
@@ -512,7 +571,7 @@ function collectIllustrationCharacterAssets(opts: {
   return {
     referenceImages: references,
     characterDescriptions: characterDescriptions.slice(0, 5),
-    characterNamesForRewriter: rewriterNames,
+    characterNamesForRewriter: characterNamesForRewriter,
     characterDescriptionsForRewriter: characterDescriptionsForRewriter.slice(0, 8),
   };
 }
@@ -6917,6 +6976,7 @@ export async function gameRoutes(app: FastifyInstance) {
                 input.chatId,
                 (meta.gameNpcs as GameNpc[]) ?? [],
               );
+              const illustrationPlayerProtagonist = await resolveIllustrationPlayerProtagonist(charStore, chat, meta);
               const illustrationAssets = collectIllustrationCharacterAssets({
                 illustration,
                 characterNames: input.context.characterNames ?? [],
@@ -6935,6 +6995,7 @@ export async function gameRoutes(app: FastifyInstance) {
                 )
                   ? 4
                   : 1,
+                playerProtagonist: illustrationPlayerProtagonist,
               });
               const illustrationSeason =
                 coerceSeason((sceneResult as Record<string, unknown>).season) ?? coerceSeason(meta.gameCurrentSeason);
@@ -7591,6 +7652,12 @@ export async function gameRoutes(app: FastifyInstance) {
         const npcReferenceByName = buildGameNpcReferenceByName(input.chatId, (meta.gameNpcs as GameNpc[]) ?? []);
 
         const illustration = input.illustration as SceneIllustrationRequest;
+        const previewCharStore = createCharactersStorage(app.db);
+        const illustrationPlayerProtagonist = await resolveIllustrationPlayerProtagonist(
+          previewCharStore,
+          chat,
+          meta,
+        );
         const illustrationAssets = collectIllustrationCharacterAssets({
           illustration,
           characterNames: illustration.characters ?? [],
@@ -7609,6 +7676,7 @@ export async function gameRoutes(app: FastifyInstance) {
           )
             ? 4
             : 1,
+          playerProtagonist: illustrationPlayerProtagonist,
         });
         const prompt = await buildSceneIllustrationImagePrompt({
           chatId: input.chatId,
@@ -8293,6 +8361,7 @@ export async function gameRoutes(app: FastifyInstance) {
         const metaBg = (meta.gameSceneBackground as string) ?? null;
         const metaLoc = (meta.currentLocationId as string) ?? null;
         const npcReferenceByName = buildGameNpcReferenceByName(input.chatId, (meta.gameNpcs as GameNpc[]) ?? []);
+        const illustrationPlayerProtagonist = await resolveIllustrationPlayerProtagonist(charStore, chat, meta);
         const illustrationAssets = collectIllustrationCharacterAssets({
           illustration,
           characterNames: characterNamesForIll,
@@ -8311,6 +8380,7 @@ export async function gameRoutes(app: FastifyInstance) {
           )
             ? 4
             : 1,
+          playerProtagonist: illustrationPlayerProtagonist,
         });
         const illustrationSeasonGen = input.conditions?.season ?? coerceSeason(meta.gameCurrentSeason);
         const illustrationContinuityGen = buildIllustrationContinuity({

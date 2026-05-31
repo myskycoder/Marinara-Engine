@@ -330,7 +330,7 @@ export const BUILT_IN_AGENTS: BuiltInAgentMeta[] = [
     id: "image-prompt-writer",
     name: "Image Prompt Writer",
     description:
-      "Rewrites Game-mode CG illustration prompts before they hit the image model, adapting them to the configured image-model family (SDXL/Pony booru tags, Flux/DALL·E natural language, NovelAI v3/v4, Pollinations, ComfyUI, etc.). Runs on demand from the Game-mode pipeline — not on every chat turn.",
+      "Two-stage pipeline for Game-mode CG prompts: extracts visual scene facts (JSON) then composes a model-aware prompt for the configured image-model family (SDXL/Pony booru tags, Flux/DALL·E natural language, NovelAI v3/v4, Pollinations, ComfyUI, etc.). Runs on demand from the Game-mode pipeline — not on every chat turn.",
     phase: "parallel",
     enabledByDefault: false,
     category: "misc",

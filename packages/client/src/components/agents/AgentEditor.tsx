@@ -224,6 +224,11 @@ export function AgentEditor() {
   const [localUseAvatarReferences, setLocalUseAvatarReferences] = useState(false);
   const [localImagePositivePrompt, setLocalImagePositivePrompt] = useState("");
   const [localImageNegativePrompt, setLocalImageNegativePrompt] = useState("");
+  const [localExtractModel, setLocalExtractModel] = useState("");
+  const [localComposeModel, setLocalComposeModel] = useState("");
+  const [localExtractConnectionId, setLocalExtractConnectionId] = useState("");
+  const [localExtractTemperature, setLocalExtractTemperature] = useState<number | "">("");
+  const [localComposeTemperature, setLocalComposeTemperature] = useState<number | "">("");
   const [spotifyStatus, setSpotifyStatus] = useState<{
     connected: boolean;
     expired: boolean;
@@ -286,6 +291,19 @@ export function AgentEditor() {
       setLocalUseAvatarReferences(settings.useAvatarReferences ?? false);
       setLocalImagePositivePrompt((settings.imagePositivePrompt as string) ?? "");
       setLocalImageNegativePrompt((settings.imageNegativePrompt as string) ?? "");
+      setLocalExtractModel((settings.extractModel as string) ?? "");
+      setLocalComposeModel((settings.composeModel as string) ?? "");
+      setLocalExtractConnectionId((settings.extractConnectionId as string) ?? "");
+      setLocalExtractTemperature(
+        typeof settings.extractTemperature === "number" ? settings.extractTemperature : "",
+      );
+      setLocalComposeTemperature(
+        typeof settings.composeTemperature === "number"
+          ? settings.composeTemperature
+          : typeof settings.temperature === "number"
+            ? settings.temperature
+            : "",
+      );
       setLocalResultType(normalizeCustomResultType(settings.resultType));
       setLocalIncludePreGenInjections(settings.includePreGenInjections === true);
       setLocalIncludeParallelResults(settings.includeParallelResults === true);
@@ -312,6 +330,11 @@ export function AgentEditor() {
       setLocalUseAvatarReferences(false);
       setLocalImagePositivePrompt("");
       setLocalImageNegativePrompt("");
+      setLocalExtractModel("");
+      setLocalComposeModel("");
+      setLocalExtractConnectionId("");
+      setLocalExtractTemperature("");
+      setLocalComposeTemperature("");
       setLocalResultType("context_injection");
       setLocalIncludePreGenInjections(false);
       setLocalIncludeParallelResults(false);
@@ -339,6 +362,11 @@ export function AgentEditor() {
       setLocalUseAvatarReferences(false);
       setLocalImagePositivePrompt("");
       setLocalImageNegativePrompt("");
+      setLocalExtractModel("");
+      setLocalComposeModel("");
+      setLocalExtractConnectionId("");
+      setLocalExtractTemperature("");
+      setLocalComposeTemperature("");
       setLocalResultType("context_injection");
       setLocalIncludePreGenInjections(false);
       setLocalIncludeParallelResults(false);
@@ -367,6 +395,8 @@ export function AgentEditor() {
   const isKnowledgeRouterAgent = agentDetailId === "knowledge-router" || dbConfig?.type === "knowledge-router";
   // Background agent — can optionally generate missing roleplay backgrounds.
   const isBackgroundAgent = agentDetailId === "background" || dbConfig?.type === "background";
+  const isImagePromptWriterAgent =
+    agentDetailId === "image-prompt-writer" || dbConfig?.type === "image-prompt-writer";
 
   // Detect when both knowledge agents will actually run in parallel. Shows a
   // soft warning so users don't accidentally do overlapping work that bloats
@@ -526,6 +556,17 @@ export function AgentEditor() {
         ...(localUseAvatarReferences ? { useAvatarReferences: true } : {}),
         ...(localImagePositivePrompt.trim() ? { imagePositivePrompt: localImagePositivePrompt.trim() } : {}),
         ...(localImageNegativePrompt.trim() ? { imageNegativePrompt: localImageNegativePrompt.trim() } : {}),
+        ...(isImagePromptWriterAgent && localExtractModel.trim() ? { extractModel: localExtractModel.trim() } : {}),
+        ...(isImagePromptWriterAgent && localComposeModel.trim() ? { composeModel: localComposeModel.trim() } : {}),
+        ...(isImagePromptWriterAgent && localExtractConnectionId
+          ? { extractConnectionId: localExtractConnectionId }
+          : {}),
+        ...(isImagePromptWriterAgent && localExtractTemperature !== ""
+          ? { extractTemperature: Number(localExtractTemperature) }
+          : {}),
+        ...(isImagePromptWriterAgent && localComposeTemperature !== ""
+          ? { composeTemperature: Number(localComposeTemperature) }
+          : {}),
       },
     };
 
@@ -578,6 +619,12 @@ export function AgentEditor() {
     localUseAvatarReferences,
     localImagePositivePrompt,
     localImageNegativePrompt,
+    localExtractModel,
+    localComposeModel,
+    localExtractConnectionId,
+    localExtractTemperature,
+    localComposeTemperature,
+    isImagePromptWriterAgent,
     isCharacterTrackerAgent,
     dbConfig,
     builtIn,
@@ -931,6 +978,111 @@ export function AgentEditor() {
                 : "When empty, uses the agent default connection if one is set, otherwise falls back to the chat's active connection."}
             </p>
           </FieldGroup>
+
+          {isImagePromptWriterAgent && (
+            <FieldGroup
+              label="Prompt Pipeline Models"
+              icon={<Link2 size="0.875rem" className="text-[var(--primary)]" />}
+              help="Two-stage pipeline: Stage 1 extracts visual scene facts (JSON) with a cheap model; Stage 2 composes the final image prompt with a stronger model. Leave model fields empty to use the Connection Override model."
+            >
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+                    Extract Model (Stage 1)
+                  </label>
+                  <input
+                    type="text"
+                    value={localExtractModel}
+                    onChange={(e) => {
+                      setLocalExtractModel(e.target.value);
+                      markDirty();
+                    }}
+                    placeholder="e.g. google/gemini-2.5-flash"
+                    className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+                    Compose Model (Stage 2)
+                  </label>
+                  <input
+                    type="text"
+                    value={localComposeModel}
+                    onChange={(e) => {
+                      setLocalComposeModel(e.target.value);
+                      markDirty();
+                    }}
+                    placeholder="e.g. deepseek/deepseek-chat"
+                    className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+                    Extract Connection Override
+                  </label>
+                  <select
+                    value={localExtractConnectionId}
+                    onChange={(e) => {
+                      setLocalExtractConnectionId(e.target.value);
+                      markDirty();
+                    }}
+                    className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                  >
+                    <option value="">Same as Connection Override above</option>
+                    {llmConnections.map((conn) => (
+                      <option key={conn.id} value={conn.id}>
+                        {conn.name} ({conn.provider})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+                      Extract Temperature
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={2}
+                      step={0.1}
+                      value={localExtractTemperature}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setLocalExtractTemperature(v === "" ? "" : Math.max(0, Math.min(2, parseFloat(v) || 0)));
+                        markDirty();
+                      }}
+                      placeholder="0.2"
+                      className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm tabular-nums ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+                      Compose Temperature
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={2}
+                      step={0.1}
+                      value={localComposeTemperature}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setLocalComposeTemperature(v === "" ? "" : Math.max(0, Math.min(2, parseFloat(v) || 0)));
+                        markDirty();
+                      }}
+                      placeholder="0.4"
+                      className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm tabular-nums ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                    />
+                  </div>
+                </div>
+              </div>
+              <p className="mt-2 text-[0.625rem] text-[var(--muted-foreground)]">
+                Stage 1 uses structured JSON extraction; Stage 2 composes the model-aware prompt. If the extract
+                provider does not support JSON schema, the agent falls back to a single-shot rewrite automatically.
+              </p>
+            </FieldGroup>
+          )}
 
           {/* ── Image Generation Connection (Illustrator only) ── */}
           {(agentDetailId === "illustrator" || dbConfig?.type === "illustrator") && (
