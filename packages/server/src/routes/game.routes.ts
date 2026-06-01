@@ -7039,6 +7039,7 @@ export async function gameRoutes(app: FastifyInstance) {
                 artStyle,
                 imagePromptInstructions,
                 rating: rewriterRating,
+                wowArt: illustration.wowArt === true,
                 imageConn: {
                   provider: imgConn.provider ?? null,
                   baseUrl: imgConn.baseUrl ?? null,
@@ -7509,6 +7510,7 @@ export async function gameRoutes(app: FastifyInstance) {
         characters: z.array(z.string().min(1).max(200)).max(6).optional(),
         reason: z.string().max(300).optional(),
         slug: z.string().max(80).optional(),
+        wowArt: z.boolean().optional(),
       })
       .optional(),
     /**
@@ -8441,6 +8443,7 @@ export async function gameRoutes(app: FastifyInstance) {
             artStyle,
             imagePromptInstructions,
             rating: rewriterRating,
+            wowArt: illustration.wowArt === true,
             imageConn: {
               provider: illImgConn.provider ?? null,
               baseUrl: illImgConn.baseUrl ?? null,

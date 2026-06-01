@@ -24,6 +24,14 @@ interface ChatGalleryProps {
   onManualImpactSceneSfw?: () => void;
   /** Game mode: запросить полную CG-иллюстрацию сцены (третье лицо, игрок в кадре) через NSFW image-модель */
   onManualImpactSceneNsfw?: () => void;
+  /** Wow CG: +1 SFW with cinematic camera/lighting pipeline */
+  onManualWowSfw?: () => void;
+  /** Wow CG: +1 NSFW with cinematic camera/lighting pipeline */
+  onManualWowNsfw?: () => void;
+  /** Wow CG: Full SFW with cinematic camera/lighting pipeline */
+  onManualWowSceneSfw?: () => void;
+  /** Wow CG: Full NSFW with cinematic camera/lighting pipeline */
+  onManualWowSceneNsfw?: () => void;
   /** Game mode: снять CG-подложку и вернуть фон локации */
   onClearCgPlate?: () => void;
 }
@@ -43,6 +51,10 @@ export function ChatGallery({
   onManualImpactNsfw,
   onManualImpactSceneSfw,
   onManualImpactSceneNsfw,
+  onManualWowSfw,
+  onManualWowNsfw,
+  onManualWowSceneSfw,
+  onManualWowSceneNsfw,
   onClearCgPlate,
 }: ChatGalleryProps) {
   const { data: images, isLoading } = useGalleryImages(chatId);
@@ -79,7 +91,12 @@ export function ChatGallery({
         onManualImpactNsfw ||
         onManualImpactSceneSfw ||
         onManualImpactSceneNsfw ||
+        onManualWowSfw ||
+        onManualWowNsfw ||
+        onManualWowSceneSfw ||
+        onManualWowSceneNsfw ||
         onClearCgPlate) && (
+        <div className="flex flex-col gap-2">
         <div className="flex flex-wrap gap-2">
           {onIllustrate && (
             <button
@@ -142,6 +159,58 @@ export function ChatGallery({
               <ImageOff size="1rem" />
             </button>
           )}
+        </div>
+        {(onManualWowSfw || onManualWowNsfw || onManualWowSceneSfw || onManualWowSceneNsfw) && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[0.65rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+              Wow CG
+            </span>
+            {onManualWowSfw && (
+              <button
+                type="button"
+                onClick={onManualWowSfw}
+                title="Кинематографичная CG (POV): усиленные камера и свет по сцене, без смены фактов"
+                className="flex min-h-[2.5rem] min-w-[3.25rem] shrink-0 items-center justify-center gap-1 rounded-xl border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[0.6875rem] font-semibold text-[var(--foreground)] transition-all hover:bg-amber-500/20"
+              >
+                <Sparkles size="0.875rem" className="text-amber-500" />
+                +1
+              </button>
+            )}
+            {onManualWowNsfw && (
+              <button
+                type="button"
+                onClick={onManualWowNsfw}
+                title="Кинематографичная NSFW CG (POV): усиленные камера и свет по сцене"
+                className="flex min-h-[2.5rem] min-w-[3.25rem] shrink-0 items-center justify-center gap-1 rounded-xl border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[0.6875rem] font-semibold text-[var(--foreground)] transition-all hover:bg-amber-500/20"
+              >
+                <Sparkles size="0.875rem" className="text-amber-500" />
+                NSFW
+              </button>
+            )}
+            {onManualWowSceneSfw && (
+              <button
+                type="button"
+                onClick={onManualWowSceneSfw}
+                title="Кинематографичная Full CG: wide-shot камера и свет по сцене"
+                className="flex min-h-[2.5rem] min-w-[3.5rem] shrink-0 items-center justify-center gap-1 rounded-xl border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[0.6875rem] font-semibold text-[var(--foreground)] transition-all hover:bg-amber-500/20"
+              >
+                <Sparkles size="0.875rem" className="text-amber-500" />
+                Full
+              </button>
+            )}
+            {onManualWowSceneNsfw && (
+              <button
+                type="button"
+                onClick={onManualWowSceneNsfw}
+                title="Кинематографичная Full NSFW CG: wide-shot камера и свет по сцене"
+                className="flex min-h-[2.5rem] min-w-[3.75rem] shrink-0 items-center justify-center gap-1 rounded-xl border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[0.6875rem] font-semibold text-[var(--foreground)] transition-all hover:bg-amber-500/20"
+              >
+                <Sparkles size="0.875rem" className="text-amber-500" />
+                Full N
+              </button>
+            )}
+          </div>
+        )}
         </div>
       )}
 

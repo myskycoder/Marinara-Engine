@@ -4917,7 +4917,7 @@ export function GameSurface({
    * server only swaps the connection for the illustration step.
    */
   const requestManualExtraIllustration = useCallback(
-    async (variant: "sfw" | "nsfw", pov: "first-person" | "scene") => {
+    async (variant: "sfw" | "nsfw", pov: "first-person" | "scene", options?: { wowArt?: boolean }) => {
       const enableGen = !!chatMeta.enableSpriteGeneration;
       const sfwConn = (chatMeta.gameImageConnectionId as string | undefined)?.trim() || null;
       const nsfwConn = (chatMeta.gameImageConnectionIdNsfw as string | undefined)?.trim() || null;
@@ -4977,13 +4977,21 @@ export function GameSurface({
       const reason =
         pov === "scene"
           ? variant === "nsfw"
-            ? "Player requested full-scene NSFW illustration (Full NSFW) from gallery"
-            : "Player requested full-scene illustration (Full SFW) from gallery"
+            ? options?.wowArt
+              ? "Player requested wow-art full-scene NSFW illustration from gallery"
+              : "Player requested full-scene NSFW illustration (Full NSFW) from gallery"
+            : options?.wowArt
+              ? "Player requested wow-art full-scene illustration from gallery"
+              : "Player requested full-scene illustration (Full SFW) from gallery"
           : variant === "nsfw"
-            ? "Player requested extra NSFW illustration (+1) from gallery"
-            : "Player requested extra illustration (+1) from gallery";
+            ? options?.wowArt
+              ? "Player requested wow-art NSFW illustration (+1) from gallery"
+              : "Player requested extra NSFW illustration (+1) from gallery"
+            : options?.wowArt
+              ? "Player requested wow-art illustration (+1) from gallery"
+              : "Player requested extra illustration (+1) from gallery";
 
-      const slug = `manual-${pov === "scene" ? "full" : "fp"}-${variant}-${Date.now().toString(36)}`;
+      const slug = `manual-${options?.wowArt ? "wow-" : ""}${pov === "scene" ? "full" : "fp"}-${variant}-${Date.now().toString(36)}`;
 
       const res = await requestAssetGeneration(
         {
@@ -5002,13 +5010,19 @@ export function GameSurface({
             characters: sceneWrapCharacterNames.slice(0, 6),
             slug,
             segment: 0,
+            wowArt: options?.wowArt === true,
           },
         },
         { softFailure: true },
       );
 
       if (res?.generatedIllustration) {
-        toast.success("Иллюстрация сгенерирована и добавлена в галерею.", { duration: 3200 });
+        toast.success(
+          options?.wowArt
+            ? "Wow CG сгенерирована и добавлена в галерею."
+            : "Иллюстрация сгенерирована и добавлена в галерею.",
+          { duration: 3200 },
+        );
       } else if (res) {
         toast.info("Генерация завершена без новой картинки (лимиты, модель или короткий контекст).", {
           duration: 4000,
@@ -9778,6 +9792,10 @@ export function GameSurface({
                 onManualImpactNsfw={() => requestManualExtraIllustration("nsfw", "first-person")}
                 onManualImpactSceneSfw={() => requestManualExtraIllustration("sfw", "scene")}
                 onManualImpactSceneNsfw={() => requestManualExtraIllustration("nsfw", "scene")}
+                onManualWowSfw={() => requestManualExtraIllustration("sfw", "first-person", { wowArt: true })}
+                onManualWowNsfw={() => requestManualExtraIllustration("nsfw", "first-person", { wowArt: true })}
+                onManualWowSceneSfw={() => requestManualExtraIllustration("sfw", "scene", { wowArt: true })}
+                onManualWowSceneNsfw={() => requestManualExtraIllustration("nsfw", "scene", { wowArt: true })}
                 onClearCgPlate={handleClearCgPlate}
               />
 

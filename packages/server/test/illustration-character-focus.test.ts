@@ -70,4 +70,12 @@ test("isFullSceneIllustrationRequest detects Full SFW/NSFW gallery requests", ()
     }),
     false,
   );
+  assert.equal(
+    isFullSceneIllustrationRequest({
+      prompt: "Player-requested VN CG still: third-person wide-shot scene illustration.",
+      reason: "Player requested wow-art full-scene illustration from gallery",
+      slug: "manual-wow-full-sfw-abc123",
+    }),
+    true,
+  );
 });

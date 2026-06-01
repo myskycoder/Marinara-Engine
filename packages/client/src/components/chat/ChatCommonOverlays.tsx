@@ -207,6 +207,10 @@ type ChatCommonOverlaysProps = {
   onManualImpactSceneSfw?: () => void;
   /** Game mode: full third-person scene illustration via NSFW image model (Full NSFW) */
   onManualImpactSceneNsfw?: () => void;
+  onManualWowSfw?: () => void;
+  onManualWowNsfw?: () => void;
+  onManualWowSceneSfw?: () => void;
+  onManualWowSceneNsfw?: () => void;
   /** Game mode: clear CG plate from gallery */
   onClearCgPlate?: () => void;
   /** Manually trigger the Scene Painter agent */
@@ -249,6 +253,10 @@ export function ChatCommonOverlays({
   onManualImpactNsfw,
   onManualImpactSceneSfw,
   onManualImpactSceneNsfw,
+  onManualWowSfw,
+  onManualWowNsfw,
+  onManualWowSceneSfw,
+  onManualWowSceneNsfw,
   onClearCgPlate,
   onPaintScene,
   onWizardFinish,
@@ -297,6 +305,10 @@ export function ChatCommonOverlays({
               onManualImpactNsfw={onManualImpactNsfw}
               onManualImpactSceneSfw={onManualImpactSceneSfw}
               onManualImpactSceneNsfw={onManualImpactSceneNsfw}
+              onManualWowSfw={onManualWowSfw}
+              onManualWowNsfw={onManualWowNsfw}
+              onManualWowSceneSfw={onManualWowSceneSfw}
+              onManualWowSceneNsfw={onManualWowSceneNsfw}
               onClearCgPlate={onClearCgPlate}
             />
           )}

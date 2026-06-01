@@ -224,9 +224,10 @@ function toPipelineConnection(resolved: ResolvedAgentLlmConn): PipelineLlmConnec
  */
 export async function rewriteIllustrationPrompt(req: RewriteIllustrationPromptRequest): Promise<string | null> {
   logger.info(
-    "[image-prompt-writer] invoked: chatId=%s draftChars=%d service=%s/%s model=%s",
+    "[image-prompt-writer] invoked: chatId=%s draftChars=%d wowArt=%s service=%s/%s model=%s",
     req.chatId,
     req.draftPrompt?.length ?? 0,
+    req.wowArt ? "yes" : "no",
     req.imageConn.imageService ?? req.imageConn.imageGenerationSource ?? "?",
     req.imageConn.provider ?? "?",
     req.imageConn.model ?? "?",

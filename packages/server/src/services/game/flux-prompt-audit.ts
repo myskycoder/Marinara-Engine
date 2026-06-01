@@ -142,8 +142,11 @@ function sanitizePose(pose: string, mirrorShowsFace: boolean, fullScene: boolean
   return value.replace(/\s{2,}/g, " ").replace(/,\s*,/g, ",").trim();
 }
 
-function enrichLighting(lighting: string): string {
+function enrichLighting(lighting: string, wowArt = false): string {
   const value = String(lighting ?? "").trim();
+  if (wowArt) {
+    return value || "ambient";
+  }
   if (!value || /^ambient$/i.test(value)) {
     return "soft purple, pink, and gold neon nightclub ambient light";
   }
@@ -197,6 +200,8 @@ export function resolveSceneGeometry(facts: SceneFacts, fullScene = false): Scen
 export interface PostProcessFactsOptions {
   /** Gallery Full SFW/NSFW — third-person wide shot with visible protagonist. */
   fullScene?: boolean;
+  /** Wow CG — do not inject generic VIP/neon into facts.lighting; compose derives cinematic light from art_direction. */
+  wowArt?: boolean;
 }
 
 /** Normalize extracted facts before compose. */
@@ -208,7 +213,7 @@ export function postProcessFacts(facts: SceneFacts, opts: PostProcessFactsOption
     processed.protagonist_visible = true;
   }
   processed.action = freezeActionText(processed.action);
-  processed.lighting = enrichLighting(processed.lighting);
+  processed.lighting = enrichLighting(processed.lighting, opts.wowArt === true);
   ensureLocationProps(processed);
   const mirror = String(processed.mirror_shows ?? "").trim();
   const mirrorShowsFace = mirror.length > 0 && FACE_IN_TEXT_RE.test(mirror);
@@ -292,11 +297,116 @@ export function buildGeometryHint(facts: SceneFacts): string | null {
   return lines.join("\n");
 }
 
+export interface WowCinematographyContext {
+  genre?: string | null;
+  setting?: string | null;
+  artStyle?: string | null;
+}
+
+function resolveWowLightingBase(facts: SceneFacts, ctx: WowCinematographyContext): string {
+  const raw = String(facts.lighting ?? "").trim();
+  if (raw && !/^ambient$/i.test(raw)) return raw;
+  const artStyle = ctx.artStyle?.trim();
+  if (artStyle) {
+    return `art_direction palette (${artStyle.slice(0, 180)})`;
+  }
+  return "facts.lighting, time_weather, and art_direction";
+}
+
+/**
+ * Optional Wow CG compose hints — cinematic camera + lighting only.
+ * Palette and mood must follow facts/art_direction, not a fixed template.
+ */
+export function buildWowCinematographyHint(
+  facts: SceneFacts,
+  ctx: WowCinematographyContext = {},
+): string | null {
+  const fullScene = isFullSceneFacts(facts);
+  const lightingBase = resolveWowLightingBase(facts, ctx);
+  const location = String(facts.location_label ?? "").trim() || "location_label";
+  const moodParts = [ctx.genre?.trim(), ctx.setting?.trim(), ctx.artStyle?.trim()].filter(Boolean);
+  const moodRef = moodParts.length > 0 ? moodParts.join("; ") : "art_direction";
+
+  const line5Checklist =
+    "line5_checklist: name key-light SOURCE + DIRECTION, rim on primary subjects, fill/bounce from a visible surface (floor/window/water/sky), optional vignette — palette from art_direction only; never generic 'soft ambient' alone.";
+  const line7Checklist = fullScene
+    ? "line7_checklist: wide cinematic third-person, lens feel (24–35mm interior / 35–50mm exterior), subjects slightly off-center, premium VN key visual, explicit color grade from art_direction."
+    : "line7_checklist: cinematic POV, hip-height or eye-level per geometry, shallow depth of field on the subject, premium VN still, explicit color grade from art_direction — never plain 'medium shot from behind at hip height' without cinematic/lens language.";
+
+  return [
+    "<wow_cinematography>",
+    "Wow CG mode — rewrite ONLY sentence 5 (lighting) and sentence 7 (camera/style) to premium cinematic quality. Do not alter facts, geometry, action, or lines 1–4.",
+    `line5_rule: cinematic lighting faithful to ${location} — start from ${lightingBase} and ${facts.time_weather || "time_weather"}; palette must match ${moodRef} — never import an unrelated mood (no nightclub neon in a forest, no golden hour in a basement unless facts say so).`,
+    line5Checklist,
+    fullScene
+      ? "line7_rule: wide cinematic third-person gallery shot, both subjects readable and slightly off-center, lens suited to the space, premium VN key-visual framing."
+      : "line7_rule: cinematic POV matched to facts.pov and geometry hints, readable subject framing, premium VN still.",
+    line7Checklist,
+    "</wow_cinematography>",
+  ].join("\n");
+}
+
+/** Appended to flux compose system prompt when wowArt is active. */
+export const FLUX_WOW_COMPOSE_SYSTEM_ADDENDUM = `# Wow CG mode (active)
+When <wow_cinematography> is present, it OVERRIDES reference-shape lighting/camera for sentences 5 and 7.
+- Sentence 5 MUST name: key-light direction, rim on subjects, fill/bounce from a visible surface, and a color grade tied to <art_direction> — not bare "ambient light" or reference-shape nightclub neon unless the scene supports it.
+- Sentence 7 MUST name: cinematic framing, lens feel (e.g. 28mm / 35mm) OR depth of field, and premium VN key-visual language — upgrade plain hip-height POV to cinematic POV.
+- Do NOT change sentences 1–4, facts, geometry hints, or character art style from <art_direction>.
+- Wow output is rejected by audit if line 5 or line 7 lacks cinematic lighting/camera language.`;
+
+export const FLUX_WOW_STYLE_GUIDE_SUFFIX =
+  "Wow CG mode: sentences 5 and 7 are mandatory premium cinematic passes — follow <wow_cinematography> checklists exactly. Ignore reference-shape lines 5/7 if they are weaker or conflict with this scene.";
+
+export const FLUX_WOW_COMPOSE_RETRY_SUFFIX =
+  " Wow CG retry: line 5 needs key-light direction + rim + surface bounce + art_direction color grade; line 7 needs cinematic/lens/DOF/key-visual language — do not change lines 1–4.";
+
+const WOW_LINE5_CINEMATIC_RE =
+  /\b(?:key[- ]?light|rim light|backlight|fill light|bounce light|volumetric|color grade|golden hour|moonlight|cinematic lighting|vignette)\b/i;
+const WOW_LINE7_CINEMATIC_RE =
+  /\b(?:cinematic|(?:\d{2,3})\s*mm|lens feel|depth of field|bokeh|key visual|color grade|off-center|gallery shot|wide shot|wide cinematic)\b/i;
+
+export interface FluxAuditOptions {
+  wowArt?: boolean;
+}
+
+function getWowCinematographyViolations(lines: string[]): string[] {
+  const violations: string[] = [];
+  const line5 = lines[4] ?? "";
+  const line7 = lines[6] ?? "";
+
+  if (line5 && !WOW_LINE5_CINEMATIC_RE.test(line5)) {
+    violations.push(
+      "WOW CG: line 5 needs cinematic key/rim/fill lighting with direction, surface bounce, or color grade",
+    );
+  }
+  if (line7 && !WOW_LINE7_CINEMATIC_RE.test(line7)) {
+    violations.push("WOW CG: line 7 needs premium cinematic camera/lens/framing language");
+  }
+  if (
+    line7 &&
+    /\bmedium shot from behind at hip height\b/i.test(line7) &&
+    !/\bcinematic\b/i.test(line7) &&
+    !WOW_LINE7_CINEMATIC_RE.test(line7)
+  ) {
+    violations.push("WOW CG: line 7 must upgrade plain hip-height POV to cinematic framing");
+  }
+  return violations;
+}
+
+export function fluxComposeAuditRetryHintWithWow(facts: SceneFacts, wowArt = false): string {
+  const base = fluxComposeAuditRetryHint(facts);
+  return wowArt ? `${base}${FLUX_WOW_COMPOSE_RETRY_SUFFIX}` : base;
+}
+
 export function normalizePromptNames(prompt: string): string {
   return prompt.replace(/Лина/g, "Lina");
 }
 
-export function getFluxPromptViolations(prompt: string, facts: SceneFacts): string[] {
+export function getFluxPromptViolations(
+  prompt: string,
+  facts: SceneFacts,
+  opts: FluxAuditOptions = {},
+): string[] {
   const violations: string[] = [];
   const lines = prompt
     .split("\n")
@@ -305,6 +415,10 @@ export function getFluxPromptViolations(prompt: string, facts: SceneFacts): stri
 
   if (lines.length !== 7) {
     violations.push(`expected 7 lines, got ${lines.length}`);
+  }
+
+  if (opts.wowArt === true && lines.length === 7) {
+    violations.push(...getWowCinematographyViolations(lines));
   }
 
   if (HAIR_ON_STONE_PROMPT_RE.test(prompt) && FACE_IN_MIRROR_PROMPT_RE.test(prompt)) {
@@ -408,8 +522,8 @@ export function getFluxPromptViolations(prompt: string, facts: SceneFacts): stri
   return violations;
 }
 
-export function auditFluxPrompt(prompt: string, facts: SceneFacts): void {
-  const violations = getFluxPromptViolations(prompt, facts);
+export function auditFluxPrompt(prompt: string, facts: SceneFacts, opts: FluxAuditOptions = {}): void {
+  const violations = getFluxPromptViolations(prompt, facts, opts);
   if (violations.length > 0) {
     throw new Error(`flux prompt audit failed: ${violations.join("; ")}`);
   }
@@ -421,8 +535,12 @@ export interface FluxPromptQualityScore {
   warnings: string[];
 }
 
-export function scoreFluxPrompt(prompt: string, facts: SceneFacts): FluxPromptQualityScore {
-  const violations = getFluxPromptViolations(prompt, facts);
+export function scoreFluxPrompt(
+  prompt: string,
+  facts: SceneFacts,
+  opts: FluxAuditOptions = {},
+): FluxPromptQualityScore {
+  const violations = getFluxPromptViolations(prompt, facts, opts);
   let score = 100 - violations.length * 25;
   const lines = prompt
     .split("\n")
@@ -434,11 +552,13 @@ export function scoreFluxPrompt(prompt: string, facts: SceneFacts): FluxPromptQu
     score -= 10;
   }
   if (lines[2] && /\bsurrounded by\b/i.test(lines[2])) score -= 5;
-  if (!/\b(?:gold|purple|pink)\b/i.test(prompt)) score -= 5;
+  if (opts.wowArt !== true && !/\b(?:gold|purple|pink)\b/i.test(prompt)) score -= 5;
   if (facts.nsfw && !/\b(?:glistening|sweat|wet|flush(?:ed)?)\b/i.test(prompt)) score -= 5;
   if (lines[0] && /\bFrom my first-person view\b/i.test(lines[0])) score += 5;
   if (isFullSceneFacts(facts) && lines[0] && /\bthird-person\b/i.test(lines[0])) score += 5;
   if (isFullSceneFacts(facts) && lines[6] && /\bwide shot\b/i.test(lines[6])) score += 5;
+  if (opts.wowArt === true && lines[4] && WOW_LINE5_CINEMATIC_RE.test(lines[4])) score += 8;
+  if (opts.wowArt === true && lines[6] && WOW_LINE7_CINEMATIC_RE.test(lines[6])) score += 8;
 
   const warnings: string[] = [];
   if (lines[0] && HAIR_SPILL_BACK_RE.test(lines[0])) warnings.push("line1: hair spill/cascade phrasing");

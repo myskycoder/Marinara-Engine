@@ -177,6 +177,8 @@ export interface SceneIllustrationRequest {
   reason?: string;
   /** Optional stable filename hint. */
   slug?: string;
+  /** Gallery Wow CG: cinematic camera + scene-faithful lighting pass (separate compose hints). */
+  wowArt?: boolean;
 }
 
 export interface GeneratedSceneIllustration {

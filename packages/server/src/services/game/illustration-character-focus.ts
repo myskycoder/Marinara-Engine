@@ -65,6 +65,7 @@ export function isFullSceneIllustrationRequest(
   const slug = (illustration.slug ?? "").toLowerCase();
   const prompt = illustration.prompt ?? "";
   if (reason.includes("full-scene")) return true;
+  if (slug.startsWith("manual-wow-full-")) return true;
   if (slug.startsWith("manual-full-")) return true;
   if (/third-person wide-shot scene illustration/i.test(prompt)) return true;
   if (/player protagonist IS visible/i.test(prompt)) return true;

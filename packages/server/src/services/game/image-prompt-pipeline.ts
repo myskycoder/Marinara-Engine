@@ -10,8 +10,11 @@ import { withAiAuditContext } from "../ai-audit/audit-context.js";
 import {
   auditFluxPrompt,
   buildGeometryHint,
+  buildWowCinematographyHint,
   filterArtDirectionForFacts,
-  fluxComposeAuditRetryHint,
+  FLUX_WOW_COMPOSE_SYSTEM_ADDENDUM,
+  FLUX_WOW_STYLE_GUIDE_SUFFIX,
+  fluxComposeAuditRetryHintWithWow,
   isFullSceneFacts,
   normalizePromptNames,
   postProcessFacts,
@@ -48,6 +51,8 @@ export interface RewriteIllustrationPromptRequest {
   chatConnectionId?: string | null;
   rating?: "sfw" | "nsfw" | null;
   signal?: AbortSignal;
+  /** Wow CG gallery mode — cinematic camera + scene-faithful lighting hints at compose only. */
+  wowArt?: boolean;
 }
 
 export const HARD_PROMPT_CHAR_CAP = 2400;
@@ -136,6 +141,7 @@ export function validateComposedPrompt(
   raw: string,
   family: string,
   facts?: SceneFacts,
+  wowArt = false,
 ): string {
   const cleaned = sanitizeRewriterOutput(raw);
   if (!cleaned) {
@@ -151,7 +157,7 @@ export function validateComposedPrompt(
     }
     const prompt = clampPrompt(normalizePromptNames(lines.join("\n")));
     if (facts) {
-      auditFluxPrompt(prompt, facts);
+      auditFluxPrompt(prompt, facts, { wowArt });
     }
     return prompt;
   }
@@ -247,6 +253,16 @@ export function buildComposerUserMessage(
   if (geometryHint) {
     parts.push("", geometryHint);
   }
+  if (req.wowArt) {
+    const wowHint = buildWowCinematographyHint(facts, {
+      genre: req.genre,
+      setting: req.setting,
+      artStyle: req.artStyle,
+    });
+    if (wowHint) {
+      parts.push("", wowHint);
+    }
+  }
   appendArtDirection(parts, req, facts);
   if (req.imagePromptInstructions?.trim()) {
     parts.push(
@@ -256,12 +272,15 @@ export function buildComposerUserMessage(
       "</user_image_instructions>",
     );
   }
+  const effectiveStyleGuide = req.wowArt
+    ? `${styleGuide}\n\n${FLUX_WOW_STYLE_GUIDE_SUFFIX}`
+    : styleGuide;
   parts.push(
     "",
     "<target_image_model>",
     `family: ${familyLabel}`,
     "",
-    styleGuide,
+    effectiveStyleGuide,
     "</target_image_model>",
     "",
     "Compose a single prompt from <scene_facts>, honoring <art_direction> for style and mood and following <target_image_model>. Output ONLY the rewritten prompt as plain text — no JSON, no preamble, no commentary. The first character of your reply is the first character of the prompt.",
@@ -316,13 +335,18 @@ export function getComposeSystemPrompt(
   customAddendum: string,
   rewriterRating: "sfw" | "nsfw",
   fullScene = false,
+  wowArt = false,
 ): string {
   let promptKey = family === "flux" ? "image-prompt-writer" : "image-prompt-writer-compose-generic";
   if (family === "flux" && fullScene) {
     promptKey = "image-prompt-writer-full-scene";
   }
   const jailbreak = rewriterRating === "nsfw" ? NSFW_REWRITER_JAILBREAK : null;
-  return buildSystemPrompt(promptKey, customAddendum, jailbreak);
+  let system = buildSystemPrompt(promptKey, customAddendum, jailbreak);
+  if (wowArt && family === "flux") {
+    system = `${system}\n\n${FLUX_WOW_COMPOSE_SYSTEM_ADDENDUM}`;
+  }
+  return system;
 }
 
 export function getSingleShotSystemPrompt(
@@ -432,13 +456,14 @@ export async function runTwoStagePipeline(options: RunTwoStagePipelineOptions): 
 
   const startedAt = Date.now();
   logger.info(
-    "[image-prompt-pipeline] starting two-stage rewrite (family=%s, extract=%s/%s, compose=%s/%s, fullScene=%s)",
+    "[image-prompt-pipeline] starting two-stage rewrite (family=%s, extract=%s/%s, compose=%s/%s, fullScene=%s, wowArt=%s)",
     styleGuideInfo.family,
     extractConn.providerName,
     settings.extractModel,
     composeConn.providerName,
     settings.composeModel,
     fullSceneRequest ? "yes" : "no",
+    req.wowArt ? "yes" : "no",
   );
 
   const facts = await withRetry("extract-facts", settings.pipelineRetries, async () => {
@@ -464,7 +489,10 @@ export async function runTwoStagePipeline(options: RunTwoStagePipelineOptions): 
         composeModel: settings.composeModel,
       },
     );
-    return postProcessFacts(validateFacts(parseFactsJson(raw)), { fullScene: fullSceneRequest });
+    return postProcessFacts(validateFacts(parseFactsJson(raw)), {
+      fullScene: fullSceneRequest,
+      wowArt: req.wowArt === true,
+    });
   });
 
   const composeSystem = getComposeSystemPrompt(
@@ -472,12 +500,17 @@ export async function runTwoStagePipeline(options: RunTwoStagePipelineOptions): 
     customAgentAddendum,
     rewriterRating,
     isFullSceneFacts(facts),
+    req.wowArt === true,
   );
   if (!composeSystem) {
     throw new Error("compose system prompt is empty");
   }
 
   logger.debug("[image-prompt-pipeline] extracted facts:\n%s", JSON.stringify(facts, null, 2));
+
+  if (req.wowArt) {
+    logger.info("[image-prompt-pipeline] wow CG mode — cinematic lighting/camera hints only (fullScene=%s)", fullSceneRequest ? "yes" : "no");
+  }
 
   let lastComposeViolations: string[] | null = null;
   const composed = await withRetry("compose-prompt", settings.pipelineRetries, async (attempt) => {
@@ -489,7 +522,7 @@ export async function runTwoStagePipeline(options: RunTwoStagePipelineOptions): 
     );
     const retryHint =
       attempt > 1 && lastComposeViolations
-        ? `\n\n<audit_failures>\nPrevious output failed: ${lastComposeViolations.join("; ")}\n${fluxComposeAuditRetryHint(facts)}\n</audit_failures>`
+        ? `\n\n<audit_failures>\nPrevious output failed: ${lastComposeViolations.join("; ")}\n${fluxComposeAuditRetryHintWithWow(facts, req.wowArt === true)}\n</audit_failures>`
         : "";
     try {
       const raw = await callLlm(
@@ -498,7 +531,9 @@ export async function runTwoStagePipeline(options: RunTwoStagePipelineOptions): 
         baseUserMessage + retryHint,
         {
           model: settings.composeModel,
-          temperature: settings.composeTemperature,
+          temperature: req.wowArt
+            ? Math.min(settings.composeTemperature + 0.08, 0.58)
+            : settings.composeTemperature,
           maxTokens: settings.maxTokens,
           signal: req.signal,
           openrouterProvider: composeConn.openrouterProvider,
@@ -513,7 +548,7 @@ export async function runTwoStagePipeline(options: RunTwoStagePipelineOptions): 
           composeModel: settings.composeModel,
         },
       );
-      return validateComposedPrompt(raw, styleGuideInfo.family, facts);
+      return validateComposedPrompt(raw, styleGuideInfo.family, facts, req.wowArt === true);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes("flux prompt audit failed:")) {
@@ -524,7 +559,7 @@ export async function runTwoStagePipeline(options: RunTwoStagePipelineOptions): 
   });
 
   if (styleGuideInfo.family === "flux") {
-    const quality = scoreFluxPrompt(composed, facts);
+    const quality = scoreFluxPrompt(composed, facts, { wowArt: req.wowArt === true });
     logger.info(
       "[image-prompt-pipeline] flux prompt quality score=%d warnings=%d",
       quality.score,

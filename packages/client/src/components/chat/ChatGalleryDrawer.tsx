@@ -19,6 +19,10 @@ interface ChatGalleryDrawerProps {
   onManualImpactSceneSfw?: () => void;
   /** Game mode: request a full third-person scene illustration via NSFW image model (Full NSFW) */
   onManualImpactSceneNsfw?: () => void;
+  onManualWowSfw?: () => void;
+  onManualWowNsfw?: () => void;
+  onManualWowSceneSfw?: () => void;
+  onManualWowSceneNsfw?: () => void;
   /** Game mode: remove CG illustration plate and restore location background */
   onClearCgPlate?: () => void;
 }
@@ -32,6 +36,10 @@ export function ChatGalleryDrawer({
   onManualImpactNsfw,
   onManualImpactSceneSfw,
   onManualImpactSceneNsfw,
+  onManualWowSfw,
+  onManualWowNsfw,
+  onManualWowSceneSfw,
+  onManualWowSceneNsfw,
   onClearCgPlate,
 }: ChatGalleryDrawerProps) {
   if (!open) return null;
@@ -64,6 +72,10 @@ export function ChatGalleryDrawer({
             onManualImpactNsfw={onManualImpactNsfw}
             onManualImpactSceneSfw={onManualImpactSceneSfw}
             onManualImpactSceneNsfw={onManualImpactSceneNsfw}
+            onManualWowSfw={onManualWowSfw}
+            onManualWowNsfw={onManualWowNsfw}
+            onManualWowSceneSfw={onManualWowSceneSfw}
+            onManualWowSceneNsfw={onManualWowSceneNsfw}
             onClearCgPlate={onClearCgPlate}
           />
         </div>

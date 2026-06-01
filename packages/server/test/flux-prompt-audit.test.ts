@@ -3,6 +3,7 @@ import test from "node:test";
 import type { SceneFacts } from "../dist/services/game/scene-facts.js";
 import {
   auditFluxPrompt,
+  buildWowCinematographyHint,
   filterArtDirectionForFacts,
   getFluxPromptViolations,
   isFullSceneFacts,
@@ -211,4 +212,57 @@ test("getFluxPromptViolations flags first-person hip height camera in full scene
   );
   const violations = getFluxPromptViolations(badPrompt, processed);
   assert.ok(violations.some((item) => item.includes("hip height")));
+});
+
+test("buildWowCinematographyHint derives lighting from facts not a fixed neon template", () => {
+  const hint = buildWowCinematographyHint(linaFacts, {
+    genre: "Romance",
+    setting: "party",
+    artStyle: "glossy anime hentai, soft neon lighting, vibrant nightclub palette",
+  });
+  assert.ok(hint);
+  assert.match(hint!, /<wow_cinematography>/);
+  assert.match(hint!, /art_direction palette/);
+  assert.match(hint!, /Mark Stone Penthouse VIP room/);
+  assert.doesNotMatch(hint!, /purple-magenta/);
+  assert.match(hint!, /never import an unrelated mood/);
+  assert.match(hint!, /cinematic POV/);
+});
+
+test("buildWowCinematographyHint full scene uses wide third-person camera rule", () => {
+  const hint = buildWowCinematographyHint(fullSceneFacts, {});
+  assert.ok(hint);
+  assert.match(hint!, /wide cinematic third-person/);
+  assert.match(hint!, /line5_checklist/);
+  assert.doesNotMatch(hint!, /purple-magenta/);
+});
+
+test("postProcessFacts wowArt keeps ambient lighting instead of VIP neon injection", () => {
+  const processed = postProcessFacts({ ...linaFacts, lighting: "ambient" }, { wowArt: true });
+  assert.equal(processed.lighting, "ambient");
+});
+
+test("getFluxPromptViolations wowArt flags weak cinematic lines 5 and 7", () => {
+  const weakWowPrompt = goodPrompt
+    .replace(
+      "Soft purple, pink, and gold neon fills the VIP bathroom, rim light on wet marble and her bare hips, deep shadows by the closed door.",
+      "Soft ambient light fills the room evenly.",
+    )
+    .replace(
+      "Medium shot from behind at hip height, glossy anime hentai illustration, vibrant nightclub palette, semi-realistic architectural background only.",
+      "Medium shot from behind at hip height, glossy anime hentai illustration, semi-realistic architectural background only.",
+    );
+  const violations = getFluxPromptViolations(weakWowPrompt, linaFacts, { wowArt: true });
+  assert.ok(violations.some((item) => item.includes("WOW CG: line 5")));
+  assert.ok(violations.some((item) => item.includes("WOW CG: line 7")));
+});
+
+test("getFluxPromptViolations wowArt accepts strong cinematic lines 5 and 7", () => {
+  const strongWowPrompt = goodPrompt
+    .replace(
+      "Medium shot from behind at hip height, glossy anime hentai illustration, vibrant nightclub palette, semi-realistic architectural background only.",
+      "Cinematic POV at hip height with 35mm lens feel, shallow depth of field on her back, premium VN key visual, vibrant nightclub color grade, semi-realistic architectural background only.",
+    );
+  const violations = getFluxPromptViolations(strongWowPrompt, linaFacts, { wowArt: true });
+  assert.ok(!violations.some((item) => item.startsWith("WOW CG:")));
 });
