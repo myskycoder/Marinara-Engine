@@ -358,12 +358,20 @@ for (const candidate of Object.values(schema)) {
   }
 }
 
-function sanitizeProfileTableRows(tableName: string, rows: Array<Record<string, unknown>>) {
+export function sanitizeProfileTableRows(tableName: string, rows: Array<Record<string, unknown>>) {
   if (tableName === "api_connections") {
     return rows.map((row) => ({ ...row, apiKeyEncrypted: "" }));
   }
   if (tableName === "agent_configs") {
     return rows.map((row) => redactAgentSecrets(row));
+  }
+  // custom_tools.webhookUrl is a bearer credential for executionType="webhook" tools
+  // (a Discord webhook URL embeds its token in the path), so blank it on every
+  // export sink, mirroring the api_connections.apiKeyEncrypted branch above. Only
+  // webhookUrl is redacted: scriptBody/staticResult are user-authored tool bodies,
+  // not credentials.
+  if (tableName === "custom_tools") {
+    return rows.map((row) => ({ ...row, webhookUrl: "" }));
   }
   return rows;
 }
