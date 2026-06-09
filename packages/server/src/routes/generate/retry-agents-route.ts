@@ -64,6 +64,8 @@ import {
 } from "./agent-connection-guards.js";
 import {
   buildAvailableSpriteCharacter,
+  completeRequiredSpriteExpressionEntries,
+  normalizeRequiredSpriteExpressionIds,
   normalizeSpriteDisplayModes,
   validateSpriteExpressionEntries,
 } from "./expression-agent-utils.js";
@@ -482,7 +484,12 @@ async function buildRetryAgentContext(args: {
         const spriteCharacter = buildAvailableSpriteCharacter(char.id, char.name, sprites, spriteDisplayModes);
         if (spriteCharacter) perChar.push(spriteCharacter);
       }
-      if (personaContext.personaId && (!restrictToSelectedSprites || selectedSpriteIds.has(personaContext.personaId))) {
+      const includePersonaSprite =
+        !!personaContext.personaId &&
+        (!restrictToSelectedSprites ||
+          selectedSpriteIds.has(personaContext.personaId) ||
+          chatMeta.expressionAvatarsEnabled === true);
+      if (personaContext.personaId && includePersonaSprite) {
         const sprites = listCharacterSprites(personaContext.personaId);
         if (sprites) {
           const spritePersona = buildAvailableSpriteCharacter(
@@ -498,6 +505,12 @@ async function buildRetryAgentContext(args: {
       if (lastAssistant?.characterId && typeof lastAssistant.characterId === "string") {
         expressionTargetIds.add(lastAssistant.characterId);
       } else if (lastAssistant?.role === "user" && personaContext.personaId) {
+        expressionTargetIds.add(personaContext.personaId);
+      }
+      if (
+        personaContext.personaId &&
+        agentContext.recentMessages.some((message) => message.role === "user" && message.content.trim())
+      ) {
         expressionTargetIds.add(personaContext.personaId);
       }
       const targetedSprites =
@@ -858,13 +871,31 @@ async function attachRetryChatMetadataToolContexts(args: {
 
 async function attachRetrySpotifyToolContexts(args: {
   agentsStore: ReturnType<typeof createAgentsStorage>;
+  chats: ReturnType<typeof createChatsStorage>;
+  chatId: string;
+  chatMeta: Record<string, unknown>;
   resolvedAgents: ResolvedRetryAgent[];
 }) {
-  const { agentsStore, resolvedAgents } = args;
+  const { agentsStore, chats, chatId, chatMeta, resolvedAgents } = args;
   const spotifyToolNames = new Set(DEFAULT_AGENT_TOOLS.spotify ?? []);
   let spotifyAccessToken: string | null = null;
   let spotifyError: string | null = null;
   let spotifyCredentialsResolved = false;
+
+  const updateChatMetadataForTools = async (patchOrUpdater: MetadataPatchInput) => {
+    let emittedPatch: Record<string, unknown> = {};
+    const updatedChat = await chats.patchMetadata(chatId, async (currentMeta) => {
+      const patch = typeof patchOrUpdater === "function" ? await patchOrUpdater({ ...currentMeta }) : patchOrUpdater;
+      emittedPatch = patch;
+      return patch;
+    });
+    const updatedMeta = updatedChat ? parseExtra(updatedChat.metadata) : { ...chatMeta, ...emittedPatch };
+    for (const key of Object.keys(chatMeta)) {
+      if (!(key in updatedMeta)) delete chatMeta[key];
+    }
+    Object.assign(chatMeta, updatedMeta);
+    return updatedMeta;
+  };
 
   for (const entry of resolvedAgents) {
     if (entry.resolved.toolContext?.tools.length) continue;
@@ -940,6 +971,8 @@ async function attachRetrySpotifyToolContexts(args: {
           }
         }
         const results = await executeToolCalls([call], {
+          chatMeta,
+          onUpdateMetadata: updateChatMetadataForTools,
           spotify: { accessToken: spotifyAccessToken },
           spotifyRepeatAfterPlay: "track",
         });
@@ -2178,7 +2211,7 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
         conns,
         agentsStore,
       });
-      await attachRetrySpotifyToolContexts({ agentsStore, resolvedAgents });
+      await attachRetrySpotifyToolContexts({ agentsStore, chats, chatId, chatMeta, resolvedAgents });
       await attachRetryChatMetadataToolContexts({ chats, chatId, chatMeta, resolvedAgents });
       const cyoaAgentWillRun = resolvedAgents.some((e) => e.resolved.type === "cyoa");
       const agentContext = await buildRetryAgentContext({
@@ -2272,12 +2305,44 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
           const availableSprites = agentContext.memory._availableSprites as
             | Array<{ characterId: string; characterName: string; expressions: string[] }>
             | undefined;
-          if (Array.isArray(spriteData.expressions) && Array.isArray(availableSprites)) {
-            const validation = validateSpriteExpressionEntries(spriteData.expressions, availableSprites);
-            spriteData.expressions = validation.expressions;
+          if (Array.isArray(availableSprites)) {
+            const rawExpressions = Array.isArray(spriteData.expressions) ? spriteData.expressions : [];
+            const validation = validateSpriteExpressionEntries(rawExpressions, availableSprites);
+            let validatedExpressions = validation.expressions;
+            if (!Array.isArray(spriteData.expressions) && rawExpressions.length === 0) {
+              logger.warn("[retry-agents] Expression agent returned no expression entries — filling required targets");
+            }
             for (const warning of validation.warnings) {
               logger.warn("[retry-agents] %s", warning.message);
             }
+            const requiredExpressionTargetIds = normalizeRequiredSpriteExpressionIds(
+              agentContext.memory._expressionTargetIds,
+            );
+            if (requiredExpressionTargetIds.length > 0) {
+              const latestUserExpressionSource =
+                [...agentContext.recentMessages]
+                  .reverse()
+                  .find((message) => message.role === "user" && message.content.trim())?.content ?? "";
+              const personaId = typeof agentContext.memory._personaId === "string" ? agentContext.memory._personaId : "";
+              const sourceTextByCharacterId = new Map<string, string>();
+              if (personaId && latestUserExpressionSource.trim()) {
+                sourceTextByCharacterId.set(personaId, latestUserExpressionSource);
+              }
+              const completion = completeRequiredSpriteExpressionEntries(
+                validatedExpressions,
+                availableSprites,
+                requiredExpressionTargetIds,
+                {
+                  defaultSourceText: agentContext.mainResponse ?? "",
+                  sourceTextByCharacterId,
+                },
+              );
+              validatedExpressions = completion.expressions;
+              for (const warning of completion.warnings) {
+                logger.warn("[retry-agents] %s", warning.message);
+              }
+            }
+            spriteData.expressions = validatedExpressions;
           } else if (!Array.isArray(availableSprites)) {
             // No sprite catalog loaded — drop expressions entirely so unvalidated data is never forwarded
             spriteData.expressions = [];

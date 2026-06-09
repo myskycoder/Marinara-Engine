@@ -19,10 +19,11 @@ import {
   EyeOff,
 } from "lucide-react";
 import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
-import type { Message, MessageExtra } from "@marinara-engine/shared";
+import { formatTextQuotes, type Message, type MessageExtra } from "@marinara-engine/shared";
 import { useUIStore } from "../../stores/ui.store";
 import { useChatStore } from "../../stores/chat.store";
 import { cn, copyToClipboard, getAvatarCropStyle, parseAvatarCropJson } from "../../lib/utils";
+import { applyTextareaQuoteFormat } from "../../lib/textarea-quotes";
 import { applyInlineMarkdown, renderMarkdownBlocks } from "../../lib/markdown";
 import { chatKeys } from "../../hooks/use-chats";
 import { resolveMessageMacros } from "../../lib/chat-macros";
@@ -372,6 +373,7 @@ export const ConversationMessage = memo(function ConversationMessage({
   const chatFontSize = useUIStore((s) => s.chatFontSize);
   const chatFontColor = useUIStore((s) => s.chatFontColor);
   const showMessageNumbers = useUIStore((s) => s.showMessageNumbers);
+  const quoteFormat = useUIStore((s) => s.quoteFormat);
   const messageTextStyle = useMemo<CSSProperties>(
     () => ({
       fontSize: `${chatFontSize}px`,
@@ -503,23 +505,26 @@ export const ConversationMessage = memo(function ConversationMessage({
     : resolvedCharacterInfo?.nameColor;
   const renderedContent = useMemo(
     () =>
-      resolveMessageMacros(message.content, {
-        userName: displayName,
-        persona: {
-          name: displayName,
-          description: plainUserMessages ? undefined : (msgPersona?.description ?? personaInfo?.description),
-          personality: plainUserMessages ? undefined : (msgPersona?.personality ?? personaInfo?.personality),
-          backstory: plainUserMessages ? undefined : (msgPersona?.backstory ?? personaInfo?.backstory),
-          appearance: plainUserMessages ? undefined : (msgPersona?.appearance ?? personaInfo?.appearance),
-          scenario: plainUserMessages ? undefined : (msgPersona?.scenario ?? personaInfo?.scenario),
-        },
-        primaryCharacter: primaryCharInfo ?? { name: displayName },
-        characters: scopedCharacterMap
-          ? Array.from(scopedCharacterMap.values())
-          : displayName
-            ? [{ name: displayName }]
-            : [],
-      }),
+      formatTextQuotes(
+        resolveMessageMacros(message.content, {
+          userName: displayName,
+          persona: {
+            name: displayName,
+            description: plainUserMessages ? undefined : (msgPersona?.description ?? personaInfo?.description),
+            personality: plainUserMessages ? undefined : (msgPersona?.personality ?? personaInfo?.personality),
+            backstory: plainUserMessages ? undefined : (msgPersona?.backstory ?? personaInfo?.backstory),
+            appearance: plainUserMessages ? undefined : (msgPersona?.appearance ?? personaInfo?.appearance),
+            scenario: plainUserMessages ? undefined : (msgPersona?.scenario ?? personaInfo?.scenario),
+          },
+          primaryCharacter: primaryCharInfo ?? { name: displayName },
+          characters: scopedCharacterMap
+            ? Array.from(scopedCharacterMap.values())
+            : displayName
+              ? [{ name: displayName }]
+              : [],
+        }),
+        quoteFormat,
+      ),
     [
       displayName,
       message.content,
@@ -535,6 +540,7 @@ export const ConversationMessage = memo(function ConversationMessage({
       personaInfo?.scenario,
       plainUserMessages,
       primaryCharInfo,
+      quoteFormat,
       scopedCharacterMap,
     ],
   );
@@ -657,7 +663,7 @@ export const ConversationMessage = memo(function ConversationMessage({
 
   const startEditing = useCallback(() => {
     setEditing(true);
-    setEditValue(message.content);
+    setEditValue(formatTextQuotes(message.content, quoteFormat));
     requestAnimationFrame(() => {
       const el = editRef.current;
       if (el) {
@@ -666,7 +672,7 @@ export const ConversationMessage = memo(function ConversationMessage({
         el.focus();
       }
     });
-  }, [message.content]);
+  }, [message.content, quoteFormat]);
 
   useEffect(() => {
     if (!onEdit) return;
@@ -684,12 +690,12 @@ export const ConversationMessage = memo(function ConversationMessage({
   editValueRef.current = editValue;
 
   const handleSaveEdit = useCallback(() => {
-    const val = editValueRef.current.trim();
+    const val = formatTextQuotes(editValueRef.current.trim(), quoteFormat);
     if (val !== message.content) {
       onEdit?.(message.id, val);
     }
     setEditing(false);
-  }, [message.content, message.id, onEdit]);
+  }, [message.content, message.id, onEdit, quoteFormat]);
 
   // System messages — minimal display
   if (isSystem) {
@@ -1134,7 +1140,8 @@ export const ConversationMessage = memo(function ConversationMessage({
               ref={editRef}
               value={editValue}
               onChange={(e) => {
-                setEditValue(e.target.value);
+                const nextValue = applyTextareaQuoteFormat(e.currentTarget, quoteFormat);
+                setEditValue(nextValue);
                 const el = e.target;
                 el.style.height = "auto";
                 el.style.height = `${Math.min(el.scrollHeight, 300)}px`;

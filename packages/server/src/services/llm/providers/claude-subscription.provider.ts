@@ -21,6 +21,7 @@
 //   • SDK docs: https://docs.anthropic.com/en/docs/claude-code/sdk
 //
 import { randomUUID } from "node:crypto";
+import { isClaudeAdaptiveOnlyNoSamplingModel } from "@marinara-engine/shared";
 import { BaseLLMProvider, type ChatMessage, type ChatOptions, type LLMUsage } from "../base-provider.js";
 import { logger } from "../../../lib/logger.js";
 import { isClaudeSubscriptionResumeEnabled } from "../../../config/runtime-config.js";
@@ -288,11 +289,10 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
       }
     }
 
-    // Opus 4.7+ is adaptive-only (sampling parameters rejected); other models
+    // Claude adaptive-only models reject sampling parameters; other models
     // accept temperature etc. but the Agent SDK doesn't expose those knobs
     // directly, so we skip them and rely on the SDK defaults.
-    const modelLower = options.model.toLowerCase();
-    const isAdaptiveOnly = /claude-opus-4-(?:[7-9]|\d{2,})/.test(modelLower);
+    const isAdaptiveOnly = isClaudeAdaptiveOnlyNoSamplingModel(options.model);
 
     // Outbound-context strip strategy: this provider is a text-chat surface
     // (roleplay / character DM), not an agent runner. The SDK's default
@@ -348,7 +348,7 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
       // that provider-facing set.
       sdkOptions.effort = (options.reasoningEffort ?? "high") as "low" | "medium" | "high" | "xhigh" | "max";
     } else if (isAdaptiveOnly) {
-      // Opus 4.7 always thinks; let the SDK pick a default effort.
+      // Adaptive-only Claude models always think; let the SDK pick a default effort.
       sdkOptions.thinking = { type: "adaptive" };
     }
 

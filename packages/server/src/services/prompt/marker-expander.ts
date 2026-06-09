@@ -368,18 +368,10 @@ async function expandChatHistory(config: MarkerConfig, ctx: MarkerContext): Prom
 
   // Add chat_history / last_message wrapping based on format
   if (messages.length > 0 && ctx.wrapFormat !== "none") {
-    // Find the last user message index — this becomes <last_message>
-    let lastUserIdx = -1;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]!.role === "user") {
-        lastUserIdx = i;
-        break;
-      }
-    }
-
-    // Everything before the last user message is "chat history",
-    // the last user message gets "last_message" wrapping
-    const historyEnd = lastUserIdx >= 0 ? lastUserIdx : messages.length;
+    // Everything before the final chat turn is "chat history"; the final turn gets
+    // "last_message" wrapping, regardless of whether it is user or assistant.
+    const lastMessageIdx = messages.length - 1;
+    const historyEnd = lastMessageIdx;
 
     if (ctx.wrapFormat === "xml") {
       if (historyEnd > 0) {
@@ -389,22 +381,18 @@ async function expandChatHistory(config: MarkerConfig, ctx: MarkerContext): Prom
           content: `${messages[historyEnd - 1]!.content}\n</chat_history>`,
         };
       }
-      if (lastUserIdx >= 0) {
-        messages[lastUserIdx] = {
-          ...messages[lastUserIdx]!,
-          content: `<last_message>\n${messages[lastUserIdx]!.content}\n</last_message>`,
-        };
-      }
+      messages[lastMessageIdx] = {
+        ...messages[lastMessageIdx]!,
+        content: `<last_message>\n${messages[lastMessageIdx]!.content}\n</last_message>`,
+      };
     } else if (ctx.wrapFormat === "markdown") {
       if (historyEnd > 0) {
         messages[0] = { ...messages[0]!, content: `## Chat History\n${messages[0]!.content}` };
       }
-      if (lastUserIdx >= 0) {
-        messages[lastUserIdx] = {
-          ...messages[lastUserIdx]!,
-          content: `## Last Message\n${messages[lastUserIdx]!.content}`,
-        };
-      }
+      messages[lastMessageIdx] = {
+        ...messages[lastMessageIdx]!,
+        content: `## Last Message\n${messages[lastMessageIdx]!.content}`,
+      };
     }
   }
 

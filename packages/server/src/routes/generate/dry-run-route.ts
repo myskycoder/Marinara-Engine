@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import {
   findKnownModel,
   LOCAL_SIDECAR_CONNECTION_ID,
+  isClaudeAdaptiveOnlyNoSamplingModel,
   resolveMacros,
   stripMacroComments,
   type APIProvider,
@@ -36,6 +37,7 @@ import { applyRegexScriptsToPromptMessages } from "../../services/regex/regex-ap
 import { sendSseEvent, startSseReply } from "./sse.js";
 import {
   appendReadableAttachmentsToContent,
+  dedupeLastMessageWrappers,
   extractImageAttachmentDataUrls,
   findTrackerContextInsertIndex,
   isMessageHiddenFromAI,
@@ -232,6 +234,7 @@ function injectTrackerContext(
     return finalMessages;
   }
 
+  dedupeLastMessageWrappers(finalMessages);
   finalMessages.splice(findTrackerContextInsertIndex(finalMessages), 0, trackerMessage);
   return finalMessages;
 }
@@ -313,18 +316,12 @@ function wrapConversationHistoryAndLastMessageInPlace(
   if (convoLen <= 0) return messages;
 
   // Replicate the preset marker-expander behavior:
-  // - Find the last USER message in the conversation slice
+  // - Find the final message in the conversation slice
   // - Wrap everything before that as chat_history
-  // - Wrap that last USER message as last_message
-  let lastUserIdx = -1;
-  for (let i = convoEnd; i >= convoStart; i--) {
-    if (out[i]!.role === "user") {
-      lastUserIdx = i;
-      break;
-    }
-  }
+  // - Wrap that final message as last_message
+  const lastMessageIdx = convoEnd;
   const historyStartIdx = convoStart;
-  const historyEndIdx = (lastUserIdx >= 0 ? lastUserIdx : convoEnd + 1) - 1;
+  const historyEndIdx = lastMessageIdx - 1;
 
   // 1) Only apply the normal preset-style wrapping if it's not already present.
   if (!hasPresetWrapping) {
@@ -336,12 +333,10 @@ function wrapConversationHistoryAndLastMessageInPlace(
         };
         out[historyEndIdx] = { ...out[historyEndIdx]!, content: `${out[historyEndIdx]!.content}\n</chat_history>` };
       }
-      if (lastUserIdx >= 0) {
-        out[lastUserIdx] = {
-          ...out[lastUserIdx]!,
-          content: `<last_message>\n${out[lastUserIdx]!.content}\n</last_message>`,
-        };
-      }
+      out[lastMessageIdx] = {
+        ...out[lastMessageIdx]!,
+        content: `<last_message>\n${out[lastMessageIdx]!.content}\n</last_message>`,
+      };
     } else if (wrapFormat === "markdown") {
       if (historyEndIdx >= historyStartIdx) {
         out[historyStartIdx] = {
@@ -349,9 +344,7 @@ function wrapConversationHistoryAndLastMessageInPlace(
           content: `## Chat History\n${out[historyStartIdx]!.content}`,
         };
       }
-      if (lastUserIdx >= 0) {
-        out[lastUserIdx] = { ...out[lastUserIdx]!, content: `## Last Message\n${out[lastUserIdx]!.content}` };
-      }
+      out[lastMessageIdx] = { ...out[lastMessageIdx]!, content: `## Last Message\n${out[lastMessageIdx]!.content}` };
     }
   }
 
@@ -370,8 +363,8 @@ function wrapConversationHistoryAndLastMessageInPlace(
   })();
 
   const assistantToWrapIdx = (() => {
-    // In preset mode, `chat_history` wraps the last user message, but any assistant replies
-    // after that user message remain unwrapped. Prefer wrapping the last such assistant.
+    // Older preset mode wrapped the last user message, leaving assistant replies unwrapped.
+    // Prefer wrapping any assistant after an existing last_message marker for compatibility.
     if (lastMessageMarkerIdx >= 0) {
       for (let i = convoEnd; i > lastMessageMarkerIdx; i--) {
         if (out[i]!.role === "assistant") return i;
@@ -1453,25 +1446,26 @@ export async function registerDryRunRoute(app: FastifyInstance) {
     if (assistantPrefill.trim()) {
       finalMessages.push({ role: "assistant", content: assistantPrefill });
     }
+    dedupeLastMessageWrappers(finalMessages);
 
     // ── Parameter normalization (mirror /api/generate) ──
     const modelLower = (conn.model ?? "").toLowerCase();
     const providerLower = (conn.provider ?? "").toLowerCase();
 
     // Resolve "maximum" reasoning effort to the highest provider-facing level.
-    // Native Anthropic/Claude subscription Opus 4.7+ uses "max"; OpenAI-compatible
-    // Claude routes keep "xhigh". All other models get "high".
+    // Native Anthropic/Claude subscription adaptive-only models use "max";
+    // OpenAI-compatible Claude routes keep "xhigh". All other models get "high".
     let resolvedEffort: "low" | "medium" | "high" | "xhigh" | "max" | null =
       reasoningEffort !== "maximum" ? reasoningEffort : null;
     if (reasoningEffort === "maximum") {
       const isNativeAnthropicAdaptiveOnly =
         (providerLower === "anthropic" || providerLower === "claude_subscription") &&
-        /claude-opus-4-(?:[7-9]|\d{2,})/.test(modelLower);
+        isClaudeAdaptiveOnlyNoSamplingModel(modelLower);
       const supportsXhigh =
         modelLower.startsWith("gpt-5.5") ||
         modelLower.startsWith("gpt-5.4") ||
         modelLower === "grok-4.20-multi-agent" ||
-        /claude-opus-4-(?:[7-9]|\d{2,})/.test(modelLower);
+        isClaudeAdaptiveOnlyNoSamplingModel(modelLower);
       resolvedEffort = isNativeAnthropicAdaptiveOnly ? "max" : supportsXhigh ? "xhigh" : "high";
     }
 
@@ -1493,8 +1487,8 @@ export async function registerDryRunRoute(app: FastifyInstance) {
     // ── Claude 4.5+ sampling parameter restrictions ──
     const modelLc = (conn.model ?? "").toLowerCase();
 
-    // Claude Opus 4.7+: ALL sampling params removed except max_tokens (provider returns 400 otherwise).
-    const isClaudeNoSampling = /claude-opus-4-(?:[7-9]|\d{2,})/.test(modelLc);
+    // Claude adaptive-only models: ALL sampling params removed except max_tokens (provider returns 400 otherwise).
+    const isClaudeNoSampling = isClaudeAdaptiveOnlyNoSamplingModel(modelLc);
     if (isClaudeNoSampling) {
       temperature = undefined;
       topP = undefined;

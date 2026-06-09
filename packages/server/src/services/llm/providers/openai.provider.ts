@@ -12,6 +12,7 @@ import {
   type LLMToolDefinition,
   type LLMUsage,
 } from "../base-provider.js";
+import { isClaudeAdaptiveOnlyNoSamplingModel } from "@marinara-engine/shared";
 import { logger } from "../../../lib/logger.js";
 
 /**
@@ -470,8 +471,8 @@ export class OpenAIProvider extends BaseLLMProvider {
     if (/^(o1|o3|o4)/.test(m)) return true;
     if (this.isGpt55Model(model)) return true;
     if (m.startsWith("gpt-5") && reasoningEffort && reasoningEffort !== "none") return true;
-    // Claude Opus 4.7+: all sampling params forbidden (covers reverse proxies)
-    if (/claude-opus-4-(?:[7-9]|\d{2,})/.test(m)) return true;
+    // Claude adaptive-only models forbid all sampling params (covers reverse proxies).
+    if (isClaudeAdaptiveOnlyNoSamplingModel(m)) return true;
     return false;
   }
 
@@ -512,7 +513,11 @@ export class OpenAIProvider extends BaseLLMProvider {
   private supportsOpenRouterUnifiedReasoning(model: string): boolean {
     if (!this.isOpenRouterEndpoint()) return false;
     const m = model.toLowerCase();
-    return m.includes("claude-3.7") || /claude-(?:opus|sonnet|haiku)-4(?:[.-]|\b)/.test(m);
+    return (
+      m.includes("claude-3.7") ||
+      /claude-(?:opus|sonnet|haiku)-4(?:[.-]|\b)/.test(m) ||
+      isClaudeAdaptiveOnlyNoSamplingModel(m)
+    );
   }
 
   private isOpenRouterGeminiModel(model: string): boolean {

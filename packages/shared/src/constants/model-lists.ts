@@ -13,6 +13,13 @@ export interface KnownModel {
   maxOutput: number;
 }
 
+const CLAUDE_ADAPTIVE_ONLY_OPUS_RE = /claude-opus-4-(?:[7-9]|\d{2,})/;
+
+export function isClaudeAdaptiveOnlyNoSamplingModel(model: string): boolean {
+  const normalized = model.toLowerCase();
+  return CLAUDE_ADAPTIVE_ONLY_OPUS_RE.test(normalized) || normalized.includes("claude-fable-5");
+}
+
 // ── OpenAI (from #model_openai_select) ──
 
 export const OPENAI_MODELS: KnownModel[] = [
@@ -103,6 +110,7 @@ export const OPENAI_MODELS: KnownModel[] = [
 // ── Anthropic / Claude (from #model_claude_select) ──
 
 export const ANTHROPIC_MODELS: KnownModel[] = [
+  { id: "claude-fable-5", name: "claude-fable-5", context: 1000000, maxOutput: 128000 },
   { id: "claude-opus-4-8", name: "claude-opus-4-8", context: 1000000, maxOutput: 128000 },
   { id: "claude-opus-4-7", name: "claude-opus-4-7", context: 1000000, maxOutput: 128000 },
   { id: "claude-opus-4-6", name: "claude-opus-4-6", context: 1000000, maxOutput: 32000 },
@@ -137,6 +145,7 @@ export const ANTHROPIC_MODELS: KnownModel[] = [
 // to the current tool-eligible families to avoid offering retired aliases that
 // the subscription path no longer accepts.
 export const CLAUDE_SUBSCRIPTION_MODELS: KnownModel[] = [
+  { id: "claude-fable-5", name: "Claude Fable 5", context: 1000000, maxOutput: 128000 },
   { id: "claude-opus-4-8", name: "Claude Opus 4.8", context: 1000000, maxOutput: 128000 },
   { id: "claude-opus-4-7", name: "Claude Opus 4.7", context: 1000000, maxOutput: 128000 },
   { id: "claude-opus-4-6", name: "Claude Opus 4.6", context: 1000000, maxOutput: 32000 },

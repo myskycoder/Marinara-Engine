@@ -4,6 +4,7 @@
 import type { BaseLLMProvider, ChatMessage, LLMToolDefinition, LLMToolCall } from "../llm/base-provider.js";
 import type { AgentResult, AgentContext, AgentResultType } from "@marinara-engine/shared";
 import {
+  compactQuestProgressForContext,
   DEFAULT_AGENT_CONTEXT_SIZE,
   DEFAULT_AGENT_MAX_TOKENS,
   MAX_AGENT_MAX_TOKENS,
@@ -70,6 +71,36 @@ function redactSensitiveValue(value: unknown): unknown {
     redacted[key] = redactSensitiveValue(entry);
   }
   return redacted;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function shouldCompactQuestContext(agentTypes: string[]): boolean {
+  return agentTypes.includes("quest");
+}
+
+function compactQuestPlayerStatsForContext(playerStats: unknown, agentTypes: string[]): unknown {
+  if (!shouldCompactQuestContext(agentTypes) || !isRecord(playerStats) || playerStats.activeQuests === undefined) {
+    return playerStats;
+  }
+
+  return {
+    ...playerStats,
+    activeQuests: compactQuestProgressForContext(playerStats.activeQuests),
+  };
+}
+
+function compactQuestGameStateForContext(gameState: unknown, agentTypes: string[]): unknown {
+  if (!shouldCompactQuestContext(agentTypes) || !isRecord(gameState) || !isRecord(gameState.playerStats)) {
+    return gameState;
+  }
+
+  return {
+    ...gameState,
+    playerStats: compactQuestPlayerStatsForContext(gameState.playerStats, agentTypes),
+  };
 }
 
 export function formatToolPayloadForLog(payload: string, maxLength = 400): string {
@@ -380,7 +411,13 @@ export async function executeAgentBatch(
     const systemPrompt = buildBatchSystemPrompt(configs, context);
     // Batch uses the max contextSize among its members
     const batchContextSize = Math.max(...configs.map((c) => normalizeAgentContextSize(c.settings.contextSize)));
-    const messages = buildAgentMessages(systemPrompt, context, "__batch__", batchContextSize);
+    const messages = buildAgentMessages(
+      systemPrompt,
+      context,
+      "__batch__",
+      batchContextSize,
+      configs.map((config) => config.type),
+    );
 
     // Each agent reserves its own configured output budget. The context fitter
     // may still reduce this further if the prompt needs more room.
@@ -758,8 +795,12 @@ function findLatestAssistantMessage(context: AgentContext): { index: number; con
   return null;
 }
 
-function findLatestUserMessage(context: AgentContext): { index: number; content: string } | null {
-  for (let index = context.recentMessages.length - 1; index >= 0; index--) {
+function findLatestUserMessage(
+  context: AgentContext,
+  beforeIndex = context.recentMessages.length,
+): { index: number; content: string } | null {
+  const startIndex = Math.min(context.recentMessages.length, beforeIndex) - 1;
+  for (let index = startIndex; index >= 0; index--) {
     const message = context.recentMessages[index]!;
     if (message.role === "user" && message.content.trim()) {
       return { index, content: message.content };
@@ -836,6 +877,9 @@ function buildExpressionAgentMessages(template: string, context: AgentContext): 
   const systemParts: string[] = [];
   systemParts.push(`<role>`);
   systemParts.push(`You are a specialized expression-selection agent. Keep the request compact and return only JSON.`);
+  systemParts.push(
+    `Return exactly one expression for every owner in <available_sprites>. Use <latest_user_message> for the active user persona and <assistant_response> for assistant or character expressions.`,
+  );
   systemParts.push(`</role>`);
   systemParts.push(``);
   systemParts.push(`<agents>`);
@@ -852,6 +896,7 @@ function buildExpressionAgentMessages(template: string, context: AgentContext): 
   const latestAssistant = findLatestAssistantMessage(context);
   const responseText = context.mainResponse?.trim() || latestAssistant?.content || "";
   const contextEndIndex = context.mainResponse?.trim() ? context.recentMessages.length : (latestAssistant?.index ?? 0);
+  const latestUser = findLatestUserMessage(context, contextEndIndex);
   const recentContext = context.recentMessages
     .slice(0, contextEndIndex)
     .slice(-EXPRESSION_AGENT_RECENT_CONTEXT_MESSAGES)
@@ -868,11 +913,18 @@ function buildExpressionAgentMessages(template: string, context: AgentContext): 
     userParts.push(``);
   }
 
+  if (latestUser) {
+    userParts.push(`<latest_user_message>`);
+    userParts.push(truncateAgentText(latestUser.content, EXPRESSION_AGENT_CONTEXT_CHAR_LIMIT));
+    userParts.push(`</latest_user_message>`);
+    userParts.push(``);
+  }
+
   userParts.push(`<assistant_response>`);
   userParts.push(truncateAgentText(responseText, EXPRESSION_AGENT_RESPONSE_CHAR_LIMIT));
   userParts.push(`</assistant_response>`);
   userParts.push(``);
-  userParts.push(`Now return the requested format.`);
+  userParts.push(`Now return the requested format with exactly one expression entry for every owner listed in <available_sprites>.`);
 
   return [
     { role: "system", content: systemParts.join("\n"), contextKind: "prompt" },
@@ -913,6 +965,7 @@ function buildAgentMessages(
   context: AgentContext,
   agentType: string,
   contextSize = 5,
+  contextAgentTypes: string[] = [agentType],
 ): ChatMessage[] {
   // ── 1. System message — already contains <role>, <lore>, <agents>, and extras ──
   const messages: ChatMessage[] = [{ role: "system", content: systemPrompt }];
@@ -957,7 +1010,7 @@ function buildAgentMessages(
         }
         if (gs.presentCharacters?.length) trackerSummary.presentCharacters = gs.presentCharacters;
         if (gs.recentEvents?.length) trackerSummary.recentEvents = gs.recentEvents;
-        if (gs.playerStats) trackerSummary.playerStats = gs.playerStats;
+        if (gs.playerStats) trackerSummary.playerStats = compactQuestPlayerStatsForContext(gs.playerStats, contextAgentTypes);
         if (gs.personaStats?.length) trackerSummary.personaStats = gs.personaStats;
         if (Object.keys(trackerSummary).length > 0) {
           content += `\n\n<committed_tracker_state>\n${JSON.stringify(trackerSummary)}\n</committed_tracker_state>`;
@@ -1085,10 +1138,12 @@ function buildAvailableSpritesBlock(context: AgentContext): string {
     expressions: string[];
     expressionChoices?: string[];
   }>;
+  const personaId = typeof context.memory._personaId === "string" ? context.memory._personaId : "";
   const parts: string[] = [`<available_sprites>`];
   for (const char of sprites) {
     const choices = char.expressionChoices?.length ? char.expressionChoices : char.expressions;
-    parts.push(`${char.characterName} (${char.characterId}): ${choices.join(", ")}`);
+    const label = char.characterId === personaId ? " [active user persona]" : "";
+    parts.push(`${char.characterName} (${char.characterId})${label}: ${choices.join(", ")}`);
   }
   parts.push(`</available_sprites>`);
   return parts.join("\n");
@@ -1133,7 +1188,7 @@ function buildAgentExtras(context: AgentContext, agentTypes: string[] = []): str
 
   if (context.gameState) {
     parts.push(`<current_game_state>`);
-    parts.push(JSON.stringify(context.gameState));
+    parts.push(JSON.stringify(compactQuestGameStateForContext(context.gameState, agentTypes)));
     parts.push(`</current_game_state>`);
   }
 

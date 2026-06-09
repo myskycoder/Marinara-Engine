@@ -124,12 +124,87 @@ export function findLastIndex(messages: SimpleMessage[], role: string): number {
   return -1;
 }
 
-/** Tracker context is injected outside chat history, directly before the latest history message. */
+function isLastMessagePromptBlock(content: unknown): boolean {
+  if (typeof content !== "string") return false;
+  return /<\/?last_message>/i.test(content) || /(?:^|\n)\s*##\s+Last Message\s*(?:\n|$)/i.test(content);
+}
+
+function stripBoundaryLastMessageWrapper(content: string): string {
+  return content
+    .replace(/^\s*<last_message>\s*\n?/i, "")
+    .replace(/\n?\s*<\/last_message>\s*$/i, "")
+    .replace(/^\s*##\s+Last Message\s*\n/i, "")
+    .trim();
+}
+
+function hasBoundaryChatHistoryClose(content: string): boolean {
+  return /\n?\s*<\/chat_history>\s*$/i.test(content);
+}
+
+function stripBoundaryChatHistoryClose(content: string): string {
+  return content.replace(/\n?\s*<\/chat_history>\s*$/i, "").trimEnd();
+}
+
+function appendBoundaryChatHistoryClose(content: string): string {
+  return `${content.trimEnd()}\n</chat_history>`;
+}
+
+export function dedupeLastMessageWrappers<T extends { content: string }>(messages: T[]): void {
+  const lastMessageIndexes: number[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (isLastMessagePromptBlock(messages[i]!.content)) {
+      lastMessageIndexes.push(i);
+    }
+  }
+  if (lastMessageIndexes.length <= 1) return;
+
+  const keepIndex = lastMessageIndexes[lastMessageIndexes.length - 1]!;
+  for (const index of lastMessageIndexes) {
+    if (index === keepIndex) continue;
+    let content = stripBoundaryLastMessageWrapper(messages[index]!.content);
+    const previousMessage = messages[index - 1];
+    if (previousMessage && hasBoundaryChatHistoryClose(previousMessage.content)) {
+      messages[index - 1] = {
+        ...previousMessage,
+        content: stripBoundaryChatHistoryClose(previousMessage.content),
+      };
+      content = appendBoundaryChatHistoryClose(content);
+    }
+    messages[index] = {
+      ...messages[index]!,
+      content,
+    };
+  }
+}
+
+/** Tracker context is injected outside chat history, directly before the latest history/last-message block. */
 export function findTrackerContextInsertIndex(
-  messages: Array<{ role: "system" | "user" | "assistant"; contextKind?: string }>,
+  messages: Array<{ role: "system" | "user" | "assistant"; content?: string; contextKind?: string }>,
 ): number {
+  let latestHistoryIndex = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]!.contextKind === "history") return i;
+    if (messages[i]!.contextKind === "history") {
+      latestHistoryIndex = i;
+      break;
+    }
+  }
+
+  let latestLastMessageBlockIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (isLastMessagePromptBlock(messages[i]!.content)) {
+      latestLastMessageBlockIndex = i;
+      break;
+    }
+  }
+
+  if (latestLastMessageBlockIndex >= 0 && latestLastMessageBlockIndex > latestHistoryIndex) {
+    return latestLastMessageBlockIndex;
+  }
+  if (latestHistoryIndex >= 0) {
+    return latestHistoryIndex;
+  }
+  if (latestLastMessageBlockIndex >= 0) {
+    return latestLastMessageBlockIndex;
   }
 
   for (let i = messages.length - 1; i >= 0; i--) {

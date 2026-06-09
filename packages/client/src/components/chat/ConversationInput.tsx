@@ -38,6 +38,7 @@ import {
 import { createInputMacroResolverForChat, isPromptPreviewMacro } from "../../lib/chat-macros";
 import { parseChatMetadata } from "../../lib/chat-display";
 import { cn, getAvatarCropStyle, type AvatarCropValue } from "../../lib/utils";
+import { applyTextareaQuoteFormat } from "../../lib/textarea-quotes";
 import { translateDraftText } from "../../lib/draft-translation";
 import { prepareImageAttachment } from "../../lib/chat-attachment-images";
 import { QuickConnectionSwitcher } from "./QuickConnectionSwitcher";
@@ -1149,13 +1150,7 @@ export function ConversationInput({
   const handleInput = useCallback(() => {
     const el = textareaRef.current;
     if (!el) return;
-    const raw = el.value;
-    const formatted = formatTextQuotes(raw, quoteFormat);
-    if (raw !== formatted) {
-      const cursor = el.selectionStart;
-      el.value = formatted;
-      el.setSelectionRange(cursor, cursor);
-    }
+    const formatted = applyTextareaQuoteFormat(el, quoteFormat);
     // Debounced resize to reduce layout reflows during fast typing
     if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
     resizeTimerRef.current = setTimeout(() => {
