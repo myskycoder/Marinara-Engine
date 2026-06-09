@@ -225,6 +225,8 @@ export interface ChatMetadata {
   spotifyPlaylistName?: string | null;
   /** Spotify artist name used when spotifySourceType is "artist". */
   spotifyArtist?: string | null;
+  /** Recent Spotify track URIs played by the roleplay/conversation Spotify DJ. */
+  spotifyRecentTracks?: string[];
   /** Durable count of autonomous messages the user has not viewed yet. */
   autonomousUnreadCount?: number;
   /** Character IDs that contributed to the current autonomous unread state. */
@@ -311,6 +313,8 @@ export interface ChatMetadata {
   gameSpotifyPlaylistName?: string | null;
   /** Spotify artist name used when gameSpotifySourceType is "artist". */
   gameSpotifyArtist?: string | null;
+  /** Recent Spotify track URIs played by Game Mode Spotify music. */
+  gameRecentSpotifyTracks?: string[];
   /** Run Game Lorebook Keeper after a session is concluded. */
   gameLorebookKeeperEnabled?: boolean;
   /** Chat-scoped lorebook maintained by Game Lorebook Keeper. */

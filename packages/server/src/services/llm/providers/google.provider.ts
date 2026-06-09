@@ -143,6 +143,13 @@ export function buildGoogleVertexModelUrl(
   return `${base}/publishers/google/models/${model}:${endpoint}`;
 }
 
+function capGeminiThinkingBudget(requestedBudget: number, maxOutputTokens: number): number {
+  if (!Number.isFinite(maxOutputTokens) || maxOutputTokens <= 0) return requestedBudget;
+  const visibleReserve = Math.min(4096, Math.max(1024, Math.floor(maxOutputTokens * 0.5)));
+  const maxThinkingBudget = Math.max(0, Math.floor(maxOutputTokens) - visibleReserve);
+  return Math.max(0, Math.min(requestedBudget, maxThinkingBudget));
+}
+
 /**
  * Handles Google Gemini API (generateContent / streamGenerateContent).
  */
@@ -184,8 +191,9 @@ export class GoogleProvider extends BaseLLMProvider {
         };
       } else {
         const budgetMap = { low: 1024, medium: 8192, high: 24576, xhigh: 24576, max: 24576 } as const;
+        const requestedBudget = options.reasoningEffort ? budgetMap[options.reasoningEffort] : 8192;
         thinkingConfig = {
-          thinkingBudget: options.reasoningEffort ? budgetMap[options.reasoningEffort] : 8192,
+          thinkingBudget: capGeminiThinkingBudget(requestedBudget, maxTokens),
           includeThoughts: true,
         };
       }
@@ -294,7 +302,12 @@ export class GoogleProvider extends BaseLLMProvider {
         candidates?: Array<{
           content: { parts: GeminiPart[] };
         }>;
-        usageMetadata?: { promptTokenCount: number; candidatesTokenCount: number; totalTokenCount: number };
+        usageMetadata?: {
+          promptTokenCount: number;
+          candidatesTokenCount: number;
+          totalTokenCount: number;
+          thoughtsTokenCount?: number;
+        };
       };
       const parts = json.candidates?.[0]?.content?.parts ?? [];
 
@@ -313,6 +326,7 @@ export class GoogleProvider extends BaseLLMProvider {
           promptTokens: json.usageMetadata.promptTokenCount,
           completionTokens: json.usageMetadata.candidatesTokenCount,
           totalTokens: json.usageMetadata.totalTokenCount,
+          completionReasoningTokens: json.usageMetadata.thoughtsTokenCount,
         };
       }
       return;
@@ -364,6 +378,7 @@ export class GoogleProvider extends BaseLLMProvider {
                 promptTokens: parsed.usageMetadata.promptTokenCount,
                 completionTokens: parsed.usageMetadata.candidatesTokenCount,
                 totalTokens: parsed.usageMetadata.totalTokenCount,
+                completionReasoningTokens: parsed.usageMetadata.thoughtsTokenCount,
               };
             }
             const parts: GeminiPart[] = parsed.candidates?.[0]?.content?.parts ?? [];

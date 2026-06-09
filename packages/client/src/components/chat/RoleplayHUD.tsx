@@ -223,8 +223,9 @@ export function RoleplayHUD({
   const inventory = playerStats?.inventory ?? [];
   const activeQuests = playerStats?.activeQuests ?? [];
   const customTrackerFields = playerStats?.customTrackerFields ?? [];
+  const hasPersonaStatsTracker = enabledAgentTypes.has("persona-stats");
   const hasPlayerTrackerSections =
-    enabledAgentTypes.has("persona-stats") ||
+    hasPersonaStatsTracker ||
     enabledAgentTypes.has("character-tracker") ||
     enabledAgentTypes.has("quest") ||
     enabledAgentTypes.has("custom-tracker");
@@ -290,7 +291,7 @@ export function RoleplayHUD({
           {hasPlayerTrackerSections && (
             <CombinedPlayerWidget
               layout={layout}
-              showPersona={enabledAgentTypes.has("persona-stats")}
+              showPersona={hasPersonaStatsTracker}
               showCharacters={enabledAgentTypes.has("character-tracker")}
               showQuests={enabledAgentTypes.has("quest")}
               showCustomTracker={enabledAgentTypes.has("custom-tracker")}
@@ -353,7 +354,7 @@ export function RoleplayHUD({
             />
           )}
 
-          {enabledAgentTypes.has("persona-stats") && (
+          {hasPersonaStatsTracker && (
             <PersonaStatsWidget
               bars={personaStatBars}
               onUpdate={(bars) => patchField("personaStats", bars)}
@@ -376,7 +377,7 @@ export function RoleplayHUD({
             />
           )}
 
-          {hasPlayerTrackerSections && (
+          {hasPersonaStatsTracker && (
             <InventoryWidget
               items={inventory}
               onUpdate={(items) => patchPlayerStats("inventory", items)}

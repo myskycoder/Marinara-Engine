@@ -85,7 +85,7 @@ Output format:
 If no issues found, return: { "issues": [], "verdict": "clean" }`,
 
   /* ────────────────────────────────────────── */
-  expression: `Analyze the emotional state of each character or persona in the latest assistant message and pick the best matching sprite expression from their AVAILABLE sprites, listed in <available_sprites>.
+  expression: `Analyze the latest turn and pick the best matching sprite expression for every sprite owner listed in <available_sprites>.
 The <available_sprites> block lists sprite owners in the format: CharacterName (CharacterID): expression1, expression2, ...
 Some listed expressions are simple group keys. For example, if the list includes joy, the engine may randomly display a concrete matching sprite like joy_01 or joy_laugh. Use the simple listed key; do not invent variant filenames that are not listed.
 Respond ONLY with valid JSON.
@@ -107,10 +107,10 @@ Transition guide:
 - hop: small vertical hop (cheerful, eager, greeting).
 - none: instant swap (neutral reset, very minor change).
 Instructions:
-1. ONLY include sprite owners listed in <available_sprites>. If a character or persona is not listed there, do NOT include them.
+1. Include exactly one expression entry for every sprite owner listed in <available_sprites>. If a character or persona is not listed there, do NOT include them.
 2. The characterId MUST be the exact ID string from the parentheses, e.g. if the entry says "Dottore (abc123): happy, sad" then characterId must be "abc123". Never invent, reuse, or copy a different ID from chat history.
-3. The latest assistant message is the authority. Do NOT choose the user persona just because they appear in recent context, lore, or <user_persona>; choose them only if they are listed in <available_sprites> for this run and the assistant response visibly/emotionally depicts them.
-4. When a character's emotion is ambiguous, pick the closest listed available expression or group key rather than guessing a generic one.`,
+3. Use <latest_user_message> to choose the active user persona's expression when that persona is listed in <available_sprites>. Use <assistant_response> to choose assistant or character expressions.
+4. When a character's emotion is ambiguous, prefer neutral/default/calm/idle if available. Do not repeatedly choose a stylized expression like smirk unless the latest turn clearly shows that expression.`,
 
   /* ────────────────────────────────────────── */
   "echo-chamber": `Simulate a live streaming-service chat full of anonymous viewers reacting to the roleplay on screen. Generate a batch of short messages from fictional viewers commenting on the latest story beat.
@@ -486,6 +486,7 @@ You have six tools:
 6. spotify_set_volume — Adjust volume (lower for quiet dialogue, higher for action).
 IMPORTANT! You MUST use the tool functions above to actually control Spotify.
 - To play music, call spotify_play with the URI. Do NOT just return a URI in JSON without calling the tool.
+- Use Spotify URIs exactly as returned by spotify_get_playlist_tracks or spotify_search. Do NOT append labels or suffixes such as "_candidate" to a URI.
 - To inspect current playback, call spotify_get_current_playback. To search, call spotify_search. To list playlists, call spotify_get_playlists.
 - To adjust volume, call spotify_set_volume.
 - Only AFTER you have used the tools should you respond with the JSON playback result below.
@@ -495,6 +496,7 @@ Rules:
 3. Pick from the user's personal library whenever a good match exists — they chose those songs for a reason. Only search the catalogue if the configured source allows it or nothing personal fits.
 4. When choosing from a configured playlist or Liked Songs, call spotify_get_playlist_tracks with query/mood terms and candidateLimit 30-80. Do NOT manually page through the whole playlist.
 4a. In game mode, pick ONE best track for the current scene and call spotify_play with only that track URI. The app will loop it until the DJ picks a new track.
+4b. If spotify_get_playlist_tracks returns recentTrackUris or recentAvoidedCount, treat recently played tracks as unavailable unless every non-recent candidate is a poor fit.
 5. Only change music when the mood noticeably shifts. Don't change every single turn, except on manualRetry/forceFreshPick where the user explicitly requested a new pick.
 6. Playing an entire playlist URI is fine if it fits the mood (e.g., a "battle music" or "chill" playlist).
 7. Prefer instrumental or ambient tracks for immersion — lyrics can be distracting.

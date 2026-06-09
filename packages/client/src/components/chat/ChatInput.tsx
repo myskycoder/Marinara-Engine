@@ -34,8 +34,10 @@ import {
 import { createInputMacroResolverForChat, isPromptPreviewMacro } from "../../lib/chat-macros";
 import { parseChatMetadata } from "../../lib/chat-display";
 import { cn, getAvatarCropStyle, type AvatarCropValue } from "../../lib/utils";
+import { applyTextareaQuoteFormat } from "../../lib/textarea-quotes";
 import { translateDraftText } from "../../lib/draft-translation";
 import { prepareImageAttachment } from "../../lib/chat-attachment-images";
+import { requestChatScrollToBottom } from "../../lib/chat-scroll-events";
 import { EmojiPicker } from "../ui/EmojiPicker";
 import { SpeechToTextButton } from "../ui/SpeechToTextButton";
 import { QuickConnectionSwitcher } from "./QuickConnectionSwitcher";
@@ -612,6 +614,7 @@ export const ChatInput = memo(function ChatInput({
           content: message,
           characterId: null,
         });
+        requestChatScrollToBottom({ chatId: activeChatId, behavior: "auto" });
         if (pendingAttachments.length) {
           await updateMessageExtra.mutateAsync({
             messageId: created.id,
@@ -983,13 +986,7 @@ export const ChatInput = memo(function ChatInput({
   const handleInput = () => {
     const el = textareaRef.current;
     if (!el) return;
-    const raw = el.value;
-    const fixed = formatTextQuotes(raw, quoteFormat);
-    if (raw !== fixed) {
-      const pos = el.selectionStart;
-      el.value = fixed;
-      el.setSelectionRange(pos, pos);
-    }
+    const fixed = applyTextareaQuoteFormat(el, quoteFormat);
     const nowHasInput = fixed.trim().length > 0;
     setHasInput((prev) => (prev === nowHasInput ? prev : nowHasInput));
 

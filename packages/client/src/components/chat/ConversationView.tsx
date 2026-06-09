@@ -33,12 +33,13 @@ import { TranscriptWindowControls } from "./TranscriptWindowControls";
 import { useChatStore } from "../../stores/chat.store";
 import { useUIStore } from "../../stores/ui.store";
 import { playNotificationPing } from "../../lib/notification-sound";
+import { applyTextareaQuoteFormat } from "../../lib/textarea-quotes";
 import { getAvatarCropStyle, type AvatarCropValue } from "../../lib/utils";
 import { getTranscriptRenderWindow, TRANSCRIPT_RENDER_WINDOW_STEP } from "../../lib/transcript-render-window";
 import { characterKeys } from "../../hooks/use-characters";
 import { api } from "../../lib/api-client";
 import type { CharacterMap, MessageSelectionToggle, PersonaInfo } from "./chat-area.types";
-import type { Message } from "@marinara-engine/shared";
+import { formatTextQuotes, type Message } from "@marinara-engine/shared";
 
 const ConversationAutonomousEffects = lazy(async () => {
   const module = await import("./ConversationAutonomousEffects");
@@ -1229,22 +1230,24 @@ function SplitMessageGroup({
   const [editing, setEditing] = useState(false);
   const [editValue, setEditValue] = useState("");
   const editRef = useRef<HTMLTextAreaElement>(null);
+  const quoteFormat = useUIStore((s) => s.quoteFormat);
 
   const fullContent = items.map((gi) => gi.msg.content).join("\n");
   const messageId = items[0]!.msg.id;
 
   const handleStartEdit = useCallback(() => {
     setEditing(true);
-    setEditValue(fullContent);
+    setEditValue(formatTextQuotes(fullContent, quoteFormat));
     requestAnimationFrame(() => editRef.current?.focus());
-  }, [fullContent]);
+  }, [fullContent, quoteFormat]);
 
   const handleSaveEdit = useCallback(() => {
-    if (editValue.trim() !== fullContent) {
-      onEdit(messageId, editValue.trim());
+    const formatted = formatTextQuotes(editValue.trim(), quoteFormat);
+    if (formatted !== fullContent) {
+      onEdit(messageId, formatted);
     }
     setEditing(false);
-  }, [editValue, fullContent, messageId, onEdit]);
+  }, [editValue, fullContent, messageId, onEdit, quoteFormat]);
 
   if (editing) {
     // Show the first message header + a single textarea for the full content
@@ -1274,7 +1277,7 @@ function SplitMessageGroup({
           <textarea
             ref={editRef}
             value={editValue}
-            onChange={(e) => setEditValue(e.target.value)}
+            onChange={(e) => setEditValue(applyTextareaQuoteFormat(e.currentTarget, quoteFormat))}
             className="w-full resize-none rounded-lg border border-[var(--border)] bg-[var(--secondary)] p-2.5 text-[0.9375rem] leading-relaxed outline-none"
             rows={Math.min(editValue.split("\n").length + 1, 16)}
             onKeyDown={(e) => {

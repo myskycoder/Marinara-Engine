@@ -51,6 +51,7 @@ import { useTranslationStore } from "../../stores/translation.store";
 import { ttsService } from "../../lib/tts-service";
 import { useTTSConfig } from "../../hooks/use-tts";
 import { buildTTSVoiceRequests, normalizeTTSCharacterName, withTTSVoiceRequestCacheKeys } from "../../lib/tts-dialogue";
+import { CHAT_SCROLL_TO_BOTTOM_EVENT, type ChatScrollToBottomDetail } from "../../lib/chat-scroll-events";
 import { mirrorSpritePlacements, normalizeSpritePlacements } from "./sprite-placement";
 import { normalizeSpriteDisplayModes } from "./sprite-display-modes";
 import type {
@@ -101,6 +102,13 @@ function normalizeMessageSpriteExpressions(value: unknown): Record<string, strin
     if (key && trimmed) expressions[key] = trimmed;
   }
   return expressions;
+}
+
+function getPersonaSnapshotName(extra: Record<string, unknown>): string | null {
+  const snapshot = extra.personaSnapshot;
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
+  const name = (snapshot as Record<string, unknown>).name;
+  return typeof name === "string" && name.trim() ? name.trim() : null;
 }
 
 function resolveExpressionAvatarSpriteUrl(sprites: SpriteInfo[] | undefined, expression: string): string | null {
@@ -721,6 +729,7 @@ export function ChatArea() {
     if (personaInfo?.id) allowedIds.add(personaInfo.id);
     const configuredIds =
       spriteCharacterIds.length > 0 ? spriteCharacterIds.filter((id) => allowedIds.has(id)) : Array.from(allowedIds);
+    if (personaInfo?.id) configuredIds.push(personaInfo.id);
     return Array.from(new Set(configuredIds.filter((id) => typeof id === "string" && id.trim())));
   }, [chatCharIds, personaInfo?.id, spriteCharacterIds]);
   const expressionAvatarSpriteQueries = useQueries({
@@ -745,11 +754,16 @@ export function ChatArea() {
       const extra = parseMessageExtraRecord(message.extra);
       const expressions = normalizeMessageSpriteExpressions(extra.spriteExpressions);
       const characterName = characterMap.get(characterId)?.name;
-      const expression = expressions[characterId] ?? (characterName ? expressions[characterName] : undefined);
+      const personaName =
+        characterId === personaInfo?.id ? (getPersonaSnapshotName(extra) ?? personaInfo.name) : undefined;
+      const expression =
+        expressions[characterId] ??
+        (characterName ? expressions[characterName] : undefined) ??
+        (personaName ? expressions[personaName] : undefined);
       if (!expression) return null;
       return resolveExpressionAvatarSpriteUrl(expressionAvatarSpriteMap.get(characterId), expression);
     };
-  }, [characterMap, expressionAvatarSpriteMap, expressionAvatarsEnabled]);
+  }, [characterMap, expressionAvatarSpriteMap, expressionAvatarsEnabled, personaInfo?.id, personaInfo?.name]);
   const shouldRefreshGameStateOnSwipe = isGameChat || Boolean(chatMeta.enableAgents);
 
   const refreshVisibleGameState = useCallback(async () => {
@@ -1355,6 +1369,41 @@ export function ChatArea() {
   const userScrolledAwayRef = useRef(false);
   const lastScrollTopRef = useRef(0);
   const userScrolledAtRef = useRef(0);
+  const forcedBottomScrollRef = useRef<{ requestedAt: number; behavior: ScrollBehavior } | null>(null);
+  const scrollToMessagesBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    const el = scrollRef.current;
+    if (el) {
+      el.scrollTo({ top: el.scrollHeight, behavior });
+      return;
+    }
+    messagesEndRef.current?.scrollIntoView({ behavior });
+  }, []);
+  const scheduleScrollToMessagesBottom = useCallback(
+    (behavior: ScrollBehavior = "smooth") => {
+      scrollToMessagesBottom(behavior);
+      requestAnimationFrame(() => {
+        scrollToMessagesBottom(behavior);
+        requestAnimationFrame(() => scrollToMessagesBottom(behavior));
+      });
+    },
+    [scrollToMessagesBottom],
+  );
+  useEffect(() => {
+    const handleScrollRequest = (event: Event) => {
+      const detail = (event as CustomEvent<ChatScrollToBottomDetail>).detail;
+      if (!detail?.chatId || detail.chatId !== activeChatId) return;
+
+      const behavior = detail.behavior ?? "auto";
+      forcedBottomScrollRef.current = { requestedAt: Date.now(), behavior };
+      userScrolledAwayRef.current = false;
+      isNearBottomRef.current = true;
+      scheduleScrollToMessagesBottom(behavior);
+    };
+
+    window.addEventListener(CHAT_SCROLL_TO_BOTTOM_EVENT, handleScrollRequest);
+    return () => window.removeEventListener(CHAT_SCROLL_TO_BOTTOM_EVENT, handleScrollRequest);
+  }, [activeChatId, scheduleScrollToMessagesBottom]);
+
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -1469,11 +1518,25 @@ export function ChatArea() {
   const isOptimistic = newestMsgId?.startsWith("__optimistic_");
   useEffect(() => {
     if (isLoadingMoreRef.current) return;
-    // Always scroll when the user just sent a message (optimistic msg)
-    if (isOptimistic || (isNearBottomRef.current && !userScrolledAwayRef.current)) {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const forcedBottomScroll = forcedBottomScrollRef.current;
+    const hasFreshForcedBottomScroll = !!forcedBottomScroll && Date.now() - forcedBottomScroll.requestedAt < 5000;
+    if (forcedBottomScroll && !hasFreshForcedBottomScroll) {
+      forcedBottomScrollRef.current = null;
     }
-  }, [newestMsgId, newestMsgSwipeIndex, isStreaming, isOptimistic]);
+
+    // Always scroll when the user just sent a message (optimistic msg)
+    if (isOptimistic || hasFreshForcedBottomScroll) {
+      const behavior = forcedBottomScroll?.behavior ?? "auto";
+      forcedBottomScrollRef.current = null;
+      userScrolledAwayRef.current = false;
+      isNearBottomRef.current = true;
+      scheduleScrollToMessagesBottom(behavior);
+      return;
+    }
+    if (isNearBottomRef.current && !userScrolledAwayRef.current) {
+      scheduleScrollToMessagesBottom("smooth");
+    }
+  }, [isOptimistic, isStreaming, newestMsgId, newestMsgSwipeIndex, scheduleScrollToMessagesBottom]);
 
   // Auto-scroll on streamBuffer changes without causing ChatArea re-render.
   // Uses a store subscription so the hot per-token updates bypass React.
@@ -1483,12 +1546,12 @@ export function ChatArea() {
       if (state.streamBuffer !== prev) {
         prev = state.streamBuffer;
         if (!isLoadingMoreRef.current && isNearBottomRef.current && !userScrolledAwayRef.current) {
-          messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+          scrollToMessagesBottom("smooth");
         }
       }
     });
     return unsub;
-  }, []);
+  }, [scrollToMessagesBottom]);
 
   // Preserve scroll position when older messages are prepended
   const pageCount = msgData?.pages.length ?? 0;

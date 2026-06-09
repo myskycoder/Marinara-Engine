@@ -48,7 +48,10 @@ const MAX_CHAT_VARIABLES = 256;
 const SPOTIFY_TRACK_INDEX_TTL_MS = 20 * 60_000;
 const SPOTIFY_TRACK_INDEX_CACHE_MAX = 24;
 const SPOTIFY_TRACK_INDEX_MAX_TRACKS = 2_500;
+const SPOTIFY_RECENT_TRACK_HISTORY_LIMIT = 24;
+const SPOTIFY_RECENT_TRACK_PROMPT_LIMIT = 12;
 const SPOTIFY_PLAYBACK_SETTLE_MS = 650;
+const SPOTIFY_PLAYBACK_VERIFY_DELAYS_MS = [0, SPOTIFY_PLAYBACK_SETTLE_MS, 900, 1500, 2500, 4000] as const;
 const SPOTIFY_REPEAT_RETRY_DELAYS_MS = [0, 450, 900] as const;
 
 type SpotifyTrackCandidate = {
@@ -206,11 +209,11 @@ async function executeSingleTool(
     case "spotify_get_playlists":
       return spotifyGetPlaylists(args, context?.spotify);
     case "spotify_get_playlist_tracks":
-      return spotifyGetPlaylistTracks(args, context?.spotify);
+      return spotifyGetPlaylistTracks(args, context?.spotify, context);
     case "spotify_search":
       return spotifySearch(args, context?.spotify);
     case "spotify_play":
-      return spotifyPlay(args, context?.spotify, context?.spotifyRepeatAfterPlay);
+      return spotifyPlay(args, context?.spotify, context);
     case "spotify_set_volume":
       return spotifySetVolume(args, context?.spotify);
     default: {
@@ -701,6 +704,89 @@ function normalizeSpotifyRepeatState(value: unknown): "off" | "track" | "context
   return value === "track" || value === "context" ? value : "off";
 }
 
+function normalizeSpotifyPlayableUri(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const uri = value.trim();
+  const trackWithCandidateSuffix = uri.match(/^spotify:track:([A-Za-z0-9]{22})_candidate$/);
+  if (trackWithCandidateSuffix) return `spotify:track:${trackWithCandidateSuffix[1]}`;
+  if (/^spotify:[a-z]+:[A-Za-z0-9]+$/i.test(uri)) return uri;
+  return null;
+}
+
+function normalizeSpotifyTrackUri(value: unknown): string | null {
+  const uri = normalizeSpotifyPlayableUri(value);
+  return uri?.startsWith("spotify:track:") ? uri : null;
+}
+
+function normalizeSpotifyTrackHistory(value: unknown, limit = SPOTIFY_RECENT_TRACK_HISTORY_LIMIT): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const entry of value) {
+    const uri = normalizeSpotifyTrackUri(entry);
+    if (!uri || seen.has(uri)) continue;
+    seen.add(uri);
+    normalized.push(uri);
+    if (normalized.length >= limit) break;
+  }
+  return normalized;
+}
+
+function appendSpotifyTrackHistory(history: unknown, uris: unknown[]): string[] {
+  const next: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of uris) {
+    const uri = normalizeSpotifyTrackUri(entry);
+    if (!uri || seen.has(uri)) continue;
+    seen.add(uri);
+    next.push(uri);
+  }
+  for (const uri of normalizeSpotifyTrackHistory(history)) {
+    if (seen.has(uri)) continue;
+    seen.add(uri);
+    next.push(uri);
+    if (next.length >= SPOTIFY_RECENT_TRACK_HISTORY_LIMIT) break;
+  }
+  return next.slice(0, SPOTIFY_RECENT_TRACK_HISTORY_LIMIT);
+}
+
+function getSpotifyRecentTrackUris(chatMeta?: Record<string, unknown>): string[] {
+  if (!chatMeta) return [];
+  const seen = new Set<string>();
+  const recent: string[] = [];
+  for (const source of [chatMeta.spotifyRecentTracks, chatMeta.gameRecentSpotifyTracks]) {
+    for (const uri of normalizeSpotifyTrackHistory(source)) {
+      if (seen.has(uri)) continue;
+      seen.add(uri);
+      recent.push(uri);
+      if (recent.length >= SPOTIFY_RECENT_TRACK_HISTORY_LIMIT) return recent;
+    }
+  }
+  return recent;
+}
+
+function getSpotifyRecentTrackMetadataKey(chatMeta?: Record<string, unknown>): "spotifyRecentTracks" | "gameRecentSpotifyTracks" {
+  return chatMeta?.gameUseSpotifyMusic === true || typeof chatMeta?.gameSpotifySourceType === "string"
+    ? "gameRecentSpotifyTracks"
+    : "spotifyRecentTracks";
+}
+
+async function rememberSpotifyPlayedTracks(context: ToolExecutionContext | undefined, uris: unknown[]): Promise<void> {
+  const trackUris = uris.map(normalizeSpotifyTrackUri).filter((uri): uri is string => Boolean(uri));
+  if (trackUris.length === 0 || !context?.onUpdateMetadata) return;
+
+  try {
+    await context.onUpdateMetadata((currentMeta) => {
+      const key = getSpotifyRecentTrackMetadataKey({ ...(context.chatMeta ?? {}), ...currentMeta });
+      return {
+        [key]: appendSpotifyTrackHistory(currentMeta[key] ?? context.chatMeta?.[key], trackUris),
+      };
+    });
+  } catch (err) {
+    logger.debug(err, "[spotify] Failed to persist recent track history");
+  }
+}
+
 async function fetchSpotifyPlaybackSnapshot(accessToken: string): Promise<SpotifyPlaybackSnapshot | null> {
   const res = await fetch("https://api.spotify.com/v1/me/player", {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -770,7 +856,7 @@ async function waitForSpotifyPlayback(
   expectedTrackUri?: string,
 ): Promise<SpotifyPlaybackSnapshot | null> {
   let latest: SpotifyPlaybackSnapshot | null = null;
-  for (const delay of [0, SPOTIFY_PLAYBACK_SETTLE_MS, 900, 1500, 2500] as const) {
+  for (const delay of SPOTIFY_PLAYBACK_VERIFY_DELAYS_MS) {
     if (delay > 0) await wait(delay);
     latest = await fetchSpotifyPlaybackSnapshot(accessToken);
     if (expectedTrackUri) {
@@ -803,17 +889,61 @@ async function requestSpotifyPlayback(
   return { ok: false, error: `Spotify play failed (${res.status}): ${text.slice(0, 200)}` };
 }
 
-async function transferSpotifyPlaybackToDevice(accessToken: string, deviceId: string): Promise<boolean> {
+async function queueSpotifyTrack(
+  accessToken: string,
+  deviceId: string | null,
+  uri: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const params = new URLSearchParams({ uri });
+  if (deviceId) params.set("device_id", deviceId);
+  const res = await fetch(`https://api.spotify.com/v1/me/player/queue?${params.toString()}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (res.ok || res.status === 204) return { ok: true };
+
+  const text = await res.text();
+  return { ok: false, error: `Spotify queue failed (${res.status}): ${text.slice(0, 200)}` };
+}
+
+async function queueSpotifyTracks(accessToken: string, deviceId: string | null, uris: string[]): Promise<number> {
+  let queued = 0;
+  for (const uri of uris) {
+    const result = await queueSpotifyTrack(accessToken, deviceId, uri);
+    if (result.ok) {
+      queued++;
+    } else {
+      logger.debug("[spotify] Queueing %s failed: %s", uri, result.error);
+    }
+  }
+  return queued;
+}
+
+async function transferSpotifyPlaybackToDevice(accessToken: string, deviceId: string, play = false): Promise<boolean> {
   const res = await fetch("https://api.spotify.com/v1/me/player", {
     method: "PUT",
     headers: {
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ device_ids: [deviceId], play: true }),
+    body: JSON.stringify({ device_ids: [deviceId], play }),
     signal: AbortSignal.timeout(10_000),
   }).catch(() => null);
   return !!res && (res.ok || res.status === 204);
+}
+
+async function primeSpotifyPlaybackDevice(
+  accessToken: string,
+  deviceId: string,
+  deviceName: string | null,
+): Promise<void> {
+  const transferred = await transferSpotifyPlaybackToDevice(accessToken, deviceId, false);
+  if (!transferred) {
+    logger.debug("[spotify] Idle-device prime failed for %s", deviceName ?? deviceId);
+    return;
+  }
+  await wait(SPOTIFY_PLAYBACK_SETTLE_MS);
 }
 
 async function verifyOrNudgeSpotifyPlayback(args: {
@@ -845,18 +975,39 @@ async function verifyOrNudgeSpotifyPlayback(args: {
     }
   }
 
+  logger.debug("[spotify] Playback still not verified; retrying Spotify's current active playback session");
+  const activeSessionRetry = await requestSpotifyPlayback(args.accessToken, null, args.body);
+  if (activeSessionRetry.ok) {
+    current = await waitForSpotifyPlayback(args.accessToken, args.expectedTrackUri);
+    if (spotifyPlaybackMatches(current, args.expectedUris, args.requireFirstUri)) return current;
+  } else {
+    logger.debug("[spotify] Current active session retry failed: %s", activeSessionRetry.error);
+  }
+
   logger.debug(
     "[spotify] Playback still not verified; nudging Spotify Connect transfer to %s",
     args.targetDeviceName ?? args.targetDeviceId,
   );
-  const transferred = await transferSpotifyPlaybackToDevice(args.accessToken, args.targetDeviceId);
+  let transferred = await transferSpotifyPlaybackToDevice(args.accessToken, args.targetDeviceId, false);
+  if (transferred) {
+    await wait(SPOTIFY_PLAYBACK_SETTLE_MS);
+    const retry = await requestSpotifyPlayback(args.accessToken, args.targetDeviceId, args.body);
+    if (retry.ok) {
+      current = await waitForSpotifyPlayback(args.accessToken, args.expectedTrackUri);
+      if (spotifyPlaybackMatches(current, args.expectedUris, args.requireFirstUri)) return current;
+    } else {
+      logger.debug("[spotify] Post-transfer play retry failed: %s", retry.error);
+    }
+  }
+
+  transferred = await transferSpotifyPlaybackToDevice(args.accessToken, args.targetDeviceId, true);
   if (transferred) {
     await wait(SPOTIFY_PLAYBACK_SETTLE_MS);
     const retry = await requestSpotifyPlayback(args.accessToken, args.targetDeviceId, args.body);
     if (retry.ok) {
       current = await waitForSpotifyPlayback(args.accessToken, args.expectedTrackUri);
     } else {
-      logger.debug("[spotify] Post-transfer play retry failed: %s", retry.error);
+      logger.debug("[spotify] Post-autoplay-transfer play retry failed: %s", retry.error);
     }
   }
 
@@ -957,19 +1108,63 @@ function sampleSpotifyTracksEvenly(
   return sampled;
 }
 
+function sampleSpotifyTracksWithRecentAvoidance(args: {
+  tracks: SpotifyTrackCandidate[];
+  count: number;
+  seed: string;
+  recentTrackUris: Set<string>;
+}): SpotifyTrackCandidate[] {
+  if (args.tracks.length <= args.count) {
+    if (args.recentTrackUris.size === 0) return args.tracks;
+    const freshTracks = args.tracks.filter((track) => !args.recentTrackUris.has(track.uri));
+    const recentTracks = args.tracks.filter((track) => args.recentTrackUris.has(track.uri));
+    return [...freshTracks, ...recentTracks];
+  }
+  if (args.recentTrackUris.size === 0) {
+    return sampleSpotifyTracksEvenly(args.tracks, args.count, args.seed);
+  }
+
+  const freshTracks = args.tracks.filter((track) => !args.recentTrackUris.has(track.uri));
+  const recentTracks = args.tracks.filter((track) => args.recentTrackUris.has(track.uri));
+  const selected = sampleSpotifyTracksEvenly(
+    freshTracks.length > 0 ? freshTracks : args.tracks,
+    Math.min(args.count, freshTracks.length || args.tracks.length),
+    args.seed,
+  );
+  if (selected.length >= args.count || recentTracks.length === 0) return selected;
+
+  const seen = new Set(selected.map((track) => track.uri));
+  const fill = sampleSpotifyTracksEvenly(
+    recentTracks.filter((track) => !seen.has(track.uri)),
+    args.count - selected.length,
+    `${args.seed}:recent-fill`,
+  );
+  selected.push(...fill);
+  return selected;
+}
+
 function selectSpotifyTrackCandidates(args: {
   tracks: SpotifyTrackCandidate[];
   query: string;
   limit: number;
   playlistId: string;
-}): { candidates: SpotifyTrackCandidate[]; mode: string; tokens: string[] } {
+  recentTrackUris?: string[];
+}): { candidates: SpotifyTrackCandidate[]; mode: string; tokens: string[]; recentAvoidedCount: number } {
   const phrase = normalizeSpotifyText(args.query);
   const tokens = buildSpotifyCandidateTokens(args.query);
+  const recentTrackUris = new Set(args.recentTrackUris ?? []);
+  const recentAvoidedCount = args.tracks.filter((track) => recentTrackUris.has(track.uri)).length;
   if (tokens.length === 0) {
     return {
-      candidates: sampleSpotifyTracksEvenly(args.tracks, args.limit, `${args.playlistId}:balanced`),
-      mode: "balanced_sample",
+      candidates: sampleSpotifyTracksWithRecentAvoidance({
+        tracks: args.tracks,
+        count: args.limit,
+        seed: `${args.playlistId}:balanced`,
+        recentTrackUris,
+      }),
+      mode: recentAvoidedCount > 0 ? "balanced_sample_recent_aware" : "balanced_sample",
       tokens,
+      recentAvoidedCount,
     };
   }
 
@@ -977,23 +1172,34 @@ function selectSpotifyTrackCandidates(args: {
     .map((track) => ({ ...track, score: scoreSpotifyCandidate(track, phrase, tokens) }))
     .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
   const strong = scored.filter((track) => (track.score ?? 0) >= 2);
-  const selected: SpotifyTrackCandidate[] = strong.slice(0, Math.max(0, Math.floor(args.limit * 0.8)));
+  const selected: SpotifyTrackCandidate[] = strong
+    .filter((track) => !recentTrackUris.has(track.uri))
+    .slice(0, Math.max(0, Math.floor(args.limit * 0.8)));
   const seen = new Set(selected.map((track) => track.uri));
   const reserve = args.limit - selected.length;
 
   if (reserve > 0) {
-    const fallback = sampleSpotifyTracksEvenly(
-      args.tracks.filter((track) => !seen.has(track.uri)),
-      reserve,
-      `${args.playlistId}:${phrase}:fallback`,
-    );
+    const fallback = sampleSpotifyTracksWithRecentAvoidance({
+      tracks: args.tracks.filter((track) => !seen.has(track.uri)),
+      count: reserve,
+      seed: `${args.playlistId}:${phrase}:fallback`,
+      recentTrackUris,
+    });
     selected.push(...fallback);
   }
 
   return {
     candidates: selected.slice(0, args.limit),
-    mode: strong.length > 0 ? "scored_candidates" : "balanced_sample",
+    mode:
+      recentAvoidedCount > 0
+        ? strong.length > 0
+          ? "scored_candidates_recent_aware"
+          : "balanced_sample_recent_aware"
+        : strong.length > 0
+          ? "scored_candidates"
+          : "balanced_sample",
     tokens,
+    recentAvoidedCount,
   };
 }
 
@@ -1089,6 +1295,7 @@ async function fetchSpotifyTrackIndex(
 async function spotifyGetPlaylistTracks(
   args: Record<string, unknown>,
   creds?: SpotifyCredentials,
+  context?: ToolExecutionContext,
 ): Promise<Record<string, unknown>> {
   if (!creds?.accessToken) {
     return { error: "Spotify not configured. Please add your Spotify access token in the Spotify DJ agent settings." };
@@ -1107,11 +1314,13 @@ async function spotifyGetPlaylistTracks(
       const index = await fetchSpotifyTrackIndex(playlistId, creds);
       const query = [args.query, args.mood, args.scene].filter((part) => typeof part === "string").join(" ");
       const candidateLimit = clampNumber(args.candidateLimit ?? args.limit ?? 60, 60, 1, 80);
+      const recentTrackUris = getSpotifyRecentTrackUris(context?.chatMeta);
       const selection = selectSpotifyTrackCandidates({
         tracks: index.tracks,
         query,
         limit: candidateLimit,
         playlistId,
+        recentTrackUris,
       });
 
       return {
@@ -1124,8 +1333,11 @@ async function spotifyGetPlaylistTracks(
         candidateMode: selection.mode,
         query: query || null,
         matchedTokens: selection.tokens,
+        recentTrackUris: recentTrackUris.slice(0, SPOTIFY_RECENT_TRACK_PROMPT_LIMIT),
+        recentAvoidedCount: selection.recentAvoidedCount,
         truncated: index.truncated,
-        hint: "Server indexed the playlist and returned only selected candidates. Pick 3-5 URIs from this shortlist; do not request every page unless you truly need manual browsing.",
+        hint:
+          "Server indexed the playlist and returned only selected candidates. Recently played tracks are suppressed when alternatives exist; avoid recentTrackUris unless no fitting non-recent candidate appears. Pick 3-5 URIs from this shortlist; do not request every page unless you truly need manual browsing.",
       };
     }
 
@@ -1205,21 +1417,23 @@ async function spotifySearch(
 async function spotifyPlay(
   args: Record<string, unknown>,
   creds?: SpotifyCredentials,
-  repeatAfterPlay?: "off" | "track" | "context",
+  context?: ToolExecutionContext,
 ): Promise<Record<string, unknown>> {
   if (!creds?.accessToken) {
     return { error: "Spotify not configured. Please add your Spotify access token in the Spotify DJ agent settings." };
   }
   const reason = String(args.reason ?? "");
+  const repeatAfterPlay = context?.spotifyRepeatAfterPlay;
 
   // Support both single `uri` and array `uris`
   let uris: string[] = [];
   if (Array.isArray(args.uris)) {
-    uris = (args.uris as string[]).filter((u) => typeof u === "string" && u.startsWith("spotify:"));
+    uris = (args.uris as unknown[]).map(normalizeSpotifyPlayableUri).filter((u): u is string => Boolean(u));
   }
-  if (args.uri && typeof args.uri === "string" && args.uri.startsWith("spotify:")) {
+  const singleUri = normalizeSpotifyPlayableUri(args.uri);
+  if (singleUri) {
     // If single uri is provided, prepend it (avoid duplicates)
-    if (!uris.includes(args.uri)) uris.unshift(args.uri);
+    if (!uris.includes(singleUri)) uris.unshift(singleUri);
   }
   if (uris.length === 0) {
     return { error: "No valid Spotify URIs provided" };
@@ -1243,8 +1457,11 @@ async function spotifyPlay(
     logger.debug(
       "[spotify] Starting playback on %s (%s)",
       targetDeviceName ?? "the active Spotify device",
-      playDeviceId ? "explicit idle-device target" : "current playback session",
+      playDeviceId ? "explicit active-device target" : "current active playback session",
     );
+    if (playDeviceId && !beforePlayback?.deviceId) {
+      await primeSpotifyPlaybackDevice(creds.accessToken, playDeviceId, targetDeviceName);
+    }
 
     if (singleTrackUri && repeatAfterPlay === "track") {
       await applySpotifyRepeatAfterPlay(creds.accessToken, "off", playDeviceId);
@@ -1263,14 +1480,28 @@ async function spotifyPlay(
         targetDeviceName,
       });
       if (!spotifyPlaybackMatches(current)) {
+        logger.warn(
+          "[spotify] Playback accepted but verification failed device=%s isPlaying=%s currentUri=%s expected=%s",
+          current?.deviceName ?? targetDeviceName ?? "unknown",
+          current?.isPlaying === true ? "true" : "false",
+          current?.trackUri ?? "none",
+          firstUri,
+        );
+        await rememberSpotifyPlayedTracks(context, current?.trackUri ? [current.trackUri] : []);
         return {
-          error: `Spotify accepted the play request, but playback did not start${targetDeviceName ? ` on ${targetDeviceName}` : ""}. Open Spotify on the target device, then try again.`,
+          applied: true,
+          playbackPending: true,
+          warning: `Spotify accepted the play request, but playback was not verified${targetDeviceName ? ` on ${targetDeviceName}` : ""} yet.`,
           uris,
           reason,
+          repeat,
+          repeatState: current?.repeatState ?? repeat ?? null,
           currentUri: current?.trackUri ?? null,
           device: current?.deviceName ?? targetDeviceName,
+          display: `🎵 Playback requested: ${firstUri}${reason ? ` — ${reason}` : ""}`,
         };
       }
+      await rememberSpotifyPlayedTracks(context, current?.trackUri ? [current.trackUri] : []);
       return {
         applied: true,
         uris,
@@ -1283,8 +1514,13 @@ async function spotifyPlay(
       };
     }
 
-    // For track URIs, pass them all as a queue
-    const body: SpotifyPlayRequestBody = { uris, position_ms: 0 };
+    // For track queues, start the first track first, then add the rest with
+    // Spotify's queue endpoint. Sending 3-5 URIs directly to /play is valid,
+    // but Spotify Connect can accept it without reliably starting playback.
+    const allTrackUris = uris.every((uri) => uri.startsWith("spotify:track:"));
+    const playbackUris = allTrackUris && uris.length > 1 ? [firstUri] : uris;
+    const queuedTrackUris = allTrackUris && uris.length > 1 ? uris.slice(1) : [];
+    const body: SpotifyPlayRequestBody = { uris: playbackUris, position_ms: 0 };
     const play = await requestSpotifyPlayback(creds.accessToken, playDeviceId, body);
     if (!play.ok) return { error: play.error };
     if (singleTrackUri) await wait(SPOTIFY_PLAYBACK_SETTLE_MS);
@@ -1295,9 +1531,9 @@ async function spotifyPlay(
       initialDeviceId: playDeviceId,
       targetDeviceId,
       targetDeviceName,
-      expectedTrackUri: singleTrackUri ? firstUri : undefined,
-      expectedUris: uris,
-      requireFirstUri: singleTrackUri,
+      expectedTrackUri: singleTrackUri || (allTrackUris && uris.length > 1) ? firstUri : undefined,
+      expectedUris: playbackUris,
+      requireFirstUri: singleTrackUri || (allTrackUris && uris.length > 1),
     });
     if (singleTrackUri && repeatAfterPlay === "track" && current?.repeatState !== "track") {
       repeat = await applySpotifyRepeatAfterPlay(creds.accessToken, "track", current?.deviceId ?? playDeviceId, 3);
@@ -1308,19 +1544,50 @@ async function spotifyPlay(
         targetDeviceId,
         targetDeviceName,
         expectedTrackUri: firstUri,
-        expectedUris: uris,
+        expectedUris: playbackUris,
         requireFirstUri: true,
       });
     }
-    if (!spotifyPlaybackMatches(current, uris, singleTrackUri)) {
+    if (!spotifyPlaybackMatches(current, playbackUris, singleTrackUri || (allTrackUris && uris.length > 1))) {
+      const queuedAfterStart = await queueSpotifyTracks(
+        creds.accessToken,
+        current?.deviceId ?? playDeviceId,
+        queuedTrackUris,
+      );
+      const totalQueued = playbackUris.length + queuedAfterStart;
+      await rememberSpotifyPlayedTracks(context, uris);
+      logger.warn(
+        "[spotify] Playback accepted but verification failed device=%s isPlaying=%s currentUri=%s expected=%s",
+        current?.deviceName ?? targetDeviceName ?? "unknown",
+        current?.isPlaying === true ? "true" : "false",
+        current?.trackUri ?? "none",
+        playbackUris[0] ?? firstUri,
+      );
       return {
-        error: `Spotify accepted the play request, but playback did not start${targetDeviceName ? ` on ${targetDeviceName}` : ""}. Open Spotify on the target device, then try again.`,
+        applied: true,
+        playbackPending: true,
+        warning: `Spotify accepted the play request, but playback was not verified${targetDeviceName ? ` on ${targetDeviceName}` : ""} yet.`,
         uris,
         reason,
+        repeat,
+        repeatState: current?.repeatState ?? repeat ?? null,
         currentUri: current?.trackUri ?? null,
         device: current?.deviceName ?? targetDeviceName,
+        queued: totalQueued,
+        queueRequested: uris.length,
+        display:
+          totalQueued > 1
+            ? `🎵 Queued ${totalQueued} tracks; playback requested${reason ? ` — ${reason}` : ""}`
+            : `🎵 Playback requested: ${firstUri}${reason ? ` — ${reason}` : ""}`,
       };
     }
+    const queuedAfterStart = await queueSpotifyTracks(
+      creds.accessToken,
+      current?.deviceId ?? playDeviceId,
+      queuedTrackUris,
+    );
+    const totalQueued = playbackUris.length + queuedAfterStart;
+    await rememberSpotifyPlayedTracks(context, uris);
     return {
       applied: true,
       uris,
@@ -1329,8 +1596,12 @@ async function spotifyPlay(
       repeatState: current?.repeatState ?? repeat ?? null,
       currentUri: current?.trackUri ?? null,
       device: current?.deviceName ?? targetDeviceName,
-      queued: uris.length,
-      display: `🎵 Queued ${uris.length} tracks${reason ? ` — ${reason}` : ""}`,
+      queued: totalQueued,
+      queueRequested: uris.length,
+      display:
+        totalQueued > 1
+          ? `🎵 Queued ${totalQueued} tracks${reason ? ` — ${reason}` : ""}`
+          : `🎵 Now playing: ${firstUri}${reason ? ` — ${reason}` : ""}`,
     };
   } catch (err) {
     return { error: `Spotify play failed: ${err instanceof Error ? err.message : "unknown"}` };

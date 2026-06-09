@@ -165,31 +165,26 @@ async function executeGroup(
     }
   };
 
-  const allResults: AgentResult[] = [];
+  const batchResultsPromise =
+    batchAgents.length > 0
+      ? executeAgentBatch(batchAgents, groupContext, group.provider, group.model).then((results) => {
+          for (const result of results) {
+            safeOnResult(result);
+          }
+          return results;
+        })
+      : Promise.resolve([] as AgentResult[]);
+  const toolResultsPromise = Promise.all(
+    toolAgents.map((agent) =>
+      executeAgent(agent, buildAgentContext(agent, context), agent.provider, agent.model, agent.toolContext).then((result) => {
+        safeOnResult(result);
+        return result;
+      }),
+    ),
+  );
 
-  // Run regular agents as a batch
-  if (batchAgents.length > 0) {
-    const batchResults = await executeAgentBatch(batchAgents, groupContext, group.provider, group.model);
-    for (const result of batchResults) {
-      safeOnResult(result);
-    }
-    allResults.push(...batchResults);
-  }
-
-  // Run tool-using agents individually (they need the tool loop)
-  for (const agent of toolAgents) {
-    const result = await executeAgent(
-      agent,
-      buildAgentContext(agent, context),
-      agent.provider,
-      agent.model,
-      agent.toolContext,
-    );
-    safeOnResult(result);
-    allResults.push(result);
-  }
-
-  return allResults;
+  const [batchResults, toolResults] = await Promise.all([batchResultsPromise, toolResultsPromise]);
+  return [...batchResults, ...toolResults];
 }
 
 /**

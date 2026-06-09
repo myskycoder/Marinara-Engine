@@ -96,6 +96,7 @@ import {
 import { dedupeSessionSummaryLists } from "../services/game/session-summary-normalization.js";
 import {
   generationParametersSchema,
+  isClaudeAdaptiveOnlyNoSamplingModel,
   resolveMacros,
   scoreMusic,
   scoreAmbient,
@@ -1356,9 +1357,9 @@ function resolveGameReasoningEffort(
   if (!reasoningEffort) return undefined;
   const modelLower = model.toLowerCase();
   const providerLower = (provider ?? "").toLowerCase();
-  const isOpus47Plus = /claude-opus-4-(?:[7-9]|\d{2,})/.test(modelLower);
+  const isClaudeAdaptiveOnly = isClaudeAdaptiveOnlyNoSamplingModel(modelLower);
   const isNativeAnthropicAdaptiveOnly =
-    (providerLower === "anthropic" || providerLower === "claude_subscription") && isOpus47Plus;
+    (providerLower === "anthropic" || providerLower === "claude_subscription") && isClaudeAdaptiveOnly;
   if (
     modelLower.startsWith("grok-4.3") ||
     modelLower.startsWith("grok-4-1-fast") ||
@@ -1374,7 +1375,7 @@ function resolveGameReasoningEffort(
     modelLower.startsWith("gpt-5.5") ||
     modelLower.startsWith("gpt-5.4") ||
     modelLower === "grok-4.20-multi-agent" ||
-    isOpus47Plus;
+    isClaudeAdaptiveOnly;
   return isNativeAnthropicAdaptiveOnly ? "max" : supportsXhigh ? "xhigh" : "high";
 }
 
@@ -1387,17 +1388,17 @@ function gameGenOptions(
 ): ChatOptions {
   const m = model.toLowerCase();
   const providerLower = (provider ?? "").toLowerCase();
-  // Opus 4.7+ and GPT-5.4/5.5 accept the strongest reasoning tier
+  // Claude adaptive-only models and GPT-5.4/5.5 accept the strongest reasoning tier
   // (native Anthropic uses "max"; OpenAI-compatible routes use "xhigh").
-  // Opus 4.7+ also forbids sampling parameters entirely; the Anthropic
+  // Claude adaptive-only models also forbid sampling parameters entirely; the Anthropic
   // provider strips them on the wire, but we omit them here so the
   // logged options match what is actually sent.
-  const isOpus47Plus = /claude-opus-4-(?:[7-9]|\d{2,})/.test(m);
+  const isClaudeAdaptiveOnly = isClaudeAdaptiveOnlyNoSamplingModel(m);
   const isNativeAnthropicAdaptiveOnly =
-    (providerLower === "anthropic" || providerLower === "claude_subscription") && isOpus47Plus;
+    (providerLower === "anthropic" || providerLower === "claude_subscription") && isClaudeAdaptiveOnly;
   const isGrokAutoReasoning = m.startsWith("grok-4.3") || m.startsWith("grok-4-1-fast") || m.startsWith("x-ai/grok-");
   const supportsXhigh =
-    m.startsWith("gpt-5.5") || m.startsWith("gpt-5.4") || m === "grok-4.20-multi-agent" || isOpus47Plus;
+    m.startsWith("gpt-5.5") || m.startsWith("gpt-5.4") || m === "grok-4.20-multi-agent" || isClaudeAdaptiveOnly;
   const base: ChatOptions = {
     model,
     maxTokens: 8192,
@@ -1408,17 +1409,17 @@ function gameGenOptions(
     // Required for providers that actually attach thinking config to the request body.
     base.enableThinking = true;
   }
-  if (!isOpus47Plus) {
+  if (!isClaudeAdaptiveOnly) {
     base.temperature = 1;
     base.topP = 1;
   }
 
   if (parameters) {
-    if (typeof parameters.temperature === "number" && !isOpus47Plus) base.temperature = parameters.temperature;
+    if (typeof parameters.temperature === "number" && !isClaudeAdaptiveOnly) base.temperature = parameters.temperature;
     if (typeof parameters.maxTokens === "number") base.maxTokens = parameters.maxTokens;
     if (typeof parameters.maxContext === "number") base.maxContext = parameters.maxContext;
-    if (typeof parameters.topP === "number" && !isOpus47Plus) base.topP = parameters.topP;
-    if (typeof parameters.topK === "number" && !isOpus47Plus) base.topK = parameters.topK;
+    if (typeof parameters.topP === "number" && !isClaudeAdaptiveOnly) base.topP = parameters.topP;
+    if (typeof parameters.topK === "number" && !isClaudeAdaptiveOnly) base.topK = parameters.topK;
     if (typeof parameters.frequencyPenalty === "number") base.frequencyPenalty = parameters.frequencyPenalty;
     if (typeof parameters.presencePenalty === "number") base.presencePenalty = parameters.presencePenalty;
     if (parameters.customParameters) {

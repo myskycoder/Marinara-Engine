@@ -276,7 +276,7 @@ export function RoleplayHUDActionsMenu({
                     title={failure.error ?? undefined}
                   >
                     <div className="font-semibold text-amber-200">{formatAgentFailureTitle(failure)}</div>
-                    <div className="mt-0.5 max-h-8 overflow-hidden break-words text-amber-100/65">
+                    <div className="mt-0.5 whitespace-pre-wrap break-words text-amber-100/65">
                       {formatAgentFailureDetail(failure)}
                     </div>
                   </div>

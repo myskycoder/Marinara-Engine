@@ -8,6 +8,7 @@ import { toast, type ExternalToast } from "sonner";
 import { api } from "../lib/api-client";
 import { formatAgentFailuresToast, toAgentFailure, type AgentFailure } from "../lib/agent-failures";
 import { chatBackgroundMetadataToUrl } from "../lib/backgrounds";
+import { requestChatScrollToBottom } from "../lib/chat-scroll-events";
 import { agentKeys } from "./use-agents";
 import type { PendingCardUpdate } from "../stores/agent.store";
 import {
@@ -728,6 +729,7 @@ export function useGenerate() {
           pages[0] = sortMessagesByCreatedAt([...(pages[0] ?? []), optimisticMsg]);
           return { ...old, pages };
         });
+        requestChatScrollToBottom({ chatId: params.chatId, behavior: "auto" });
       }
 
       // ── SillyTavern-style smooth streaming ──
@@ -797,9 +799,8 @@ export function useGenerate() {
       let lastTypewriterPaintAt = 0;
       let typewriterRemainder = 0;
       const canInspectPageFocus = typeof document !== "undefined";
-      const canListenForWindowBlur = typeof window !== "undefined";
       const shouldFlushTypewriterForBackground = () =>
-        canInspectPageFocus && (document.visibilityState !== "visible" || !document.hasFocus());
+        canInspectPageFocus && document.visibilityState !== "visible";
 
       console.log(
         "[Typewriter] streaming=%s, speed=%d, charsPerSecond=%s",
@@ -912,9 +913,6 @@ export function useGenerate() {
       };
       if (canInspectPageFocus) {
         document.addEventListener("visibilitychange", flushBackgroundedTypewriter);
-      }
-      if (canListenForWindowBlur) {
-        window.addEventListener("blur", flushBackgroundedTypewriter);
       }
 
       const waitForTypewriterDrain = async () => {
@@ -1139,11 +1137,9 @@ export function useGenerate() {
                 error: result.error,
               });
 
-              const bubble = formatAgentBubble(
-                result.agentType,
-                result.agentName,
-                result.success ? result.data : { error: result.error ?? "Agent failed" },
-              );
+              const bubble = result.success
+                ? formatAgentBubble(result.agentType, result.agentName, result.data)
+                : null;
               if (bubble) {
                 addThoughtBubble(result.agentType, result.agentName, bubble);
               }
@@ -1738,9 +1734,6 @@ export function useGenerate() {
         if (canInspectPageFocus) {
           document.removeEventListener("visibilitychange", flushBackgroundedTypewriter);
         }
-        if (canListenForWindowBlur) {
-          window.removeEventListener("blur", flushBackgroundedTypewriter);
-        }
 
         if (shouldRefreshGameState) {
           // Refresh game state from DB so HUD/sidebar trackers settle on the
@@ -2037,11 +2030,10 @@ export function useGenerate() {
                   })
                   .catch((err) => console.warn("[Agent] Failed to build card update entry:", err));
               }
-              const bubble = formatAgentBubble(
-                result.agentType,
-                result.agentName,
-                result.success ? result.data : { error: result.error ?? "Agent failed" },
-              ) ?? formatRetryAgentActivityBubble(result, isTrackerRetry);
+              const bubble = result.success
+                ? (formatAgentBubble(result.agentType, result.agentName, result.data) ??
+                  formatRetryAgentActivityBubble(result, isTrackerRetry))
+                : null;
               if (bubble) addThoughtBubble(result.agentType, result.agentName, bubble);
 
               if (result.success && result.data) {

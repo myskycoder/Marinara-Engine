@@ -23,6 +23,8 @@ import {
   appendChatSummaryEntryToMetadata,
   applyQuestUpdatesToPlayerStats,
   buildQuestJournalData,
+  compactQuestProgressForContext,
+  isClaudeAdaptiveOnlyNoSamplingModel,
 } from "@marinara-engine/shared";
 import type {
   AgentContext,
@@ -158,6 +160,7 @@ import { postToDiscordWebhook } from "../services/discord-webhook.js";
 import {
   appendGenerationTailMessages,
   canUseMessageForUserRegeneration,
+  dedupeLastMessageWrappers,
   findLastIndex,
   findTrackerContextInsertIndex,
   appendReadableAttachmentsToContent,
@@ -194,6 +197,8 @@ import {
 } from "./generate/generate-route-utils.js";
 import {
   buildAvailableSpriteCharacter,
+  completeRequiredSpriteExpressionEntries,
+  normalizeRequiredSpriteExpressionIds,
   normalizeSpriteDisplayModes,
   validateSpriteExpressionEntries,
 } from "./generate/expression-agent-utils.js";
@@ -440,6 +445,11 @@ async function findLastUserMessageIdBefore(
     if (message?.role === "user" && typeof message.id === "string") return message.id;
   }
   return null;
+}
+
+function resolveAgentRuntimePhase(agentType: string, configuredPhase: string): string {
+  if (agentType === "echo-chamber") return "parallel";
+  return configuredPhase;
 }
 
 function resolveLorebookGenerationTriggers(
@@ -1610,33 +1620,24 @@ function reassignHistoryLastMessageWrapper(messages: GenerationPromptMessage[]):
     messages[index] = { ...messages[index]!, content: stripped };
   }
 
-  let lastUserHistoryIndex = -1;
-  for (let i = historyIndexes.length - 1; i >= 0; i--) {
-    const index = historyIndexes[i]!;
-    if (messages[index]!.role === "user") {
-      lastUserHistoryIndex = index;
-      break;
-    }
-  }
-  if (lastUserHistoryIndex < 0) return;
-
-  const historyBeforeLast = historyIndexes.filter((index) => index < lastUserHistoryIndex);
+  const lastHistoryIndex = historyIndexes[historyIndexes.length - 1]!;
+  const historyBeforeLast = historyIndexes.filter((index) => index < lastHistoryIndex);
   if (hasXmlWrappers) {
     if (historyBeforeLast.length > 0) {
       const firstHistoryIndex = historyBeforeLast[0]!;
-      const lastHistoryIndex = historyBeforeLast[historyBeforeLast.length - 1]!;
+      const lastChatHistoryIndex = historyBeforeLast[historyBeforeLast.length - 1]!;
       messages[firstHistoryIndex] = {
         ...messages[firstHistoryIndex]!,
         content: `<chat_history>\n${messages[firstHistoryIndex]!.content}`,
       };
-      messages[lastHistoryIndex] = {
-        ...messages[lastHistoryIndex]!,
-        content: `${messages[lastHistoryIndex]!.content}\n</chat_history>`,
+      messages[lastChatHistoryIndex] = {
+        ...messages[lastChatHistoryIndex]!,
+        content: `${messages[lastChatHistoryIndex]!.content}\n</chat_history>`,
       };
     }
-    messages[lastUserHistoryIndex] = {
-      ...messages[lastUserHistoryIndex]!,
-      content: `<last_message>\n${messages[lastUserHistoryIndex]!.content}\n</last_message>`,
+    messages[lastHistoryIndex] = {
+      ...messages[lastHistoryIndex]!,
+      content: `<last_message>\n${messages[lastHistoryIndex]!.content}\n</last_message>`,
     };
     return;
   }
@@ -1648,9 +1649,9 @@ function reassignHistoryLastMessageWrapper(messages: GenerationPromptMessage[]):
       content: `## Chat History\n${messages[firstHistoryIndex]!.content}`,
     };
   }
-  messages[lastUserHistoryIndex] = {
-    ...messages[lastUserHistoryIndex]!,
-    content: `## Last Message\n${messages[lastUserHistoryIndex]!.content}`,
+  messages[lastHistoryIndex] = {
+    ...messages[lastHistoryIndex]!,
+    content: `## Last Message\n${messages[lastHistoryIndex]!.content}`,
   };
 }
 
@@ -3887,19 +3888,19 @@ export async function generateRoutes(app: FastifyInstance) {
         const providerLower = (conn.provider ?? "").toLowerCase();
 
         // Resolve "maximum" reasoning effort to the highest provider-facing level.
-        // Native Anthropic/Claude subscription Opus 4.7+ uses "max"; OpenAI-compatible
-        // Claude routes keep "xhigh". All other models get "high".
+        // Native Anthropic/Claude subscription adaptive-only models use "max";
+        // OpenAI-compatible Claude routes keep "xhigh". All other models get "high".
         let resolvedEffort: "low" | "medium" | "high" | "xhigh" | "max" | null =
           reasoningEffort !== "maximum" ? reasoningEffort : null;
         if (reasoningEffort === "maximum") {
           const isNativeAnthropicAdaptiveOnly =
             (providerLower === "anthropic" || providerLower === "claude_subscription") &&
-            /claude-opus-4-(?:[7-9]|\d{2,})/.test(modelLower);
+            isClaudeAdaptiveOnlyNoSamplingModel(modelLower);
           const supportsXhigh =
             modelLower.startsWith("gpt-5.5") ||
             modelLower.startsWith("gpt-5.4") ||
             modelLower === "grok-4.20-multi-agent" ||
-            /claude-opus-4-(?:[7-9]|\d{2,})/.test(modelLower);
+            isClaudeAdaptiveOnlyNoSamplingModel(modelLower);
           resolvedEffort = isNativeAnthropicAdaptiveOnly ? "max" : supportsXhigh ? "xhigh" : "high";
         }
 
@@ -3925,9 +3926,9 @@ export async function generateRoutes(app: FastifyInstance) {
         // ── Claude 4.5+ sampling parameter restrictions ──
         const modelLc = (conn.model ?? "").toLowerCase();
 
-        // Claude Opus 4.7+: ALL sampling params removed (temperature, top_p, top_k
+        // Claude adaptive-only models: ALL sampling params removed (temperature, top_p, top_k
         // return 400). Strip everything regardless of provider (covers reverse proxies).
-        const isClaudeNoSampling = /claude-opus-4-(?:[7-9]|\d{2,})/.test(modelLc);
+        const isClaudeNoSampling = isClaudeAdaptiveOnlyNoSamplingModel(modelLc);
         if (isClaudeNoSampling) {
           temperature = undefined;
           topP = undefined;
@@ -4074,7 +4075,7 @@ export async function generateRoutes(app: FastifyInstance) {
             id: cfg.id,
             type: cfg.type,
             name: cfg.name,
-            phase: cfg.phase as string,
+            phase: resolveAgentRuntimePhase(cfg.type as string, cfg.phase as string),
             promptTemplate: cfg.promptTemplate as string,
             connectionId: effectiveConnectionId,
             settings,
@@ -4115,7 +4116,7 @@ export async function generateRoutes(app: FastifyInstance) {
             id: `builtin:${builtIn.id}`,
             type: builtIn.id,
             name: builtIn.name,
-            phase: builtIn.phase,
+            phase: resolveAgentRuntimePhase(builtIn.id, builtIn.phase),
             promptTemplate: "",
             connectionId: defaultAgentConn?.id ?? null,
             settings: builtInSettings,
@@ -5438,7 +5439,10 @@ export async function generateRoutes(app: FastifyInstance) {
               const spriteCharacter = buildAvailableSpriteCharacter(char.id, char.name, sprites, spriteDisplayModes);
               if (spriteCharacter) perChar.push(spriteCharacter);
             }
-            if (personaId && (!restrictToSelectedSprites || selectedSpriteIds.has(personaId))) {
+            const includePersonaSprite =
+              !!personaId &&
+              (!restrictToSelectedSprites || selectedSpriteIds.has(personaId) || chatMeta.expressionAvatarsEnabled === true);
+            if (personaId && includePersonaSprite) {
               const sprites = listCharacterSprites(personaId);
               if (sprites) {
                 const spritePersona = buildAvailableSpriteCharacter(
@@ -5839,13 +5843,16 @@ export async function generateRoutes(app: FastifyInstance) {
                 }
 
                 if (hasQuest && Array.isArray(stats.activeQuests) && stats.activeQuests.length > 0) {
-                  const questLines = stats.activeQuests.map((q: any) => {
+                  const activeQuestsForContext = compactQuestProgressForContext(stats.activeQuests);
+                  const questLines = activeQuestsForContext.map((q) => {
                     const objectives = Array.isArray(q.objectives)
-                      ? q.objectives.map((o: any) => `  ${o.completed ? "[x]" : "[ ]"} ${o.text}`).join("\n")
+                      ? q.objectives.map((o) => `  [ ] ${o.text}`).join("\n")
                       : "";
-                    return `- ${q.name}${q.completed ? " (completed)" : ""}${objectives ? "\n" + objectives : ""}`;
+                    return `- ${q.name}${objectives ? "\n" + objectives : ""}`;
                   });
-                  trackerParts.push(wrapContent(questLines.join("\n"), "Active Quests", wrapFormat));
+                  if (questLines.length > 0) {
+                    trackerParts.push(wrapContent(questLines.join("\n"), "Active Quests", wrapFormat));
+                  }
                 }
 
                 if (hasPersonaStats && Array.isArray(stats.inventory) && stats.inventory.length > 0) {
@@ -5884,6 +5891,7 @@ export async function generateRoutes(app: FastifyInstance) {
               }
 
               if (trackerParts.length > 0) {
+                dedupeLastMessageWrappers(finalMessages);
                 const contextBlock =
                   wrapFormat === "none"
                     ? trackerParts.join("\n\n")
@@ -5908,8 +5916,9 @@ export async function generateRoutes(app: FastifyInstance) {
         // navigated away), a write error must NOT crash the agent pipeline —
         // otherwise Promise.allSettled in executePhase silently drops the
         // entire group's results, causing agents to appear as "not triggered".
-        const sendAgentEvent = (result: AgentResult) => {
-          if (shouldDeferSpotifyAgentEvent(result)) return;
+        const shouldDeferExpressionAgentEvent = (result: AgentResult) =>
+          result.success && result.agentType === "expression" && result.type === "sprite_change";
+        const sendAgentResultEvent = (result: AgentResult) => {
           trySendSseEvent(reply, {
             type: "agent_result",
             data: {
@@ -5922,6 +5931,10 @@ export async function generateRoutes(app: FastifyInstance) {
               durationMs: result.durationMs,
             },
           });
+        };
+        const sendAgentEvent = (result: AgentResult) => {
+          if (shouldDeferSpotifyAgentEvent(result) || shouldDeferExpressionAgentEvent(result)) return;
+          sendAgentResultEvent(result);
         };
 
         for (const warning of agentConnectionWarnings) {
@@ -7325,6 +7338,7 @@ export async function generateRoutes(app: FastifyInstance) {
               : message.content
             ).replace(/\n([ \t]*\n){2,}/g, "\n\n"),
           }));
+          dedupeLastMessageWrappers(preparedMessagesForGen);
           if (
             deferCharacterMacros &&
             preparedMessagesForGen.some((message) => hasDeferredCharacterMacros(message.content))
@@ -7823,18 +7837,34 @@ export async function generateRoutes(app: FastifyInstance) {
                 debugLog("[debug] Thinking tokens (%d chars):\n%s", fullThinking.length, fullThinking);
               }
               if (usage) {
+                const hiddenCompletionTokens = getHiddenCompletionTokens(usage);
                 const visibleCompletionTokens = getVisibleCompletionTokens(usage);
+                const hiddenThinkingUnreported = fullThinking.trim().length > 0 && hiddenCompletionTokens == null;
                 debugLog(
                   "[debug] Token usage — prompt: %s  completion: %s  visibleCompletion: %s  reasoning: %s  total: %s  cached: %s  cacheWrite: %s  finish: %s",
                   usage.promptTokens ?? "N/A",
                   usage.completionTokens ?? "N/A",
-                  visibleCompletionTokens ?? "N/A",
-                  usage.completionReasoningTokens ?? "N/A",
+                  hiddenThinkingUnreported
+                    ? "unknown (provider did not split hidden thinking)"
+                    : (visibleCompletionTokens ?? "N/A"),
+                  usage.completionReasoningTokens ?? (hiddenThinkingUnreported ? "unreported" : "N/A"),
                   usage.totalTokens ?? "N/A",
                   usage.cachedPromptTokens ?? "N/A",
                   usage.cacheWritePromptTokens ?? "N/A",
                   finishReason ?? "N/A",
                 );
+                if (
+                  fullThinking.trim().length > 0 &&
+                  typeof usage.completionTokens === "number" &&
+                  typeof effectiveMaxTokensForSend === "number" &&
+                  usage.completionTokens >= effectiveMaxTokensForSend
+                ) {
+                  debugLog(
+                    "[debug] Completion budget warning — hidden thinking was present and completion usage reached maxTokens=%s; visible response may be short even when finish=%s.",
+                    effectiveMaxTokensForSend,
+                    finishReason ?? "N/A",
+                  );
+                }
               }
             }
 
@@ -8260,6 +8290,7 @@ export async function generateRoutes(app: FastifyInstance) {
         const hasParallelAgents = pipelineAgents.some((a) => a.phase === "parallel");
         let parallelPromise: Promise<AgentResult[]> | null = null;
         if (hasParallelAgents && !abortController.signal.aborted) {
+          trySendSseEvent(reply, { type: "agent_start", data: { phase: "parallel" } });
           parallelPromise = pipeline.runParallel();
         }
 
@@ -8469,13 +8500,18 @@ export async function generateRoutes(app: FastifyInstance) {
         // (pendingIllustration is hoisted above the follow-up loop.)
         const hasPostWork = hasPostProcessingAgents || parallelResults.length > 0;
         if (hasPostWork && combinedResponse && !abortController.signal.aborted) {
+          if (currentTurnUserMessageId && personaId && Array.isArray(agentContext.memory._availableSprites)) {
+            generatedExpressionTargetIds.add(personaId);
+          }
           if (generatedExpressionTargetIds.size > 0 && Array.isArray(agentContext.memory._availableSprites)) {
             agentContext.memory._availableSprites = (
               agentContext.memory._availableSprites as Array<{ characterId: string }>
             ).filter((sprite) => generatedExpressionTargetIds.has(sprite.characterId));
             agentContext.memory._expressionTargetIds = [...generatedExpressionTargetIds];
           }
-          reply.raw.write(`data: ${JSON.stringify({ type: "agent_start", data: { phase: "post_generation" } })}\n\n`);
+          if (hasPostProcessingAgents) {
+            reply.raw.write(`data: ${JSON.stringify({ type: "agent_start", data: { phase: "post_generation" } })}\n\n`);
+          }
 
           // LOG_LEVEL=debug: log post-processing agents
           if (isDebug) {
@@ -8492,6 +8528,64 @@ export async function generateRoutes(app: FastifyInstance) {
             mainResponse: combinedResponse,
             preGenInjections: contextInjections,
             parallelResults,
+          };
+
+          const finalizeExpressionAgentResult = (result: AgentResult): AgentResult => {
+            if (!result.success || result.type !== "sprite_change" || !result.data || typeof result.data !== "object") {
+              return result;
+            }
+
+            const spriteData = { ...(result.data as Record<string, unknown>) } as {
+              expressions?: Array<{
+                characterId?: string;
+                characterName?: string;
+                expression?: string;
+                transition?: string;
+              }>;
+            };
+            const availableSprites = agentContext.memory._availableSprites as
+              | Array<{ characterId: string; characterName: string; expressions: string[] }>
+              | undefined;
+            const rawExpressions = Array.isArray(spriteData.expressions) ? spriteData.expressions : [];
+            const validation = validateSpriteExpressionEntries(rawExpressions, availableSprites);
+            let validatedExpressions = validation.expressions as typeof spriteData.expressions;
+            if (!Array.isArray(spriteData.expressions) && rawExpressions.length === 0) {
+              logger.warn("[generate] Expression agent returned no expression entries — filling required targets");
+            }
+            for (const warning of validation.warnings) {
+              logger.warn("[generate] %s", warning.message);
+            }
+            const requiredExpressionTargetIds = normalizeRequiredSpriteExpressionIds(
+              agentContext.memory._expressionTargetIds,
+            );
+            if (requiredExpressionTargetIds.length > 0) {
+              const latestUserExpressionSource =
+                [...agentContext.recentMessages]
+                  .reverse()
+                  .find((message) => message.role === "user" && message.content.trim())?.content ??
+                input.userMessage ??
+                "";
+              const sourceTextByCharacterId = new Map<string, string>();
+              if (personaId && latestUserExpressionSource.trim()) {
+                sourceTextByCharacterId.set(personaId, latestUserExpressionSource);
+              }
+              const completion = completeRequiredSpriteExpressionEntries(
+                validatedExpressions ?? [],
+                availableSprites,
+                requiredExpressionTargetIds,
+                {
+                  defaultSourceText: combinedResponse,
+                  sourceTextByCharacterId,
+                },
+              );
+              validatedExpressions = completion.expressions as typeof spriteData.expressions;
+              for (const warning of completion.warnings) {
+                logger.warn("[generate] %s", warning.message);
+              }
+            }
+            spriteData.expressions = validatedExpressions;
+
+            return { ...result, data: spriteData };
           };
 
           let postResults = hasPostProcessingAgents
@@ -8550,16 +8644,15 @@ export async function generateRoutes(app: FastifyInstance) {
                         lorebookKeeperSettings.readBehindMessages,
                       )
                     : null;
+                const phaseRetryContext: AgentContext =
+                  agentCfg.phase === "post_processing" ? { ...agentContext, mainResponse: combinedResponse } : agentContext;
                 const retryCtx: AgentContext = historicalLorebookTarget
                   ? (buildHistoricalLorebookKeeperContext(
                       agentContext,
                       lorebookKeeperMessages,
                       historicalLorebookTarget.id,
-                    ) ?? {
-                      ...agentContext,
-                      mainResponse: combinedResponse,
-                    })
-                  : { ...agentContext, mainResponse: combinedResponse };
+                    ) ?? phaseRetryContext)
+                  : phaseRetryContext;
                 const retried = await executeAgent(
                   agentCfg,
                   retryCtx,
@@ -8600,6 +8693,15 @@ export async function generateRoutes(app: FastifyInstance) {
                   })),
                 })}\n\n`,
               );
+            }
+          }
+
+          // Finalize expression results before streaming/persisting them so
+          // required persona/character entries are visible immediately.
+          postResults = postResults.map(finalizeExpressionAgentResult);
+          for (const result of postResults) {
+            if (shouldDeferExpressionAgentEvent(result)) {
+              sendAgentResultEvent(result);
             }
           }
 
@@ -8859,10 +8961,39 @@ export async function generateRoutes(app: FastifyInstance) {
                 | undefined;
               if (Array.isArray(spriteData.expressions)) {
                 const validation = validateSpriteExpressionEntries(spriteData.expressions, availableSprites);
-                spriteData.expressions = validation.expressions as typeof spriteData.expressions;
+                let validatedExpressions = validation.expressions as typeof spriteData.expressions;
                 for (const warning of validation.warnings) {
                   logger.warn("[generate] %s", warning.message);
                 }
+                const requiredExpressionTargetIds = normalizeRequiredSpriteExpressionIds(
+                  agentContext.memory._expressionTargetIds,
+                );
+                if (requiredExpressionTargetIds.length > 0) {
+                  const latestUserExpressionSource =
+                    [...agentContext.recentMessages]
+                      .reverse()
+                      .find((message) => message.role === "user" && message.content.trim())?.content ??
+                    input.userMessage ??
+                    "";
+                  const sourceTextByCharacterId = new Map<string, string>();
+                  if (personaId && latestUserExpressionSource.trim()) {
+                    sourceTextByCharacterId.set(personaId, latestUserExpressionSource);
+                  }
+                  const completion = completeRequiredSpriteExpressionEntries(
+                    validatedExpressions ?? [],
+                    availableSprites,
+                    requiredExpressionTargetIds,
+                    {
+                      defaultSourceText: combinedResponse,
+                      sourceTextByCharacterId,
+                    },
+                  );
+                  validatedExpressions = completion.expressions as typeof spriteData.expressions;
+                  for (const warning of completion.warnings) {
+                    logger.warn("[generate] %s", warning.message);
+                  }
+                }
+                spriteData.expressions = validatedExpressions;
               }
               // Persist validated expressions onto the message/swipe extra so they survive page refresh
               // and swipe switching. The chat-level metadata is also updated for backward compat.
