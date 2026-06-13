@@ -2,7 +2,7 @@
 // Zustand Store: Agent Slice
 // ──────────────────────────────────────────────
 import { create } from "zustand";
-import type { AgentResult, CharacterCardFieldUpdate } from "@marinara-engine/shared";
+import type { AgentCallDebugEvent, AgentResult, CharacterCardFieldUpdate } from "@marinara-engine/shared";
 import type { AgentFailure } from "../lib/agent-failures";
 
 /**
@@ -42,8 +42,36 @@ export interface AgentDebugEntry {
     result: string;
     success: boolean;
   };
+  agentCall?: AgentCallDebugEvent;
   batchMaxTokens?: number;
   timestamp: number;
+}
+
+function logAgentDebugToBrowserConsole(entry: AgentDebugEntry) {
+  const call = entry.agentCall;
+  if (!call) {
+    console.debug("[Marinara Agent Debug]", entry);
+    return;
+  }
+
+  const usageParts = [
+    call.promptTokens != null ? `prompt ${call.promptTokens}` : null,
+    call.completionTokens != null ? `completion ${call.completionTokens}` : null,
+    call.reasoningTokens != null ? `reasoning ${call.reasoningTokens}` : null,
+    call.totalTokens != null ? `total ${call.totalTokens}` : null,
+  ].filter(Boolean);
+  const round = call.round != null ? ` round ${call.round}` : "";
+  const usage = usageParts.length > 0 ? ` | ${usageParts.join(", ")} tokens` : "";
+  const duration = call.durationMs != null ? ` | ${call.durationMs}ms` : "";
+  const label = `[Marinara Agent Debug] ${call.stage}${round}: ${call.agentName} (${call.agentType}) | ${call.model}${usage}${duration}`;
+
+  console.groupCollapsed(label);
+  console.debug("Event", call);
+  if (call.messages?.length) console.debug("Messages", call.messages);
+  if (call.response) console.debug("Response", call.response);
+  if (call.batchedAgentTypes?.length) console.debug("Batched agents", call.batchedAgentTypes);
+  if (call.tools?.length) console.debug("Tools", call.tools);
+  console.groupEnd();
 }
 
 interface AgentState {
@@ -136,10 +164,13 @@ export const useAgentStore = create<AgentState>((set) => ({
       return { lastResults: results };
     }),
 
-  addDebugEntry: (entry) =>
+  addDebugEntry: (entry) => {
+    const stamped = { ...entry, timestamp: entry.timestamp ?? Date.now() };
+    logAgentDebugToBrowserConsole(stamped);
     set((s) => ({
-      debugLog: [...s.debugLog, { ...entry, timestamp: entry.timestamp ?? Date.now() }].slice(-100),
-    })),
+      debugLog: [...s.debugLog, stamped].slice(-100),
+    }));
+  },
 
   clearDebugLog: () => set({ debugLog: [] }),
 

@@ -116,6 +116,7 @@ import {
 } from "../../hooks/use-chat-presets";
 import type {
   AgentPhase,
+  AgentPromptTemplateOption,
   ChatMode,
   ChatMemoryChunk,
   ChatMemoryRecallExportPayload,
@@ -130,6 +131,7 @@ import {
   BUILT_IN_AGENTS,
   BUILT_IN_TOOLS,
   DEFAULT_AGENT_CONTEXT_SIZE,
+  DEFAULT_AGENT_PROMPT_TEMPLATE_ID,
   DEFAULT_AGENT_TOOLS,
   DEFAULT_AGENT_MAX_TOKENS,
   DEFAULT_AGENT_PROMPTS,
@@ -138,11 +140,14 @@ import {
   MAX_AGENT_MAX_TOKENS,
   MIN_AGENT_MAX_TOKENS,
   estimateAgentLoadCost,
+  getAgentPromptTemplateOptions,
   AGENT_COST_HIGH_CALLS,
   AGENT_COST_HIGH_TOKENS,
   getDefaultBuiltInAgentSettings,
   isAgentAvailableInChatMode,
   isAgentHiddenFromChatSettingsPicker,
+  normalizeAgentPromptTemplateSelectionMap,
+  resolveAgentPromptTemplate,
 } from "@marinara-engine/shared";
 import type { Chat, CharacterGroup, Lorebook } from "@marinara-engine/shared";
 import {
@@ -489,6 +494,25 @@ export function ChatSettingsDrawer({
     }
     return map;
   }, [agentConfigs]);
+  const agentPromptTemplateSelections = useMemo(
+    () => normalizeAgentPromptTemplateSelectionMap(metadata.agentPromptTemplateIds),
+    [metadata.agentPromptTemplateIds],
+  );
+  const getPromptOptionsForAgent = useCallback(
+    (agentId: string) => {
+      const cfg = agentConfigsByType.get(agentId);
+      const settings = {
+        ...getDefaultBuiltInAgentSettings(agentId),
+        ...parseAgentSettings(cfg?.settings),
+      };
+      return getAgentPromptTemplateOptions({
+        promptTemplate: cfg?.promptTemplate || "",
+        fallbackPromptTemplate: DEFAULT_AGENT_PROMPTS[agentId] || "",
+        settings,
+      });
+    },
+    [agentConfigsByType],
+  );
   const conversationCommandsEnabled = metadata.characterCommands !== false;
 
   // Build the available agent list: built-in + custom agents from DB
@@ -535,9 +559,17 @@ export function ChatSettingsDrawer({
       const meta = availableAgents.find((a) => a.id === id);
       if (!meta) return [];
       const cfg = agentConfigsByType.get(id);
-      // `||` (not `??`) — custom configs often have an empty-string promptTemplate
-      // meaning "no override", and we still want to count the built-in default.
-      const promptTemplate = cfg?.promptTemplate || DEFAULT_AGENT_PROMPTS[id] || "";
+      const settings = {
+        ...getDefaultBuiltInAgentSettings(id),
+        ...parseAgentSettings(cfg?.settings),
+      };
+      const promptTemplate = resolveAgentPromptTemplate({
+        agentType: id,
+        promptTemplate: cfg?.promptTemplate || "",
+        fallbackPromptTemplate: DEFAULT_AGENT_PROMPTS[id] || "",
+        settings,
+        selectedPromptTemplateId: agentPromptTemplateSelections[id] ?? null,
+      });
       return [
         {
           type: id,
@@ -552,7 +584,7 @@ export function ChatSettingsDrawer({
       cost: estimateAgentLoadCost(inputs, chat.connectionId ?? null),
       tokensByType,
     };
-  }, [activeAgentIds, availableAgents, agentConfigsByType, chat.connectionId]);
+  }, [activeAgentIds, agentConfigsByType, agentPromptTemplateSelections, availableAgents, chat.connectionId]);
 
   const lorebookKeeperActive = activeAgentIds.includes("lorebook-keeper");
   const expressionActive = activeAgentIds.includes("expression");
@@ -989,10 +1021,22 @@ export function ChatSettingsDrawer({
     const isRemoving = idx >= 0;
     if (isRemoving) current.splice(idx, 1);
     else current.push(agentId);
+    const nextPromptTemplateSelections =
+      isRemoving && agentPromptTemplateSelections[agentId]
+        ? (() => {
+            const next = { ...agentPromptTemplateSelections };
+            delete next[agentId];
+            return next;
+          })()
+        : null;
     let metadataSaved = false;
     try {
       await updateMeta.mutateAsync(
-        { id: chat.id, activeAgentIds: current },
+        {
+          id: chat.id,
+          activeAgentIds: current,
+          ...(nextPromptTemplateSelections ? { agentPromptTemplateIds: nextPromptTemplateSelections } : {}),
+        },
         {
           onSuccess: async () => {
             metadataSaved = true;
@@ -1014,6 +1058,19 @@ export function ChatSettingsDrawer({
       });
     }
   };
+
+  const updateAgentPromptTemplateSelection = useCallback(
+    (agentId: string, promptTemplateId: string) => {
+      const next = { ...agentPromptTemplateSelections };
+      if (!promptTemplateId || promptTemplateId === DEFAULT_AGENT_PROMPT_TEMPLATE_ID) {
+        delete next[agentId];
+      } else {
+        next[agentId] = promptTemplateId;
+      }
+      updateMeta.mutate({ id: chat.id, agentPromptTemplateIds: next });
+    },
+    [agentPromptTemplateSelections, chat.id, updateMeta],
+  );
 
   const handleLorebookKeeperBackfill = useCallback(async () => {
     await retryAgents(chat.id, ["lorebook-keeper"], { lorebookKeeperBackfill: true });
@@ -4476,6 +4533,7 @@ export function ChatSettingsDrawer({
                                   {activeInCat.map((agent) => {
                                     const tokenEst = agentLoadCost.tokensByType.get(agent.id);
                                     const isSecretPlotDriver = agent.id === "secret-plot-driver";
+                                    const promptOptions = getPromptOptionsForAgent(agent.id);
                                     return (
                                       <div
                                         key={agent.id}
@@ -4509,6 +4567,15 @@ export function ChatSettingsDrawer({
                                             <Trash2 size="0.6875rem" />
                                           </button>
                                         </div>
+                                        <AgentPromptTemplateSelect
+                                          options={promptOptions}
+                                          selectedId={
+                                            agentPromptTemplateSelections[agent.id] ?? DEFAULT_AGENT_PROMPT_TEMPLATE_ID
+                                          }
+                                          onChange={(promptTemplateId) =>
+                                            updateAgentPromptTemplateSelection(agent.id, promptTemplateId)
+                                          }
+                                        />
                                         {isSecretPlotDriver && (
                                           <button
                                             type="button"
@@ -4597,32 +4664,44 @@ export function ChatSettingsDrawer({
                                 <div className="flex flex-col gap-1 mb-1.5">
                                   {activeCustom.map((agent) => {
                                     const tokenEst = agentLoadCost.tokensByType.get(agent.id);
+                                    const promptOptions = getPromptOptionsForAgent(agent.id);
                                     return (
                                       <div
                                         key={agent.id}
-                                        className="flex items-center gap-2.5 rounded-lg bg-[var(--primary)]/10 px-3 py-2 ring-1 ring-[var(--primary)]/30"
+                                        className="rounded-lg bg-[var(--primary)]/10 px-3 py-2 ring-1 ring-[var(--primary)]/30"
                                       >
-                                        <Sparkles size="0.875rem" className="text-[var(--primary)]" />
-                                        <div className="flex-1 min-w-0">
-                                          <span className="block truncate text-xs">{agent.name}</span>
-                                        </div>
-                                        {tokenEst != null ? (
-                                          <span
-                                            className="shrink-0 tabular-nums text-[0.625rem] text-[var(--muted-foreground)]"
-                                            title={`~${tokenEst.toLocaleString()} tokens of agent instructions (estimated)`}
+                                        <div className="flex items-center gap-2.5">
+                                          <Sparkles size="0.875rem" className="text-[var(--primary)]" />
+                                          <div className="flex-1 min-w-0">
+                                            <span className="block truncate text-xs">{agent.name}</span>
+                                          </div>
+                                          {tokenEst != null ? (
+                                            <span
+                                              className="shrink-0 tabular-nums text-[0.625rem] text-[var(--muted-foreground)]"
+                                              title={`~${tokenEst.toLocaleString()} tokens of agent instructions (estimated)`}
+                                            >
+                                              ~{tokenEst.toLocaleString()}
+                                            </span>
+                                          ) : null}
+                                          <button
+                                            onClick={() => {
+                                              void toggleAgent(agent.id);
+                                            }}
+                                            className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
+                                            title="Remove from chat"
                                           >
-                                            ~{tokenEst.toLocaleString()}
-                                          </span>
-                                        ) : null}
-                                        <button
-                                          onClick={() => {
-                                            void toggleAgent(agent.id);
-                                          }}
-                                          className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
-                                          title="Remove from chat"
-                                        >
-                                          <Trash2 size="0.6875rem" />
-                                        </button>
+                                            <Trash2 size="0.6875rem" />
+                                          </button>
+                                        </div>
+                                        <AgentPromptTemplateSelect
+                                          options={promptOptions}
+                                          selectedId={
+                                            agentPromptTemplateSelections[agent.id] ?? DEFAULT_AGENT_PROMPT_TEMPLATE_ID
+                                          }
+                                          onChange={(promptTemplateId) =>
+                                            updateAgentPromptTemplateSelection(agent.id, promptTemplateId)
+                                          }
+                                        />
                                       </div>
                                     );
                                   })}
@@ -6130,6 +6209,43 @@ function HapticConnectionPanel({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function AgentPromptTemplateSelect({
+  options,
+  selectedId,
+  onChange,
+}: {
+  options: AgentPromptTemplateOption[];
+  selectedId: string;
+  onChange: (promptTemplateId: string) => void;
+}) {
+  if (options.length <= 1) return null;
+  const activeOption = options.find((option) => option.id === selectedId) ?? options[0];
+
+  return (
+    <div className="mt-2 rounded-lg bg-[var(--background)]/25 px-2 py-2 ring-1 ring-[var(--border)]/70">
+      <label className="flex flex-col gap-1.5">
+        <span className="text-[0.5625rem] font-semibold uppercase text-[var(--muted-foreground)]">Prompt</span>
+        <select
+          value={activeOption?.id ?? DEFAULT_AGENT_PROMPT_TEMPLATE_ID}
+          onChange={(event) => onChange(event.target.value)}
+          className="w-full rounded-md bg-[var(--secondary)] px-2 py-1.5 text-[0.6875rem] text-[var(--foreground)] ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+        >
+          {options.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      {activeOption?.description ? (
+        <p className="mt-1.5 text-[0.5625rem] leading-snug text-[var(--muted-foreground)]">
+          {activeOption.description}
+        </p>
+      ) : null}
     </div>
   );
 }

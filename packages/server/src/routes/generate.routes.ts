@@ -18,6 +18,7 @@ import {
   resolveDeferredCharacterMacros,
   hasDeferredCharacterMacros,
   stripMacroComments,
+  getDefaultAgentPrompt,
   LIMITS,
   coerceGameStateTextValue,
   appendChatSummaryEntryToMetadata,
@@ -26,11 +27,14 @@ import {
   compactQuestProgressForContext,
   isClaudeAdaptiveOnlyNoSamplingModel,
   isAgentAvailableInChatMode,
+  normalizeAgentPromptTemplateSelectionMap,
   normalizeThinkingTagPairs,
+  resolveAgentPromptTemplate,
   supportsXhighReasoningEffort,
 } from "@marinara-engine/shared";
 import type {
   AgentContext,
+  AgentCallDebugEvent,
   AgentResult,
   AgentPhase,
   APIProvider,
@@ -2439,6 +2443,7 @@ export async function generateRoutes(app: FastifyInstance) {
         const chatActiveAgentIds: string[] = filterGameInternalAgentIds(chatMode, persistedChatActiveAgentIds)
           .filter((agentId) => isAgentAvailableInChatMode(chatMode, agentId))
           .filter((agentId) => !(gameSpotifyMusicEnabled && agentId === "spotify"));
+        const agentPromptTemplateSelections = normalizeAgentPromptTemplateSelectionMap(chatMeta.agentPromptTemplateIds);
         const hasPerChatAgentList = chatActiveAgentIds.length > 0;
         const perChatAgentSet = new Set(chatActiveAgentIds);
         const chatSummaryAgentActive = chatEnableAgents && perChatAgentSet.has("chat-summary");
@@ -4221,6 +4226,13 @@ export async function generateRoutes(app: FastifyInstance) {
           if (cfg.type === "spotify" && (!Array.isArray(settings.enabledTools) || settings.enabledTools.length === 0)) {
             settings.enabledTools = DEFAULT_AGENT_TOOLS.spotify ?? [];
           }
+          const selectedPromptTemplate = resolveAgentPromptTemplate({
+            agentType: cfg.type as string,
+            promptTemplate: cfg.promptTemplate as string,
+            fallbackPromptTemplate: getDefaultAgentPrompt(cfg.type as string),
+            settings,
+            selectedPromptTemplateId: agentPromptTemplateSelections[cfg.type as string] ?? null,
+          });
           let agentProvider = provider;
           let agentModel = conn.model;
           let agentMaxParallelJobs = chatConnectionMaxParallelJobs;
@@ -4280,7 +4292,7 @@ export async function generateRoutes(app: FastifyInstance) {
             type: cfg.type,
             name: cfg.name,
             phase: resolveAgentRuntimePhase(cfg.type as string, cfg.phase as string),
-            promptTemplate: cfg.promptTemplate as string,
+            promptTemplate: selectedPromptTemplate,
             connectionId: effectiveConnectionId,
             settings,
             provider: agentProvider,
@@ -4315,13 +4327,20 @@ export async function generateRoutes(app: FastifyInstance) {
           ) {
             builtInSettings.enabledTools = DEFAULT_AGENT_TOOLS.spotify ?? [];
           }
+          const selectedPromptTemplate = resolveAgentPromptTemplate({
+            agentType: builtIn.id,
+            promptTemplate: "",
+            fallbackPromptTemplate: getDefaultAgentPrompt(builtIn.id),
+            settings: builtInSettings,
+            selectedPromptTemplateId: agentPromptTemplateSelections[builtIn.id] ?? null,
+          });
 
           resolvedAgents.push({
             id: `builtin:${builtIn.id}`,
             type: builtIn.id,
             name: builtIn.name,
             phase: resolveAgentRuntimePhase(builtIn.id, builtIn.phase),
-            promptTemplate: "",
+            promptTemplate: selectedPromptTemplate,
             connectionId: defaultAgentConn?.id ?? null,
             settings: builtInSettings,
             provider: builtInCached?.provider ?? provider,
@@ -5522,6 +5541,13 @@ export async function generateRoutes(app: FastifyInstance) {
           writableLorebookIds: null,
           chatSummary: activeChatSummary,
           streaming: input.streaming,
+          ...(requestDebug
+            ? {
+                agentDebug: (event: AgentCallDebugEvent) => {
+                  trySendSseEvent(reply, { type: "agent_debug", data: event });
+                },
+              }
+            : {}),
           signal: abortController.signal,
         };
 
@@ -6150,6 +6176,7 @@ export async function generateRoutes(app: FastifyInstance) {
               agentName: resolvedAgents.find((a) => a.type === result.agentType)?.name ?? result.agentType,
               resultType: result.type,
               data: result.data,
+              tokensUsed: result.tokensUsed,
               success: result.success,
               error: result.error,
               durationMs: result.durationMs,
@@ -7028,6 +7055,7 @@ export async function generateRoutes(app: FastifyInstance) {
                     agentName: agentNameByType.get(inj.agentType) ?? inj.agentName ?? inj.agentType,
                     resultType: "context_injection",
                     data: { text: inj.text },
+                    tokensUsed: 0,
                     success: true,
                     error: null,
                     durationMs: 0,
@@ -7269,7 +7297,6 @@ export async function generateRoutes(app: FastifyInstance) {
         // ────────────────────────────────────────
         if (resolvedAgents.some((a) => a.type === "html")) {
           const htmlAgent = resolvedAgents.find((a) => a.type === "html")!;
-          const { getDefaultAgentPrompt } = await import("@marinara-engine/shared");
           const htmlPrompt = (htmlAgent.promptTemplate || getDefaultAgentPrompt("html")).trim();
           if (htmlPrompt) {
             const htmlBlock = wrapFormat === "markdown" ? `\n## Immersive HTML\n${htmlPrompt}` : htmlPrompt;
@@ -7310,6 +7337,7 @@ export async function generateRoutes(app: FastifyInstance) {
                   agentName: htmlAgent.name || "Immersive HTML",
                   resultType: "context_injection",
                   data: { text: "HTML formatting instructions injected into prompt" },
+                  tokensUsed: 0,
                   success: true,
                   error: null,
                   durationMs: 0,
@@ -7331,6 +7359,7 @@ export async function generateRoutes(app: FastifyInstance) {
                 agentName: (chatSummaryCfg as any)?.name || "Automated Chat Summary",
                 resultType: "context_injection",
                 data: { text: "Chat summary injected into prompt" },
+                tokensUsed: 0,
                 success: true,
                 error: null,
                 durationMs: 0,
@@ -9222,6 +9251,7 @@ export async function generateRoutes(app: FastifyInstance) {
                             agentName: currentBackgroundAgent?.name ?? "Background",
                             resultType: result.type,
                             data: bgData,
+                            tokensUsed: result.tokensUsed,
                             success: result.success,
                             error: result.error,
                             durationMs: result.durationMs,

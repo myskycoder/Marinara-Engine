@@ -2,7 +2,12 @@
 // Import: Marinara Engine native format (.marinara.json)
 // ──────────────────────────────────────────────
 import type { DB } from "../../db/connection.js";
-import { lorebookFilterModeSchema } from "@marinara-engine/shared";
+import {
+  getFolderImportEntries,
+  getFolderManifestConfig,
+  isJsonRecord,
+  lorebookFilterModeSchema,
+} from "@marinara-engine/shared";
 import type { ExportEnvelope, ExportType, LorebookFilterMode, LorebookMatchingSource } from "@marinara-engine/shared";
 import { createCharactersStorage } from "../storage/characters.storage.js";
 import { createCharacterGalleryStorage } from "../storage/character-gallery.storage.js";
@@ -193,22 +198,47 @@ export async function importMarinara(
   envelope: ExportEnvelope,
   db: DB,
 ): Promise<{ success: boolean; type: ExportType; id?: string; name?: string; error?: string }> {
-  if (!envelope || typeof envelope !== "object" || !envelope.type || envelope.version !== 1) {
+  const normalizedEnvelope = unwrapFolderManifestEnvelope(envelope) ?? envelope;
+  if (
+    !normalizedEnvelope ||
+    typeof normalizedEnvelope !== "object" ||
+    !normalizedEnvelope.type ||
+    normalizedEnvelope.version !== 1
+  ) {
     return { success: false, type: "marinara_character" as ExportType, error: "Invalid Marinara export file" };
   }
 
-  switch (envelope.type) {
+  switch (normalizedEnvelope.type) {
     case "marinara_character":
-      return importCharacter(envelope.data, db);
+      return importCharacter(normalizedEnvelope.data, db);
     case "marinara_persona":
-      return importPersona(envelope.data, db);
+      return importPersona(normalizedEnvelope.data, db);
     case "marinara_lorebook":
-      return importLorebook(envelope.data, db);
+      return importLorebook(normalizedEnvelope.data, db);
     case "marinara_preset":
-      return importPreset(envelope.data, db);
+      return importPreset(normalizedEnvelope.data, db);
     default:
-      return { success: false, type: envelope.type, error: `Unknown export type: ${envelope.type}` };
+      return {
+        success: false,
+        type: normalizedEnvelope.type,
+        error: `Unknown export type: ${normalizedEnvelope.type}`,
+      };
   }
+}
+
+function unwrapFolderManifestEnvelope(value: unknown): ExportEnvelope | null {
+  if (!isJsonRecord(value)) return null;
+  const looksLikeFolderManifest =
+    typeof value.kind === "string" || isJsonRecord(value.manifest) || Array.isArray(value.presets);
+  if (!looksLikeFolderManifest) return null;
+  const entries = getFolderImportEntries(value, ["presets"]);
+  for (const entry of entries) {
+    const config = getFolderManifestConfig(entry);
+    if (isJsonRecord(config) && typeof config.type === "string" && config.version === 1) {
+      return config as unknown as ExportEnvelope;
+    }
+  }
+  return null;
 }
 
 // ── Character ────────────────────────────────

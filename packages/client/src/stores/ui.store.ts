@@ -423,6 +423,7 @@ interface UIState {
   // ── Sound ──
   convoNotificationSound: boolean;
   rpNotificationSound: boolean;
+  gameNotificationSound: boolean;
   conversationBrowserNotifications: boolean;
 
   // ── Custom Conversation Prompt ──
@@ -619,6 +620,7 @@ interface UIState {
   setConvoGradientField: (scheme: "dark" | "light", field: "from" | "to", value: string) => void;
   setConvoNotificationSound: (v: boolean) => void;
   setRpNotificationSound: (v: boolean) => void;
+  setGameNotificationSound: (v: boolean) => void;
   setConversationBrowserNotifications: (v: boolean) => void;
   setCustomConversationPrompt: (v: string | null) => void;
   setScheduleGenerationPreferences: (v: string) => void;
@@ -772,6 +774,7 @@ export function pickSyncedSettings(state: UIState) {
     userActivity: state.userActivity,
     convoNotificationSound: state.convoNotificationSound,
     rpNotificationSound: state.rpNotificationSound,
+    gameNotificationSound: state.gameNotificationSound,
     conversationBrowserNotifications: state.conversationBrowserNotifications,
     customConversationPrompt: state.customConversationPrompt,
     scheduleGenerationPreferences: state.scheduleGenerationPreferences,
@@ -894,6 +897,7 @@ export const useUIStore = create<UIState>()(
       },
       convoNotificationSound: true,
       rpNotificationSound: true,
+      gameNotificationSound: true,
       conversationBrowserNotifications: false,
       customConversationPrompt: null,
       scheduleGenerationPreferences: "",
@@ -1369,6 +1373,7 @@ export const useUIStore = create<UIState>()(
         })),
       setConvoNotificationSound: (v) => set({ convoNotificationSound: v }),
       setRpNotificationSound: (v) => set({ rpNotificationSound: v }),
+      setGameNotificationSound: (v) => set({ gameNotificationSound: v }),
       setConversationBrowserNotifications: (v) => set({ conversationBrowserNotifications: v }),
       setCustomConversationPrompt: (v) => set({ customConversationPrompt: v }),
       setScheduleGenerationPreferences: (v) => set({ scheduleGenerationPreferences: v }),
@@ -1446,7 +1451,7 @@ export const useUIStore = create<UIState>()(
     }),
     {
       name: "marinara-engine-ui",
-      version: 41,
+      version: 42,
       // Debounce localStorage writes to avoid sync I/O on every state change
       storage: createJSONStorage(() => {
         let timer: ReturnType<typeof setTimeout> | null = null;
@@ -1774,7 +1779,7 @@ export const useUIStore = create<UIState>()(
           );
         }
         persisted.imageStyleProfiles = normalizeImageStyleProfileSettings(persisted.imageStyleProfiles);
-        // v38 -> v39: opt-in browser notifications for background Conversation replies.
+        // v38 -> v39: opt-in browser notifications for background replies.
         if (version <= 38 && persisted.conversationBrowserNotifications === undefined) {
           persisted.conversationBrowserNotifications = false;
         }
@@ -1788,6 +1793,10 @@ export const useUIStore = create<UIState>()(
         if (version <= 40) {
           if (persisted.imageIllustrationWidth === undefined) persisted.imageIllustrationWidth = 896;
           if (persisted.imageIllustrationHeight === undefined) persisted.imageIllustrationHeight = 1280;
+        }
+        // v41 -> v42: Game mode gets its own turn-loaded notification sound setting.
+        if (version <= 41 && persisted.gameNotificationSound === undefined) {
+          persisted.gameNotificationSound = true;
         }
         delete persisted.trackerPanelWidth;
         return persisted;
@@ -1891,6 +1900,7 @@ export const useUIStore = create<UIState>()(
         userActivity: state.userActivity,
         convoNotificationSound: state.convoNotificationSound,
         rpNotificationSound: state.rpNotificationSound,
+        gameNotificationSound: state.gameNotificationSound,
         conversationBrowserNotifications: state.conversationBrowserNotifications,
         customConversationPrompt: state.customConversationPrompt,
         scheduleGenerationPreferences: state.scheduleGenerationPreferences,

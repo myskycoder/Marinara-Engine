@@ -15,6 +15,7 @@ import {
   Camera,
   Download,
   Upload,
+  Check,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useUIStore } from "../../stores/ui.store";
@@ -25,10 +26,16 @@ import {
   useUploadAgentImage,
   type AgentConfigRow,
 } from "../../hooks/use-agents";
-import { BUILT_IN_AGENTS, type AgentCategory } from "@marinara-engine/shared";
+import {
+  BUILT_IN_AGENTS,
+  createFolderEntry,
+  getFolderImportEntries,
+  getFolderManifestConfig,
+  type AgentCategory,
+} from "@marinara-engine/shared";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { cn } from "../../lib/utils";
-import { downloadJsonFile, sanitizeExportFilenamePart } from "../../lib/download-json";
+import { downloadJsonFile } from "../../lib/download-json";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -56,14 +63,14 @@ function parseAgentSettings(value: unknown): JsonRecord {
 }
 
 function getAgentImportEntries(parsed: unknown) {
-  if (Array.isArray(parsed)) return parsed;
-  if (!isJsonRecord(parsed)) return [];
-  if (Array.isArray(parsed.agents)) return parsed.agents;
-  return [parsed];
+  return getFolderImportEntries(parsed, ["agents"]);
 }
 
 function serializeAgentConfig(agent: AgentConfigRow) {
   const settings = parseAgentSettings(agent.settings);
+  if (typeof settings.author !== "string" || !settings.author.trim()) {
+    settings.author = "Unknown";
+  }
   const resultType = typeof settings.resultType === "string" ? settings.resultType : undefined;
   return {
     type: agent.type,
@@ -80,21 +87,17 @@ function serializeAgentConfig(agent: AgentConfigRow) {
 }
 
 function serializeAgentFolderEntry(agent: AgentConfigRow) {
-  const folderName = sanitizeExportFilenamePart(agent.type, "custom-agent");
-  return {
-    path: `Agents/${folderName}/manifest.json`,
-    manifest: {
-      kind: "marinara.agent",
-      version: 1,
-      config: serializeAgentConfig(agent),
-    },
-  };
+  return createFolderEntry({
+    folderName: "Agents",
+    itemName: agent.type,
+    itemKind: "marinara.agent",
+    config: serializeAgentConfig(agent),
+    fallbackName: "custom-agent",
+  });
 }
 
 function normalizeAgentImportEntry(entry: unknown) {
-  const container = isJsonRecord(entry) ? entry : null;
-  const manifest = container && isJsonRecord(container.manifest) ? container.manifest : container;
-  const source = manifest && isJsonRecord(manifest.config) ? manifest.config : manifest;
+  const source = getFolderManifestConfig(entry);
   if (!isJsonRecord(source)) return null;
 
   const type = typeof source.type === "string" ? source.type.trim() : "";
@@ -107,6 +110,15 @@ function normalizeAgentImportEntry(entry: unknown) {
   if (!type || !name) return null;
 
   const settings = parseAgentSettings(source.settings);
+  if (typeof source.author === "string" && !settings.author) {
+    settings.author = source.author;
+  }
+  if (Array.isArray(source.promptTemplates) && settings.promptTemplates === undefined) {
+    settings.promptTemplates = source.promptTemplates;
+  }
+  if (typeof settings.author !== "string" || !settings.author.trim()) {
+    settings.author = "Unknown";
+  }
   const resultType = typeof source.resultType === "string" ? source.resultType : settings.resultType;
 
   return {
@@ -135,11 +147,13 @@ export function AgentsPanel() {
   const imageTargetAgentIdRef = useRef<string | null>(null);
   const [agentImportError, setAgentImportError] = useState<string | null>(null);
   const [agentImportSuccess, setAgentImportSuccess] = useState<string | null>(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedAgentIds, setSelectedAgentIds] = useState<Set<string>>(new Set());
+  const [exportingSelected, setExportingSelected] = useState(false);
 
   // Custom agents = DB entries whose type doesn't match any built-in
   const customAgents = useMemo(
-    () =>
-      ((agentConfigs ?? []) as AgentConfigRow[]).filter((c) => !BUILT_IN_AGENTS.some((b) => b.id === c.type)),
+    () => ((agentConfigs ?? []) as AgentConfigRow[]).filter((c) => !BUILT_IN_AGENTS.some((b) => b.id === c.type)),
     [agentConfigs],
   );
   const configByType = useMemo(
@@ -171,30 +185,88 @@ export function AgentsPanel() {
     agentCategorySections.some((section) =>
       BUILT_IN_AGENTS.some((agent) => agent.category === section.category && matchesAgentSearch(agent)),
     ) || visibleCustomAgents.length > 0;
+  const selectedCustomAgents = useMemo(
+    () => customAgents.filter((agent) => selectedAgentIds.has(agent.id)),
+    [customAgents, selectedAgentIds],
+  );
 
   const handleCreateAgent = () => {
     // Create a new custom agent immediately in DB then open editor
     openAgentDetail("__new__");
   };
 
-  const handleExportAgents = useCallback(() => {
-    if (customAgents.length === 0) {
-      toast.error("No custom agents to export");
+  const exitSelectionMode = useCallback(() => {
+    setSelectionMode(false);
+    setSelectedAgentIds(new Set());
+  }, []);
+
+  const toggleAgentSelection = useCallback((agentId: string) => {
+    setSelectedAgentIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(agentId)) next.delete(agentId);
+      else next.add(agentId);
+      return next;
+    });
+  }, []);
+
+  const handleExportSelectedAgents = useCallback(async () => {
+    if (selectedCustomAgents.length === 0) {
+      toast.error("Select at least one custom agent to export");
       return;
     }
 
-    downloadJsonFile(
-      {
-        kind: "marinara.agent-folder",
-        version: 1,
-        exportedAt: new Date().toISOString(),
-        folderName: "Agents",
-        agents: customAgents.map(serializeAgentFolderEntry),
-      },
-      "marinara-agents.json",
-    );
-    toast.success(`Exported ${customAgents.length} custom agent${customAgents.length === 1 ? "" : "s"}`);
-  }, [customAgents]);
+    setExportingSelected(true);
+    try {
+      downloadJsonFile(
+        {
+          kind: "marinara.agent-folder",
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          folderName: "Agents",
+          agents: selectedCustomAgents.map(serializeAgentFolderEntry),
+        },
+        "marinara-agents.json",
+      );
+      toast.success(
+        `Exported ${selectedCustomAgents.length} custom agent${selectedCustomAgents.length === 1 ? "" : "s"}`,
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to export agents");
+    } finally {
+      setExportingSelected(false);
+    }
+  }, [selectedCustomAgents]);
+
+  const handleDeleteSelectedAgents = useCallback(async () => {
+    const ids = selectedCustomAgents.map((agent) => agent.id);
+    if (ids.length === 0) return;
+
+    if (
+      !(await showConfirmDialog({
+        title: "Delete Agents",
+        message: `Delete ${ids.length} custom agent${ids.length === 1 ? "" : "s"}?`,
+        confirmLabel: "Delete",
+        tone: "destructive",
+      }))
+    ) {
+      return;
+    }
+
+    const results = await Promise.allSettled(ids.map((id) => deleteAgent.mutateAsync(id)));
+    const failedIds = ids.filter((_, index) => results[index]?.status === "rejected");
+    const deletedCount = ids.length - failedIds.length;
+
+    if (deletedCount > 0) {
+      toast.success(`Deleted ${deletedCount} custom agent${deletedCount === 1 ? "" : "s"}`);
+    }
+    if (failedIds.length > 0) {
+      setSelectedAgentIds(new Set(failedIds));
+      toast.error(`Failed to delete ${failedIds.length} custom agent${failedIds.length === 1 ? "" : "s"}`);
+      return;
+    }
+
+    exitSelectionMode();
+  }, [deleteAgent, exitSelectionMode, selectedCustomAgents]);
 
   const handleImportAgents = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
@@ -319,19 +391,71 @@ export function AgentsPanel() {
           <Download size="0.8125rem" /> <span className="md:hidden">Import</span>
         </button>
         <button
-          onClick={handleExportAgents}
+          onClick={() => {
+            if (selectionMode) exitSelectionMode();
+            else setSelectionMode(true);
+          }}
           disabled={customAgents.length === 0}
-          className="flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-xs font-medium text-[var(--secondary-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
-          title="Export custom agents"
+          className={cn(
+            "flex flex-1 items-center justify-center gap-1.5 rounded-xl px-3 py-2.5 text-xs font-medium transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40",
+            selectionMode
+              ? "bg-violet-400/15 text-violet-400 ring-1 ring-violet-400/30"
+              : "bg-[var(--secondary)] text-[var(--secondary-foreground)] ring-1 ring-[var(--border)] hover:bg-[var(--accent)]",
+          )}
+          title="Select custom agents"
         >
-          <Upload size="0.8125rem" /> <span className="md:hidden">Export</span>
+          <Check size="0.8125rem" /> <span className="md:hidden">Select</span>
         </button>
       </div>
 
-      {agentImportError && <div className="rounded-lg bg-red-500/10 px-2 py-1.5 text-xs text-red-500">{agentImportError}</div>}
+      {agentImportError && (
+        <div className="rounded-lg bg-red-500/10 px-2 py-1.5 text-xs text-red-500">{agentImportError}</div>
+      )}
       {agentImportSuccess && (
-        <div className="rounded-lg bg-emerald-500/10 px-2 py-1.5 text-xs text-emerald-500">
-          {agentImportSuccess}
+        <div className="rounded-lg bg-emerald-500/10 px-2 py-1.5 text-xs text-emerald-500">{agentImportSuccess}</div>
+      )}
+
+      {selectionMode && (
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--secondary)]/60 px-3 py-2">
+          <span className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+            {selectedCustomAgents.length} selected
+          </span>
+          <button
+            onClick={() => setSelectedAgentIds(new Set(visibleCustomAgents.map((agent) => agent.id)))}
+            disabled={visibleCustomAgents.length === 0}
+            className="rounded-lg px-2.5 py-1 text-[0.625rem] font-medium text-violet-400 transition-colors hover:bg-[var(--accent)] disabled:opacity-40"
+          >
+            Select visible
+          </button>
+          <button
+            onClick={() => setSelectedAgentIds(new Set())}
+            disabled={selectedCustomAgents.length === 0}
+            className="rounded-lg px-2.5 py-1 text-[0.625rem] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-40"
+          >
+            Clear
+          </button>
+          <button
+            onClick={handleDeleteSelectedAgents}
+            disabled={selectedCustomAgents.length === 0}
+            className="inline-flex items-center gap-1 rounded-lg bg-[var(--destructive)]/12 px-2.5 py-1 text-[0.625rem] font-medium text-[var(--destructive)] transition-all hover:bg-[var(--destructive)]/20 disabled:opacity-40"
+          >
+            <Trash2 size="0.6875rem" />
+            Delete
+          </button>
+          <button
+            onClick={handleExportSelectedAgents}
+            disabled={selectedCustomAgents.length === 0 || exportingSelected}
+            className="inline-flex items-center gap-1 rounded-lg bg-violet-500 px-2.5 py-1 text-[0.625rem] font-medium text-white transition-all hover:opacity-90 disabled:opacity-40"
+          >
+            <Upload size="0.6875rem" />
+            {exportingSelected ? "Exporting..." : "Export"}
+          </button>
+          <button
+            onClick={exitSelectionMode}
+            className="rounded-lg px-2.5 py-1 text-[0.625rem] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+          >
+            Done
+          </button>
         </div>
       )}
 
@@ -377,6 +501,7 @@ export function AgentsPanel() {
                   custom: false,
                   openAgentDetail,
                   onImagePick: () => handlePickAgentImage(agent.id),
+                  selectionMode: false,
                 }),
               )
             )}
@@ -400,6 +525,9 @@ export function AgentsPanel() {
                 custom: true,
                 openAgentDetail,
                 onImagePick: () => handlePickAgentImage(agent.id),
+                selectionMode,
+                selected: selectedAgentIds.has(agent.id),
+                onToggleSelected: () => toggleAgentSelection(agent.id),
                 onDelete: async () => {
                   if (
                     await showConfirmDialog({
@@ -432,6 +560,9 @@ function renderAgentCard({
   openAgentDetail,
   onImagePick,
   onDelete,
+  selectionMode = false,
+  selected = false,
+  onToggleSelected,
 }: {
   id: string;
   type: string;
@@ -443,6 +574,9 @@ function renderAgentCard({
   openAgentDetail: (id: string) => void;
   onImagePick: () => void;
   onDelete?: () => void;
+  selectionMode?: boolean;
+  selected?: boolean;
+  onToggleSelected?: () => void;
 }) {
   const iconContent = imagePath ? (
     <img src={imagePath} alt="" className="h-full w-full object-cover" draggable={false} />
@@ -459,29 +593,60 @@ function renderAgentCard({
       key={id}
       data-agent-card
       data-agent-name={name}
-      className="group relative flex cursor-pointer items-center gap-2.5 rounded-xl p-2 transition-all hover:bg-[var(--sidebar-accent)]"
+      onClick={() => {
+        if (selectionMode && onToggleSelected) onToggleSelected();
+      }}
+      className={cn(
+        "group relative flex cursor-pointer items-center gap-2.5 rounded-xl p-2 transition-all hover:bg-[var(--sidebar-accent)]",
+        selectionMode && selected && "bg-violet-400/10 ring-1 ring-violet-400/40",
+      )}
     >
+      {selectionMode && (
+        <div
+          className={cn(
+            "flex h-5 w-5 shrink-0 items-center justify-center rounded border-2 transition-colors",
+            selected
+              ? "border-violet-400 bg-violet-400 text-white"
+              : "border-[var(--muted-foreground)]/40 bg-[var(--secondary)] text-transparent",
+          )}
+        >
+          <Check size="0.75rem" />
+        </div>
+      )}
       <button
         type="button"
         onClick={(event) => {
           event.stopPropagation();
+          if (selectionMode && onToggleSelected) {
+            onToggleSelected();
+            return;
+          }
           onImagePick();
         }}
         className={cn(
           iconClasses,
           "transition-transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-violet-400/50",
         )}
-        title={imagePath ? "Replace agent picture" : "Upload agent picture"}
-        aria-label={imagePath ? "Replace agent picture" : "Upload agent picture"}
+        title={selectionMode ? "Select agent" : imagePath ? "Replace agent picture" : "Upload agent picture"}
+        aria-label={selectionMode ? "Select agent" : imagePath ? "Replace agent picture" : "Upload agent picture"}
       >
         {iconContent}
-        <span className="absolute inset-0 flex items-center justify-center bg-black/45 opacity-0 transition-opacity group-hover:opacity-100">
-          <Camera size="0.875rem" />
-        </span>
+        {!selectionMode && (
+          <span className="absolute inset-0 flex items-center justify-center bg-black/45 opacity-0 transition-opacity group-hover:opacity-100">
+            <Camera size="0.875rem" />
+          </span>
+        )}
       </button>
       <button
-        className={cn("min-w-0 flex-1 text-left", onDelete ? "pr-16" : "pr-10")}
-        onClick={() => openAgentDetail(custom ? id : type)}
+        className={cn("min-w-0 flex-1 text-left", !selectionMode && (onDelete ? "pr-16" : "pr-10"))}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (selectionMode && onToggleSelected) {
+            onToggleSelected();
+            return;
+          }
+          openAgentDetail(custom ? id : type);
+        }}
       >
         <div className="truncate text-sm font-medium">{name}</div>
         <div className="mt-0.5 text-[0.625rem] text-[var(--muted-foreground)] line-clamp-2">
@@ -491,30 +656,32 @@ function renderAgentCard({
           {custom ? "custom" : category}
         </div>
       </button>
-      <div className="absolute right-2 top-1/2 flex -translate-y-1/2 shrink-0 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] px-1 py-0.5 opacity-0 shadow-sm ring-1 ring-[var(--border)] transition-opacity group-hover:opacity-100 max-md:opacity-100">
-        <button
-          className="rounded-lg p-1.5 text-[var(--muted-foreground)] transition-all hover:bg-violet-400/10 hover:text-violet-400 active:scale-90"
-          title="Edit agent"
-          onClick={(event) => {
-            event.stopPropagation();
-            openAgentDetail(custom ? id : type);
-          }}
-        >
-          <Pencil size="0.75rem" />
-        </button>
-        {onDelete && (
+      {!selectionMode && (
+        <div className="absolute right-2 top-1/2 flex -translate-y-1/2 shrink-0 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] px-1 py-0.5 opacity-0 shadow-sm ring-1 ring-[var(--border)] transition-opacity group-hover:opacity-100 max-md:opacity-100">
           <button
-            className="rounded-lg p-1.5 text-[var(--muted-foreground)] transition-all hover:bg-[var(--destructive)]/15 active:scale-90"
-            title="Delete agent"
+            className="rounded-lg p-1.5 text-[var(--muted-foreground)] transition-all hover:bg-violet-400/10 hover:text-violet-400 active:scale-90"
+            title="Edit agent"
             onClick={(event) => {
               event.stopPropagation();
-              void onDelete();
+              openAgentDetail(custom ? id : type);
             }}
           >
-            <Trash2 size="0.75rem" className="text-[var(--destructive)]" />
+            <Pencil size="0.75rem" />
           </button>
-        )}
-      </div>
+          {onDelete && (
+            <button
+              className="rounded-lg p-1.5 text-[var(--muted-foreground)] transition-all hover:bg-[var(--destructive)]/15 active:scale-90"
+              title="Delete agent"
+              onClick={(event) => {
+                event.stopPropagation();
+                void onDelete();
+              }}
+            >
+              <Trash2 size="0.75rem" className="text-[var(--destructive)]" />
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

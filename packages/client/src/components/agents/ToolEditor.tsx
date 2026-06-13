@@ -31,6 +31,7 @@ import {
 import { cn } from "../../lib/utils";
 import { downloadJsonFile, sanitizeExportFilenamePart } from "../../lib/download-json";
 import { HelpTooltip } from "../ui/HelpTooltip";
+import { createFolderEntry } from "@marinara-engine/shared";
 
 const EXEC_TYPES = [
   { value: "static", label: "Static Result", icon: FileText, description: "Returns a fixed string when called." },
@@ -207,19 +208,31 @@ export function ToolEditor() {
   ]);
 
   const handleExport = useCallback(() => {
+    const config = {
+      name: localName,
+      description: localDesc,
+      parametersSchema: buildParamsSchema(),
+      executionType: localExecType,
+      webhookUrl: localExecType === "webhook" ? localWebhookUrl || null : null,
+      staticResult: localExecType === "static" ? localStaticResult || null : null,
+      scriptBody: localExecType === "script" ? localScriptBody || null : null,
+      enabled: currentEnabled,
+    };
     downloadJsonFile(
       {
-        kind: "marinara.function-call",
+        kind: "marinara.function-folder",
         version: 1,
         exportedAt: new Date().toISOString(),
-        name: localName,
-        description: localDesc,
-        parametersSchema: buildParamsSchema(),
-        executionType: localExecType,
-        webhookUrl: localExecType === "webhook" ? localWebhookUrl || null : null,
-        staticResult: localExecType === "static" ? localStaticResult || null : null,
-        scriptBody: localExecType === "script" ? localScriptBody || null : null,
-        enabled: currentEnabled,
+        folderName: "Function Calls",
+        functions: [
+          createFolderEntry({
+            folderName: "Function Calls",
+            itemName: localName,
+            itemKind: "marinara.function",
+            config,
+            fallbackName: "function",
+          }),
+        ],
       },
       `${sanitizeExportFilenamePart(localName, "function")}.json`,
     );

@@ -61,6 +61,7 @@ import {
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { downloadJsonFile } from "../../lib/download-json";
+import { createFolderEntry, getFolderImportEntries, getFolderManifestConfig } from "@marinara-engine/shared";
 import {
   getNextUnnamedLibraryFolderName,
   useCreateLibraryFolder,
@@ -130,13 +131,7 @@ function parseToolParametersSchema(value: unknown): JsonRecord {
 }
 
 function getImportEntries(parsed: unknown, envelopeKeys: string[]) {
-  if (Array.isArray(parsed)) return parsed;
-  if (!isJsonRecord(parsed)) return [];
-  for (const key of envelopeKeys) {
-    const value = parsed[key];
-    if (Array.isArray(value)) return value;
-  }
-  return [parsed];
+  return getFolderImportEntries(parsed, envelopeKeys);
 }
 
 function serializeRegexScript(script: RegexScriptRow) {
@@ -158,7 +153,8 @@ function serializeRegexScript(script: RegexScriptRow) {
 
 function normalizeRegexImportEntry(entry: unknown) {
   if (!isJsonRecord(entry)) return null;
-  const name = typeof entry.name === "string" ? entry.name : typeof entry.scriptName === "string" ? entry.scriptName : "";
+  const name =
+    typeof entry.name === "string" ? entry.name : typeof entry.scriptName === "string" ? entry.scriptName : "";
   let findRegex = typeof entry.findRegex === "string" ? entry.findRegex : "";
   let flags = typeof entry.flags === "string" ? entry.flags : "gi";
   const delimited = findRegex.match(/^\/(.+)\/([gimsuy]*)$/s);
@@ -173,8 +169,7 @@ function normalizeRegexImportEntry(entry: unknown) {
   const mappedPlacement = rawPlacement
     .map((placementValue) => (typeof placementValue === "number" ? stPlacementMap[placementValue] : placementValue))
     .filter(
-      (placementValue): placementValue is string =>
-        placementValue === "ai_output" || placementValue === "user_input",
+      (placementValue): placementValue is string => placementValue === "ai_output" || placementValue === "user_input",
     );
 
   return {
@@ -207,25 +202,36 @@ function serializeCustomTool(tool: CustomToolRow) {
 }
 
 function normalizeCustomToolImportEntry(entry: unknown) {
-  if (!isJsonRecord(entry)) return null;
-  const name = typeof entry.name === "string" ? entry.name.trim() : "";
-  const description = typeof entry.description === "string" ? entry.description.trim() : "";
+  const source = getFolderManifestConfig(entry);
+  if (!isJsonRecord(source)) return null;
+  const name = typeof source.name === "string" ? source.name.trim() : "";
+  const description = typeof source.description === "string" ? source.description.trim() : "";
   if (!name || !description) return null;
   const executionType =
-    entry.executionType === "webhook" || entry.executionType === "script" || entry.executionType === "static"
-      ? entry.executionType
+    source.executionType === "webhook" || source.executionType === "script" || source.executionType === "static"
+      ? source.executionType
       : "static";
 
   return {
     name,
     description,
-    parametersSchema: parseToolParametersSchema(entry.parametersSchema ?? entry.parameters),
+    parametersSchema: parseToolParametersSchema(source.parametersSchema ?? source.parameters),
     executionType,
-    webhookUrl: executionType === "webhook" && typeof entry.webhookUrl === "string" ? entry.webhookUrl : null,
-    staticResult: executionType === "static" && typeof entry.staticResult === "string" ? entry.staticResult : null,
-    scriptBody: executionType === "script" && typeof entry.scriptBody === "string" ? entry.scriptBody : null,
-    enabled: parseBooleanValue(entry.enabled),
+    webhookUrl: executionType === "webhook" && typeof source.webhookUrl === "string" ? source.webhookUrl : null,
+    staticResult: executionType === "static" && typeof source.staticResult === "string" ? source.staticResult : null,
+    scriptBody: executionType === "script" && typeof source.scriptBody === "string" ? source.scriptBody : null,
+    enabled: parseBooleanValue(source.enabled),
   };
+}
+
+function serializeCustomToolFolderEntry(tool: CustomToolRow) {
+  return createFolderEntry({
+    folderName: "Function Calls",
+    itemName: tool.name,
+    itemKind: "marinara.function",
+    config: serializeCustomTool(tool),
+    fallbackName: "function",
+  });
 }
 
 export function PresetsPanel() {
@@ -448,10 +454,11 @@ export function PresetsPanel() {
 
     downloadJsonFile(
       {
-        kind: "marinara.function-calls",
+        kind: "marinara.function-folder",
         version: 1,
         exportedAt: new Date().toISOString(),
-        functions: customToolRows.map(serializeCustomTool),
+        folderName: "Function Calls",
+        functions: customToolRows.map(serializeCustomToolFolderEntry),
       },
       "marinara-functions.json",
     );
@@ -1175,12 +1182,12 @@ function RegexSection({
       }
     >
       <div className="mb-1.5 px-1 text-[0.625rem] text-[var(--muted-foreground)]">
-        Find/replace patterns applied to AI output or user input.
+        Find/replace patterns applied to AI output or user input
       </div>
       {regexImportError && <div className="mb-1 px-1 text-xs text-red-500">{regexImportError}</div>}
       {regexImportSuccess && <div className="mb-1 px-1 text-xs text-green-500">{regexImportSuccess}</div>}
       {sortedRegexScripts.length === 0 ? (
-        <p className="px-1 py-2 text-[0.625rem] text-[var(--muted-foreground)]">No regexes yet.</p>
+        <p className="px-1 py-2 text-[0.625rem] text-[var(--muted-foreground)]">No regexes yet</p>
       ) : (
         sortedRegexScripts.map((script) => {
           const placements = (() => {
@@ -1354,12 +1361,12 @@ function FunctionsSection({
       }
     >
       <div className="mb-1.5 px-1 text-[0.625rem] text-[var(--muted-foreground)]">
-        Custom function calls available from Chat Settings.
+        Custom function calls available from Chat Settings
       </div>
       {functionImportError && <div className="mb-1 px-1 text-xs text-red-500">{functionImportError}</div>}
       {functionImportSuccess && <div className="mb-1 px-1 text-xs text-green-500">{functionImportSuccess}</div>}
       {customToolRows.length === 0 ? (
-        <p className="px-1 py-2 text-[0.625rem] text-[var(--muted-foreground)]">No functions yet.</p>
+        <p className="px-1 py-2 text-[0.625rem] text-[var(--muted-foreground)]">No functions yet</p>
       ) : (
         customToolRows.map((tool) => {
           const enabled = tool.enabled === "true" || tool.enabled === "1";

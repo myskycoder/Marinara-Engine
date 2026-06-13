@@ -289,7 +289,10 @@ export async function agentsRoutes(app: FastifyInstance) {
       connectionId: null,
       imagePath: null,
       promptTemplate: "",
-      settings: builtIn.defaultInjectAsSection ? { injectAsSection: true } : {},
+      settings: {
+        ...getDefaultBuiltInAgentSettings(builtIn.id),
+        ...(DEFAULT_AGENT_TOOLS[builtIn.id]?.length ? { enabledTools: DEFAULT_AGENT_TOOLS[builtIn.id] } : {}),
+      },
     });
   });
 

@@ -1,8 +1,14 @@
 // ──────────────────────────────────────────────
 // Agent Executor — Single & Batched LLM execution
 // ──────────────────────────────────────────────
-import type { BaseLLMProvider, ChatMessage, LLMToolDefinition, LLMToolCall } from "../llm/base-provider.js";
-import type { AgentResult, AgentContext, AgentResultType } from "@marinara-engine/shared";
+import type {
+  BaseLLMProvider,
+  ChatMessage,
+  LLMToolDefinition,
+  LLMToolCall,
+  LLMUsage,
+} from "../llm/base-provider.js";
+import type { AgentResult, AgentContext, AgentResultType, AgentCallDebugEvent } from "@marinara-engine/shared";
 import {
   compactQuestProgressForContext,
   DEFAULT_AGENT_CONTEXT_SIZE,
@@ -133,6 +139,68 @@ function applyProviderMaxTokensOverride(provider: BaseLLMProvider, maxTokens: nu
   return provider.maxTokensOverrideValue !== null ? Math.min(maxTokens, provider.maxTokensOverrideValue) : maxTokens;
 }
 
+function debugMessages(messages: ChatMessage[]): AgentCallDebugEvent["messages"] {
+  return messages.map((message) => {
+    const next: NonNullable<AgentCallDebugEvent["messages"]>[number] = {
+      role: message.role,
+      content: message.content,
+    };
+    const name = (message as { name?: unknown }).name;
+    if (typeof name === "string" && name.trim()) next.name = name;
+    return next;
+  });
+}
+
+function debugToolNames(tools?: LLMToolDefinition[]): string[] | undefined {
+  if (!tools?.length) return undefined;
+  return tools.map((tool) => tool.function.name);
+}
+
+function debugUsage(usage?: LLMUsage): Partial<AgentCallDebugEvent> {
+  if (!usage) return {};
+  const fields: Partial<AgentCallDebugEvent> = {
+    promptTokens: usage.promptTokens,
+    completionTokens: usage.completionTokens,
+    totalTokens: usage.totalTokens,
+  };
+  if (typeof usage.completionReasoningTokens === "number") {
+    fields.reasoningTokens = usage.completionReasoningTokens;
+  }
+  return fields;
+}
+
+function emitAgentDebug(context: AgentContext, event: AgentCallDebugEvent): void {
+  try {
+    context.agentDebug?.(event);
+  } catch (err) {
+    logger.warn(err, "[agent-debug] Failed to emit debug event for %s", event.agentType);
+  }
+}
+
+function agentDebugBase(
+  config: AgentExecConfig,
+  model: string,
+  temperature: number,
+  maxTokens: number,
+): Pick<AgentCallDebugEvent, "agentId" | "agentType" | "agentName" | "phase" | "model" | "temperature" | "maxTokens"> {
+  return {
+    agentId: config.id,
+    agentType: config.type,
+    agentName: config.name,
+    phase: config.phase,
+    model,
+    temperature,
+    maxTokens,
+  };
+}
+
+function responseDebugFields(response: string): Pick<AgentCallDebugEvent, "response" | "responsePreview"> {
+  return {
+    response,
+    responsePreview: response.length > 1200 ? `${response.slice(0, 1200)}...` : response,
+  };
+}
+
 /**
  * Execute a single agent: build prompt → call LLM → parse response.
  * If toolContext is provided, the agent can make tool calls in a loop.
@@ -178,7 +246,7 @@ export async function executeAgent(
         toolContext,
         streamResponses,
         startTime,
-        context.signal,
+        context,
       );
     }
 
@@ -188,6 +256,12 @@ export async function executeAgent(
       logger.debug(`[agent] [${msg.role}] ${msg.content}`);
     }
     logger.debug(`[agent] ═══ END PROMPT — temperature=${temperature} maxTokens=${maxTokens} ═══\n`);
+    emitAgentDebug(context, {
+      stage: "request",
+      ...agentDebugBase(config, model, temperature, maxTokens),
+      messageCount: messages.length,
+      messages: debugMessages(messages),
+    });
 
     let responseText = "";
     const result = await provider.chatComplete(messages, {
@@ -207,6 +281,15 @@ export async function executeAgent(
     responseText = responseText.trim();
     logger.info(`[agent] ${config.type} done (${responseText.length} chars, ${Date.now() - startTime}ms)`);
     logger.debug(`[agent] ${config.type} raw response: ${responseText.slice(0, 500)}`);
+    emitAgentDebug(context, {
+      stage: "response",
+      ...agentDebugBase(config, model, temperature, maxTokens),
+      messageCount: messages.length,
+      durationMs: Date.now() - startTime,
+      finishReason: result.finishReason,
+      ...debugUsage(result.usage),
+      ...responseDebugFields(responseText),
+    });
 
     // Parse the result based on agent type
     let parsed = parseAgentResponse(config, responseText);
@@ -215,8 +298,15 @@ export async function executeAgent(
 
     if (invalidJson && shouldRetryInvalidJsonAgent(config) && !context.signal?.aborted) {
       logger.warn("[agent] %s returned invalid JSON; retrying once with strict JSON reminder", config.type);
+      const retryMessages = buildInvalidJsonRetryMessages(messages, parsed.type, responseText);
+      emitAgentDebug(context, {
+        stage: "retry_request",
+        ...agentDebugBase(config, model, temperature, maxTokens),
+        messageCount: retryMessages.length,
+        messages: debugMessages(retryMessages),
+      });
       let retryResponseText = "";
-      const retryResult = await provider.chatComplete(buildInvalidJsonRetryMessages(messages, parsed.type, responseText), {
+      const retryResult = await provider.chatComplete(retryMessages, {
         model,
         temperature,
         maxTokens,
@@ -233,6 +323,15 @@ export async function executeAgent(
       responseText = retryResponseText.trim();
       logger.info("[agent] %s JSON retry done (%d chars, %dms)", config.type, responseText.length, Date.now() - startTime);
       logger.debug("[agent] %s JSON retry raw response: %s", config.type, responseText.slice(0, 500));
+      emitAgentDebug(context, {
+        stage: "retry_response",
+        ...agentDebugBase(config, model, temperature, maxTokens),
+        messageCount: retryMessages.length,
+        durationMs: Date.now() - startTime,
+        finishReason: retryResult.finishReason,
+        ...debugUsage(retryResult.usage),
+        ...responseDebugFields(responseText),
+      });
       parsed = parseAgentResponse(config, responseText);
       invalidJson = shouldFailInvalidJsonResult(config, parsed.data);
     }
@@ -248,6 +347,13 @@ export async function executeAgent(
       error: invalidJson ? invalidJsonAgentError(parsed.type) : null,
     };
   } catch (err) {
+    emitAgentDebug(context, {
+      stage: "error",
+      ...agentDebugBase(config, model, (config.settings.temperature as number) ?? 0.3, normalizeAgentMaxTokens(config.settings.maxTokens)),
+      messageCount: 0,
+      durationMs: Date.now() - startTime,
+      error: extractErrorMessage(err),
+    });
     return makeError(config, extractErrorMessage(err), startTime);
   }
 }
@@ -266,7 +372,7 @@ async function executeAgentWithTools(
   toolContext: AgentToolContext,
   streamResponses: boolean,
   startTime: number,
-  signal?: AbortSignal,
+  context: AgentContext,
 ): Promise<AgentResult> {
   const MAX_TOOL_ROUNDS = 5;
   const loopMessages = [...initialMessages];
@@ -274,16 +380,35 @@ async function executeAgentWithTools(
   const debugAgentsEnabled = isDebugAgentsEnabled() && logger.isLevelEnabled("debug");
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    emitAgentDebug(context, {
+      stage: "request",
+      ...agentDebugBase(config, model, temperature, maxTokens),
+      messageCount: loopMessages.length,
+      messages: debugMessages(loopMessages),
+      tools: debugToolNames(toolContext.tools),
+      round: round + 1,
+    });
     const result = await provider.chatComplete(loopMessages, {
       model,
       temperature,
       maxTokens,
       stream: streamResponses,
       tools: toolContext.tools,
-      signal,
+      signal: context.signal,
     });
 
     totalTokens += result.usage?.totalTokens ?? 0;
+    emitAgentDebug(context, {
+      stage: "response",
+      ...agentDebugBase(config, model, temperature, maxTokens),
+      messageCount: loopMessages.length,
+      tools: debugToolNames(toolContext.tools),
+      round: round + 1,
+      durationMs: Date.now() - startTime,
+      finishReason: result.finishReason,
+      ...debugUsage(result.usage),
+      ...responseDebugFields(result.content?.trim() ?? ""),
+    });
 
     // No tool calls → final response
     if (!result.toolCalls || result.toolCalls.length === 0) {
@@ -336,15 +461,32 @@ async function executeAgentWithTools(
   }
 
   // Exhausted tool rounds — make one final call without tools to get JSON response
+  emitAgentDebug(context, {
+    stage: "request",
+    ...agentDebugBase(config, model, temperature, maxTokens),
+    messageCount: loopMessages.length,
+    messages: debugMessages(loopMessages),
+    round: MAX_TOOL_ROUNDS + 1,
+  });
   const finalResult = await provider.chatComplete(loopMessages, {
     model,
     temperature,
     maxTokens,
     stream: streamResponses,
-    signal,
+    signal: context.signal,
   });
   totalTokens += finalResult.usage?.totalTokens ?? 0;
   const responseText = finalResult.content?.trim() ?? "";
+  emitAgentDebug(context, {
+    stage: "response",
+    ...agentDebugBase(config, model, temperature, maxTokens),
+    messageCount: loopMessages.length,
+    round: MAX_TOOL_ROUNDS + 1,
+    durationMs: Date.now() - startTime,
+    finishReason: finalResult.finishReason,
+    ...debugUsage(finalResult.usage),
+    ...responseDebugFields(responseText),
+  });
   const parsed = parseAgentResponse(config, responseText);
   const invalidJson = shouldFailInvalidJsonResult(config, parsed.data);
   return {
@@ -461,6 +603,19 @@ export async function executeAgentBatch(
       logger.debug(`[agent-batch] [${msg.role}] ${msg.content}`);
     }
     logger.debug(`[agent-batch] ═══ END BATCH PROMPT — temperature=${temperature} maxTokens=${batchMaxTokens} ═══\n`);
+    emitAgentDebug(context, {
+      stage: "request",
+      agentId: "__batch__",
+      agentType: "__batch__",
+      agentName: `Agent Batch (${configs.length})`,
+      phase: "batch",
+      model,
+      temperature,
+      maxTokens: batchMaxTokens,
+      messageCount: messages.length,
+      messages: debugMessages(messages),
+      batchedAgentTypes: configs.map((config) => config.type),
+    });
 
     // Use streaming (onToken) to keep the connection alive — avoids proxy
     // timeouts (e.g. Cloudflare 524) on large batch responses.
@@ -487,6 +642,22 @@ export async function executeAgentBatch(
 
     logger.info(`[agent-batch] Got response (${responseText.length} chars, ${durationMs}ms, ${totalTokens} tokens)`);
     logger.debug(`[agent-batch] ${responseText}`);
+    emitAgentDebug(context, {
+      stage: "response",
+      agentId: "__batch__",
+      agentType: "__batch__",
+      agentName: `Agent Batch (${configs.length})`,
+      phase: "batch",
+      model,
+      temperature,
+      maxTokens: batchMaxTokens,
+      messageCount: messages.length,
+      durationMs,
+      finishReason: result.finishReason,
+      ...debugUsage(result.usage),
+      ...responseDebugFields(responseText),
+      batchedAgentTypes: configs.map((config) => config.type),
+    });
 
     // Parse the batched response into individual results
     const { parsed, failed } = parseBatchResponse(configs, responseText, durationMs, totalTokens);

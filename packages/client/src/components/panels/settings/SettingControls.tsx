@@ -80,6 +80,8 @@ export function ConversationSoundSetting() {
   const setConvoNotificationSound = useUIStore((s) => s.setConvoNotificationSound);
   const rpNotificationSound = useUIStore((s) => s.rpNotificationSound);
   const setRpNotificationSound = useUIStore((s) => s.setRpNotificationSound);
+  const gameNotificationSound = useUIStore((s) => s.gameNotificationSound);
+  const setGameNotificationSound = useUIStore((s) => s.setGameNotificationSound);
   const conversationBrowserNotifications = useUIStore((s) => s.conversationBrowserNotifications);
   const setConversationBrowserNotifications = useUIStore((s) => s.setConversationBrowserNotifications);
   const [browserPermission, setBrowserPermission] = useState<LocalNotificationPermission>("default");
@@ -138,6 +140,15 @@ export function ConversationSoundSetting() {
           setRpNotificationSound(v);
           if (v) playNotificationPing();
         }}
+      />
+      <ToggleSetting
+        label="Game mode"
+        checked={gameNotificationSound}
+        onChange={(v) => {
+          setGameNotificationSound(v);
+          if (v) playNotificationPing();
+        }}
+        help="Play when a Game turn finishes loading."
       />
       <div className="mt-1 flex items-center gap-1.5">
         <Bell size="0.75rem" className="text-[var(--muted-foreground)]" />

@@ -28,6 +28,9 @@ import {
   DEFAULT_IMAGE_STYLE_PROFILES,
   compileImagePrompt,
   normalizeImageStyleProfileSettings,
+  createFolderEntry,
+  getFolderImportEntries,
+  getFolderManifestConfig,
   type ImagePromptKind,
   type ImagePromptMode,
   type ImageStyleProfile,
@@ -140,11 +143,7 @@ function fitSettingsArtPreviewSizes(sizes: SettingsArtPreviewSize[]): SettingsAr
     visibleSizes.reduce((sum, size) => sum + size.width, 0) +
     SETTINGS_ART_PREVIEW_FRAME.gap * Math.max(0, visibleSizes.length - 1);
   const maxHeight = Math.max(...visibleSizes.map((size) => size.height));
-  const fit = Math.min(
-    1,
-    SETTINGS_ART_PREVIEW_FRAME.width / totalWidth,
-    SETTINGS_ART_PREVIEW_FRAME.height / maxHeight,
-  );
+  const fit = Math.min(1, SETTINGS_ART_PREVIEW_FRAME.width / totalWidth, SETTINGS_ART_PREVIEW_FRAME.height / maxHeight);
 
   return sizes.map((size) => ({
     width: size.width * fit,
@@ -3062,30 +3061,58 @@ function ThemesSettings() {
     if (!file) return;
     try {
       const text = await file.text();
-      let importedThemeName: string;
-      let importedThemeCss: string;
+      const latestThemes = await api.get<Theme[]>("/themes");
+      let workingThemes = [...latestThemes];
+      let imported = 0;
+      let skipped = 0;
 
       if (file.name.endsWith(".json")) {
         const parsed = JSON.parse(text);
-        importedThemeName =
-          typeof parsed.name === "string" && parsed.name.trim() ? parsed.name : file.name.replace(/\.json$/, "");
-        importedThemeCss = typeof parsed.css === "string" ? parsed.css : "";
+        const entries = getFolderImportEntries(parsed, ["themes"]);
+        for (const entry of entries) {
+          const source = getFolderManifestConfig(entry);
+          if (!source || typeof source !== "object" || Array.isArray(source)) continue;
+          const record = source as Record<string, unknown>;
+          const importedThemeName =
+            typeof record.name === "string" && record.name.trim() ? record.name : file.name.replace(/\.json$/, "");
+          const importedThemeCss = typeof record.css === "string" ? record.css : "";
+          if (!importedThemeCss.trim()) continue;
+          const duplicate = findDuplicateTheme(workingThemes, importedThemeName, importedThemeCss);
+          if (duplicate) {
+            skipped++;
+            continue;
+          }
+          const created = await createTheme.mutateAsync({
+            name: importedThemeName,
+            css: importedThemeCss,
+            installedAt: new Date().toISOString(),
+          });
+          workingThemes = [created, ...workingThemes];
+          imported++;
+        }
       } else {
-        importedThemeName = file.name.replace(/\.css$/, "");
-        importedThemeCss = text;
+        const importedThemeName = file.name.replace(/\.css$/, "");
+        const importedThemeCss = text;
+        const duplicate = findDuplicateTheme(workingThemes, importedThemeName, importedThemeCss);
+        if (duplicate) {
+          skipped++;
+        } else {
+          const created = await createTheme.mutateAsync({
+            name: importedThemeName,
+            css: importedThemeCss,
+            installedAt: new Date().toISOString(),
+          });
+          workingThemes = [created, ...workingThemes];
+          imported++;
+        }
       }
 
-      const latestThemes = await api.get<Theme[]>("/themes");
-      const duplicate = findDuplicateTheme(latestThemes, importedThemeName, importedThemeCss);
-      if (duplicate) {
-        toast.success(`Theme "${duplicate.name}" is already synced`);
+      if (imported > 0) {
+        toast.success(`Imported ${imported} theme${imported === 1 ? "" : "s"}`);
+      } else if (skipped > 0) {
+        toast.success(`${skipped} theme${skipped === 1 ? "" : "s"} already synced`);
       } else {
-        await createTheme.mutateAsync({
-          name: importedThemeName,
-          css: importedThemeCss,
-          installedAt: new Date().toISOString(),
-        });
-        toast.success(`Theme "${importedThemeName}" imported`);
+        toast.error("No valid themes found in file.");
       }
     } catch (err) {
       console.error("[ThemesSettings] Failed to import theme:", err);
@@ -3093,7 +3120,6 @@ function ThemesSettings() {
     }
     e.target.value = "";
   };
-
   // ── CSS Editor View ──
   if (editorOpen) {
     return (
@@ -3281,19 +3307,29 @@ function ThemesSettings() {
                 </button>
                 <button
                   onClick={() => {
-                    const json = JSON.stringify({ name: t.name, css: t.css }, null, 2);
-                    const blob = new Blob([json], { type: "application/json" });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
-                    a.href = url;
-                    a.download = `${t.name.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`;
-                    a.click();
-                    URL.revokeObjectURL(url);
+                    downloadJsonFile(
+                      {
+                        kind: "marinara.theme-folder",
+                        version: 1,
+                        exportedAt: new Date().toISOString(),
+                        folderName: "Themes",
+                        themes: [
+                          createFolderEntry({
+                            folderName: "Themes",
+                            itemName: t.name,
+                            itemKind: "marinara.theme",
+                            config: { name: t.name, css: t.css },
+                            fallbackName: "theme",
+                          }),
+                        ],
+                      },
+                      `${sanitizeExportFilenamePart(t.name, "theme")}.json`,
+                    );
                   }}
                   className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-emerald-500/10 hover:text-emerald-400"
                   title="Export theme"
                 >
-                  <Download size="0.6875rem" />
+                  <Upload size="0.6875rem" />
                 </button>
                 <button
                   onClick={() => {
@@ -3391,16 +3427,26 @@ function ExtensionsSettings() {
 
       if (file.name.endsWith(".json")) {
         const parsed = JSON.parse(text);
-        const name = parsed.name ?? file.name.replace(/\.json$/, "");
-        await createExtension.mutateAsync({
-          name,
-          description: parsed.description ?? "",
-          css: parsed.css ?? null,
-          js: parsed.js ?? null,
-          enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : true,
-          installedAt,
-        });
-        toast.success(`Extension "${name}" installed`);
+        const entries = getFolderImportEntries(parsed, ["extensions"]);
+        let imported = 0;
+        for (const entry of entries) {
+          const source = getFolderManifestConfig(entry);
+          if (!source || typeof source !== "object" || Array.isArray(source)) continue;
+          const record = source as Record<string, unknown>;
+          const name =
+            typeof record.name === "string" && record.name.trim() ? record.name : file.name.replace(/\.json$/, "");
+          await createExtension.mutateAsync({
+            name,
+            description: typeof record.description === "string" ? record.description : "",
+            css: typeof record.css === "string" ? record.css : null,
+            js: typeof record.js === "string" ? record.js : null,
+            enabled: typeof record.enabled === "boolean" ? record.enabled : true,
+            installedAt,
+          });
+          imported++;
+        }
+        if (imported === 0) throw new Error("No valid extensions found in file");
+        toast.success(`Installed ${imported} extension${imported === 1 ? "" : "s"}`);
       } else if (file.name.endsWith(".js")) {
         const name = file.name.replace(/\.js$/, "");
         await createExtension.mutateAsync({
@@ -3491,13 +3537,25 @@ function ExtensionsSettings() {
                   onClick={() => {
                     downloadJsonFile(
                       {
-                        kind: "marinara.extension",
+                        kind: "marinara.extension-folder",
                         version: 1,
-                        name: ext.name,
-                        description: ext.description ?? "",
-                        css: ext.css ?? null,
-                        js: ext.js ?? null,
-                        enabled: ext.enabled,
+                        exportedAt: new Date().toISOString(),
+                        folderName: "Extensions",
+                        extensions: [
+                          createFolderEntry({
+                            folderName: "Extensions",
+                            itemName: ext.name,
+                            itemKind: "marinara.extension",
+                            config: {
+                              name: ext.name,
+                              description: ext.description ?? "",
+                              css: ext.css ?? null,
+                              js: ext.js ?? null,
+                              enabled: ext.enabled,
+                            },
+                            fallbackName: "extension",
+                          }),
+                        ],
                       },
                       `${sanitizeExportFilenamePart(ext.name, "extension")}.json`,
                     );
@@ -3505,7 +3563,7 @@ function ExtensionsSettings() {
                   className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-emerald-500/10 hover:text-emerald-400"
                   title="Export extension"
                 >
-                  <Download size="0.6875rem" />
+                  <Upload size="0.6875rem" />
                 </button>
                 <button
                   onClick={() => deleteExtension.mutate(ext.id)}

@@ -4,6 +4,7 @@
 // ──────────────────────────────────────────────
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { useUIStore } from "../../stores/ui.store";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import {
@@ -38,6 +39,7 @@ import {
   ToggleLeft,
   ToggleRight,
   Trash2,
+  Plus,
   Layers,
   Music,
   ChevronDown,
@@ -66,9 +68,11 @@ import { HelpTooltip } from "../ui/HelpTooltip";
 import {
   BUILT_IN_AGENTS,
   BUILT_IN_TOOLS,
+  createFolderEntry,
   DEFAULT_AGENT_CONTEXT_SIZE,
   DEFAULT_AGENT_TOOLS,
   DEFAULT_AGENT_MAX_TOKENS,
+  DEFAULT_AGENT_AUTHOR,
   DEFAULT_CUSTOM_AGENT_ACTIVATION_SCAN_DEPTH,
   LOCAL_SIDECAR_CONNECTION_ID,
   MAX_AGENT_MAX_TOKENS,
@@ -76,10 +80,14 @@ import {
   MIN_AGENT_MAX_TOKENS,
   getDefaultBuiltInAgentSettings,
   getDefaultAgentPrompt,
+  normalizeAgentPromptTemplateOptions,
+  parseAgentSettingsRecord,
   type AgentPhase,
+  type AgentPromptTemplateOption,
   type AgentResultType,
   type ToolDefinition,
 } from "@marinara-engine/shared";
+import { downloadJsonFile } from "../../lib/download-json";
 
 function parseActivationKeywordsText(value: string): string[] {
   const seen = new Set<string>();
@@ -179,6 +187,44 @@ function normalizeCustomResultType(value: unknown): CustomAgentResultType {
   return value === "text_rewrite" ? "text_rewrite" : "context_injection";
 }
 
+function createPromptOptionId(name: string, existingIds: Set<string>): string {
+  const base =
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/(^-|-$)/g, "") || "prompt";
+  let candidate = base;
+  let attempt = 2;
+  while (existingIds.has(candidate) || candidate === "default") {
+    candidate = `${base}-${attempt}`;
+    attempt++;
+  }
+  return candidate;
+}
+
+function createBlankPromptOption(existingOptions: AgentPromptTemplateOption[]): AgentPromptTemplateOption {
+  const existingIds = new Set(existingOptions.map((option) => option.id));
+  const name = `Prompt ${existingOptions.length + 1}`;
+  return {
+    id: createPromptOptionId(name, existingIds),
+    name,
+    promptTemplate: "",
+  };
+}
+
+function normalizeAuthor(value: unknown, fallback: string): string {
+  const author = typeof value === "string" ? value.trim() : "";
+  return author || fallback;
+}
+
+function normalizeOptionalNumber(value: unknown): number | "" {
+  return typeof value === "number" && Number.isFinite(value) ? value : "";
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
 // ═══════════════════════════════════════════════
 //  Main Editor
 // ═══════════════════════════════════════════════
@@ -230,6 +276,8 @@ export function AgentEditor() {
   );
   const [customCadenceInputFocused, setCustomCadenceInputFocused] = useState(false);
   const [localPrompt, setLocalPrompt] = useState("");
+  const [localAuthor, setLocalAuthor] = useState("");
+  const [localPromptTemplates, setLocalPromptTemplates] = useState<AgentPromptTemplateOption[]>([]);
   const [localAgentEnabled, setLocalAgentEnabled] = useState(true);
   const [localResultType, setLocalResultType] = useState<CustomAgentResultType>("context_injection");
   const [localInjectAsSection, setLocalInjectAsSection] = useState(false);
@@ -280,13 +328,15 @@ export function AgentEditor() {
       setLocalPhase(dbConfig.phase as AgentPhase);
       setLocalAgentEnabled(dbConfig.enabled !== "false");
       setLocalConnectionId(dbConfig.connectionId ?? "");
-      const settings = dbConfig.settings
-        ? typeof dbConfig.settings === "string"
-          ? JSON.parse(dbConfig.settings)
-          : dbConfig.settings
-        : {};
-      setLocalContextSize(settings.contextSize ?? "");
-      setLocalMaxTokens(settings.maxTokens ?? (defaultSettings.maxTokens as number | undefined) ?? "");
+      const settings = parseAgentSettingsRecord(dbConfig.settings);
+      const promptTemplateSource =
+        settings.promptTemplates !== undefined ? settings.promptTemplates : defaultSettings.promptTemplates;
+      setLocalAuthor(
+        normalizeAuthor(settings.author, builtIn?.author ?? (isCustomAgent ? "Unknown" : DEFAULT_AGENT_AUTHOR)),
+      );
+      setLocalPromptTemplates(normalizeAgentPromptTemplateOptions(promptTemplateSource));
+      setLocalContextSize(normalizeOptionalNumber(settings.contextSize));
+      setLocalMaxTokens(normalizeOptionalNumber(settings.maxTokens) || (defaultSettings.maxTokens as number) || "");
       setLocalImageConnectionId((settings.imageConnectionId as string) ?? "");
       setLocalRunInterval(
         (settings.runInterval as number | undefined) ?? (defaultSettings.runInterval as number) ?? "",
@@ -316,14 +366,14 @@ export function AgentEditor() {
       setLocalEnabledTools(enabledTools);
       setLocalLorebookWriteEnabled(settings.lorebookWriteEnabled === true || enabledTools.includes(LOREBOOK_WRITE_TOOL_NAME));
       setLocalWritableLorebookId(writableLorebookId);
-      setLocalSpotifyClientId(settings.spotifyClientId ?? "");
-      setLocalSourceLorebookIds(settings.sourceLorebookIds ?? []);
+      setLocalSpotifyClientId(typeof settings.spotifyClientId === "string" ? settings.spotifyClientId : "");
+      setLocalSourceLorebookIds(normalizeStringArray(settings.sourceLorebookIds));
       setLocalUseChatActiveLorebooks(
         (settings.useChatActiveLorebooks as boolean | undefined) ?? defaultSettings.useChatActiveLorebooks === true,
       );
-      setLocalSourceFileIds(settings.sourceFileIds ?? []);
-      setLocalAutoGenerateAvatars(settings.autoGenerateAvatars ?? false);
-      setLocalAutoGenerateBackgrounds(settings.autoGenerateBackgrounds ?? false);
+      setLocalSourceFileIds(normalizeStringArray(settings.sourceFileIds));
+      setLocalAutoGenerateAvatars(settings.autoGenerateAvatars === true);
+      setLocalAutoGenerateBackgrounds(settings.autoGenerateBackgrounds === true);
       setLocalUseAvatarReferences(
         (settings.useAvatarReferences as boolean | undefined) ?? defaultSettings.useAvatarReferences === true,
       );
@@ -336,6 +386,8 @@ export function AgentEditor() {
     } else if (builtIn) {
       setLocalName(builtIn.name);
       setLocalDescription(builtIn.description);
+      setLocalAuthor(builtIn.author ?? DEFAULT_AGENT_AUTHOR);
+      setLocalPromptTemplates(normalizeAgentPromptTemplateOptions(defaultSettings.promptTemplates));
       setLocalPhase(builtIn.phase);
       setLocalAgentEnabled(true);
       setLocalConnectionId("");
@@ -366,6 +418,8 @@ export function AgentEditor() {
       // Brand new custom agent — start empty
       setLocalName("New Agent");
       setLocalDescription("");
+      setLocalAuthor("");
+      setLocalPromptTemplates([]);
       setLocalPhase("post_processing");
       setLocalAgentEnabled(true);
       setLocalConnectionId("");
@@ -395,7 +449,7 @@ export function AgentEditor() {
     }
     setDirty(false);
     setSaveError(null);
-  }, [agentDetailId, dbConfig, builtIn, connections, customRunIntervalMeta?.defaultValue]);
+  }, [agentDetailId, dbConfig, builtIn, connections, customRunIntervalMeta?.defaultValue, isCustomAgent]);
 
   // Fetch Spotify connection status when viewing a Spotify agent
   const isSpotifyAgent = agentDetailId === "spotify" || dbConfig?.type === "spotify";
@@ -544,15 +598,13 @@ export function AgentEditor() {
           : localEnabledTools.filter((tool) => tool !== LOREBOOK_WRITE_TOOL_NAME),
       ),
     );
+    const savedAuthor = localAuthor.trim() || (builtIn ? DEFAULT_AGENT_AUTHOR : "Unknown");
+    const savedPromptTemplates = normalizeAgentPromptTemplateOptions(localPromptTemplates);
 
     // Preserve OAuth fields the form doesn't expose. The server replaces
     // `settings` wholesale, so anything we omit here would be wiped — and the
     // Spotify tokens live in settings rather than their own column.
-    const currentSettings: Record<string, unknown> = dbConfig?.settings
-      ? typeof dbConfig.settings === "string"
-        ? JSON.parse(dbConfig.settings as string)
-        : (dbConfig.settings as Record<string, unknown>)
-      : {};
+    const currentSettings: Record<string, unknown> = parseAgentSettingsRecord(dbConfig?.settings);
     const preservedSpotifyFields: Record<string, unknown> = {};
     for (const key of ["spotifyAccessToken", "spotifyRefreshToken", "spotifyExpiresAt", "spotifyScope"]) {
       if (currentSettings[key] !== undefined) preservedSpotifyFields[key] = currentSettings[key];
@@ -567,6 +619,8 @@ export function AgentEditor() {
       promptTemplate: localPrompt,
       settings: {
         ...preservedSpotifyFields,
+        author: savedAuthor,
+        promptTemplates: savedPromptTemplates,
         ...(isEditingCustomAgent ? { resultType: localResultType } : {}),
         ...(activationKeywords.length > 0
           ? {
@@ -637,6 +691,8 @@ export function AgentEditor() {
     localIncludePreGenInjections,
     localIncludeParallelResults,
     localPrompt,
+    localAuthor,
+    localPromptTemplates,
     localContextSize,
     localMaxTokens,
     localRunInterval,
@@ -667,6 +723,100 @@ export function AgentEditor() {
     openAgentDetail,
   ]);
 
+  const handleExportAgent = () => {
+    if (!agentDetailId) return;
+    const isEditingCustomAgent = isCustomAgent || isNewCustomAgent;
+    const savedPhase = isEditingCustomAgent && localResultType === "text_rewrite" ? "post_processing" : localPhase;
+    const mayIncludeTurnData = isEditingCustomAgent && savedPhase === "post_processing";
+    const activationKeywords = isEditingCustomAgent ? parseActivationKeywordsText(localActivationKeywordsText) : [];
+    const activationScanDepth =
+      localActivationScanDepth === ""
+        ? DEFAULT_CUSTOM_AGENT_ACTIVATION_SCAN_DEPTH
+        : Math.max(
+            1,
+            Math.min(MAX_CUSTOM_AGENT_ACTIVATION_SCAN_DEPTH, Math.floor(Number(localActivationScanDepth) || 1)),
+          );
+    const writableLorebookId = localWritableLorebookId.trim();
+    const lorebookWriterEnabled = isEditingCustomAgent && localLorebookWriteEnabled;
+    if (lorebookWriterEnabled && !writableLorebookId) {
+      toast.error("Select a target lorebook before exporting lorebook writing for this agent.");
+      return;
+    }
+    const effectiveEnabledTools = Array.from(
+      new Set(
+        lorebookWriterEnabled
+          ? [...localEnabledTools, LOREBOOK_WRITE_TOOL_NAME]
+          : localEnabledTools.filter((tool) => tool !== LOREBOOK_WRITE_TOOL_NAME),
+      ),
+    );
+    const savedAuthor = localAuthor.trim() || (builtIn ? DEFAULT_AGENT_AUTHOR : "Unknown");
+    const savedPromptTemplates = normalizeAgentPromptTemplateOptions(localPromptTemplates);
+    const currentSettings: Record<string, unknown> = parseAgentSettingsRecord(dbConfig?.settings);
+    const preservedSpotifyFields: Record<string, unknown> = {};
+    for (const key of ["spotifyAccessToken", "spotifyRefreshToken", "spotifyExpiresAt", "spotifyScope"]) {
+      if (currentSettings[key] !== undefined) preservedSpotifyFields[key] = currentSettings[key];
+    }
+    const agentType = dbConfig?.type ?? builtIn?.id ?? createCustomAgentType(localName);
+    const settings = {
+      ...preservedSpotifyFields,
+      author: savedAuthor,
+      promptTemplates: savedPromptTemplates,
+      ...(isEditingCustomAgent ? { resultType: localResultType } : {}),
+      ...(activationKeywords.length > 0 ? { activationKeywords, activationScanDepth } : {}),
+      ...(mayIncludeTurnData && localIncludePreGenInjections ? { includePreGenInjections: true } : {}),
+      ...(mayIncludeTurnData && localIncludeParallelResults ? { includeParallelResults: true } : {}),
+      ...(localContextSize !== "" ? { contextSize: Number(localContextSize) } : {}),
+      ...(localMaxTokens !== "" ? { maxTokens: clampAgentMaxTokens(localMaxTokens) } : {}),
+      ...(localRunInterval !== "" ? { runInterval: Number(localRunInterval) } : {}),
+      ...(localInjectAsSection ? { injectAsSection: true } : {}),
+      enabledTools: effectiveEnabledTools,
+      ...(lorebookWriterEnabled
+        ? { lorebookWriteEnabled: true, writableLorebookId, writableLorebookIds: [writableLorebookId] }
+        : {}),
+      ...(localSpotifyClientId ? { spotifyClientId: localSpotifyClientId } : {}),
+      ...(isKnowledgeRetrievalAgent || isKnowledgeRouterAgent
+        ? { useChatActiveLorebooks: localUseChatActiveLorebooks }
+        : {}),
+      ...(localSourceLorebookIds.length > 0 ? { sourceLorebookIds: localSourceLorebookIds } : {}),
+      ...(isKnowledgeRetrievalAgent && localSourceFileIds.length > 0 ? { sourceFileIds: localSourceFileIds } : {}),
+      ...(localImageConnectionId ? { imageConnectionId: localImageConnectionId } : {}),
+      ...(localAutoGenerateAvatars ? { autoGenerateAvatars: true } : {}),
+      ...(localAutoGenerateBackgrounds ? { autoGenerateBackgrounds: true } : {}),
+      ...(isIllustratorAgent ? { useAvatarReferences: localUseAvatarReferences } : {}),
+      ...(localImagePositivePrompt.trim() ? { imagePositivePrompt: localImagePositivePrompt.trim() } : {}),
+      ...(localImageNegativePrompt.trim() ? { imageNegativePrompt: localImageNegativePrompt.trim() } : {}),
+    };
+    const agentEntry = createFolderEntry({
+      folderName: "Agents",
+      itemName: agentType,
+      itemKind: "marinara.agent",
+      config: {
+        type: agentType,
+        name: localName,
+        description: localDescription,
+        phase: savedPhase,
+        enabled: localAgentEnabled,
+        connectionId: localConnectionId || null,
+        imagePath: null,
+        promptTemplate: localPrompt,
+        settings,
+        ...(isEditingCustomAgent ? { resultType: localResultType } : {}),
+      },
+      fallbackName: "agent",
+    });
+    downloadJsonFile(
+      {
+        kind: "marinara.agent-folder",
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        folderName: "Agents",
+        agents: [agentEntry],
+      },
+      "marinara-agent.json",
+    );
+    toast.success(`Exported ${localName || "agent"}`);
+  };
+
   const handleResetPrompt = useCallback(() => {
     setLocalPrompt("");
     setDirty(true);
@@ -678,6 +828,29 @@ export function AgentEditor() {
   }, [defaultPrompt]);
 
   const markDirty = useCallback(() => setDirty(true), []);
+
+  const handleAddPromptTemplate = useCallback(() => {
+    setLocalPromptTemplates((options) => [...options, createBlankPromptOption(options)]);
+    markDirty();
+  }, [markDirty]);
+
+  const handleUpdatePromptTemplate = useCallback(
+    (id: string, patch: Partial<Pick<AgentPromptTemplateOption, "name" | "promptTemplate" | "description">>) => {
+      setLocalPromptTemplates((options) =>
+        options.map((option) => (option.id === id ? { ...option, ...patch } : option)),
+      );
+      markDirty();
+    },
+    [markDirty],
+  );
+
+  const handleRemovePromptTemplate = useCallback(
+    (id: string) => {
+      setLocalPromptTemplates((options) => options.filter((option) => option.id !== id));
+      markDirty();
+    },
+    [markDirty],
+  );
 
   const phaseMeta = PHASE_META[localPhase];
   const effectivePhase =
@@ -760,6 +933,12 @@ export function AgentEditor() {
             </button>
           )}
           <button
+            onClick={handleExportAgent}
+            className="flex items-center gap-1.5 rounded-xl bg-[var(--secondary)] px-3 py-2 text-xs font-medium text-[var(--secondary-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] active:scale-[0.98]"
+          >
+            <Upload size="0.8125rem" /> <span className="max-md:hidden">Export</span>
+          </button>
+          <button
             onClick={handleSave}
             disabled={isPending}
             className="flex items-center gap-1.5 rounded-xl bg-[var(--primary)] px-4 py-2 text-xs font-medium text-[var(--primary-foreground)] shadow-md transition-all hover:shadow-lg active:scale-[0.98] disabled:opacity-50"
@@ -831,17 +1010,34 @@ export function AgentEditor() {
           <FieldGroup
             label="Description"
             icon={<Info size="0.875rem" className="text-[var(--primary)]" />}
-            help="A short summary of what this agent does. Shown in the agents panel to help you identify each agent."
+            help="A short summary of what this agent does, plus author credit for the person or team who made it."
           >
-            <input
-              value={localDescription}
-              onChange={(e) => {
-                setLocalDescription(e.target.value);
-                markDirty();
-              }}
-              className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
-              placeholder="What does this agent do…"
-            />
+            <div className="grid gap-3 sm:grid-cols-[1fr_14rem]">
+              <label className="flex min-w-0 flex-col gap-1.5">
+                <span className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">Description</span>
+                <input
+                  value={localDescription}
+                  onChange={(e) => {
+                    setLocalDescription(e.target.value);
+                    markDirty();
+                  }}
+                  className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                  placeholder="What does this agent do…"
+                />
+              </label>
+              <label className="flex min-w-0 flex-col gap-1.5">
+                <span className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">Author</span>
+                <input
+                  value={localAuthor}
+                  onChange={(e) => {
+                    setLocalAuthor(e.target.value);
+                    markDirty();
+                  }}
+                  className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                  placeholder={builtIn ? DEFAULT_AGENT_AUTHOR : "Your name"}
+                />
+              </label>
+            </div>
           </FieldGroup>
 
           {/* Agent Status */}
@@ -2263,6 +2459,74 @@ export function AgentEditor() {
                   ? 'Write the full system prompt for this custom editor. It must return JSON with "editedText" and "changes".'
                   : "Write the full system prompt for this custom agent."}
             </p>
+
+            <div className="mt-4 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-xs font-semibold text-[var(--foreground)]">Named prompt options</p>
+                  <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                    Chats can pick one of these without changing the agent globally.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleAddPromptTemplate}
+                  className="flex items-center gap-1.5 rounded-lg bg-[var(--secondary)] px-2.5 py-1.5 text-[0.6875rem] font-medium text-[var(--foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)]"
+                >
+                  <Plus size="0.6875rem" />
+                  Add option
+                </button>
+              </div>
+
+              {localPromptTemplates.length === 0 ? (
+                <p className="rounded-xl bg-[var(--secondary)]/60 px-3 py-2 text-[0.6875rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+                  No named options yet. The chat menu will show only the default prompt.
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {localPromptTemplates.map((option, index) => (
+                    <div key={option.id} className="rounded-xl bg-[var(--secondary)]/70 p-3 ring-1 ring-[var(--border)]">
+                      <div className="mb-2 flex items-center gap-2">
+                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-[var(--background)] text-[0.6875rem] font-semibold text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+                          {index + 1}
+                        </span>
+                        <input
+                          value={option.name}
+                          onChange={(e) => handleUpdatePromptTemplate(option.id, { name: e.target.value })}
+                          className="min-w-0 flex-1 rounded-lg bg-[var(--background)] px-2.5 py-1.5 text-sm ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                          placeholder="Option name"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleRemovePromptTemplate(option.id)}
+                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
+                          title="Remove prompt option"
+                        >
+                          <Trash2 size="0.75rem" />
+                        </button>
+                      </div>
+                      <input
+                        value={option.description ?? ""}
+                        onChange={(e) =>
+                          handleUpdatePromptTemplate(option.id, { description: e.target.value })
+                        }
+                        className="mb-2 w-full rounded-lg bg-[var(--background)] px-2.5 py-1.5 text-xs ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                        placeholder="Short description shown in Chat Settings"
+                      />
+                      <textarea
+                        value={option.promptTemplate}
+                        onChange={(e) =>
+                          handleUpdatePromptTemplate(option.id, { promptTemplate: e.target.value })
+                        }
+                        rows={7}
+                        className="w-full resize-y rounded-lg bg-[var(--background)] px-3 py-2 font-mono text-xs leading-relaxed ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                        placeholder="Write the prompt template for this option…"
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
 
             {/* Default prompt preview removed — now shown inline above */}
           </FieldGroup>

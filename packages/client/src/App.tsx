@@ -291,7 +291,8 @@ export function App() {
       <AppDialogRenderer />
       <CsrfOriginWarningBanner />
       <Toaster
-        position="bottom-right"
+        position="top-center"
+        offset="4rem"
         theme={theme}
         closeButton
         toastOptions={{

@@ -58,6 +58,7 @@ export * from "./constants/game-assets.js";
 export * from "./features/agents/agent-manifest.types.js";
 export * from "./features/agents/agent-registry.js";
 export * from "./features/function-calls/tool-definitions.js";
+export * from "./features/folder-packages/manifest-package.js";
 
 // Utils
 export * from "./utils/macro-engine.js";
