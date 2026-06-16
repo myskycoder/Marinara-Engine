@@ -7,12 +7,14 @@ import { toast } from "sonner";
 import { cn } from "../../lib/utils";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { ImageUploadDropzone } from "../ui/ImageUploadDropzone";
+import { CustomEmojiTagButton } from "../ui/CustomEmojiTagButton";
 import {
   useGlobalGalleryImages,
   useGalleryFolders,
   useUploadGlobalGalleryImages,
   useDeleteGlobalGalleryImage,
   useMoveGlobalGalleryImage,
+  useTagGlobalGalleryImage,
   useCreateGalleryFolder,
   useRenameGalleryFolder,
   useDeleteGalleryFolder,
@@ -28,6 +30,7 @@ export function GlobalGalleryPanel() {
   const upload = useUploadGlobalGalleryImages();
   const removeImage = useDeleteGlobalGalleryImage();
   const moveImage = useMoveGlobalGalleryImage();
+  const tag = useTagGlobalGalleryImage();
   const createFolder = useCreateGalleryFolder();
   const renameFolder = useRenameGalleryFolder();
   const deleteFolder = useDeleteGalleryFolder();
@@ -85,16 +88,27 @@ export function GlobalGalleryPanel() {
       ) {
         return;
       }
-      removeImage.mutate(image.id);
-      if (lightbox?.id === image.id) setLightbox(null);
+      removeImage.mutate(image.id, {
+        onSuccess: () => {
+          if (lightbox?.id === image.id) setLightbox(null);
+        },
+        onError: (err) => toast.error(err.message),
+      });
     },
     [lightbox?.id, removeImage],
   );
 
   const handleMove = useCallback(
     (imageId: string, folderId: string | null) => {
-      moveImage.mutate({ id: imageId, folderId });
-      setLightbox((current) => (current?.id === imageId ? { ...current, folderId } : current));
+      moveImage.mutate(
+        { id: imageId, folderId },
+        {
+          onSuccess: () => {
+            setLightbox((current) => (current?.id === imageId ? { ...current, folderId } : current));
+          },
+          onError: (err) => toast.error(err.message),
+        },
+      );
     },
     [moveImage],
   );
@@ -338,6 +352,10 @@ export function GlobalGalleryPanel() {
                 dragImageId === image.id && "opacity-50",
               )}
             >
+              <CustomEmojiTagButton
+                image={image}
+                onApply={(patch) => tag.mutate({ imageId: image.id, patch }, { onError: (err) => toast.error(err.message) })}
+              />
               <button
                 type="button"
                 className="block aspect-square w-full bg-[var(--secondary)]"

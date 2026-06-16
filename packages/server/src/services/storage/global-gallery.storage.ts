@@ -59,6 +59,22 @@ export function createGlobalGalleryStorage(db: DB) {
       await db.delete(globalImages).where(eq(globalImages.id, id));
     },
 
+    async setTag(
+      id: string,
+      patch: { customKind: "emoji" | "sticker" | null; customName: string | null; width?: number; height?: number },
+    ) {
+      await db
+        .update(globalImages)
+        .set({
+          customKind: patch.customKind,
+          customName: patch.customName,
+          ...(patch.width !== undefined ? { width: patch.width } : {}),
+          ...(patch.height !== undefined ? { height: patch.height } : {}),
+        })
+        .where(eq(globalImages.id, id));
+      return this.getImageById(id);
+    },
+
     // ── Folders (flat) ──
 
     async listFolders() {

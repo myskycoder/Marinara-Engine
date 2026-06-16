@@ -42,6 +42,10 @@ export const characterImages = sqliteTable("character_images", {
   width: integer("width"),
   /** Image height in pixels */
   height: integer("height"),
+  /** Custom emoji/sticker tag: "emoji" | "sticker", or null when untagged */
+  customKind: text("custom_kind"),
+  /** Slugified custom emoji/sticker name, or null when untagged */
+  customName: text("custom_name"),
   createdAt: text("created_at").notNull(),
 });
 
@@ -62,6 +66,10 @@ export const personaImages = sqliteTable("persona_images", {
   width: integer("width"),
   /** Image height in pixels */
   height: integer("height"),
+  /** Custom emoji/sticker tag: "emoji" | "sticker", or null when untagged */
+  customKind: text("custom_kind"),
+  /** Slugified custom emoji/sticker name, or null when untagged */
+  customName: text("custom_name"),
   createdAt: text("created_at").notNull(),
 });
 
@@ -91,5 +99,9 @@ export const globalImages = sqliteTable("global_images", {
   width: integer("width"),
   /** Image height in pixels */
   height: integer("height"),
+  /** Custom emoji/sticker tag: "emoji" | "sticker", or null when untagged */
+  customKind: text("custom_kind"),
+  /** Slugified custom emoji/sticker name, or null when untagged */
+  customName: text("custom_name"),
   createdAt: text("created_at").notNull(),
 });

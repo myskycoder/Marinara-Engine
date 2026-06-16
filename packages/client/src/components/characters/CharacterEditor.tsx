@@ -19,6 +19,7 @@ import {
   useCharacterGalleryImages,
   useUploadCharacterGalleryImage,
   useDeleteCharacterGalleryImage,
+  useTagCharacterGalleryImage,
   useUploadSprite,
   useDeleteSprite,
   useExportSprites,
@@ -40,6 +41,7 @@ import { SpriteGenerationModal } from "../ui/SpriteGenerationModal";
 import { AvatarGenerationModal } from "../ui/AvatarGenerationModal";
 import { AvatarCropWidget } from "../ui/AvatarCropWidget";
 import { ImageUploadDropzone } from "../ui/ImageUploadDropzone";
+import { CustomEmojiTagButton } from "../ui/CustomEmojiTagButton";
 import {
   ArrowLeft,
   Save,
@@ -1929,6 +1931,7 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
   const { data: images, isLoading } = useCharacterGalleryImages(characterId);
   const upload = useUploadCharacterGalleryImage(characterId);
   const remove = useDeleteCharacterGalleryImage(characterId);
+  const tag = useTagCharacterGalleryImage(characterId);
   const [lightbox, setLightbox] = useState<CharacterGalleryImage | null>(null);
 
   const handleUpload = useCallback(
@@ -1988,6 +1991,7 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
               key={image.id}
               className="group relative overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)] transition-all hover:border-[var(--primary)]/30 hover:shadow-md"
             >
+              <CustomEmojiTagButton image={image} onApply={(patch) => tag.mutate({ imageId: image.id, patch })} />
               <button
                 type="button"
                 className="block aspect-square w-full bg-[var(--secondary)]"

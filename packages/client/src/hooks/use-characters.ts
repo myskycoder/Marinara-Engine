@@ -9,6 +9,7 @@ import {
   TRACKER_CARD_COLOR_PREVIEW_BASE_FIELD,
 } from "../lib/tracker-card-colors";
 import { PROFESSOR_MARI_ID, type CharacterCardVersion, type PersonaCardVersion } from "@marinara-engine/shared";
+import type { CustomKind, CustomTagPatch } from "../lib/custom-emoji";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -32,7 +33,7 @@ export const characterKeys = {
   detail: (id: string) => [...characterKeys.all, "detail", id] as const,
   versions: (id: string) => [...characterKeys.detail(id), "versions"] as const,
   gallery: (id: string) => [...characterKeys.all, "gallery", id] as const,
-  personaGallery: (id: string) => ["personas", "gallery", id] as const,
+  personaGallery: (id: string) => ["persona-gallery", id] as const,
   personas: ["personas"] as const,
   personaVersions: (id: string) => [...characterKeys.personas, "detail", id, "versions"] as const,
   groups: ["character-groups"] as const,
@@ -234,6 +235,8 @@ export interface CharacterGalleryImage {
   model: string;
   width: number | null;
   height: number | null;
+  customKind: CustomKind | null;
+  customName: string | null;
   createdAt: string;
   url: string;
 }
@@ -379,6 +382,17 @@ export function useDeleteCharacterGalleryImage(characterId: string) {
   });
 }
 
+export function useTagCharacterGalleryImage(characterId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ imageId, patch }: { imageId: string; patch: CustomTagPatch }) =>
+      api.patch<CharacterGalleryImage>(`/characters/${characterId}/gallery/${imageId}/tag`, patch),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: characterKeys.gallery(characterId) });
+    },
+  });
+}
+
 // ── Persona Gallery ──
 
 export interface PersonaGalleryImage {
@@ -390,6 +404,8 @@ export interface PersonaGalleryImage {
   model: string;
   width: number | null;
   height: number | null;
+  customKind: CustomKind | null;
+  customName: string | null;
   createdAt: string;
   url: string;
 }
@@ -440,6 +456,17 @@ export function useDeletePersonaGalleryImage(personaId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (imageId: string) => api.delete(`/characters/personas/${personaId}/gallery/${imageId}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: characterKeys.personaGallery(personaId) });
+    },
+  });
+}
+
+export function useTagPersonaGalleryImage(personaId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ imageId, patch }: { imageId: string; patch: CustomTagPatch }) =>
+      api.patch<PersonaGalleryImage>(`/characters/personas/${personaId}/gallery/${imageId}/tag`, patch),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: characterKeys.personaGallery(personaId) });
     },

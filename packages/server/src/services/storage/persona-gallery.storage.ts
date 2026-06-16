@@ -50,5 +50,21 @@ export function createPersonaGalleryStorage(db: DB) {
     async remove(id: string) {
       await db.delete(personaImages).where(eq(personaImages.id, id));
     },
+
+    async setTag(
+      id: string,
+      patch: { customKind: "emoji" | "sticker" | null; customName: string | null; width?: number; height?: number },
+    ) {
+      await db
+        .update(personaImages)
+        .set({
+          customKind: patch.customKind,
+          customName: patch.customName,
+          ...(patch.width !== undefined ? { width: patch.width } : {}),
+          ...(patch.height !== undefined ? { height: patch.height } : {}),
+        })
+        .where(eq(personaImages.id, id));
+      return this.getById(id);
+    },
   };
 }

@@ -13,6 +13,11 @@ import { logger } from "../lib/logger.js";
 
 const GLOBAL_GALLERY_ROOT = join(DATA_DIR, "gallery", "global");
 const ALLOWED_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"]);
+const CUSTOM_NAME_RE = /^[a-z0-9_]{1,32}$/;
+const CUSTOM_KIND_MAX_DIMENSION = {
+  emoji: 256,
+  sticker: 512,
+} as const;
 
 function ensureDir() {
   if (!existsSync(GLOBAL_GALLERY_ROOT)) {
@@ -23,6 +28,10 @@ function ensureDir() {
 
 function buildUrl(filename: string) {
   return `/api/global-gallery/file/${encodeURIComponent(filename)}`;
+}
+
+function isValidCustomDimension(value: unknown, max: number): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= max;
 }
 
 export async function globalGalleryRoutes(app: FastifyInstance) {
@@ -162,6 +171,39 @@ export async function globalGalleryRoutes(app: FastifyInstance) {
     }
 
     return storage.moveImage(req.params.id, folderId);
+  });
+
+  // Tag (or untag) an image as a custom emoji/sticker.
+  app.patch<{
+    Params: { id: string };
+    Body: { customKind?: string | null; customName?: string | null; width?: number; height?: number };
+  }>("/:id/tag", async (req, reply) => {
+    const image = await storage.getImageById(req.params.id);
+    if (!image) return reply.status(404).send({ error: "Not found" });
+    const kind = req.body?.customKind ?? null;
+    if (kind !== null && kind !== "emoji" && kind !== "sticker") {
+      return reply.status(400).send({ error: "Invalid customKind" });
+    }
+    const name = typeof req.body?.customName === "string" ? req.body.customName.trim() : "";
+    if (kind !== null && !CUSTOM_NAME_RE.test(name)) {
+      return reply.status(400).send({ error: "customName must use 1-32 lowercase letters, numbers, or underscores" });
+    }
+    if (kind !== null) {
+      const max = CUSTOM_KIND_MAX_DIMENSION[kind];
+      const { width, height } = req.body ?? {};
+      if (width !== undefined && !isValidCustomDimension(width, max)) {
+        return reply.status(400).send({ error: `width must be an integer from 1 to ${max}` });
+      }
+      if (height !== undefined && !isValidCustomDimension(height, max)) {
+        return reply.status(400).send({ error: `height must be an integer from 1 to ${max}` });
+      }
+    }
+    return storage.setTag(req.params.id, {
+      customKind: kind,
+      customName: kind === null ? null : name,
+      width: kind !== null && typeof req.body?.width === "number" ? req.body.width : undefined,
+      height: kind !== null && typeof req.body?.height === "number" ? req.body.height : undefined,
+    });
   });
 
   app.delete<{ Params: { id: string } }>("/:id", async (req, reply) => {

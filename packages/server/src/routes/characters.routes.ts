@@ -37,6 +37,11 @@ const CHARACTER_GALLERY_ROOT = join(DATA_DIR, "gallery", "characters");
 const PERSONA_GALLERY_ROOT = join(DATA_DIR, "gallery", "personas");
 const ALLOWED_GALLERY_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"]);
 const CHARACTER_CARD_PNG_KEYWORDS = new Set(["chara", "ccv3"]);
+const CUSTOM_NAME_RE = /^[a-z0-9_]{1,32}$/;
+const CUSTOM_KIND_MAX_DIMENSION = {
+  emoji: 256,
+  sticker: 512,
+} as const;
 
 async function ensureCharacterGalleryDir(characterId: string) {
   const dir = join(CHARACTER_GALLERY_ROOT, characterId);
@@ -55,6 +60,24 @@ async function ensurePersonaGalleryDir(personaId: string) {
 
 function isUnsafePathSegment(value: string) {
   return value === "." || value === ".." || value.includes("..") || value.includes("/") || value.includes("\\");
+}
+
+function isValidCustomDimension(value: unknown, max: number): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= max;
+}
+
+function validateCustomTagPayload(
+  kind: "emoji" | "sticker" | null,
+  name: string,
+  width: unknown,
+  height: unknown,
+) {
+  if (kind === null) return null;
+  if (!CUSTOM_NAME_RE.test(name)) return "customName must use 1-32 lowercase letters, numbers, or underscores";
+  const max = CUSTOM_KIND_MAX_DIMENSION[kind];
+  if (width !== undefined && !isValidCustomDimension(width, max)) return `width must be an integer from 1 to ${max}`;
+  if (height !== undefined && !isValidCustomDimension(height, max)) return `height must be an integer from 1 to ${max}`;
+  return null;
 }
 
 function toSafeExportName(name: string, fallback: string) {
@@ -560,6 +583,31 @@ export async function charactersRoutes(app: FastifyInstance) {
     return { success: true };
   });
 
+  app.patch<{
+    Params: { id: string; imageId: string };
+    Body: { customKind?: string | null; customName?: string | null; width?: number; height?: number };
+  }>("/:id/gallery/:imageId/tag", async (req, reply) => {
+    const { id, imageId } = req.params;
+    const image = await characterGallery.getById(imageId);
+    if (!image || image.characterId !== id) {
+      return reply.status(404).send({ error: "Not found" });
+    }
+    const kind = req.body?.customKind ?? null;
+    if (kind !== null && kind !== "emoji" && kind !== "sticker") {
+      return reply.status(400).send({ error: "Invalid customKind" });
+    }
+    const name = typeof req.body?.customName === "string" ? req.body.customName.trim() : "";
+    const error = validateCustomTagPayload(kind, name, req.body?.width, req.body?.height);
+    if (error) return reply.status(400).send({ error });
+
+    return characterGallery.setTag(imageId, {
+      customKind: kind,
+      customName: kind === null ? null : name,
+      width: kind !== null && typeof req.body?.width === "number" ? req.body.width : undefined,
+      height: kind !== null && typeof req.body?.height === "number" ? req.body.height : undefined,
+    });
+  });
+
   // ── Duplicate ──
   app.post<{ Params: { id: string } }>("/:id/duplicate", async (req, reply) => {
     const result = await storage.duplicateCharacter(req.params.id);
@@ -988,6 +1036,31 @@ export async function charactersRoutes(app: FastifyInstance) {
 
     await personaGallery.remove(imageId);
     return { success: true };
+  });
+
+  app.patch<{
+    Params: { id: string; imageId: string };
+    Body: { customKind?: string | null; customName?: string | null; width?: number; height?: number };
+  }>("/personas/:id/gallery/:imageId/tag", async (req, reply) => {
+    const { id, imageId } = req.params;
+    const image = await personaGallery.getById(imageId);
+    if (!image || image.personaId !== id) {
+      return reply.status(404).send({ error: "Not found" });
+    }
+    const kind = req.body?.customKind ?? null;
+    if (kind !== null && kind !== "emoji" && kind !== "sticker") {
+      return reply.status(400).send({ error: "Invalid customKind" });
+    }
+    const name = typeof req.body?.customName === "string" ? req.body.customName.trim() : "";
+    const error = validateCustomTagPayload(kind, name, req.body?.width, req.body?.height);
+    if (error) return reply.status(400).send({ error });
+
+    return personaGallery.setTag(imageId, {
+      customKind: kind,
+      customName: kind === null ? null : name,
+      width: kind !== null && typeof req.body?.width === "number" ? req.body.width : undefined,
+      height: kind !== null && typeof req.body?.height === "number" ? req.body.height : undefined,
+    });
   });
 
   // ── Persona Duplicate ──
