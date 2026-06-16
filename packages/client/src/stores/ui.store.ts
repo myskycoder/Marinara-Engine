@@ -84,9 +84,13 @@ export const TRACKER_PANEL_WIDTH_MAX = TRACKER_PANEL_SIZE_PROFILE_WIDTHS.expande
 export const TRACKER_PANEL_DEFAULT_BACKGROUND_COLOR = "#09090b";
 export const DEFAULT_APP_ACCENT_DARK = "#d4d4d4";
 export const DEFAULT_APP_ACCENT_LIGHT = "#1a1025";
+export const DEFAULT_CHAT_CHROME_TEXT_DARK = "#d4d4d4";
+export const DEFAULT_CHAT_CHROME_TEXT_LIGHT = "#1a1025";
 const IMAGE_DIMENSION_MIN = 64;
 const IMAGE_DIMENSION_MAX = 4096;
 const GAME_SETUP_LEARNED_LIMIT = 60;
+const USER_ACTIVITY_MAX_LENGTH = 120;
+const RECENT_USER_ACTIVITY_LIMIT = 8;
 export const TRACKER_DATA_PANEL_SECTIONS: TrackerDataPanelSection[] = [
   "world",
   "persona",
@@ -120,11 +124,23 @@ const DEFAULT_SUMMARY_POPOVER_SETTINGS: SummaryPopoverSettings = {
   collapseHiddenMessages: false,
 };
 
+function normalizeUserActivity(activity: string): string {
+  return activity.replace(/\s+/g, " ").trim().slice(0, USER_ACTIVITY_MAX_LENGTH);
+}
+
 export function getDefaultAppAccentColor(theme: "dark" | "light") {
   return theme === "light" ? DEFAULT_APP_ACCENT_LIGHT : DEFAULT_APP_ACCENT_DARK;
 }
 
+export function getDefaultChatChromeTextColor(theme: "dark" | "light") {
+  return theme === "light" ? DEFAULT_CHAT_CHROME_TEXT_LIGHT : DEFAULT_CHAT_CHROME_TEXT_DARK;
+}
+
 function normalizeAppAccentColor(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeChatChromeTextColor(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
@@ -423,6 +439,8 @@ interface UIState {
   narrationOpacity: number;
   /** Color for chat message text (empty = theme default) */
   chatFontColor: string;
+  /** Color for shared chat chrome text/icons in tracker widgets, toolbar buttons, and popovers (empty = scheme default) */
+  chatChromeTextColor: string;
   /** Opacity for roleplay message backgrounds (0–100) */
   chatFontOpacity: number;
   /** Layout style for roleplay message avatars */
@@ -509,6 +527,8 @@ interface UIState {
   userStatus: UserStatus;
   /** Optional short activity shown with the user's status in Conversation mode. */
   userActivity: string;
+  /** Recent user activity strings shown under the chat sidebar status editor. */
+  recentUserActivities: string[];
 
   // ── Impersonate Settings ──
   /** Custom prompt template for /impersonate (empty = use server default). Persisted. */
@@ -642,6 +662,7 @@ interface UIState {
   setNarrationFontColor: (v: string) => void;
   setNarrationOpacity: (v: number) => void;
   setChatFontColor: (v: string) => void;
+  setChatChromeTextColor: (v: string) => void;
   setChatFontOpacity: (v: number) => void;
   setRoleplayAvatarStyle: (v: RoleplayAvatarStyle) => void;
   setRoleplayAvatarScale: (v: number) => void;
@@ -697,6 +718,7 @@ interface UIState {
   setUserStatus: (status: UserStatus) => void;
   setUserStatusManual: (status: UserStatus) => void;
   setUserActivity: (activity: string) => void;
+  rememberUserActivity: (activity: string) => void;
 }
 
 function getMobileDetailReturnState(state: UIState) {
@@ -793,6 +815,7 @@ export function pickSyncedSettings(state: UIState) {
     narrationFontColor: state.narrationFontColor,
     narrationOpacity: state.narrationOpacity,
     chatFontColor: state.chatFontColor,
+    chatChromeTextColor: state.chatChromeTextColor,
     chatFontOpacity: state.chatFontOpacity,
     roleplayAvatarStyle: state.roleplayAvatarStyle,
     roleplayAvatarScale: state.roleplayAvatarScale,
@@ -814,6 +837,7 @@ export function pickSyncedSettings(state: UIState) {
     echoChamberSide: state.echoChamberSide,
     userStatusManual: state.userStatusManual,
     userActivity: state.userActivity,
+    recentUserActivities: state.recentUserActivities,
     convoNotificationSound: state.convoNotificationSound,
     rpNotificationSound: state.rpNotificationSound,
     gameNotificationSound: state.gameNotificationSound,
@@ -931,6 +955,7 @@ export const useUIStore = create<UIState>()(
       narrationFontColor: "",
       narrationOpacity: 80,
       chatFontColor: "",
+      chatChromeTextColor: "",
       chatFontOpacity: 90,
       roleplayAvatarStyle: "circles" as RoleplayAvatarStyle,
       roleplayAvatarScale: 1,
@@ -970,6 +995,7 @@ export const useUIStore = create<UIState>()(
       userStatusManual: "active" as const,
       userStatus: "active" as UserStatus,
       userActivity: "",
+      recentUserActivities: [],
       centerCompact: false,
       chatModeShortcutRequest: null,
 
@@ -1423,6 +1449,7 @@ export const useUIStore = create<UIState>()(
       setNarrationFontColor: (v) => set({ narrationFontColor: v }),
       setNarrationOpacity: (v) => set({ narrationOpacity: Math.max(0, Math.min(100, v)) }),
       setChatFontColor: (v) => set({ chatFontColor: v }),
+      setChatChromeTextColor: (v) => set({ chatChromeTextColor: normalizeChatChromeTextColor(v) }),
       setChatFontOpacity: (v) => set({ chatFontOpacity: Math.max(0, Math.min(100, v)) }),
       setRoleplayAvatarStyle: (v) => set({ roleplayAvatarStyle: v }),
       setRoleplayAvatarScale: (v) =>
@@ -1518,11 +1545,22 @@ export const useUIStore = create<UIState>()(
       setEchoChamberSide: (side) => set({ echoChamberSide: side }),
       setUserStatus: (status) => set({ userStatus: status }),
       setUserStatusManual: (status) => set({ userStatusManual: status, userStatus: status }),
-      setUserActivity: (activity) => set({ userActivity: activity.slice(0, 120) }),
+      setUserActivity: (activity) => set({ userActivity: activity.slice(0, USER_ACTIVITY_MAX_LENGTH) }),
+      rememberUserActivity: (activity) =>
+        set((state) => {
+          const normalized = normalizeUserActivity(activity);
+          if (!normalized) return { recentUserActivities: state.recentUserActivities };
+          return {
+            recentUserActivities: [
+              normalized,
+              ...state.recentUserActivities.filter((item) => item.toLowerCase() !== normalized.toLowerCase()),
+            ].slice(0, RECENT_USER_ACTIVITY_LIMIT),
+          };
+        }),
     }),
     {
       name: "marinara-engine-ui",
-      version: 47,
+      version: 49,
       // Debounce localStorage writes to avoid sync I/O on every state change
       storage: createJSONStorage(() => {
         let timer: ReturnType<typeof setTimeout> | null = null;
@@ -1899,7 +1937,23 @@ export const useUIStore = create<UIState>()(
         if (version <= 46 && typeof persisted.youtubePlayerVolume !== "number") {
           persisted.youtubePlayerVolume = 70;
         }
+        if (version <= 47 && persisted.chatChromeTextColor === undefined) {
+          persisted.chatChromeTextColor = "";
+        }
+        if (version <= 48 && !Array.isArray(persisted.recentUserActivities)) {
+          persisted.recentUserActivities = [];
+        }
+        if (Array.isArray(persisted.recentUserActivities)) {
+          persisted.recentUserActivities = persisted.recentUserActivities
+            .filter((activity: unknown): activity is string => typeof activity === "string")
+            .map((activity: string) => normalizeUserActivity(activity))
+            .filter(Boolean)
+            .slice(0, RECENT_USER_ACTIVITY_LIMIT);
+        } else {
+          persisted.recentUserActivities = [];
+        }
         persisted.appAccentColor = normalizeAppAccentColor(persisted.appAccentColor);
+        persisted.chatChromeTextColor = normalizeChatChromeTextColor(persisted.chatChromeTextColor);
         delete persisted.trackerPanelWidth;
         return persisted;
       },
@@ -1979,6 +2033,7 @@ export const useUIStore = create<UIState>()(
         narrationFontColor: state.narrationFontColor,
         narrationOpacity: state.narrationOpacity,
         chatFontColor: state.chatFontColor,
+        chatChromeTextColor: state.chatChromeTextColor,
         chatFontOpacity: state.chatFontOpacity,
         roleplayAvatarStyle: state.roleplayAvatarStyle,
         roleplayAvatarScale: state.roleplayAvatarScale,
@@ -2006,6 +2061,7 @@ export const useUIStore = create<UIState>()(
         userStatusManual: state.userStatusManual,
         userStatus: state.userStatus,
         userActivity: state.userActivity,
+        recentUserActivities: state.recentUserActivities,
         convoNotificationSound: state.convoNotificationSound,
         rpNotificationSound: state.rpNotificationSound,
         gameNotificationSound: state.gameNotificationSound,

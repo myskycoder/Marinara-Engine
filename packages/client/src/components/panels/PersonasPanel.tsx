@@ -44,6 +44,9 @@ type PersonaRow = {
   id: string;
   name: string;
   comment?: string;
+  creator?: string;
+  personaVersion?: string;
+  creatorNotes?: string;
   description: string;
   personality: string;
   scenario: string;
@@ -73,6 +76,17 @@ function getNextUnnamedFolderName(folders: Array<{ name: string }>) {
 function estimateTokens(p: PersonaRow): number {
   const text = [p.description, p.personality, p.scenario, p.backstory, p.appearance].join("");
   return Math.ceil(text.length / 4);
+}
+
+function getPersonaPreviewMetadata(p: PersonaRow): string | null {
+  const parts: string[] = [];
+  const creator = p.creator?.trim() ?? "";
+  const version = p.personaVersion?.trim() ?? "";
+
+  if (creator) parts.push(`by ${creator}`);
+  if (version) parts.push(`v${version}`);
+
+  return parts.length > 0 ? parts.join(", ") : null;
 }
 
 export function PersonasPanel() {
@@ -229,15 +243,6 @@ export function PersonasPanel() {
     [editGroupName, updatePGroup],
   );
 
-  const toggleGroupMember = useCallback(
-    (groupId: string, personaId: string, currentMembers: string[]) => {
-      const isMember = currentMembers.includes(personaId);
-      const newMembers = isMember ? currentMembers.filter((id) => id !== personaId) : [...currentMembers, personaId];
-      updatePGroup.mutate({ id: groupId, personaIds: newMembers });
-    },
-    [updatePGroup],
-  );
-
   const getDraggedPersonaIds = useCallback(
     (personaId: string) =>
       selectionMode && selectedPersonaIds.has(personaId) ? Array.from(selectedPersonaIds) : [personaId],
@@ -273,8 +278,9 @@ export function PersonasPanel() {
 
   const handlePersonaDrop = useCallback(
     (folderId: string | null, personaIds?: string[]) => {
-      if (!draggedPersonaId) return;
-      void movePersonasToFolder(personaIds ?? [draggedPersonaId], folderId);
+      const ids = personaIds ?? (draggedPersonaId ? [draggedPersonaId] : []);
+      if (ids.length === 0) return;
+      void movePersonasToFolder(ids, folderId);
       setDraggedPersonaId(null);
     },
     [draggedPersonaId, movePersonasToFolder],
@@ -731,6 +737,7 @@ export function PersonasPanel() {
                         const p = personaMap.get(pid);
                         if (!p) return null;
                         const isBulkSelected = selectedPersonaIds.has(pid);
+                        const personaMetadata = getPersonaPreviewMetadata(p);
                         return (
                           <div
                             key={pid}
@@ -801,12 +808,27 @@ export function PersonasPanel() {
                                 <User size="0.625rem" />
                               )}
                             </div>
-                            <span className="min-w-0 flex-1 truncate">{p.name}</span>
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-[0.75rem] font-medium">{p.name}</div>
+                              {p.comment && (
+                                <div className="truncate text-[0.5625rem] italic text-[var(--muted-foreground)]">
+                                  {p.comment}
+                                </div>
+                              )}
+                              {personaMetadata && (
+                                <div className="truncate text-[0.5625rem] text-[var(--muted-foreground)]">
+                                  {personaMetadata}
+                                </div>
+                              )}
+                              <div className="truncate text-[0.625rem] text-[var(--muted-foreground)]">
+                                {p.description || "No description"}
+                              </div>
+                            </div>
                             {!selectionMode && (
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  toggleGroupMember(group.id, pid, group.memberIds);
+                                  void movePersonasToFolder([pid], null);
                                 }}
                                 className="rounded p-0.5 text-[var(--muted-foreground)] opacity-0 transition-all hover:bg-[var(--destructive)]/10 hover:text-[var(--destructive)] group-hover/member:opacity-100 max-md:opacity-100"
                                 title="Remove from folder"
@@ -861,9 +883,15 @@ export function PersonasPanel() {
           draggedPersonaId && "ring-1 ring-emerald-400/20",
         )}
       >
+        {draggedPersonaId && (
+          <div className="rounded-xl border border-dashed border-emerald-400/35 bg-emerald-400/5 px-3 py-2 text-[0.625rem] text-emerald-300">
+            Drop here to move out of folder
+          </div>
+        )}
         {visibleRootPersonas.map((persona) => {
           const active = isActive(persona);
           const isBulkSelected = selectedPersonaIds.has(persona.id);
+          const personaMetadata = getPersonaPreviewMetadata(persona);
 
           return (
             <div
@@ -955,6 +983,9 @@ export function PersonasPanel() {
                   <div className="truncate text-[0.625rem] italic text-[var(--muted-foreground)]">
                     {persona.comment}
                   </div>
+                )}
+                {personaMetadata && (
+                  <div className="truncate text-[0.625rem] text-[var(--muted-foreground)]">{personaMetadata}</div>
                 )}
                 <div className="truncate text-[0.6875rem] text-[var(--muted-foreground)]">
                   {persona.description || "No description"}
