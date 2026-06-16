@@ -21,7 +21,7 @@ export function FieldGroup({
   children: React.ReactNode;
 }) {
   return (
-    <div>
+    <div className="min-w-0">
       <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium">
         <Icon size="0.8125rem" className="text-amber-400" />
         {label}

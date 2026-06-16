@@ -452,7 +452,7 @@ Type definitions for all entities in `packages/shared/src/types/`:
 | `combat-encounter.ts` | `CombatPartyMember`, `CombatEnemy`, `CombatActionResult`, `EncounterSettings`                               |
 | `game-state.ts`       | `GameState`, `PresentCharacter`, `PlayerStats`, `QuestProgress`, `InventoryItem`                            |
 | `lorebook.ts`         | `Lorebook`, `LorebookEntry`, `ActivationCondition`, `LorebookSchedule`, `QuestData`                         |
-| `persona.ts`          | `Persona`, `PersonaStatsConfig`, `AltDescription`                                                           |
+| `persona.ts`          | `Persona`, `PersonaStatsConfig`                                                                             |
 | `prompt.ts`           | `PromptPreset`, `PromptSection`, `PromptGroup`, `ChoiceBlock`, `GenerationParameters`                       |
 | `scene.ts`            | `SceneMeta`, `SceneFullPlan`                                                                                |
 | `vn.ts`               | `VNScene`, `VNSprite`, `VNTransition`, `VNChoice`                                                           |

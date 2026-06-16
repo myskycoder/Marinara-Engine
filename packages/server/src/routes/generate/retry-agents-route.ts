@@ -42,7 +42,6 @@ import { loadImageGenerationUserSettings } from "../../services/image/image-gene
 import { compileImagePrompt } from "../../services/image/image-prompt-compiler.js";
 import { createGameStateStorage } from "../../services/storage/game-state.storage.js";
 import { createLorebooksStorage } from "../../services/storage/lorebooks.storage.js";
-import { getCharacterDescriptionWithExtensions } from "../../services/prompt/index.js";
 import { syncGameMapMetaPartyPosition } from "../../services/game/map-position.service.js";
 import { gameStateSnapshots as gameStateSnapshotsTable } from "../../db/schema/index.js";
 import {
@@ -270,20 +269,6 @@ async function resolvePersonaContext(
     appearance: cardPromptText(persona.appearance),
   };
 
-  if (persona.altDescriptions) {
-    try {
-      const altDescs = parseJsonIfString<Array<{ active: boolean; content: string }>>(persona.altDescriptions);
-      for (const ext of altDescs) {
-        if (ext.active && ext.content) {
-          const content = cardPromptText(ext.content);
-          if (content) personaDescription += "\n" + content;
-        }
-      }
-    } catch {
-      // Ignore malformed JSON in legacy rows.
-    }
-  }
-
   if (persona.personaStats) {
     try {
       const parsed = parseJsonIfString<any>(persona.personaStats);
@@ -356,7 +341,7 @@ async function buildRetryAgentContext(args: {
     charInfo.push({
       id: cid,
       name: (charData.name as string | undefined) ?? "Unknown",
-      description: cardPromptText(getCharacterDescriptionWithExtensions(charData as any)),
+      description: cardPromptText(charData.description),
       personality: cardPromptText(charData.personality) || undefined,
       scenario: cardPromptText(charData.scenario) || undefined,
       creatorNotes: cardPromptText(charData.creator_notes) || undefined,

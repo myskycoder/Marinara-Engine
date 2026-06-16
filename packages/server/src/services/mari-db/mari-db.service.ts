@@ -240,6 +240,7 @@ const CASCADES: Array<{ parent: string; child: string; parentKey: string; childK
   { parent: "messages", child: "message_swipes", parentKey: "id", childKey: "messageId" },
   { parent: "characters", child: "character_card_versions", parentKey: "id", childKey: "characterId" },
   { parent: "characters", child: "character_images", parentKey: "id", childKey: "characterId" },
+  { parent: "personas", child: "persona_card_versions", parentKey: "id", childKey: "personaId" },
   { parent: "lorebooks", child: "lorebook_character_links", parentKey: "id", childKey: "lorebookId" },
   { parent: "lorebooks", child: "lorebook_persona_links", parentKey: "id", childKey: "lorebookId" },
   { parent: "lorebooks", child: "lorebook_folders", parentKey: "id", childKey: "lorebookId" },
@@ -254,7 +255,8 @@ const CASCADES: Array<{ parent: string; child: string; parentKey: string; childK
 const JSON_COLUMNS: Record<string, readonly string[]> = {
   characters: ["data"],
   character_card_versions: ["data"],
-  personas: ["avatarCrop", "trackerCardColors", "personaStats", "altDescriptions", "tags", "savedStatusOptions"],
+  persona_card_versions: ["data"],
+  personas: ["avatarCrop", "trackerCardColors", "personaStats", "tags", "savedStatusOptions"],
   character_groups: ["characterIds"],
   persona_groups: ["personaIds"],
   chats: ["characterIds", "metadata"],

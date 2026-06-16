@@ -21,7 +21,6 @@ import { createCharactersStorage } from "../storage/characters.storage.js";
 import { createAgentsStorage } from "../storage/agents.storage.js";
 import { processLorebooks, type LorebookFinalContentResolver, type LorebookScanResult } from "../lorebook/index.js";
 import { wrapContent } from "./format-engine.js";
-import { getCharacterDescriptionWithExtensions } from "./character-description-extensions.js";
 import { agentRuns } from "../../db/schema/index.js";
 import { gameStateSnapshots } from "../../db/schema/index.js";
 import { eq, and, desc } from "drizzle-orm";
@@ -192,7 +191,7 @@ async function expandCharacter(config: MarkerConfig, ctx: MarkerContext): Promis
 function characterMacroProfileFromData(data: CharacterData): CharacterMacroProfile {
   return {
     name: data.name ?? "Character",
-    description: getCharacterDescriptionWithExtensions(data),
+    description: data.description ?? "",
     personality: data.personality ?? "",
     backstory: data.extensions?.backstory ?? "",
     appearance: data.extensions?.appearance ?? "",
@@ -208,7 +207,7 @@ function getCharacterField(data: CharacterData, field: string): string {
     case "name":
       return data.name;
     case "description":
-      return getCharacterDescriptionWithExtensions(data);
+      return data.description;
     case "personality":
       return data.personality;
     case "scenario":

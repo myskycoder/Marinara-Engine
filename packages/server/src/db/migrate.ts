@@ -64,6 +64,9 @@ const CREATE_TABLES: string[] = [
     id TEXT PRIMARY KEY NOT NULL,
     name TEXT NOT NULL,
     comment TEXT NOT NULL DEFAULT '',
+    creator TEXT NOT NULL DEFAULT '',
+    persona_version TEXT NOT NULL DEFAULT '1.0',
+    creator_notes TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
     personality TEXT NOT NULL DEFAULT '',
     scenario TEXT NOT NULL DEFAULT '',
@@ -77,11 +80,21 @@ const CREATE_TABLES: string[] = [
     box_color TEXT NOT NULL DEFAULT '',
     tracker_card_colors TEXT NOT NULL DEFAULT '{"mode":"chat"}',
     persona_stats TEXT NOT NULL DEFAULT '',
-    alt_descriptions TEXT NOT NULL DEFAULT '[]',
     tags TEXT NOT NULL DEFAULT '[]',
     saved_status_options TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS persona_card_versions (
+    id TEXT PRIMARY KEY NOT NULL,
+    persona_id TEXT NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+    data TEXT NOT NULL,
+    comment TEXT NOT NULL DEFAULT '',
+    avatar_path TEXT,
+    version TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'manual',
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS character_groups (
     id TEXT PRIMARY KEY NOT NULL,
@@ -559,11 +572,6 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
     definition: "TEXT NOT NULL DEFAULT 'false'",
   },
   {
-    table: "personas",
-    column: "alt_descriptions",
-    definition: "TEXT NOT NULL DEFAULT '[]'",
-  },
-  {
     table: "lorebook_entries",
     column: "embedding",
     definition: "TEXT",
@@ -586,6 +594,21 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
   {
     table: "personas",
     column: "comment",
+    definition: "TEXT NOT NULL DEFAULT ''",
+  },
+  {
+    table: "personas",
+    column: "creator",
+    definition: "TEXT NOT NULL DEFAULT ''",
+  },
+  {
+    table: "personas",
+    column: "persona_version",
+    definition: "TEXT NOT NULL DEFAULT '1.0'",
+  },
+  {
+    table: "personas",
+    column: "creator_notes",
     definition: "TEXT NOT NULL DEFAULT ''",
   },
   {
@@ -902,6 +925,9 @@ export async function runMigrations(db: DB) {
     sql.raw(
       `CREATE INDEX IF NOT EXISTS idx_character_card_versions ON character_card_versions(character_id, created_at DESC)`,
     ),
+  );
+  await db.run(
+    sql.raw(`CREATE INDEX IF NOT EXISTS idx_persona_card_versions ON persona_card_versions(persona_id, created_at DESC)`),
   );
   await db.run(sql.raw(`CREATE INDEX IF NOT EXISTS idx_custom_themes_active ON custom_themes(is_active)`));
   await db.run(sql.raw(`CREATE INDEX IF NOT EXISTS idx_chat_presets_mode_active ON chat_presets(mode, is_active)`));

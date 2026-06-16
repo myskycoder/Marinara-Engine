@@ -34,6 +34,9 @@ import {
   Trash2,
   Link,
   Check,
+  Download,
+  Upload,
+  Search,
   Shuffle,
   ExternalLink,
   X,
@@ -51,6 +54,12 @@ import {
   ImageIcon,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { downloadJsonFile, sanitizeExportFilenamePart } from "../../lib/download-json";
+import {
+  CONNECTION_EXPORT_WARNING,
+  createConnectionExportEnvelope,
+  type ConnectionTransferRow,
+} from "../../lib/connection-transfer";
 import { toast } from "sonner";
 import { TTSConfigCard } from "./settings/TTSConfigCard";
 
@@ -370,12 +379,48 @@ type ConnectionRowData = {
   id: string;
   name: string;
   provider: string;
+  baseUrl?: string;
   model: string;
   imagePath?: string | null;
   useForRandom?: string;
+  isDefault?: boolean | string;
   defaultForAgents?: boolean | string;
+  enableCaching?: boolean | string;
+  cachingAtDepth?: number;
+  embeddingModel?: string | null;
+  embeddingBaseUrl?: string | null;
+  embeddingConnectionId?: string | null;
+  openrouterProvider?: string | null;
+  imageGenerationSource?: string | null;
+  comfyuiWorkflow?: string | null;
+  imageService?: string | null;
+  imageEndpointId?: string | null;
+  defaultParameters?: string | null;
+  promptPresetId?: string | null;
+  maxContext?: number;
+  maxTokensOverride?: number | null;
+  maxParallelJobs?: number;
+  claudeFastMode?: boolean | string;
   folderId?: string | null;
 };
+
+function connectionMatchesSearch(conn: ConnectionRowData, query: string) {
+  if (!query) return true;
+  const haystack = [
+    conn.name,
+    conn.provider,
+    conn.model,
+    conn.baseUrl,
+    conn.imageService,
+    conn.imageGenerationSource,
+    conn.openrouterProvider,
+    conn.embeddingModel,
+  ]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(query);
+}
 
 function DefaultAgentConnectionCard({ connectionsList }: { connectionsList: ConnectionRowData[] }) {
   const openConnectionDetail = useUIStore((s) => s.openConnectionDetail);
@@ -461,6 +506,7 @@ function ConnectionRow({
   onDragStart,
   onDragEnd,
   onImagePick,
+  onExport,
 }: {
   conn: ConnectionRowData;
   isSelected: boolean;
@@ -471,6 +517,7 @@ function ConnectionRow({
   onDragStart: (event: React.DragEvent<HTMLDivElement>) => void;
   onDragEnd: () => void;
   onImagePick: () => void;
+  onExport: () => void;
 }) {
   const duplicateConnection = useDuplicateConnection();
   const deleteConnection = useDeleteConnection();
@@ -567,6 +614,16 @@ function ConnectionRow({
           title="Duplicate"
         >
           <Copy size="0.75rem" />
+        </button>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onExport();
+          }}
+          className="rounded-lg p-1.5 text-[var(--muted-foreground)] transition-all hover:bg-sky-400/10 hover:text-sky-400 active:scale-90"
+          title="Export"
+        >
+          <Upload size="0.75rem" />
         </button>
         <button
           onClick={async (e) => {
@@ -756,10 +813,16 @@ export function ConnectionsPanel() {
   const [draggedConnectionId, setDraggedConnectionId] = useState<string | null>(null);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedConnectionIds, setSelectedConnectionIds] = useState<Set<string>>(new Set());
+  const [search, setSearch] = useState("");
+  const [exportingSelected, setExportingSelected] = useState(false);
   const connectionImageInputRef = useRef<HTMLInputElement>(null);
   const imageTargetConnectionIdRef = useRef<string | null>(null);
 
   const connectionsList = useMemo(() => (connections as ConnectionRowData[] | undefined) ?? [], [connections]);
+  const filteredConnections = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return connectionsList.filter((connection) => connectionMatchesSearch(connection, query));
+  }, [connectionsList, search]);
 
   // Sorted folder list + local order for optimistic drag-to-reorder
   const sortedFolders = useMemo(() => {
@@ -776,7 +839,7 @@ export function ConnectionsPanel() {
   const { unfiledConnections, folderConnectionsMap } = useMemo(() => {
     const unfiled: ConnectionRowData[] = [];
     const map = new Map<string, ConnectionRowData[]>();
-    for (const c of connectionsList) {
+    for (const c of filteredConnections) {
       const fid = c.folderId ?? null;
       if (fid && sortedFolders.some((f) => f.id === fid)) {
         const arr = map.get(fid) ?? [];
@@ -787,7 +850,7 @@ export function ConnectionsPanel() {
       }
     }
     return { unfiledConnections: unfiled, folderConnectionsMap: map };
-  }, [connectionsList, sortedFolders]);
+  }, [filteredConnections, sortedFolders]);
 
   const handleCreateFolder = () => {
     createFolderMut.mutate({ name: getNextUnnamedFolderName(sortedFolders) });
@@ -893,6 +956,36 @@ export function ConnectionsPanel() {
     [uploadConnectionImage],
   );
 
+  const exportConnections = useCallback(async (connectionsToExport: ConnectionRowData[]) => {
+    if (connectionsToExport.length === 0) return;
+
+    const confirmed = await showConfirmDialog({
+      title: "Export Connection Data",
+      message: CONNECTION_EXPORT_WARNING,
+      confirmLabel: "Export",
+      cancelLabel: "Close",
+    });
+    if (!confirmed) return;
+
+    const envelope = createConnectionExportEnvelope(connectionsToExport as ConnectionTransferRow[]);
+    const filename =
+      connectionsToExport.length === 1
+        ? `${sanitizeExportFilenamePart(connectionsToExport[0]?.name, "connection")}.connection.json`
+        : "marinara-connections.json";
+    downloadJsonFile(envelope, filename);
+    toast.success(`Exported ${connectionsToExport.length} connection${connectionsToExport.length === 1 ? "" : "s"}`);
+  }, []);
+
+  const handleExportSelected = useCallback(async () => {
+    if (selectedConnectionIds.size === 0) return;
+    setExportingSelected(true);
+    try {
+      await exportConnections(connectionsList.filter((connection) => selectedConnectionIds.has(connection.id)));
+    } finally {
+      setExportingSelected(false);
+    }
+  }, [connectionsList, exportConnections, selectedConnectionIds]);
+
   const renderConnectionRow = (conn: ConnectionRowData) => {
     const isSelected = activeConnectionId === conn.id;
     const isBulkSelected = selectedConnectionIds.has(conn.id);
@@ -918,6 +1011,7 @@ export function ConnectionsPanel() {
         }}
         onDragEnd={() => setDraggedConnectionId(null)}
         onImagePick={() => handlePickConnectionImage(conn.id)}
+        onExport={() => void exportConnections([conn])}
       />
     );
   };
@@ -932,14 +1026,51 @@ export function ConnectionsPanel() {
         onChange={handleConnectionImageSelected}
       />
 
-      <button
-        onClick={() => openModal("create-connection")}
-        className="flex items-center justify-center rounded-xl bg-gradient-to-r from-sky-400 to-blue-500 px-3 py-2.5 text-xs font-medium text-white shadow-md shadow-sky-400/15 transition-all hover:shadow-lg hover:shadow-sky-400/25 active:scale-[0.98]"
-        title="Add Connection"
-        aria-label="Add Connection"
-      >
-        <Plus size="0.875rem" />
-      </button>
+      {/* Action buttons */}
+      <div className="flex gap-2">
+        <button
+          onClick={() => openModal("create-connection")}
+          className="flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-sky-400 to-blue-500 px-3 py-2.5 text-xs font-medium text-white shadow-md shadow-sky-400/15 transition-all hover:shadow-lg hover:shadow-sky-400/25 active:scale-[0.98]"
+          title="New"
+        >
+          <Plus size="0.8125rem" /> <span className="md:hidden">New</span>
+        </button>
+        <button
+          onClick={() => openModal("import-connection")}
+          className="flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-xs font-medium text-[var(--secondary-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] active:scale-[0.98]"
+          title="Import"
+        >
+          <Download size="0.8125rem" /> <span className="md:hidden">Import</span>
+        </button>
+        <button
+          onClick={() => (selectionMode ? exitSelectionMode() : setSelectionMode(true))}
+          disabled={connectionsList.length === 0}
+          className={cn(
+            "flex flex-1 items-center justify-center gap-1.5 rounded-xl px-3 py-2.5 text-xs font-medium transition-all disabled:opacity-40",
+            selectionMode
+              ? "bg-sky-400/15 text-sky-400 ring-1 ring-sky-400/30"
+              : "bg-[var(--secondary)] text-[var(--secondary-foreground)] ring-1 ring-[var(--border)] hover:bg-[var(--accent)]",
+          )}
+          title="Select"
+        >
+          <Check size="0.8125rem" /> <span className="md:hidden">Select</span>
+        </button>
+      </div>
+
+      {/* Search */}
+      <div className="relative">
+        <Search
+          size="0.8125rem"
+          className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)]"
+        />
+        <input
+          type="text"
+          placeholder="Search connections..."
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          className="w-full rounded-xl bg-[var(--secondary)] py-2 pl-8 pr-3 text-xs text-[var(--foreground)] ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+        />
+      </div>
 
       {/* ── Local Model (Sidecar) ── */}
       {import.meta.env.VITE_MARINARA_LITE !== "true" && <SidecarCard />}
@@ -958,19 +1089,6 @@ export function ConnectionsPanel() {
           <FolderPlus size="0.75rem" />
           New Folder
         </button>
-        <button
-          onClick={() => (selectionMode ? exitSelectionMode() : setSelectionMode(true))}
-          disabled={connectionsList.length === 0}
-          className={cn(
-            "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[0.6875rem] transition-all disabled:opacity-40",
-            selectionMode
-              ? "bg-[var(--primary)]/15 text-[var(--primary)]"
-              : "text-[var(--muted-foreground)] hover:bg-[var(--sidebar-accent)]/40 hover:text-[var(--foreground)]",
-          )}
-        >
-          <Check size="0.75rem" />
-          {selectionMode ? "Done" : "Select"}
-        </button>
       </div>
 
       {selectionMode && (
@@ -979,8 +1097,8 @@ export function ConnectionsPanel() {
             {selectedConnectionIds.size} selected
           </span>
           <button
-            onClick={() => setSelectedConnectionIds(new Set(connectionsList.map((connection) => connection.id)))}
-            disabled={connectionsList.length === 0}
+            onClick={() => setSelectedConnectionIds(new Set(filteredConnections.map((connection) => connection.id)))}
+            disabled={filteredConnections.length === 0}
             className="rounded-lg px-2.5 py-1 text-[0.625rem] font-medium text-sky-400 transition-colors hover:bg-[var(--accent)] disabled:opacity-40"
           >
             Select visible
@@ -991,6 +1109,20 @@ export function ConnectionsPanel() {
             className="rounded-lg px-2.5 py-1 text-[0.625rem] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-40"
           >
             Clear
+          </button>
+          <button
+            onClick={() => void handleExportSelected()}
+            disabled={selectedConnectionIds.size === 0 || exportingSelected}
+            className="inline-flex items-center gap-1 rounded-lg bg-sky-500 px-2.5 py-1 text-[0.625rem] font-medium text-white transition-all hover:opacity-90 disabled:opacity-40"
+          >
+            <Upload size="0.6875rem" />
+            {exportingSelected ? "Exporting..." : "Export JSON"}
+          </button>
+          <button
+            onClick={exitSelectionMode}
+            className="rounded-lg px-2.5 py-1 text-[0.625rem] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+          >
+            Done
           </button>
         </div>
       )}
@@ -1015,6 +1147,15 @@ export function ConnectionsPanel() {
             <Link size="1.25rem" className="text-sky-400" />
           </div>
           <p className="text-xs text-[var(--muted-foreground)]">No connections yet</p>
+        </div>
+      )}
+
+      {!isLoading && connectionsList.length > 0 && filteredConnections.length === 0 && (
+        <div className="flex flex-col items-center gap-2 py-8 text-center">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[var(--secondary)] text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+            <Search size="1.25rem" />
+          </div>
+          <p className="text-xs text-[var(--muted-foreground)]">No connections match your search</p>
         </div>
       )}
 

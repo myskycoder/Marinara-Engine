@@ -322,6 +322,8 @@ interface UIState {
   gameAssetsBrowserOpen: boolean;
   /** When true, the main area shows the full-page character library */
   characterLibraryOpen: boolean;
+  /** Last selected character card inside the full-page character library */
+  characterLibrarySelectedId: string | null;
   /** True when any open detail editor has unsaved changes */
   editorDirty: boolean;
   /** Mobile-only return target for detail editors opened from a right panel */
@@ -556,7 +558,8 @@ interface UIState {
   setAppAccentColor: (color: string) => void;
   setChatBackground: (url: string | null) => void;
   setChatBackgroundBlur: (v: number) => void;
-  openCharacterDetail: (id: string) => void;
+  setCharacterLibrarySelectedId: (id: string | null) => void;
+  openCharacterDetail: (id: string, options?: { preserveCharacterLibrary?: boolean }) => void;
   closeCharacterDetail: () => void;
   openLorebookDetail: (id: string) => void;
   closeLorebookDetail: () => void;
@@ -867,6 +870,7 @@ export const useUIStore = create<UIState>()(
       botBrowserOpen: false,
       gameAssetsBrowserOpen: false,
       characterLibraryOpen: false,
+      characterLibrarySelectedId: null,
       editorDirty: false,
       detailReturnRightPanel: null,
 
@@ -1047,21 +1051,26 @@ export const useUIStore = create<UIState>()(
       setAppAccentColor: (color) => set({ appAccentColor: normalizeAppAccentColor(color) }),
       setChatBackground: (url) => set({ chatBackground: url }),
       setChatBackgroundBlur: (v) => set({ chatBackgroundBlur: Math.max(0, Math.min(24, Math.round(v))) }),
-      openCharacterDetail: (id) =>
-        set((s) => ({
-          characterDetailId: id,
-          lorebookDetailId: null,
-          presetDetailId: null,
-          connectionDetailId: null,
-          agentDetailId: null,
-          toolDetailId: null,
-          personaDetailId: null,
-          regexDetailId: null,
-          characterLibraryOpen: false,
-          botBrowserOpen: false,
-          gameAssetsBrowserOpen: false,
-          ...getMobileDetailReturnState(s),
-        })),
+      setCharacterLibrarySelectedId: (id) => set({ characterLibrarySelectedId: id }),
+      openCharacterDetail: (id, options) =>
+        set((s) => {
+          const preserveCharacterLibrary = options?.preserveCharacterLibrary ?? s.characterLibraryOpen;
+          return {
+            characterDetailId: id,
+            lorebookDetailId: null,
+            presetDetailId: null,
+            connectionDetailId: null,
+            agentDetailId: null,
+            toolDetailId: null,
+            personaDetailId: null,
+            regexDetailId: null,
+            characterLibraryOpen: preserveCharacterLibrary ? s.characterLibraryOpen : false,
+            characterLibrarySelectedId: preserveCharacterLibrary ? id : s.characterLibrarySelectedId,
+            botBrowserOpen: false,
+            gameAssetsBrowserOpen: false,
+            ...getMobileDetailReturnState(s),
+          };
+        }),
       closeCharacterDetail: () =>
         set((s) => ({
           characterDetailId: null,

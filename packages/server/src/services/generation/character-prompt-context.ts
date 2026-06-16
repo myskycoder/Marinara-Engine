@@ -1,5 +1,4 @@
 import { nameToXmlTag, resolveMacros, type CharacterMacroProfile, type MacroContext } from "@marinara-engine/shared";
-import { getCharacterDescriptionWithExtensions } from "../prompt/index.js";
 import { wrapContent } from "../prompt/format-engine.js";
 import { cardPromptText } from "./generation-text-utils.js";
 
@@ -64,7 +63,7 @@ export async function loadCharacterPromptInfo({
       scenario = scenario.replace(/<assistant_capabilities>[\s\S]*?<\/assistant_capabilities>/gi, "").trim();
     }
     scenario = cardPromptText(scenario);
-    const description = cardPromptText(getCharacterDescriptionWithExtensions(charData));
+    const description = cardPromptText(charData.description);
     charInfo.push({
       id: cid,
       name: charData.name ?? "Unknown",

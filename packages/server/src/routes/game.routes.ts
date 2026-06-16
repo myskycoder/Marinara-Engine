@@ -30,7 +30,6 @@ import {
 import { buildPartySystemPrompt } from "../services/game/party-prompts.js";
 import {
   buildPromptMacroContext,
-  getCharacterDescriptionWithExtensions,
   resolveMacrosWithVariableSnapshot,
 } from "../services/prompt/index.js";
 import { listPartySprites, readPreferredFullBodySpriteBase64 } from "../services/game/sprite.service.js";
@@ -3186,7 +3185,7 @@ export async function gameRoutes(app: FastifyInstance) {
         const data = typeof gmChar.data === "string" ? JSON.parse(gmChar.data) : gmChar.data;
         const parts = [`Name: ${data.name}`];
         if (data.personality) parts.push(`Personality: ${data.personality}`);
-        const description = getCharacterDescriptionWithExtensions(data);
+        const description = typeof data.description === "string" ? data.description : "";
         if (description) parts.push(`Description: ${description}`);
         const gmBackstory = data.extensions?.backstory || data.backstory;
         const gmAppearance = data.extensions?.appearance || data.appearance;
@@ -3233,7 +3232,7 @@ export async function gameRoutes(app: FastifyInstance) {
           partyNames.push(data.name.trim());
         }
         if (data.personality) parts.push(`Personality: ${data.personality}`);
-        const description = getCharacterDescriptionWithExtensions(data);
+        const description = typeof data.description === "string" ? data.description : "";
         if (description) parts.push(`Description: ${description}`);
         const pcBackstory = data.extensions?.backstory || data.backstory;
         const pcAppearance = data.extensions?.appearance || data.appearance;
@@ -5829,7 +5828,7 @@ export async function gameRoutes(app: FastifyInstance) {
         const charRow = await chars.getById(charId);
         if (!charRow) continue;
         const charData = typeof charRow.data === "string" ? JSON.parse(charRow.data) : charRow.data;
-        const description = getCharacterDescriptionWithExtensions(charData);
+        const description = typeof charData.description === "string" ? charData.description : "";
         const card = [
           `Name: ${charData.name}`,
           charData.personality ? `Personality: ${charData.personality}` : null,

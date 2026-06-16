@@ -54,6 +54,10 @@ import {
 
 type JsonRecord = Record<string, unknown>;
 const BUILT_IN_AGENT_TYPE_SET = new Set(BUILT_IN_AGENTS.map((agent) => agent.id));
+const AGENT_GRADIENT_SURFACE =
+  "bg-gradient-to-br from-violet-500 via-fuchsia-500 to-pink-500 text-white shadow-purple-500/25";
+const AGENT_GRADIENT_BUTTON =
+  "bg-gradient-to-r from-violet-500 via-fuchsia-500 to-pink-500 text-white shadow-md shadow-purple-500/20 hover:shadow-lg hover:shadow-purple-500/25";
 
 function isJsonRecord(value: unknown): value is JsonRecord {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -605,7 +609,10 @@ export function AgentsPanel() {
       <div className="flex gap-2">
         <button
           onClick={handleCreateAgent}
-          className="flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-[var(--primary)] px-3 py-2.5 text-xs font-medium text-[var(--primary-foreground)] shadow-sm transition-all hover:brightness-110 active:scale-[0.98]"
+          className={cn(
+            "flex flex-1 items-center justify-center gap-1.5 rounded-xl px-3 py-2.5 text-xs font-medium transition-all hover:brightness-110 active:scale-[0.98]",
+            AGENT_GRADIENT_BUTTON,
+          )}
           title="New"
         >
           <Plus size="0.8125rem" /> <span className="md:hidden">New</span>
@@ -672,7 +679,10 @@ export function AgentsPanel() {
           <button
             onClick={handleExportSelectedAgents}
             disabled={selectedAgents.length === 0 || exportingSelected}
-            className="inline-flex items-center gap-1 rounded-lg bg-[var(--primary)] px-2.5 py-1 text-[0.625rem] font-medium text-[var(--primary-foreground)] transition-all hover:brightness-110 disabled:opacity-40"
+            className={cn(
+              "inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[0.625rem] font-medium transition-all hover:brightness-110 disabled:opacity-40",
+              AGENT_GRADIENT_BUTTON,
+            )}
           >
             <Upload size="0.6875rem" />
             {exportingSelected ? "Exporting..." : "Export"}
@@ -977,7 +987,7 @@ function renderAgentCard({
   );
   const iconClasses = cn(
     "relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl shadow-sm",
-    imagePath ? "bg-[var(--muted)]" : "bg-[var(--primary)] text-[var(--primary-foreground)]",
+    imagePath ? "bg-[var(--muted)]" : AGENT_GRADIENT_SURFACE,
   );
 
   return (

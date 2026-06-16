@@ -1,10 +1,9 @@
 // ──────────────────────────────────────────────
 // Character Editor — Full-page detail view
 // Replaces the chat area when editing a character.
-// Sections: Metadata, Description, Personality, Backstory,
-//           Appearance, Scenario, Dialogue, Lorebook, Advanced
+// Sections: Metadata, Card, Lorebook, Advanced
 // ──────────────────────────────────────────────
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -35,7 +34,6 @@ import {
 } from "../../hooks/use-characters";
 import { useUIStore } from "../../stores/ui.store";
 import { lorebookKeys, useLorebook } from "../../hooks/use-lorebooks";
-import { useStartChatFromCharacter } from "../../hooks/use-start-chat-from-character";
 import { useConnections } from "../../hooks/use-connections";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { SpriteGenerationModal } from "../ui/SpriteGenerationModal";
@@ -46,12 +44,7 @@ import {
   ArrowLeft,
   Save,
   User,
-  FileText,
-  Heart,
-  BookOpen,
-  Eye,
-  MapPin,
-  MessageCircle,
+  IdCard,
   Settings2,
   Library,
   Camera,
@@ -90,6 +83,7 @@ import { SpriteFrameEditor } from "../ui/SpriteFrameEditor";
 import { SpriteWandCleanupEditor } from "../ui/SpriteWandCleanupEditor";
 import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatDialog";
 import { EditorTabRail } from "../ui/EditorTabRail";
+import { EditorSectionAnchor, EditorSectionJumps } from "../ui/EditorSectionJumps";
 import type { CharacterCardVersion, CharacterData, RPGStatsConfig } from "@marinara-engine/shared";
 import { parseTrackerCardColorConfig, serializeTrackerCardColorConfig } from "../../lib/tracker-card-colors";
 import { useQuoteFormatter } from "../../hooks/use-quote-formatter";
@@ -98,12 +92,7 @@ import { LorebookAssignmentSection } from "../lorebooks/LorebookAssignmentSectio
 // ── Tabs ──
 const TABS = [
   { id: "metadata", label: "Metadata", icon: User },
-  { id: "description", label: "Description", icon: FileText },
-  { id: "personality", label: "Personality", icon: Heart },
-  { id: "backstory", label: "Backstory", icon: BookOpen },
-  { id: "appearance", label: "Appearance", icon: Eye },
-  { id: "scenario", label: "Scenario", icon: MapPin },
-  { id: "dialogue", label: "Dialogue", icon: MessageCircle },
+  { id: "card", label: "Card", icon: IdCard },
   { id: "lorebook", label: "Lorebook", icon: Library },
   { id: "sprites", label: "Sprites", icon: Image },
   { id: "gallery", label: "Gallery", icon: Camera },
@@ -113,6 +102,57 @@ const TABS = [
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
+
+const CHARACTER_CARD_SECTIONS = [
+  { id: "character-card-description", label: "Description" },
+  { id: "character-card-personality", label: "Personality" },
+  { id: "character-card-backstory", label: "Backstory" },
+  { id: "character-card-appearance", label: "Appearance" },
+  { id: "character-card-scenario", label: "Scenario" },
+  { id: "character-card-dialogue", label: "Dialogue" },
+] as const;
+
+const CHARACTER_METADATA_HELP =
+  "Use metadata for identity, sharing, and library organization. Name is used as {{char}}, creator/version help track authorship and revisions, tags make the card searchable, talkativeness affects group chat response frequency, and creator notes stay private.";
+
+const CHARACTER_CARD_HELP =
+  "Write the fields that define how the model sees and plays the character. Description, personality, backstory, appearance, scenario, and dialogue are kept together here so you can treat the card as one writing document.";
+
+const CHARACTER_DESCRIPTION_HELP =
+  "The character's general identity and role. This is sent in every prompt as part of who the character is.";
+
+const CHARACTER_PERSONALITY_HELP =
+  "A concise summary of temperament, behavior, speech habits, preferences, and emotional patterns.";
+
+const CHARACTER_BACKSTORY_HELP =
+  "History, origin, important relationships, and formative events that explain how the character became who they are.";
+
+const CHARACTER_APPEARANCE_HELP =
+  "Physical description, clothing, posture, distinguishing marks, and visual details the model should remember.";
+
+const CHARACTER_SCENARIO_HELP =
+  "The default setting or situation for new interactions. Use it to establish where the scene starts and what is already happening.";
+
+const CHARACTER_DIALOGUE_HELP =
+  "First Message opens a new chat. Alternate Greetings provide other opening options. Example Dialogue teaches voice and formatting; use <START> to separate examples and {{user}} / {{char}} as placeholders.";
+
+const CHARACTER_ADVANCED_HELP =
+  "Character-specific prompt controls. System Prompt is injected through the preset's character block, Post-History Instructions appear near generation time, and Depth Prompt inserts a reminder at a selected point in chat history.";
+
+const CHARACTER_GALLERY_HELP =
+  "These images belong to the character, so deleting a chat does not remove them. Use this for reference sheets, outfit variants, or imported ST-style character image packs. Chat gallery is still best for scene-specific illustrations and generated message attachments.";
+
+const CHARACTER_SPRITES_HELP =
+  "Upload sprites one by one, or use Upload Folder to bulk-import a folder of PNGs. Each filename becomes the expression name, for example admiration.png becomes admiration. To rotate variants, share a prefix before an underscore, for example happy_01.png and happy_blush.png. Enable the Expression Engine agent so roleplay can pick matching sprites from detected emotions. Sprites appear as VN-style overlays in the chat area.";
+
+const CHARACTER_STATS_HELP =
+  "HP is injected into the prompt so the AI knows the character's current health. Attributes are custom stats, like STR or DEX, that define the character's capabilities. The Character Tracker agent can adjust values based on combat, healing, and narrative events. Values set here serve as the initial/default state for new conversations.";
+
+const CHARACTER_COLORS_HELP =
+  "Name color is applied to the character's display name in chat. Gradients use CSS linear-gradient. Dialogue color applies to text inside dialogue quotation marks and can optionally be bolded from Settings. Box color sets the background color of the character's message bubble in roleplay mode. Leave any field empty to use the default theme colors.";
+
+const CHARACTER_LOREBOOK_HELP =
+  "Attach lorebook/world-info entries to this character. Entries trigger from keywords during conversation; embedded card lorebooks can be imported into Marinara as linked lorebooks for deeper editing.";
 
 interface ParsedCharacter {
   id: string;
@@ -164,13 +204,6 @@ function formatCharacterFieldValue<K extends keyof CharacterData>(
 
 function formatCharacterExtensionValue(key: string, value: unknown, formatQuotes: (value: string) => string): unknown {
   if (CHARACTER_QUOTE_EXTENSION_KEYS.has(key) && typeof value === "string") return formatQuotes(value);
-  if (key === "altDescriptions" && Array.isArray(value)) {
-    return value.map((entry) =>
-      entry && typeof entry === "object" && "content" in entry && typeof entry.content === "string"
-        ? { ...entry, content: formatQuotes(entry.content) }
-        : entry,
-    );
-  }
   if (key === "depth_prompt" && value && typeof value === "object" && "prompt" in value) {
     const depthPrompt = value as { prompt?: unknown };
     if (typeof depthPrompt.prompt === "string") return { ...value, prompt: formatQuotes(depthPrompt.prompt) };
@@ -189,7 +222,6 @@ export function CharacterEditor() {
   const duplicateCharacter = useDuplicateCharacter();
   const createPersona = useCreatePersona();
   const uploadPersonaAvatar = useUploadPersonaAvatar();
-  const { startChatFromCharacter, isStartingChat } = useStartChatFromCharacter();
   const { data: connectionsList } = useConnections();
 
   const [activeTab, setActiveTab] = useState<TabId>("metadata");
@@ -557,6 +589,9 @@ export function CharacterEditor() {
       const created = (await createPersona.mutateAsync({
         name: personaName,
         comment: formData.creator_notes ?? "",
+        creator: formData.creator ?? "",
+        personaVersion: formData.character_version ?? "1.0",
+        creatorNotes: formData.creator_notes ?? "",
         description: formData.description ?? "",
         personality: formData.personality ?? "",
         scenario: formData.scenario ?? "",
@@ -569,7 +604,6 @@ export function CharacterEditor() {
           parseTrackerCardColorConfig(formData.extensions.trackerCardColors),
         ),
         personaStats,
-        altDescriptions: "[]",
         tags: JSON.stringify(formData.tags ?? []),
       })) as { id?: string };
 
@@ -659,29 +693,16 @@ export function CharacterEditor() {
   const headerActionButtonClass =
     "rounded-xl p-2 text-[var(--muted-foreground)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)] max-md:rounded-lg max-md:p-1.5";
   const saveDisabled = !dirty || saving || avatarUploading;
+  const saveLabel = avatarUploading ? "Uploading…" : saving ? "Saving…" : "Save";
+  const saveButtonClass = cn(
+    "flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-medium transition-all max-md:rounded-lg max-md:px-2.5 max-md:py-1.5",
+    !saveDisabled
+      ? "bg-gradient-to-r from-pink-400 to-purple-500 text-white shadow-md shadow-pink-500/20 hover:shadow-lg active:scale-[0.98]"
+      : "bg-[var(--secondary)] text-[var(--muted-foreground)] cursor-not-allowed",
+  );
 
   const headerActions = (
     <>
-      <button
-        type="button"
-        onClick={() => {
-          if (!characterId) return;
-          startChatFromCharacter({
-            characterId,
-            characterName: formData.name,
-            mode: "roleplay",
-            firstMessage: formData.first_mes,
-            alternateGreetings: formData.alternate_greetings,
-          });
-        }}
-        disabled={!characterId || isStartingChat}
-        className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--primary)] px-3 py-2 text-xs font-medium text-[var(--primary-foreground)] transition-all hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60 max-md:rounded-lg max-md:px-2.5 max-md:py-1.5"
-        title="Start new chat"
-      >
-        <MessageCircle size="1rem" />
-        <span className="max-sm:hidden">Start Chat</span>
-      </button>
-
       <button
         type="button"
         onClick={() => updateExtension("fav", !formData.extensions.fav)}
@@ -859,18 +880,19 @@ export function CharacterEditor() {
           type="button"
           onClick={handleSave}
           disabled={saveDisabled}
-          className={cn(
-            "flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-medium transition-all",
-            !saveDisabled
-              ? "bg-gradient-to-r from-pink-400 to-purple-500 text-white shadow-md shadow-pink-500/20 hover:shadow-lg active:scale-[0.98]"
-              : "bg-[var(--secondary)] text-[var(--muted-foreground)] cursor-not-allowed",
-          )}
+          className={cn(saveButtonClass, "hidden md:flex")}
         >
           <Save size="0.8125rem" />
-          <span className="max-md:hidden">{avatarUploading ? "Uploading…" : saving ? "Saving…" : "Save"}</span>
+          <span>{saveLabel}</span>
         </button>
 
-        <div className="flex w-full items-center justify-end gap-1 md:hidden">{headerActions}</div>
+        <div className="flex w-full items-center justify-between gap-2 md:hidden">
+          <button type="button" onClick={handleSave} disabled={saveDisabled} className={saveButtonClass}>
+            <Save size="0.8125rem" />
+            <span>{saveLabel}</span>
+          </button>
+          <div className="flex min-w-0 items-center justify-end gap-1">{headerActions}</div>
+        </div>
       </div>
 
       {/* ── Unsaved changes warning ── */}
@@ -932,48 +954,9 @@ export function CharacterEditor() {
                 removingAvatar={removeAvatar.isPending}
               />
             )}
-            {activeTab === "description" && <CharacterDescriptionTab formData={formData} updateField={updateField} />}
-            {activeTab === "personality" && (
-              <TextareaTab
-                title="Personality"
-                subtitle="A concise summary of the character's personality traits, temperament, and behavioral patterns."
-                value={formData.personality}
-                onChange={(v) => updateField("personality", v)}
-                placeholder="Energetic, curious, and fiercely loyal. Speaks in short bursts. Has a habit of…"
-                rows={8}
-              />
+            {activeTab === "card" && (
+              <CharacterCardTab formData={formData} updateField={updateField} updateExtension={updateExtension} />
             )}
-            {activeTab === "backstory" && (
-              <TextareaTab
-                title="Backstory"
-                subtitle="The character's history, origin story, and formative life events."
-                value={(formData.extensions.backstory as string) ?? ""}
-                onChange={(v) => updateExtension("backstory", v)}
-                placeholder="Born in a small village on the outskirts of the empire…"
-                rows={12}
-              />
-            )}
-            {activeTab === "appearance" && (
-              <TextareaTab
-                title="Appearance"
-                subtitle="Detailed physical description — height, build, hair, eyes, clothing, distinguishing features."
-                value={(formData.extensions.appearance as string) ?? ""}
-                onChange={(v) => updateExtension("appearance", v)}
-                placeholder="Tall and willowy with silver-streaked dark hair. Wears a battered leather coat over…"
-                rows={8}
-              />
-            )}
-            {activeTab === "scenario" && (
-              <TextareaTab
-                title="Scenario"
-                subtitle="The default setting or situation where interactions take place."
-                value={formData.scenario}
-                onChange={(v) => updateField("scenario", v)}
-                placeholder="A bustling port city during a trade festival. The streets are alive with merchants and performers…"
-                rows={8}
-              />
-            )}
-            {activeTab === "dialogue" && <DialogueTab formData={formData} updateField={updateField} />}
             {activeTab === "advanced" && (
               <AdvancedTab formData={formData} updateField={updateField} updateExtension={updateExtension} />
             )}
@@ -1004,11 +987,97 @@ export function CharacterEditor() {
 // Sub-tab components
 // ──────────────────────────────────────────────
 
-function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }) {
+function SectionHeader({
+  title,
+  subtitle,
+  helpText,
+  helpWide = true,
+}: {
+  title: string;
+  subtitle?: string;
+  helpText?: ReactNode;
+  helpWide?: boolean;
+}) {
   return (
     <div className="mb-4">
-      <h2 className="text-lg font-bold">{title}</h2>
+      <h2 className="inline-flex items-center gap-1.5 text-lg font-bold">
+        {title}
+        {helpText && <HelpTooltip text={helpText} side="bottom" wide={helpWide} size="0.875rem" />}
+      </h2>
       {subtitle && <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">{subtitle}</p>}
+    </div>
+  );
+}
+
+function CharacterCardTab({
+  formData,
+  updateField,
+  updateExtension,
+}: {
+  formData: CharacterData;
+  updateField: <K extends keyof CharacterData>(key: K, value: CharacterData[K]) => void;
+  updateExtension: (key: string, value: unknown) => void;
+}) {
+  return (
+    <div>
+      <SectionHeader
+        title="Card"
+        subtitle="Write the character's core card fields in one focused workspace."
+        helpText={CHARACTER_CARD_HELP}
+      />
+      <EditorSectionJumps items={CHARACTER_CARD_SECTIONS} />
+      <div className="space-y-10">
+        <EditorSectionAnchor id="character-card-description">
+          <CharacterDescriptionTab formData={formData} updateField={updateField} />
+        </EditorSectionAnchor>
+        <EditorSectionAnchor id="character-card-personality">
+          <TextareaTab
+            title="Personality"
+            subtitle="A concise summary of the character's personality traits, temperament, and behavioral patterns."
+            helpText={CHARACTER_PERSONALITY_HELP}
+            value={formData.personality}
+            onChange={(v) => updateField("personality", v)}
+            placeholder="Energetic, curious, and fiercely loyal. Speaks in short bursts. Has a habit of…"
+            rows={8}
+          />
+        </EditorSectionAnchor>
+        <EditorSectionAnchor id="character-card-backstory">
+          <TextareaTab
+            title="Backstory"
+            subtitle="The character's history, origin story, and formative life events."
+            helpText={CHARACTER_BACKSTORY_HELP}
+            value={(formData.extensions.backstory as string) ?? ""}
+            onChange={(v) => updateExtension("backstory", v)}
+            placeholder="Born in a small village on the outskirts of the empire…"
+            rows={12}
+          />
+        </EditorSectionAnchor>
+        <EditorSectionAnchor id="character-card-appearance">
+          <TextareaTab
+            title="Appearance"
+            subtitle="Detailed physical description, height, build, hair, eyes, clothing, distinguishing features."
+            helpText={CHARACTER_APPEARANCE_HELP}
+            value={(formData.extensions.appearance as string) ?? ""}
+            onChange={(v) => updateExtension("appearance", v)}
+            placeholder="Tall and willowy with silver-streaked dark hair. Wears a battered leather coat over…"
+            rows={8}
+          />
+        </EditorSectionAnchor>
+        <EditorSectionAnchor id="character-card-scenario">
+          <TextareaTab
+            title="Scenario"
+            subtitle="The default setting or situation where interactions take place."
+            helpText={CHARACTER_SCENARIO_HELP}
+            value={formData.scenario}
+            onChange={(v) => updateField("scenario", v)}
+            placeholder="A bustling port city during a trade festival. The streets are alive with merchants and performers…"
+            rows={8}
+          />
+        </EditorSectionAnchor>
+        <EditorSectionAnchor id="character-card-dialogue">
+          <DialogueTab formData={formData} updateField={updateField} />
+        </EditorSectionAnchor>
+      </div>
     </div>
   );
 }
@@ -1029,6 +1098,7 @@ function CharacterDescriptionTab({
           <SectionHeader
             title="Description"
             subtitle="The character's general description. This is sent in every prompt as part of the character's identity."
+            helpText={CHARACTER_DESCRIPTION_HELP}
           />
           <button
             type="button"
@@ -1070,9 +1140,11 @@ function TextareaTab({
   onChange,
   placeholder,
   rows = 8,
+  helpText,
 }: {
   title: string;
   subtitle: string;
+  helpText?: ReactNode;
   value: string;
   onChange: (v: string) => void;
   placeholder: string;
@@ -1082,7 +1154,7 @@ function TextareaTab({
   return (
     <div>
       <div className="flex items-start justify-between gap-2 mb-4">
-        <SectionHeader title={title} subtitle={subtitle} />
+        <SectionHeader title={title} subtitle={subtitle} helpText={helpText} />
         <button
           type="button"
           onClick={() => setExpanded(true)}
@@ -1147,7 +1219,11 @@ function MetadataTab({
 
   return (
     <div className="space-y-5">
-      <SectionHeader title="Metadata" subtitle="Basic character info — name, creator, version, tags." />
+      <SectionHeader
+        title="Metadata"
+        subtitle="Basic character info — name, creator, version, tags."
+        helpText={CHARACTER_METADATA_HELP}
+      />
 
       {/* Avatar Crop */}
       {avatarPreview && (
@@ -1567,6 +1643,7 @@ function DialogueTab({
       <SectionHeader
         title="Dialogue & Greetings"
         subtitle="First message, example dialogue, and alternate greetings."
+        helpText={CHARACTER_DIALOGUE_HELP}
       />
 
       {/* First Message */}
@@ -1715,6 +1792,7 @@ function AdvancedTab({
       <SectionHeader
         title="Advanced"
         subtitle="System prompt, post-history instructions, and depth prompt injection."
+        helpText={CHARACTER_ADVANCED_HELP}
       />
 
       <label className="block space-y-1.5">
@@ -1884,6 +1962,7 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
       <SectionHeader
         title="Character Gallery"
         subtitle="Keep reference art, alternate outfits, and other character images attached to this character even if chats get deleted."
+        helpText={CHARACTER_GALLERY_HELP}
       />
 
       <ImageUploadDropzone
@@ -1958,15 +2037,6 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
           </div>
         </div>
       )}
-
-      <div className="rounded-xl bg-[var(--card)] p-4 ring-1 ring-[var(--border)]">
-        <h4 className="mb-1.5 text-xs font-semibold">How this differs from chat gallery</h4>
-        <ul className="space-y-1 text-[0.6875rem] text-[var(--muted-foreground)]">
-          <li>• These images belong to the character, so deleting a chat does not remove them.</li>
-          <li>• Use this for reference sheets, outfit variants, or imported ST-style character image packs.</li>
-          <li>• Chat gallery is still best for scene-specific illustrations and generated message attachments.</li>
-        </ul>
-      </div>
 
       {lightbox && (
         <div
@@ -2360,6 +2430,7 @@ function SpritesTab({
       <SectionHeader
         title="Character Sprites"
         subtitle="Upload VN-style sprites for different expressions. The Expression Engine agent will select the appropriate sprite during roleplay."
+        helpText={CHARACTER_SPRITES_HELP}
       />
 
       <div className="inline-flex rounded-xl bg-[var(--secondary)] p-1 ring-1 ring-[var(--border)]">
@@ -2700,27 +2771,6 @@ function SpritesTab({
         </div>
       )}
 
-      {/* Info card */}
-      <div className="rounded-xl bg-[var(--card)] p-4 ring-1 ring-[var(--border)]">
-        <h4 className="mb-1.5 text-xs font-semibold">How sprites work</h4>
-        <ul className="space-y-1 text-[0.6875rem] text-[var(--muted-foreground)]">
-          <li>
-            • Upload sprites one by one, or use <strong className="text-[var(--foreground)]">Upload Folder</strong> to
-            bulk-import a folder of PNGs (each filename = expression name, e.g. admiration.png → "admiration")
-          </li>
-          <li>
-            • To make one expression randomly rotate between variants, use a shared prefix before an underscore, e.g.
-            happy_01.png and happy_blush.png are offered to the agent as "happy"
-          </li>
-          <li>
-            • Enable the <strong className="text-[var(--foreground)]">Expression Engine</strong> agent in the Agents
-            panel
-          </li>
-          <li>• During roleplay, the agent will detect emotions and display the matching sprite</li>
-          <li>• Sprites appear as VN-style overlays in the chat area</li>
-        </ul>
-      </div>
-
       {deleteSpriteRequest && (
         <Modal
           open
@@ -2838,6 +2888,7 @@ function StatsTab({
       <SectionHeader
         title="RPG Stats"
         subtitle="Toggle stat tracking for this character. When enabled, the character's stats are included in the prompt and tracked by agents."
+        helpText={CHARACTER_STATS_HELP}
       />
 
       {/* Enable toggle */}
@@ -2920,25 +2971,6 @@ function StatsTab({
             </div>
           </div>
 
-          {/* Info */}
-          <div className="rounded-xl bg-[var(--card)] p-4 ring-1 ring-[var(--border)]">
-            <h4 className="mb-1.5 text-xs font-semibold">How stats work</h4>
-            <ul className="space-y-1 text-[0.6875rem] text-[var(--muted-foreground)]">
-              <li>
-                &bull; <strong className="text-[var(--foreground)]">HP</strong> — Injected into the prompt so the AI
-                knows the character&apos;s current health.
-              </li>
-              <li>
-                &bull; <strong className="text-[var(--foreground)]">Attributes</strong> — Custom stats (STR, DEX, etc.)
-                that define the character&apos;s capabilities.
-              </li>
-              <li>
-                &bull; The Character Tracker agent adjusts these values based on narrative events (combat, healing,
-                etc.).
-              </li>
-              <li>&bull; Values set here serve as the initial/default state for new conversations.</li>
-            </ul>
-          </div>
         </>
       )}
     </div>
@@ -2981,6 +3013,7 @@ function ColorsTab({
       <SectionHeader
         title="Character Colors"
         subtitle="Customize how this character appears in chats. Colors are applied to the name, dialogue, and message bubble."
+        helpText={CHARACTER_COLORS_HELP}
       />
 
       {/* Extract from avatar button */}
@@ -3068,25 +3101,6 @@ function ColorsTab({
         helpText="Background color for this character's chat message bubbles. Use a semi-transparent color for best results (e.g. rgba)."
       />
 
-      {/* Info */}
-      <div className="rounded-xl bg-[var(--card)] p-4 ring-1 ring-[var(--border)]">
-        <h4 className="mb-1.5 text-xs font-semibold">How colors work</h4>
-        <ul className="space-y-1 text-[0.6875rem] text-[var(--muted-foreground)]">
-          <li>
-            &bull; <strong className="text-[var(--foreground)]">Name color</strong> — Applied to the character&apos;s
-            display name in chat. Gradients use CSS linear-gradient.
-          </li>
-          <li>
-            &bull; <strong className="text-[var(--foreground)]">Dialogue color</strong> — All text inside dialogue
-            quotation marks is automatically colored with this value, and can optionally be bolded from Settings.
-          </li>
-          <li>
-            &bull; <strong className="text-[var(--foreground)]">Box color</strong> — Sets the background color of the
-            character&apos;s message bubble in roleplay mode.
-          </li>
-          <li>&bull; Leave any field empty to use the default theme colors.</li>
-        </ul>
-      </div>
     </div>
   );
 }
@@ -3150,6 +3164,7 @@ function LorebookTab({ characterId, formData }: { characterId: string | null; fo
       <SectionHeader
         title="Character Lorebook"
         subtitle="World-building entries embedded in this character. Triggered by keywords in conversation."
+        helpText={CHARACTER_LOREBOOK_HELP}
       />
 
       <LorebookAssignmentSection ownerType="character" ownerId={characterId} ownerName={formData.name} />

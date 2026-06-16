@@ -983,24 +983,6 @@ export async function generateRoutes(app: FastifyInstance) {
         personaName = persona.name;
         personaDescription = cardPromptText(persona.description);
 
-        // Append active alt description extensions
-        if (persona.altDescriptions) {
-          try {
-            const altDescs = JSON.parse(persona.altDescriptions as string) as Array<{
-              active: boolean;
-              content: string;
-            }>;
-            for (const ext of altDescs) {
-              const content = cardPromptText(ext.content);
-              if (ext.active && content) {
-                personaDescription += "\n" + content;
-              }
-            }
-          } catch {
-            /* ignore malformed JSON */
-          }
-        }
-
         personaFields = {
           personality: cardPromptText(persona.personality),
           scenario: cardPromptText(persona.scenario),
@@ -8649,7 +8631,6 @@ export async function generateRoutes(app: FastifyInstance) {
                         },
                         backstory: ccCmd.backstory ?? "",
                         appearance: ccCmd.appearance ?? "",
-                        altDescriptions: [],
                       },
                       character_book: null,
                     };

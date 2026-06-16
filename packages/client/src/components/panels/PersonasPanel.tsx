@@ -37,7 +37,6 @@ import {
 } from "lucide-react";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { cn, getAvatarCropStyle, parseAvatarCropJson } from "../../lib/utils";
-import { HelpTooltip } from "../ui/HelpTooltip";
 import { api } from "../../lib/api-client";
 import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatDialog";
 
@@ -410,12 +409,6 @@ export function PersonasPanel() {
 
   return (
     <div className="flex flex-col gap-2 p-3">
-      {/* Header help */}
-      <div className="flex items-center gap-1.5 text-xs text-[var(--muted-foreground)]">
-        Your personas
-        <HelpTooltip text="Personas are your different identities. The active persona determines how the AI refers to you and sees your description, personality, backstory, and appearance. Great for switching between different player characters!" />
-      </div>
-
       {/* Actions */}
       <div className="flex gap-2">
         <button

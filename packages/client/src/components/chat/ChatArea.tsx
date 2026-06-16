@@ -452,7 +452,6 @@ export function ChatArea() {
       scenario?: string;
       backstory?: string;
       appearance?: string;
-      altDescriptions?: string;
       avatarPath?: string | null;
       avatarCrop?: string;
       nameColor?: string;
@@ -467,23 +466,10 @@ export function ChatArea() {
       (chatPersonaId ? personas.find((p) => p.id === chatPersonaId) : null) ??
       (!isGame ? personas.find((p) => p.isActive === "true" || p.isActive === true) : null);
     if (!persona) return undefined;
-    let description = persona.description ?? "";
-    if (persona.altDescriptions) {
-      try {
-        const altDescriptions = JSON.parse(persona.altDescriptions) as Array<{ active?: boolean; content?: string }>;
-        for (const altDescription of altDescriptions) {
-          if (altDescription?.active && typeof altDescription.content === "string" && altDescription.content.trim()) {
-            description = [description, altDescription.content.trim()].filter(Boolean).join("\n");
-          }
-        }
-      } catch {
-        /* ignore malformed JSON */
-      }
-    }
     return {
       id: persona.id,
       name: persona.name,
-      description,
+      description: persona.description ?? "",
       personality: persona.personality || undefined,
       scenario: persona.scenario || undefined,
       backstory: persona.backstory || undefined,

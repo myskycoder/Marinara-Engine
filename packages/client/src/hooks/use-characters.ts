@@ -8,7 +8,7 @@ import {
   serializeTrackerCardColorConfig,
   TRACKER_CARD_COLOR_PREVIEW_BASE_FIELD,
 } from "../lib/tracker-card-colors";
-import { PROFESSOR_MARI_ID, type CharacterCardVersion } from "@marinara-engine/shared";
+import { PROFESSOR_MARI_ID, type CharacterCardVersion, type PersonaCardVersion } from "@marinara-engine/shared";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -33,6 +33,7 @@ export const characterKeys = {
   versions: (id: string) => [...characterKeys.detail(id), "versions"] as const,
   gallery: (id: string) => [...characterKeys.all, "gallery", id] as const,
   personas: ["personas"] as const,
+  personaVersions: (id: string) => [...characterKeys.personas, "detail", id, "versions"] as const,
   groups: ["character-groups"] as const,
   groupDetail: (id: string) => ["character-groups", "detail", id] as const,
   personaGroups: ["persona-groups"] as const,
@@ -395,6 +396,9 @@ export function useCreatePersona() {
       name: string;
       description?: string;
       comment?: string;
+      creator?: string;
+      personaVersion?: string;
+      creatorNotes?: string;
       personality?: string;
       scenario?: string;
       backstory?: string;
@@ -404,7 +408,6 @@ export function useCreatePersona() {
       boxColor?: string;
       trackerCardColors?: string;
       personaStats?: string;
-      altDescriptions?: string;
       tags?: string;
       savedStatusOptions?: string;
       avatarCrop?: string;
@@ -423,6 +426,9 @@ export function useUpdatePersona() {
       id: string;
       name?: string;
       comment?: string;
+      creator?: string;
+      personaVersion?: string;
+      creatorNotes?: string;
       description?: string;
       personality?: string;
       scenario?: string;
@@ -433,15 +439,14 @@ export function useUpdatePersona() {
       boxColor?: string;
       trackerCardColors?: string;
       personaStats?: string;
-      altDescriptions?: string;
       tags?: string;
       savedStatusOptions?: string;
       avatarCrop?: string;
     }) => api.patch(`/characters/personas/${id}`, data),
     onSuccess: (updatedPersona, variables) => {
+      const updatedId = (updatedPersona as { id?: string } | null)?.id ?? variables.id;
       qc.setQueryData<unknown[] | undefined>(characterKeys.personas, (old) => {
         if (!Array.isArray(old)) return old;
-        const updatedId = (updatedPersona as { id?: string } | null)?.id ?? variables.id;
         if (!updatedId) return old;
 
         return old.map((p) => {
@@ -466,6 +471,41 @@ export function useUpdatePersona() {
       });
 
       qc.invalidateQueries({ queryKey: characterKeys.personas });
+      if (updatedId) {
+        qc.invalidateQueries({ queryKey: characterKeys.personaVersions(updatedId) });
+      }
+    },
+  });
+}
+
+export function usePersonaVersions(id: string | null) {
+  return useQuery({
+    queryKey: characterKeys.personaVersions(id ?? ""),
+    queryFn: () => api.get<PersonaCardVersion[]>(`/characters/personas/${id}/versions`),
+    enabled: !!id,
+    staleTime: 60_000,
+  });
+}
+
+export function useRestorePersonaVersion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, versionId }: { id: string; versionId: string }) =>
+      api.post(`/characters/personas/${id}/versions/${versionId}/restore`, {}),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: characterKeys.personas });
+      qc.invalidateQueries({ queryKey: characterKeys.personaVersions(variables.id) });
+    },
+  });
+}
+
+export function useDeletePersonaVersion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, versionId }: { id: string; versionId: string }) =>
+      api.delete(`/characters/personas/${id}/versions/${versionId}`),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: characterKeys.personaVersions(variables.id) });
     },
   });
 }
@@ -499,7 +539,10 @@ export function useUploadPersonaAvatar() {
   return useMutation({
     mutationFn: ({ id, avatar, filename }: { id: string; avatar: string; filename?: string }) =>
       api.post(`/characters/personas/${id}/avatar`, { avatar, filename }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: characterKeys.personas }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: characterKeys.personas });
+      qc.invalidateQueries({ queryKey: characterKeys.personaVersions(variables.id) });
+    },
   });
 }
 

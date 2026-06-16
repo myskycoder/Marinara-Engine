@@ -97,6 +97,11 @@ import {
 } from "@marinara-engine/shared";
 import { downloadJsonFile } from "../../lib/download-json";
 
+const AGENT_GRADIENT_SURFACE =
+  "bg-gradient-to-br from-violet-500 via-fuchsia-500 to-pink-500 text-white shadow-purple-500/25";
+const AGENT_GRADIENT_BUTTON =
+  "bg-gradient-to-r from-violet-500 via-fuchsia-500 to-pink-500 text-white shadow-md shadow-purple-500/20 hover:shadow-lg hover:shadow-purple-500/25";
+
 function parseActivationKeywordsText(value: string): string[] {
   const seen = new Set<string>();
   const keywords: string[] = [];
@@ -434,6 +439,7 @@ export function AgentEditor() {
   const [localIncludePreGenInjections, setLocalIncludePreGenInjections] = useState(false);
   const [localIncludeParallelResults, setLocalIncludeParallelResults] = useState(false);
   const [localEnabledTools, setLocalEnabledTools] = useState<string[]>([]);
+  const [toolsSectionOpen, setToolsSectionOpen] = useState(false);
   const [localLorebookWriteEnabled, setLocalLorebookWriteEnabled] = useState(false);
   const [localWritableLorebookId, setLocalWritableLorebookId] = useState("");
   const [localMusicProvider, setLocalMusicProvider] = useState<"spotify" | "youtube">("spotify");
@@ -1190,6 +1196,19 @@ export function AgentEditor() {
       ),
     [localCustomCapabilities.edit_messages],
   );
+  const selectableCustomTools = useMemo(
+    () =>
+      (customToolsRaw as CustomToolRow[] | undefined)?.filter((tool) =>
+        isCustomToolSelectable(tool, customToolCapabilities),
+      ) ?? [],
+    [customToolsRaw, customToolCapabilities],
+  );
+  const visibleToolNames = useMemo(
+    () => new Set([...visibleBuiltInTools.map((tool) => tool.name), ...selectableCustomTools.map((tool) => tool.name)]),
+    [selectableCustomTools, visibleBuiltInTools],
+  );
+  const selectedVisibleToolCount = localEnabledTools.filter((toolName) => visibleToolNames.has(toolName)).length;
+  const availableVisibleToolCount = visibleToolNames.size;
 
   // ── Loading / not found ──
   if (!agentDetailId || (!builtIn && !dbConfig && agentDetailId !== "__new__")) {
@@ -1230,7 +1249,12 @@ export function AgentEditor() {
         >
           <ArrowLeft size="1.125rem" />
         </button>
-        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--primary)] text-[var(--primary-foreground)] shadow-sm max-md:h-8 max-md:w-8">
+        <div
+          className={cn(
+            "flex h-10 w-10 items-center justify-center rounded-xl shadow-sm max-md:h-8 max-md:w-8",
+            AGENT_GRADIENT_SURFACE,
+          )}
+        >
           <Sparkles size="1.125rem" className="max-md:!h-[0.875rem] max-md:!w-[0.875rem]" />
         </div>
         <input
@@ -1254,27 +1278,34 @@ export function AgentEditor() {
             </span>
           )}
           {dirty && !saveError && <span className="mr-2 text-[0.625rem] font-medium text-amber-400">Unsaved</span>}
-          {isCustomAgent && dbConfig && (
-            <button
-              onClick={handleDelete}
-              className="flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-medium text-[var(--destructive)] transition-all hover:bg-[var(--destructive)]/15 active:scale-[0.98]"
-            >
-              <Trash2 size="0.8125rem" /> <span className="max-md:hidden">Delete</span>
-            </button>
-          )}
-          <button
-            onClick={handleExportAgent}
-            className="flex items-center gap-1.5 rounded-xl bg-[var(--secondary)] px-3 py-2 text-xs font-medium text-[var(--secondary-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] active:scale-[0.98]"
-          >
-            <Upload size="0.8125rem" /> <span className="max-md:hidden">Export</span>
-          </button>
           <button
             onClick={handleSave}
             disabled={isPending}
-            className="flex items-center gap-1.5 rounded-xl bg-[var(--primary)] px-4 py-2 text-xs font-medium text-[var(--primary-foreground)] shadow-md transition-all hover:shadow-lg active:scale-[0.98] disabled:opacity-50"
+            className={cn(
+              "flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-medium transition-all active:scale-[0.98] disabled:opacity-50",
+              AGENT_GRADIENT_BUTTON,
+            )}
           >
             <Save size="0.8125rem" /> <span className="max-md:hidden">Save</span>
           </button>
+          <button
+            onClick={handleExportAgent}
+            className="rounded-xl p-2 text-[var(--muted-foreground)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)] active:scale-95"
+            title="Export agent"
+            aria-label="Export agent"
+          >
+            <Upload size="0.9375rem" />
+          </button>
+          {isCustomAgent && dbConfig && (
+            <button
+              onClick={handleDelete}
+              className="rounded-xl p-2 transition-all hover:bg-[var(--destructive)]/15 active:scale-95"
+              title="Delete agent"
+              aria-label="Delete agent"
+            >
+              <Trash2 size="0.9375rem" className="text-[var(--destructive)]" />
+            </button>
+          )}
         </div>
       </div>
 
@@ -3255,6 +3286,10 @@ export function AgentEditor() {
             label="Tools / Function Calling"
             icon={<Wrench size="0.875rem" className="text-[var(--primary)]" />}
             help="Select which tools this agent can use during generation. The AI can call these functions and receive results back for multi-step interactions."
+            collapsible
+            expanded={toolsSectionOpen}
+            onExpandedChange={setToolsSectionOpen}
+            summary={`${selectedVisibleToolCount}/${availableVisibleToolCount} enabled`}
           >
             <p className="text-[0.625rem] text-[var(--muted-foreground)] mb-3">
               Toggle tools on or off for this agent. When enabled for a chat, only selected tools will be available
@@ -3274,56 +3309,29 @@ export function AgentEditor() {
                   }}
                 />
               ))}
-              {(customToolsRaw as CustomToolRow[] | undefined)
-                ?.filter((tool) => isCustomToolSelectable(tool, customToolCapabilities))
-                .map((tool) => (
-                  <ToolCard
-                    key={tool.name}
-                    tool={{
-                      name: tool.name,
-                      description: tool.description,
-                      parameters: JSON.parse(tool.parametersSchema || "{}"),
-                    }}
-                    enabled={localEnabledTools.includes(tool.name)}
-                    onToggle={(name) => {
-                      setLocalEnabledTools((prev) =>
-                        prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name],
-                      );
-                      markDirty();
-                    }}
-                    isCustom
-                  />
-                ))}
+              {selectableCustomTools.map((tool) => (
+                <ToolCard
+                  key={tool.name}
+                  tool={{
+                    name: tool.name,
+                    description: tool.description,
+                    parameters: JSON.parse(tool.parametersSchema || "{}"),
+                  }}
+                  enabled={localEnabledTools.includes(tool.name)}
+                  onToggle={(name) => {
+                    setLocalEnabledTools((prev) =>
+                      prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name],
+                    );
+                    markDirty();
+                  }}
+                  isCustom
+                />
+              ))}
             </div>
             <p className="mt-2 text-[0.625rem] text-[var(--muted-foreground)]">
               Tool-use must also be enabled per chat via Chat Settings → "Enable Function Calling".
             </p>
           </FieldGroup>
-
-          {/* ── Agent Info Card ── */}
-          <div className="rounded-xl bg-[var(--card)] p-4 ring-1 ring-[var(--border)]">
-            <h3 className="mb-2 text-xs font-semibold text-[var(--foreground)]">About this Agent</h3>
-            <div className="space-y-1.5 text-[0.6875rem] text-[var(--muted-foreground)]">
-              <p>
-                <strong className="text-[var(--foreground)]">Type:</strong> {isCustomAgent ? "Custom" : agentDetailId}
-              </p>
-              <p>
-                <strong className="text-[var(--foreground)]">Phase:</strong> {phaseMeta.label} — {phaseMeta.description}
-              </p>
-              {(isCustomAgent || isNewCustomAgent) && (
-                <p>
-                  <strong className="text-[var(--foreground)]">Result Type:</strong>{" "}
-                  {CUSTOM_AGENT_RESULT_TYPE_OPTIONS.find((option) => option.id === localResultType)?.label ??
-                    localResultType}
-                </p>
-              )}
-              <p>
-                <strong className="text-[var(--foreground)]">DB Status:</strong>{" "}
-                {dbConfig ? `Persisted (ID: ${dbConfig.id})` : "Not yet saved — click Save to persist"}
-              </p>
-              <p className="text-[var(--muted-foreground)]">Add this agent to a Roleplay chat to use it.</p>
-            </div>
-          </div>
         </div>
       </div>
     </div>
@@ -3338,21 +3346,54 @@ function FieldGroup({
   label,
   icon,
   help,
+  collapsible = false,
+  expanded = true,
+  onExpandedChange,
+  summary,
   children,
 }: {
   label: string;
   icon?: React.ReactNode;
   help?: string;
+  collapsible?: boolean;
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
+  summary?: React.ReactNode;
   children: React.ReactNode;
 }) {
+  const contentVisible = !collapsible || expanded;
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-1.5">
-        {icon}
-        <h3 className="text-xs font-semibold text-[var(--foreground)]">{label}</h3>
+        {collapsible ? (
+          <button
+            type="button"
+            onClick={() => onExpandedChange?.(!expanded)}
+            className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg py-1 text-left transition-colors hover:text-[var(--foreground)]"
+            aria-expanded={expanded}
+          >
+            {icon}
+            <h3 className="text-xs font-semibold text-[var(--foreground)]">{label}</h3>
+            {summary && (
+              <span className="ml-auto rounded-full bg-[var(--secondary)] px-2 py-0.5 text-[0.625rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+                {summary}
+              </span>
+            )}
+            {expanded ? (
+              <ChevronUp size="0.8125rem" className="shrink-0 text-[var(--muted-foreground)]" />
+            ) : (
+              <ChevronDown size="0.8125rem" className="shrink-0 text-[var(--muted-foreground)]" />
+            )}
+          </button>
+        ) : (
+          <>
+            {icon}
+            <h3 className="text-xs font-semibold text-[var(--foreground)]">{label}</h3>
+          </>
+        )}
         {help && <HelpTooltip text={help} />}
       </div>
-      {children}
+      {contentVisible && children}
     </div>
   );
 }

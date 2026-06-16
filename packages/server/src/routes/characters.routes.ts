@@ -767,10 +767,38 @@ export async function charactersRoutes(app: FastifyInstance) {
     return persona;
   });
 
+  app.get<{ Params: { id: string } }>("/personas/:id/versions", async (req, reply) => {
+    const persona = await storage.getPersona(req.params.id);
+    if (!persona) return reply.status(404).send({ error: "Persona not found" });
+    return storage.listPersonaVersions(req.params.id);
+  });
+
+  app.post<{ Params: { id: string; versionId: string } }>(
+    "/personas/:id/versions/:versionId/restore",
+    async (req, reply) => {
+      const restored = await storage.restorePersonaVersion(req.params.id, req.params.versionId);
+      if (!restored) return reply.status(404).send({ error: "Persona version not found" });
+      return restored;
+    },
+  );
+
+  app.delete<{ Params: { id: string; versionId: string } }>(
+    "/personas/:id/versions/:versionId",
+    async (req, reply) => {
+      const deleted = await storage.deletePersonaVersion(req.params.id, req.params.versionId);
+      if (!deleted) return reply.status(404).send({ error: "Persona version not found" });
+      return reply.status(204).send();
+    },
+  );
+
   app.post("/personas", async (req) => {
     const { name, description, createdAt, updatedAt, ...extra } = req.body as {
       name: string;
       description?: string;
+      comment?: string;
+      creator?: string;
+      personaVersion?: string;
+      creatorNotes?: string;
       personality?: string;
       scenario?: string;
       backstory?: string;
@@ -817,7 +845,7 @@ export async function charactersRoutes(app: FastifyInstance) {
     const filepath = assertInsideDir(avatarsDir, join(avatarsDir, filename));
     await writeFile(filepath, imageBuffer);
     const avatarPath = `/api/avatars/file/${filename}`;
-    return storage.updatePersona(req.params.id, { avatarPath });
+    return storage.updatePersona(req.params.id, { avatarPath }, { versionReason: "Avatar update" });
   });
 
   app.put<{ Params: { id: string } }>("/personas/:id/activate", async (req) => {

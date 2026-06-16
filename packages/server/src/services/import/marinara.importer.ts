@@ -339,12 +339,21 @@ async function importPersona(data: unknown, db: DB) {
     if (Array.isArray(value) || (value && typeof value === "object")) return JSON.stringify(value);
     return fallback;
   };
+  const firstStringField = (...values: unknown[]) => {
+    for (const value of values) {
+      if (typeof value === "string") return value;
+    }
+    return "";
+  };
   const result = await storage.createPersona(
     String(d.name ?? "Imported Persona"),
     String(d.description ?? ""),
     undefined,
     {
       comment: typeof d.comment === "string" ? d.comment : "",
+      creator: firstStringField(d.creator),
+      personaVersion: firstStringField(d.personaVersion, d.persona_version, d.character_version),
+      creatorNotes: firstStringField(d.creatorNotes, d.creator_notes),
       personality: String(d.personality ?? ""),
       scenario: String(d.scenario ?? ""),
       backstory: String(d.backstory ?? ""),
@@ -357,7 +366,6 @@ async function importPersona(data: unknown, db: DB) {
           ? d.trackerCardColors
           : JSON.stringify(d.trackerCardColors ?? { mode: "chat" }),
       personaStats: typeof d.personaStats === "string" ? d.personaStats : "",
-      altDescriptions: stringifyJsonField(d.altDescriptions, "[]"),
       tags: stringifyJsonField(d.tags, "[]"),
       savedStatusOptions: stringifyJsonField(d.savedStatusOptions, "[]"),
       // avatarCrop is stored as a JSON string in the DB; the export round-trips it

@@ -1944,6 +1944,9 @@ export async function backupRoutes(app: FastifyInstance) {
                 personaAvatarPath,
                 {
                   comment: p.comment,
+                  creator: p.creator,
+                  personaVersion: p.personaVersion,
+                  creatorNotes: p.creatorNotes,
                   personality: p.personality,
                   backstory: p.backstory,
                   appearance: p.appearance,
@@ -1956,8 +1959,6 @@ export async function backupRoutes(app: FastifyInstance) {
                       ? p.trackerCardColors
                       : JSON.stringify(p.trackerCardColors ?? { mode: "chat" }),
                   personaStats: p.personaStats,
-                  altDescriptions:
-                    typeof p.altDescriptions === "string" ? p.altDescriptions : JSON.stringify(p.altDescriptions ?? []),
                 },
                 normalizeTimestampOverrides({ createdAt: p.createdAt, updatedAt: p.updatedAt }),
               );

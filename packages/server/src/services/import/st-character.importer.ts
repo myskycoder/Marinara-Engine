@@ -512,28 +512,6 @@ function resolveCharXAsset(zip: AdmZip, uri: string, ext?: string): string | nul
   return `data:image/${mime};base64,${entry.getData().toString("base64")}`;
 }
 
-function normalizeAltDescriptions(raw: unknown): CharacterData["extensions"]["altDescriptions"] {
-  const entries = (() => {
-    if (Array.isArray(raw)) return raw;
-    if (typeof raw !== "string" || !raw.trim()) return [];
-    try {
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  })();
-
-  return entries
-    .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object")
-    .map((entry, index) => ({
-      id: typeof entry.id === "string" && entry.id.trim() ? entry.id : `extension-${index}`,
-      label: typeof entry.label === "string" ? entry.label : "Extension",
-      content: typeof entry.content === "string" ? entry.content : "",
-      active: entry.active !== false,
-    }));
-}
-
 function normalizeV2(raw: Record<string, unknown>): CharacterData {
   const rawExtensions =
     raw.extensions && typeof raw.extensions === "object" ? (raw.extensions as Record<string, unknown>) : {};
@@ -564,7 +542,6 @@ function normalizeV2(raw: Record<string, unknown>): CharacterData {
       },
       backstory: String(rawExtensions.backstory ?? ""),
       appearance: String(rawExtensions.appearance ?? ""),
-      altDescriptions: normalizeAltDescriptions(rawExtensions.altDescriptions ?? rawExtensions.descriptionExtensions),
     },
     character_book: normalizeCharacterBook(raw.character_book),
   };

@@ -23,6 +23,7 @@ import {
   ArrowLeft,
   Save,
   Trash2,
+  Upload,
   Link,
   Wifi,
   MessageSquare,
@@ -44,8 +45,15 @@ import {
   RotateCcw,
   SlidersHorizontal,
 } from "lucide-react";
+import { toast } from "sonner";
 import { cn } from "../../lib/utils";
 import { showConfirmDialog } from "../../lib/app-dialogs";
+import { downloadJsonFile, sanitizeExportFilenamePart } from "../../lib/download-json";
+import {
+  CONNECTION_EXPORT_WARNING,
+  createConnectionExportEnvelope,
+  type ConnectionTransferRow,
+} from "../../lib/connection-transfer";
 import { DraftNumberInput } from "../ui/DraftNumberInput";
 import { HelpTooltip } from "../ui/HelpTooltip";
 import { SettingsCheckbox, SettingsSwitch } from "../panels/settings/SettingControls";
@@ -511,6 +519,92 @@ export function ConnectionEditor() {
     deleteConnection.mutate(connectionDetailId, { onSuccess: () => closeConnectionDetail() });
   }, [connectionDetailId, deleteConnection, closeConnectionDetail]);
 
+  const handleExportConnection = useCallback(async () => {
+    if (!conn) return;
+    const confirmed = await showConfirmDialog({
+      title: "Export Connection Data",
+      message: CONNECTION_EXPORT_WARNING,
+      confirmLabel: "Export",
+      cancelLabel: "Close",
+    });
+    if (!confirmed) return;
+
+    const currentConnection = conn as Record<string, unknown>;
+    const defaultParameters =
+      localProvider === "image_generation"
+        ? buildImageDefaultParameters(
+            currentConnection.defaultParameters,
+            selectedImageDefaultsService && localImageDefaults
+              ? sanitizeImageGenerationProfile(localImageDefaults, selectedImageDefaultsService)
+              : null,
+          )
+        : localDefaultParametersEnabled
+          ? (localDefaultParameters as unknown as Record<string, unknown>)
+          : null;
+    const imageService =
+      localProvider === "image_generation" ? localImageGenerationSource || localImageService || null : null;
+    const exportRow: ConnectionTransferRow = {
+      ...currentConnection,
+      name: localName,
+      provider: localProvider,
+      baseUrl: localBaseUrl,
+      model: localModel,
+      maxContext: localMaxContext,
+      maxTokensOverride: localMaxTokensOverride ?? null,
+      maxParallelJobs: localMaxParallelJobs,
+      promptPresetId: localProvider !== "image_generation" ? localPromptPresetId || null : null,
+      defaultParameters,
+      enableCaching: localEnableCaching,
+      cachingAtDepth: localCachingAtDepth,
+      defaultForAgents: localDefaultForAgents,
+      embeddingModel: localEmbeddingModel,
+      embeddingBaseUrl: localEmbeddingBaseUrl,
+      embeddingConnectionId: localEmbeddingConnectionId || null,
+      openrouterProvider: localOpenrouterProvider || null,
+      imageGenerationSource: imageService,
+      imageService,
+      imageEndpointId:
+        localProvider === "image_generation" && selectedImageService === "runpod_comfyui"
+          ? localImageEndpointId || null
+          : null,
+      comfyuiWorkflow: localProvider === "image_generation" ? localComfyuiWorkflow || null : null,
+      claudeFastMode: localClaudeFastMode,
+    };
+
+    downloadJsonFile(
+      createConnectionExportEnvelope([exportRow]),
+      `${sanitizeExportFilenamePart(localName || String(currentConnection.name ?? ""), "connection")}.connection.json`,
+    );
+    toast.success(`Exported ${localName || "connection"}`);
+  }, [
+    conn,
+    localProvider,
+    localName,
+    localBaseUrl,
+    localModel,
+    localMaxContext,
+    localMaxTokensOverride,
+    localMaxParallelJobs,
+    localPromptPresetId,
+    localDefaultParametersEnabled,
+    localDefaultParameters,
+    localEnableCaching,
+    localCachingAtDepth,
+    localDefaultForAgents,
+    localEmbeddingModel,
+    localEmbeddingBaseUrl,
+    localEmbeddingConnectionId,
+    localOpenrouterProvider,
+    localImageGenerationSource,
+    localImageService,
+    selectedImageService,
+    localImageEndpointId,
+    localComfyuiWorkflow,
+    localClaudeFastMode,
+    selectedImageDefaultsService,
+    localImageDefaults,
+  ]);
+
   const handleTestConnection = useCallback(async () => {
     if (!connectionDetailId) return;
     // Save first if dirty, and wait for it to complete
@@ -730,8 +824,18 @@ export function ConnectionEditor() {
             <Save size="0.8125rem" /> <span className="max-md:hidden">Save</span>
           </button>
           <button
+            onClick={handleExportConnection}
+            className="rounded-xl p-2 text-[var(--muted-foreground)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)] active:scale-95"
+            title="Export connection"
+            aria-label="Export connection"
+          >
+            <Upload size="0.9375rem" />
+          </button>
+          <button
             onClick={handleDelete}
             className="rounded-xl p-2 transition-all hover:bg-[var(--destructive)]/15 active:scale-95"
+            title="Delete connection"
+            aria-label="Delete connection"
           >
             <Trash2 size="0.9375rem" className="text-[var(--destructive)]" />
           </button>

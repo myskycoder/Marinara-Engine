@@ -185,7 +185,6 @@ This file is the release-notes source of truth for Marinara Engine. Reuse these 
 - Agent tool calls for reading and replacing chat-wide string variables.
 - OpenRouter as an image generation service through the existing image connection flow.
 - Game setup can now review, edit, or remove generated HUD widgets and custom stat fields before the first turn starts.
-- Character cards now support Persona-style Description Extensions, with active blocks appended to prompt descriptions.
 - Game mode NPC side banter now spreads long runs across later VN segments, reducing oversized popup stacks.
 - Roleplay Writer Agents can now pause before the main reply so their prompt injections can be reviewed and edited.
 - Game Session Logs now highlight entries included in a pending multi-message deletion.

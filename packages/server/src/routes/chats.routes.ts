@@ -47,7 +47,6 @@ import { generateMissingConversationSummaries } from "../services/conversation/a
 import { rebuildMemoryChunks } from "../services/memory-recall.js";
 import { wrapContent } from "../services/prompt/format-engine.js";
 import { chatSummaryFingerprintMatches, fingerprintChatSummary } from "../services/prompt/chat-summary-fingerprint.js";
-import { getCharacterDescriptionWithExtensions } from "../services/prompt/index.js";
 import { newId } from "../utils/id-generator.js";
 import { characters, gameStateSnapshots, memoryChunks } from "../db/schema/index.js";
 import { and, desc, eq, inArray } from "drizzle-orm";
@@ -1608,24 +1607,6 @@ export async function chatsRoutes(app: FastifyInstance) {
             personaName = persona.name;
             personaDescription = cardPromptText(persona.description);
 
-            // Append active alt description extensions
-            if (persona.altDescriptions) {
-              try {
-                const altDescs = JSON.parse(persona.altDescriptions as string) as Array<{
-                  active: boolean;
-                  content: string;
-                }>;
-                for (const ext of altDescs) {
-                  if (ext.active && ext.content) {
-                    const content = cardPromptText(ext.content);
-                    if (content) personaDescription += "\n" + content;
-                  }
-                }
-              } catch {
-                /* ignore malformed JSON */
-              }
-            }
-
             personaFields = {
               personality: cardPromptText(persona.personality),
               scenario: cardPromptText(persona.scenario),
@@ -1822,7 +1803,7 @@ export async function chatsRoutes(app: FastifyInstance) {
             if (!charRow) continue;
             const charData = JSON.parse(charRow.data as string);
             const charName = charData.name ?? "Unknown";
-            const charDesc = cardPromptText(getCharacterDescriptionWithExtensions(charData));
+            const charDesc = cardPromptText(charData.description);
             const xmlTag = nameToXmlTag(charName);
             const hasCharInfo =
               (charDesc && allContent.includes(charDesc.split("\n")[0]!.trim().slice(0, 80))) ||
