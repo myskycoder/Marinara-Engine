@@ -3,12 +3,13 @@
 // ──────────────────────────────────────────────
 import { mkdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { FastifyInstance } from "fastify";
 import {
   AuthStorage,
   createAgentSession,
+  createBashTool,
   DefaultResourceLoader,
   ModelRegistry,
   SessionManager,
@@ -89,6 +90,33 @@ const JSON_RESPONSE_FORMAT_PROVIDERS = new Set([
   "google",
   "google_vertex",
 ]);
+
+function getPathEnvKey(env: NodeJS.ProcessEnv) {
+  return Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "PATH";
+}
+
+function normalizePathEntry(entry: string) {
+  const normalized = resolve(entry);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function prependPathEntry(env: NodeJS.ProcessEnv, entry: string) {
+  const pathKey = getPathEnvKey(env);
+  const currentPath = env[pathKey] ?? "";
+  const entries = currentPath.split(delimiter).filter(Boolean);
+  const normalizedEntry = normalizePathEntry(entry);
+  const alreadyPresent = entries.some((candidate) => normalizePathEntry(candidate) === normalizedEntry);
+  if (!alreadyPresent) env[pathKey] = [entry, ...entries].join(delimiter);
+  return env;
+}
+
+function shellQuote(value: string) {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function powershellQuote(value: string) {
+  return `'${value.replace(/'/g, "''")}'`;
+}
 
 const MARI_SYSTEM_PROMPT = `You are Professor Mari, Marinara Engine's Home-screen local workspace helper.
 
@@ -817,7 +845,7 @@ export class ProfessorMariWorkspaceService {
   private async ensureSession(connection: ConnectionWithKey): Promise<AgentSession> {
     if (this.session && this.sessionConnectionId === connection.id) return this.session;
     await this.disposeSession();
-    await this.ensureMariCliShim();
+    const mariCliBinDir = await this.ensureMariCliShim();
 
     process.env.MARINARA_PI_API_KEY = RUNTIME_API_KEY;
     process.env.MARI_WORKSPACE_SESSION_ID = SESSION_ID;
@@ -847,6 +875,18 @@ export class ProfessorMariWorkspaceService {
       skillsOverride: () => ({ skills: [], diagnostics: [] }),
       extensionFactories: [
         (pi: any) => {
+          const bashTool = createBashTool(this.workspaceRoot, {
+            spawnHook: ({ command, cwd, env }) => ({
+              command,
+              cwd,
+              env: this.withMariRuntimeEnv({ ...env }, mariCliBinDir),
+            }),
+          });
+          pi.registerTool({
+            ...bashTool,
+            execute: async (id: string, params: any, signal: AbortSignal, onUpdate: any) =>
+              bashTool.execute(id, params, signal, onUpdate),
+          });
           pi.registerProvider(MARINARA_PROVIDER, {
             name: "Marinara current connection",
             baseUrl: "marinara://current-connection",
@@ -1098,23 +1138,60 @@ export class ProfessorMariWorkspaceService {
     return { ...fallback, apiKey: decryptApiKey(fallback.apiKeyEncrypted) };
   }
 
+  private withMariRuntimeEnv(env: NodeJS.ProcessEnv, mariCliBinDir: string) {
+    env.MARI_WORKSPACE_SESSION_ID = SESSION_ID;
+    env.MARI_SERVER_URL = `${getServerProtocol()}://127.0.0.1:${getPort()}`;
+    env.DATA_DIR = DATA_DIR;
+    return prependPathEntry(env, mariCliBinDir);
+  }
+
   private async ensureMariCliShim() {
     const binDir = join(DATA_DIR, ".mari-workspace", "bin");
     await mkdir(binDir, { recursive: true });
-    const cliPath = join(binDir, process.platform === "win32" ? "mari.cmd" : "mari");
+    const posixCliPath = join(binDir, "mari");
+    const cmdCliPath = join(binDir, "mari.cmd");
+    const powershellCliPath = join(binDir, "mari.ps1");
     const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
     const distCli = join(packageRoot, "dist", "bin", "mari.js");
     const sourceCli = join(packageRoot, "src", "bin", "mari.ts");
-    const script =
-      process.platform === "win32"
-        ? `@echo off\r\nnode "${distCli}" %*\r\n`
-        : `#!/usr/bin/env sh\nif [ -f ${JSON.stringify(distCli)} ]; then\n  exec node ${JSON.stringify(distCli)} "$@"\nfi\nexec pnpm exec tsx ${JSON.stringify(sourceCli)} "$@"\n`;
-    await writeFile(cliPath, script, { mode: 0o755 });
-    const currentPath = process.env.PATH ?? "";
-    if (!currentPath.split(process.platform === "win32" ? ";" : ":").includes(binDir)) {
-      process.env.PATH = `${binDir}${process.platform === "win32" ? ";" : ":"}${currentPath}`;
+    const posixScript = `#!/usr/bin/env sh
+DIST_CLI=${shellQuote(distCli)}
+SOURCE_CLI=${shellQuote(sourceCli)}
+if [ -f "$DIST_CLI" ]; then
+  exec node "$DIST_CLI" "$@"
+fi
+exec pnpm exec tsx "$SOURCE_CLI" "$@"
+`;
+    const cmdScript = `@echo off\r
+setlocal\r
+set "DIST_CLI=${distCli}"\r
+set "SOURCE_CLI=${sourceCli}"\r
+if exist "%DIST_CLI%" (\r
+  node "%DIST_CLI%" %*\r
+  exit /b %ERRORLEVEL%\r
+)\r
+pnpm exec tsx "%SOURCE_CLI%" %*\r
+exit /b %ERRORLEVEL%\r
+`;
+    const powershellScript = `$DistCli = ${powershellQuote(distCli)}
+$SourceCli = ${powershellQuote(sourceCli)}
+if (Test-Path -LiteralPath $DistCli) {
+  & node $DistCli @args
+  exit $LASTEXITCODE
+}
+& pnpm exec tsx $SourceCli @args
+exit $LASTEXITCODE
+`;
+    await Promise.all([
+      writeFile(posixCliPath, posixScript, { mode: 0o755 }),
+      writeFile(cmdCliPath, cmdScript, { mode: 0o755 }),
+      writeFile(powershellCliPath, powershellScript, { mode: 0o755 }),
+    ]);
+    this.withMariRuntimeEnv(process.env, binDir);
+    if (!existsSync(posixCliPath) || !existsSync(cmdCliPath) || !existsSync(powershellCliPath)) {
+      logger.warn("[Professor Mari] failed to create one or more mari CLI shims at %s", binDir);
     }
-    if (!existsSync(cliPath)) logger.warn("[Professor Mari] failed to create mari CLI shim at %s", cliPath);
+    return binDir;
   }
 }
 
