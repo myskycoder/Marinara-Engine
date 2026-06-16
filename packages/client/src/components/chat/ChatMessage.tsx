@@ -1852,7 +1852,7 @@ export const ChatMessage = memo(function ChatMessage({
             {/* Message bubble */}
             <div
               className={cn(
-                "mari-message-bubble relative overflow-hidden rounded-2xl shadow-lg shadow-black/20",
+                "mari-message-bubble mari-rp-bubble relative overflow-hidden rounded-2xl shadow-lg shadow-black/20",
                 isUser
                   ? "rounded-tr-sm text-neutral-100 ring-1 ring-white/10"
                   : "rounded-tl-sm text-white/90 ring-1 ring-white/8",
@@ -1862,10 +1862,15 @@ export const ChatMessage = memo(function ChatMessage({
                 isHiddenFromAI && "ring-amber-300/35 saturate-75",
                 editing && "w-full",
               )}
-              style={{
-                ...messageTextStyle,
-                backgroundColor: roleplayBubbleBg,
-              }}
+              style={
+                {
+                  ...messageTextStyle,
+                  // Pass the per-character/default color as a var rather than
+                  // an inline `background` so card CSS can override the bubble
+                  // (inline styles beat every selector). Applied by `.mari-rp-bubble`.
+                  "--mari-rp-bubble-bg": roleplayBubbleBg,
+                } as React.CSSProperties
+              }
             >
               {showRoleplayAvatarPanel ? (
                 <div className={cn("flex min-h-full items-stretch", isUser && "flex-row-reverse")}>

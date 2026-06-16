@@ -1972,6 +1972,14 @@ summary[class*="cursor-pointer"],
   border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
 }
 
+/* Roleplay message bubble background. Applied here (via a class + the
+   `--mari-rp-bubble-bg` variable the bubble sets) instead of inline, so card
+   CSS (`.mari-card-css .mari-message-bubble { background: … }`) can override it
+   — an inline background would otherwise beat every card selector. */
+.mari-rp-bubble {
+  background-color: var(--mari-rp-bubble-bg);
+}
+
 /* ─────────────────────────────────────────────
    15. CHAT: ROLEPLAY MODE
    ───────────────────────────────────────────── */
