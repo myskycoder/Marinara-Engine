@@ -4,6 +4,10 @@ This file is the release-notes source of truth for Marinara Engine. Reuse these 
 
 ## [Unreleased]
 
+### Added
+
+- Added tracker field locks for editable Roleplay HUD and Tracker Panel fields so manually pinned tracker values survive generated game-state updates.
+
 ### Changed
 
 - Moved AI-assisted character, persona, lorebook, preset creation, and preset review workflows to Professor Mari.
