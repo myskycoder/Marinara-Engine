@@ -9,8 +9,6 @@ interface ChatGalleryDrawerProps {
   chat: Chat;
   open: boolean;
   onClose: () => void;
-  /** Manually trigger the Illustrator agent */
-  onIllustrate?: () => void;
   /** Game mode: request one extra VN scene illustration from current narration via SFW image model (+1 SFW, first-person POV) */
   onManualImpactSfw?: () => void;
   /** Game mode: request one extra VN scene illustration from current narration via NSFW image model (+1 NSFW, first-person POV) */
@@ -21,18 +19,20 @@ interface ChatGalleryDrawerProps {
   onManualImpactSceneNsfw?: () => void;
   /** Game mode: remove CG illustration plate and restore location background */
   onClearCgPlate?: () => void;
+  /** Current game artStylePrompt from setup. */
+  gameArtStylePrompt?: string | null;
 }
 
 export function ChatGalleryDrawer({
   chat,
   open,
   onClose,
-  onIllustrate,
   onManualImpactSfw,
   onManualImpactNsfw,
   onManualImpactSceneSfw,
   onManualImpactSceneNsfw,
   onClearCgPlate,
+  gameArtStylePrompt,
 }: ChatGalleryDrawerProps) {
   if (!open) return null;
 
@@ -59,12 +59,12 @@ export function ChatGalleryDrawer({
         <div className="flex-1 overflow-y-auto">
           <ChatGallery
             chatId={chat.id}
-            onIllustrate={onIllustrate}
             onManualImpactSfw={onManualImpactSfw}
             onManualImpactNsfw={onManualImpactNsfw}
             onManualImpactSceneSfw={onManualImpactSceneSfw}
             onManualImpactSceneNsfw={onManualImpactSceneNsfw}
             onClearCgPlate={onClearCgPlate}
+            gameArtStylePrompt={gameArtStylePrompt}
           />
         </div>
       </div>

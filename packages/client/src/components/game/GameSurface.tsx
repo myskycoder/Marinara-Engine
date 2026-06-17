@@ -8,6 +8,7 @@ import { useGameModeStore } from "../../stores/game-mode.store";
 import { useGameAssetStore } from "../../stores/game-asset.store";
 import { useChatStore } from "../../stores/chat.store";
 import { useUIStore } from "../../stores/ui.store";
+import { useGalleryStore } from "../../stores/gallery.store";
 import { useGameStateStore } from "../../stores/game-state.store";
 import {
   useSyncGameState,
@@ -173,6 +174,12 @@ type GameAssetGenerationPayload = {
   illustrationConnectionId?: string;
   /** Bypass the per-message manual illustration cooldown (e.g. for explicit "+1" gallery requests). */
   skipIllustrationCooldown?: boolean;
+  /** Gallery manual illustration: attach character/background reference images. */
+  illustrationIncludeImageReference?: boolean;
+  /** Gallery manual illustration: ComfyUI workflow steps override. */
+  illustrationComfySteps?: 4 | 8 | 12 | 18 | 28;
+  /** Gallery manual illustration: art style preset override. */
+  illustrationStylePreset?: import("@marinara-engine/shared").GalleryIllustrationStylePresetId;
   debugMode?: boolean;
   imageSizes?: {
     background?: { width: number; height: number };
@@ -4984,11 +4991,15 @@ export function GameSurface({
             : "Player requested extra illustration (+1) from gallery";
 
       const slug = `manual-${pov === "scene" ? "full" : "fp"}-${variant}-${Date.now().toString(36)}`;
+      const { includeImageReference, comfySteps, stylePreset } = useGalleryStore.getState();
 
       const res = await requestAssetGeneration(
         {
           chatId: activeChatId,
           skipIllustrationCooldown: true,
+          illustrationIncludeImageReference: includeImageReference,
+          illustrationComfySteps: comfySteps,
+          illustrationStylePreset: stylePreset,
           illustrationConnectionId: chosenConn,
           locationId: locId,
           conditions: {
@@ -9773,7 +9784,13 @@ export function GameSurface({
                 chat={chat}
                 open={galleryOpen}
                 onClose={() => setGalleryOpen(false)}
-                onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
+                gameArtStylePrompt={
+                  (
+                    (chatMeta.gameSetupConfig as Record<string, unknown> | undefined)?.artStylePrompt as
+                      | string
+                      | undefined
+                  )?.trim() || null
+                }
                 onManualImpactSfw={() => requestManualExtraIllustration("sfw", "first-person")}
                 onManualImpactNsfw={() => requestManualExtraIllustration("nsfw", "first-person")}
                 onManualImpactSceneSfw={() => requestManualExtraIllustration("sfw", "scene")}

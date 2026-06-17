@@ -1748,7 +1748,6 @@ export function ChatArea() {
             onCloseFiles={() => setFilesOpen(false)}
             onCloseGallery={() => setGalleryOpen(false)}
             onCloseSceneJournal={() => {}}
-            onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
             onWizardFinish={() => {
               setWizardOpen(false);
               setSettingsOpen(true);
@@ -1824,7 +1823,6 @@ export function ChatArea() {
             onCloseFiles={() => setFilesOpen(false)}
             onCloseGallery={() => setGalleryOpen(false)}
             onCloseSceneJournal={() => setSceneJournalOpen(false)}
-            onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
             onPaintScene={() => retryAgents(activeChatId, ["scene-painter"])}
             onWizardFinish={() => {
               setWizardOpen(false);
@@ -1945,7 +1943,6 @@ export function ChatArea() {
           onCloseFiles={() => setFilesOpen(false)}
           onCloseGallery={() => setGalleryOpen(false)}
           onCloseSceneJournal={() => setSceneJournalOpen(false)}
-          onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
           onPaintScene={() => retryAgents(activeChatId, ["scene-painter"])}
           onWizardFinish={() => {
             setWizardOpen(false);

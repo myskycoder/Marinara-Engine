@@ -128,6 +128,7 @@ import type {
   Season,
   PendingBackgroundGeneration,
   HudWidget,
+  ImageGenerationDefaultsProfile,
 } from "@marinara-engine/shared";
 import type { IllustrationCooldownInput } from "@marinara-engine/shared";
 import {
@@ -137,6 +138,8 @@ import {
   isGameCgAutoEnabled,
   GAME_ILLUSTRATION_DRAFT_MAX,
   GAME_ILLUSTRATION_NARRATION_EXCERPT_MAX,
+  resolveGalleryIllustrationArtStyle,
+  type GalleryIllustrationStylePresetId,
 } from "@marinara-engine/shared";
 import { getAssetManifest, GAME_ASSETS_DIR } from "../services/game/asset-manifest.service.js";
 import {
@@ -574,6 +577,62 @@ function collectIllustrationCharacterAssets(opts: {
     characterNamesForRewriter: characterNamesForRewriter,
     characterDescriptionsForRewriter: characterDescriptionsForRewriter.slice(0, 8),
   };
+}
+
+type IllustrationGalleryOverrideInput = {
+  illustrationIncludeImageReference?: boolean;
+  illustrationComfySteps?: number;
+  illustrationStylePreset?: GalleryIllustrationStylePresetId;
+};
+
+function resolveIllustrationArtStyleForRequest(
+  setupArtStyle: string,
+  preset?: GalleryIllustrationStylePresetId,
+): string {
+  return resolveGalleryIllustrationArtStyle(setupArtStyle, preset);
+}
+
+function resolveIllustrationReferenceCollectionOpts(
+  input: IllustrationGalleryOverrideInput & {
+    comfyWorkflow?: string | null;
+    comfyWorkflowWithReference?: string | null;
+  },
+): { includeBackgroundReference: boolean; maxReferenceImages: number } {
+  const wantsRefs = input.illustrationIncludeImageReference !== false;
+  if (!wantsRefs) {
+    return { includeBackgroundReference: false, maxReferenceImages: 0 };
+  }
+  const expectsBgRef = comfyWorkflowExpectsBackgroundReference(
+    input.comfyWorkflowWithReference ?? input.comfyWorkflow,
+  );
+  return {
+    includeBackgroundReference: expectsBgRef,
+    maxReferenceImages: expectsBgRef ? 4 : 1,
+  };
+}
+
+function applyIllustrationGalleryOverrides(
+  assets: ReturnType<typeof collectIllustrationCharacterAssets>,
+  imgDefaults: ImageGenerationDefaultsProfile | null,
+  input: IllustrationGalleryOverrideInput,
+): {
+  referenceImages: string[];
+  imgDefaults: ImageGenerationDefaultsProfile | null;
+} {
+  const includeRefs = input.illustrationIncludeImageReference !== false;
+  const referenceImages = includeRefs ? assets.referenceImages : [];
+  let resolvedDefaults = imgDefaults;
+  if (
+    input.illustrationComfySteps != null &&
+    imgDefaults?.service === "comfyui" &&
+    imgDefaults.comfyui
+  ) {
+    resolvedDefaults = {
+      ...imgDefaults,
+      comfyui: { ...imgDefaults.comfyui, steps: input.illustrationComfySteps },
+    };
+  }
+  return { referenceImages, imgDefaults: resolvedDefaults };
 }
 
 function isIllustrationBgTag(tag: unknown): boolean {
@@ -7520,6 +7579,25 @@ export async function gameRoutes(app: FastifyInstance) {
     illustrationConnectionId: z.string().min(1).max(120).optional(),
     /** With `illustration`, bypass the automatic per-turn illustration cooldown (player-triggered). */
     skipIllustrationCooldown: z.boolean().optional(),
+    /** Gallery manual illustration: attach character/background reference images. */
+    illustrationIncludeImageReference: z.boolean().optional(),
+    /** Gallery manual illustration: ComfyUI workflow steps override. */
+    illustrationComfySteps: z.union([
+      z.literal(4),
+      z.literal(8),
+      z.literal(12),
+      z.literal(18),
+      z.literal(28),
+    ]).optional(),
+    /** Gallery manual illustration: art style preset override. */
+    illustrationStylePreset: z.enum([
+      "game",
+      "vn-cel",
+      "cinematic",
+      "painterly",
+      "noir",
+      "retro-90s",
+    ]).optional(),
     imageSizes: imageSizesSchema,
     promptOverrides: imagePromptOverrideSchema,
     debugMode: z.boolean().optional().default(false),
@@ -7658,6 +7736,11 @@ export async function gameRoutes(app: FastifyInstance) {
           chat,
           meta,
         );
+        const previewReferenceOpts = resolveIllustrationReferenceCollectionOpts({
+          illustrationIncludeImageReference: input.illustrationIncludeImageReference,
+          comfyWorkflow: illImgComfyWorkflow,
+          comfyWorkflowWithReference: illImgComfyWorkflowWithReference,
+        });
         const illustrationAssets = collectIllustrationCharacterAssets({
           illustration,
           characterNames: illustration.characters ?? [],
@@ -7668,16 +7751,16 @@ export async function gameRoutes(app: FastifyInstance) {
           charAvatarByName,
           charDescriptionByName,
           backgroundTag: (meta.gameSceneBackground as string) ?? null,
-          includeBackgroundReference: comfyWorkflowExpectsBackgroundReference(
-            illImgComfyWorkflowWithReference ?? illImgComfyWorkflow,
-          ),
-          maxReferenceImages: comfyWorkflowExpectsBackgroundReference(
-            illImgComfyWorkflowWithReference ?? illImgComfyWorkflow,
-          )
-            ? 4
-            : 1,
+          includeBackgroundReference: previewReferenceOpts.includeBackgroundReference,
+          maxReferenceImages: previewReferenceOpts.maxReferenceImages,
           playerProtagonist: illustrationPlayerProtagonist,
         });
+        const previewIllustrationOverrides = applyIllustrationGalleryOverrides(
+          illustrationAssets,
+          illImgDefaults,
+          input,
+        );
+        const illustrationArtStyle = resolveIllustrationArtStyleForRequest(artStyle, input.illustrationStylePreset);
         const prompt = await buildSceneIllustrationImagePrompt({
           chatId: input.chatId,
           prompt: illustration.prompt,
@@ -7687,9 +7770,9 @@ export async function gameRoutes(app: FastifyInstance) {
           slug: illustration.slug,
           genre,
           setting,
-          artStyle,
+          artStyle: illustrationArtStyle,
           imagePromptInstructions,
-          referenceImages: illustrationAssets.referenceImages,
+          referenceImages: previewIllustrationOverrides.referenceImages,
           imgSource: illImgSource,
           imgModel: illImgModel,
           imgBaseUrl: illImgBaseUrl,
@@ -7698,7 +7781,7 @@ export async function gameRoutes(app: FastifyInstance) {
           imgEndpointId,
           imgComfyWorkflow: illImgComfyWorkflow,
           imgComfyWorkflowWithReference: illImgComfyWorkflowWithReference,
-          imgDefaults: illImgDefaults,
+          imgDefaults: previewIllustrationOverrides.imgDefaults,
           promptOverridesStorage,
           size: backgroundSize,
         });
@@ -8362,6 +8445,11 @@ export async function gameRoutes(app: FastifyInstance) {
         const metaLoc = (meta.currentLocationId as string) ?? null;
         const npcReferenceByName = buildGameNpcReferenceByName(input.chatId, (meta.gameNpcs as GameNpc[]) ?? []);
         const illustrationPlayerProtagonist = await resolveIllustrationPlayerProtagonist(charStore, chat, meta);
+        const illustrationReferenceOpts = resolveIllustrationReferenceCollectionOpts({
+          illustrationIncludeImageReference: input.illustrationIncludeImageReference,
+          comfyWorkflow: illImgComfyWorkflow,
+          comfyWorkflowWithReference: illImgComfyWorkflowWithReference,
+        });
         const illustrationAssets = collectIllustrationCharacterAssets({
           illustration,
           characterNames: characterNamesForIll,
@@ -8372,14 +8460,8 @@ export async function gameRoutes(app: FastifyInstance) {
           charAvatarByName,
           charDescriptionByName,
           backgroundTag: metaBg,
-          includeBackgroundReference: comfyWorkflowExpectsBackgroundReference(
-            illImgComfyWorkflowWithReference ?? illImgComfyWorkflow,
-          ),
-          maxReferenceImages: comfyWorkflowExpectsBackgroundReference(
-            illImgComfyWorkflowWithReference ?? illImgComfyWorkflow,
-          )
-            ? 4
-            : 1,
+          includeBackgroundReference: illustrationReferenceOpts.includeBackgroundReference,
+          maxReferenceImages: illustrationReferenceOpts.maxReferenceImages,
           playerProtagonist: illustrationPlayerProtagonist,
         });
         const illustrationSeasonGen = input.conditions?.season ?? coerceSeason(meta.gameCurrentSeason);
@@ -8427,6 +8509,7 @@ export async function gameRoutes(app: FastifyInstance) {
               typeof meta.gameImageConnectionIdNsfw === "string" ? meta.gameImageConnectionIdNsfw : null,
             reason: illustration.reason ?? null,
           });
+          const illustrationArtStyle = resolveIllustrationArtStyleForRequest(artStyle, input.illustrationStylePreset);
           const rewritten = await rewriteIllustrationPrompt({
             app,
             chatId: input.chatId,
@@ -8438,7 +8521,7 @@ export async function gameRoutes(app: FastifyInstance) {
             reason: illustration.reason ?? null,
             genre,
             setting,
-            artStyle,
+            artStyle: illustrationArtStyle,
             imagePromptInstructions,
             rating: rewriterRating,
             imageConn: {
@@ -8462,6 +8545,12 @@ export async function gameRoutes(app: FastifyInstance) {
             );
           }
         }
+        const illustrationGenerationOverrides = applyIllustrationGalleryOverrides(
+          illustrationAssets,
+          illImgDefaults,
+          input,
+        );
+        const illustrationArtStyle = resolveIllustrationArtStyleForRequest(artStyle, input.illustrationStylePreset);
         const tag = await generateSceneIllustration({
           chatId: input.chatId,
           prompt: illustration.prompt,
@@ -8472,9 +8561,9 @@ export async function gameRoutes(app: FastifyInstance) {
           slug: illustration.slug,
           genre,
           setting,
-          artStyle,
+          artStyle: illustrationArtStyle,
           imagePromptInstructions,
-          referenceImages: illustrationAssets.referenceImages,
+          referenceImages: illustrationGenerationOverrides.referenceImages,
           imgSource: illImgSource,
           imgModel: illImgModel,
           imgBaseUrl: illImgBaseUrl,
@@ -8483,7 +8572,7 @@ export async function gameRoutes(app: FastifyInstance) {
           imgEndpointId,
           imgComfyWorkflow: illImgComfyWorkflow,
           imgComfyWorkflowWithReference: illImgComfyWorkflowWithReference,
-          imgDefaults: illImgDefaults,
+          imgDefaults: illustrationGenerationOverrides.imgDefaults,
           debugLog: debugLogsEnabled ? debugLog : undefined,
           promptOverridesStorage,
           size: backgroundSize,

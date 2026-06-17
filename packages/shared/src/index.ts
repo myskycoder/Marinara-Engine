@@ -50,6 +50,7 @@ export * from "./constants/image-generation-defaults.js";
 export * from "./constants/image-model-families.js";
 export * from "./constants/security.js";
 export * from "./constants/game-assets.js";
+export * from "./constants/gallery-illustration-styles.js";
 
 // Game helpers
 export * from "./game/cg-frequency.js";

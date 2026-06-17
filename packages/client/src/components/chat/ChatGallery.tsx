@@ -2,20 +2,26 @@
 // Chat Gallery — Image grid for per-chat generated images
 // ──────────────────────────────────────────────
 import { useState, useRef } from "react";
-import { ImagePlus, Paintbrush, Trash2, X, ZoomIn, Download, Sparkles, Pin, Minimize2, ImageOff } from "lucide-react";
+import { ImagePlus, Trash2, X, ZoomIn, Download, Sparkles, Pin, Minimize2, ImageOff } from "lucide-react";
 import {
   useGalleryImages,
   useUploadGalleryImage,
   useDeleteGalleryImage,
   type ChatImage,
 } from "../../hooks/use-gallery";
-import { useGalleryStore } from "../../stores/gallery.store";
+import {
+  GALLERY_ILLUSTRATION_STYLE_PRESET_IDS,
+  type GalleryIllustrationStylePresetId,
+} from "@marinara-engine/shared";
+import {
+  GALLERY_COMFY_STEP_OPTIONS,
+  useGalleryStore,
+  type GalleryComfySteps,
+} from "../../stores/gallery.store";
 import { ImagePromptPanel } from "./ImagePromptPanel";
 
 interface ChatGalleryProps {
   chatId: string;
-  /** Manually trigger the Illustrator agent */
-  onIllustrate?: () => void;
   /** Game mode: запросить ещё одну CG-иллюстрацию (вид от первого лица) через SFW image-модель */
   onManualImpactSfw?: () => void;
   /** Game mode: запросить ещё одну CG-иллюстрацию (вид от первого лица) через NSFW image-модель */
@@ -26,7 +32,18 @@ interface ChatGalleryProps {
   onManualImpactSceneNsfw?: () => void;
   /** Game mode: снять CG-подложку и вернуть фон локации */
   onClearCgPlate?: () => void;
+  /** Current game artStylePrompt from setup — shown as the default style baseline. */
+  gameArtStylePrompt?: string | null;
 }
+
+const GALLERY_STYLE_PRESET_LABELS: Record<GalleryIllustrationStylePresetId, string> = {
+  game: "Как в игре",
+  "vn-cel": "VN Cel",
+  cinematic: "Cinematic",
+  painterly: "Painterly",
+  noir: "Noir",
+  "retro-90s": "Retro 90s",
+};
 
 function formatImageMeta(image: ChatImage) {
   const details: string[] = [];
@@ -38,12 +55,12 @@ function formatImageMeta(image: ChatImage) {
 
 export function ChatGallery({
   chatId,
-  onIllustrate,
   onManualImpactSfw,
   onManualImpactNsfw,
   onManualImpactSceneSfw,
   onManualImpactSceneNsfw,
   onClearCgPlate,
+  gameArtStylePrompt,
 }: ChatGalleryProps) {
   const { data: images, isLoading } = useGalleryImages(chatId);
   const upload = useUploadGalleryImage(chatId);
@@ -52,6 +69,19 @@ export function ChatGallery({
   const [lightbox, setLightbox] = useState<ChatImage | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const pinImage = useGalleryStore((s) => s.pinImage);
+  const includeImageReference = useGalleryStore((s) => s.includeImageReference);
+  const comfySteps = useGalleryStore((s) => s.comfySteps);
+  const stylePreset = useGalleryStore((s) => s.stylePreset);
+  const setIncludeImageReference = useGalleryStore((s) => s.setIncludeImageReference);
+  const setComfySteps = useGalleryStore((s) => s.setComfySteps);
+  const setStylePreset = useGalleryStore((s) => s.setStylePreset);
+  const currentGameArtStyle = gameArtStylePrompt?.trim() ?? "";
+  const hasGameGenerationControls =
+    onManualImpactSfw ||
+    onManualImpactNsfw ||
+    onManualImpactSceneSfw ||
+    onManualImpactSceneNsfw ||
+    onClearCgPlate;
   const lightboxPrompt = lightbox?.prompt.trim() ?? "";
   const lightboxMeta = lightbox ? formatImageMeta(lightbox) : "";
 
@@ -74,23 +104,9 @@ export function ChatGallery({
 
   return (
     <div className="flex flex-col gap-3 p-4">
-      {(onIllustrate ||
-        onManualImpactSfw ||
-        onManualImpactNsfw ||
-        onManualImpactSceneSfw ||
-        onManualImpactSceneNsfw ||
-        onClearCgPlate) && (
-        <div className="flex flex-wrap gap-2">
-          {onIllustrate && (
-            <button
-              type="button"
-              onClick={onIllustrate}
-              className="flex min-h-[2.75rem] flex-1 min-w-[6rem] items-center justify-center gap-2 rounded-xl bg-[var(--primary)]/15 px-3 py-3 text-xs font-medium text-[var(--primary)] transition-all hover:bg-[var(--primary)]/25"
-            >
-              <Paintbrush size="1rem" />
-              Illustrate
-            </button>
-          )}
+      {hasGameGenerationControls && (
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap gap-2">
           {onManualImpactSfw && (
             <button
               type="button"
@@ -141,6 +157,64 @@ export function ChatGallery({
             >
               <ImageOff size="1rem" />
             </button>
+          )}
+          </div>
+          {(onManualImpactSfw ||
+            onManualImpactNsfw ||
+            onManualImpactSceneSfw ||
+            onManualImpactSceneNsfw) && (
+            <div className="flex flex-col gap-2 rounded-xl border border-[var(--border)] bg-[var(--muted)]/5 px-3 py-2.5">
+              <div className="flex flex-col gap-1">
+                <span className="text-[0.625rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                  Стиль игры
+                </span>
+                <p
+                  className="line-clamp-2 text-xs text-[var(--foreground)]"
+                  title={currentGameArtStyle || undefined}
+                >
+                  {currentGameArtStyle || "Стиль игры не задан"}
+                </p>
+              </div>
+              <label className="flex min-h-[2.25rem] flex-col gap-1 text-xs text-[var(--foreground)] sm:flex-row sm:items-center sm:gap-2">
+                <span className="shrink-0 text-[var(--muted-foreground)]">Art style</span>
+                <select
+                  value={stylePreset}
+                  onChange={(e) => setStylePreset(e.target.value as GalleryIllustrationStylePresetId)}
+                  className="w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-2 py-1 text-xs text-[var(--foreground)] sm:min-w-[8rem] sm:flex-1"
+                >
+                  {GALLERY_ILLUSTRATION_STYLE_PRESET_IDS.map((presetId) => (
+                    <option key={presetId} value={presetId}>
+                      {GALLERY_STYLE_PRESET_LABELS[presetId]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+              <label className="flex min-h-[2.25rem] cursor-pointer items-center gap-2 text-xs text-[var(--foreground)]">
+                <input
+                  type="checkbox"
+                  checked={includeImageReference}
+                  onChange={(e) => setIncludeImageReference(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-[var(--border)] accent-[var(--primary)]"
+                />
+                Отправлять image reference
+              </label>
+              <label className="flex min-h-[2.25rem] items-center gap-2 text-xs text-[var(--foreground)]">
+                <span className="text-[var(--muted-foreground)]">Steps</span>
+                <select
+                  value={comfySteps}
+                  onChange={(e) => setComfySteps(Number(e.target.value) as GalleryComfySteps)}
+                  className="rounded-lg border border-[var(--border)] bg-[var(--background)] px-2 py-1 text-xs tabular-nums text-[var(--foreground)]"
+                >
+                  {GALLERY_COMFY_STEP_OPTIONS.map((steps) => (
+                    <option key={steps} value={steps}>
+                      {steps}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              </div>
+            </div>
           )}
         </div>
       )}

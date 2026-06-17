@@ -591,7 +591,6 @@ type RoleplaySurfaceProps = {
   onCloseFiles: () => void;
   onCloseGallery: () => void;
   onCloseSceneJournal: () => void;
-  onIllustrate?: () => void;
   onPaintScene?: () => void;
   onWizardFinish: () => void;
   onClosePeekPrompt: () => void;
@@ -694,7 +693,6 @@ export function ChatRoleplaySurface({
   onCloseFiles,
   onCloseGallery,
   onCloseSceneJournal,
-  onIllustrate,
   onPaintScene,
   onWizardFinish,
   onClosePeekPrompt,
@@ -1232,7 +1230,6 @@ export function ChatRoleplaySurface({
         onCloseFiles={onCloseFiles}
         onCloseGallery={onCloseGallery}
         onCloseSceneJournal={onCloseSceneJournal}
-        onIllustrate={onIllustrate}
         onPaintScene={onPaintScene}
         onWizardFinish={onWizardFinish}
         onClosePeekPrompt={onClosePeekPrompt}

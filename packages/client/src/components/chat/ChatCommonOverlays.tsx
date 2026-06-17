@@ -197,8 +197,6 @@ type ChatCommonOverlaysProps = {
   onCloseFiles: () => void;
   onCloseGallery: () => void;
   onCloseSceneJournal: () => void;
-  /** Manually trigger the Illustrator agent */
-  onIllustrate?: () => void;
   /** Game mode: extra scene illustration from gallery via SFW image model (+1 SFW, first-person POV) */
   onManualImpactSfw?: () => void;
   /** Game mode: extra scene illustration from gallery via NSFW image model (+1 NSFW, first-person POV) */
@@ -244,7 +242,6 @@ export function ChatCommonOverlays({
   onCloseFiles,
   onCloseGallery,
   onCloseSceneJournal,
-  onIllustrate,
   onManualImpactSfw,
   onManualImpactNsfw,
   onManualImpactSceneSfw,
@@ -292,7 +289,6 @@ export function ChatCommonOverlays({
               chat={chat}
               open={galleryOpen}
               onClose={onCloseGallery}
-              onIllustrate={onIllustrate}
               onManualImpactSfw={onManualImpactSfw}
               onManualImpactNsfw={onManualImpactNsfw}
               onManualImpactSceneSfw={onManualImpactSceneSfw}
