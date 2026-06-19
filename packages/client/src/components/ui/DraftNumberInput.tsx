@@ -8,6 +8,7 @@ interface DraftNumberInputProps {
   max?: number;
   integer?: boolean;
   selectOnFocus?: boolean;
+  commitOnValidChange?: boolean;
 }
 
 export function DraftNumberInput({
@@ -18,6 +19,7 @@ export function DraftNumberInput({
   max,
   integer = true,
   selectOnFocus = false,
+  commitOnValidChange = false,
 }: DraftNumberInputProps) {
   const [draft, setDraft] = useState(String(value));
 
@@ -25,12 +27,21 @@ export function DraftNumberInput({
     setDraft(String(value));
   }, [value]);
 
-  const commit = () => {
-    const parsed = integer ? parseInt(draft, 10) : parseFloat(draft);
-    const inRange =
-      !Number.isNaN(parsed) && (min === undefined || parsed >= min) && (max === undefined || parsed <= max);
+  const parseDraft = (raw: string) => {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
 
-    if (inRange) {
+    const parsed = Number(trimmed);
+    const validNumber = Number.isFinite(parsed) && (!integer || Number.isInteger(parsed));
+    const inRange = validNumber && (min === undefined || parsed >= min) && (max === undefined || parsed <= max);
+
+    return inRange ? parsed : null;
+  };
+
+  const commit = () => {
+    const parsed = parseDraft(draft);
+
+    if (parsed !== null) {
       onCommit(parsed);
       setDraft(String(parsed));
       return;
@@ -47,7 +58,14 @@ export function DraftNumberInput({
       onFocus={(e) => {
         if (selectOnFocus) e.target.select();
       }}
-      onChange={(e) => setDraft(e.target.value)}
+      onChange={(e) => {
+        const nextDraft = e.target.value;
+        setDraft(nextDraft);
+        if (commitOnValidChange) {
+          const parsed = parseDraft(nextDraft);
+          if (parsed !== null) onCommit(parsed);
+        }
+      }}
       onBlur={commit}
       onKeyDown={(e) => {
         if (e.key === "Enter") {

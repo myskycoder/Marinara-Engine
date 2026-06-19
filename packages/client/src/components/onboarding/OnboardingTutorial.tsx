@@ -2,16 +2,22 @@
 // Onboarding Tutorial — first-time guided tour
 // ──────────────────────────────────────────────
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useUIStore } from "../../stores/ui.store";
-import { useChatStore } from "../../stores/chat.store";
-import { useSidecarStore } from "../../stores/sidecar.store";
-import { useCreateChat } from "../../hooks/use-chats";
+import { useUIStore, type ChatModeShortcut } from "../../stores/ui.store";
+import { useTrackAchievement } from "../../hooks/use-achievements";
 import { motion, AnimatePresence } from "framer-motion";
-import { ChevronRight, ArrowRightLeft } from "lucide-react";
-import { PROFESSOR_MARI_ID, DEFAULT_CONNECTION_ID } from "@marinara-engine/shared";
-import { api } from "../../lib/api-client";
+import { ChevronRight } from "lucide-react";
 
 // ─── Step definitions ─────────────────────────
+
+type TourPanel =
+  | "bot-browser"
+  | "characters"
+  | "lorebooks"
+  | "presets"
+  | "connections"
+  | "agents"
+  | "personas"
+  | "settings";
 
 interface TourStep {
   /** data-tour attribute value of the element to highlight, or null for centered modal */
@@ -20,10 +26,14 @@ interface TourStep {
   body: string;
   /** Preferred side for the tooltip relative to the highlighted element */
   side?: "top" | "bottom" | "left" | "right";
-  /** If set, show a special action button with this label */
-  actionLabel?: string;
-  /** Key used internally to trigger special step actions */
-  actionKey?: string;
+  /** Right-side panel to open while this step is active */
+  openPanel?: TourPanel;
+  /** Chat sidebar mode tab to open while this step is active */
+  chatMode?: ChatModeShortcut;
+  /** Open the chat sidebar without changing its mode */
+  openSidebar?: boolean;
+  /** Optional settings tab to show when the Settings panel is open */
+  settingsTab?: string;
   /** Professor Mari sprite to display */
   sprite?: { src: string; flip?: boolean };
 }
@@ -32,68 +42,121 @@ const STEPS: TourStep[] = [
   {
     target: null,
     title: "Welcome to Marinara Engine!",
-    body: "Howdy! Here's a quick tutorial to show you around. Confident in your skill? Feel free to skip it!\n\n**Warning:** skipping the tutorial will make me cry.",
+    body: "Hi! I'm Professor Mari, and I will show you where the important pieces of Marinara live. This is a quick orientation tour, so you can skip it if you already know your way around.",
     sprite: { src: "/sprites/mari/Mari_wave.png" },
   },
   {
-    target: "sidebar-toggle",
-    title: "Chats Sidebar",
-    body: "This is where all your conversations live. Create new chats, search through them, and organize your history. You can have as many chats as you want!",
-    side: "right",
-    sprite: { src: "/sprites/mari/Mari_point_middle_left.png" },
-  },
-  {
-    target: "panel-buttons",
-    title: "Tab Buttons",
-    body: "These buttons (from left to right) open panels for:\n- **Browser:** browse for downloadable cards and more,\n- **Characters:** view and manage all your character cards,\n- **Lorebooks:** lorebooks with all the information you want,\n- **Presets:** section for prompts,\n- **Connections:** Set up your API connection here,\n- **Agents:** Think of them as extensions to your chats, each agent does something atop your main conversation, e.g., tracks details, creates images, etc.,\n- **Persona:** personas you play as,\n- **Settings:** settings for the entire application.\n\nCheck them all out!",
+    target: "panel-bot-browser",
+    title: "Browser",
+    body: "The Browser helps you discover and import downloadable cards and resources. Start here when you want new characters or ready-made material to bring into your library.",
     side: "bottom",
+    openPanel: "bot-browser",
     sprite: { src: "/sprites/mari/Mari_point_up_left.png", flip: true },
   },
   {
-    target: "chat-area",
-    title: "Chat Area",
-    body: "This is your main workspace, where you chat with AI characters, enjoy roleplay, and read generated stories. Messages appear here in real time.",
-    side: "left",
+    target: "panel-characters",
+    title: "Characters",
+    body: "Characters are the cards your chats speak as. Create them, edit their metadata and writing fields, organize them into folders, or import cards from other tools.",
+    side: "bottom",
+    openPanel: "characters",
+    sprite: { src: "/sprites/mari/Mari_point_up_left.png", flip: true },
+  },
+  {
+    target: "panel-lorebooks",
+    title: "Lorebooks",
+    body: "Lorebooks hold reusable world facts, memories, rules, locations, and character details. Entries trigger when their keys appear, giving the model extra context only when it matters.",
+    side: "bottom",
+    openPanel: "lorebooks",
+    sprite: { src: "/sprites/mari/Mari_point_up_left.png", flip: true },
+  },
+  {
+    target: "panel-presets",
+    title: "Presets",
+    body: "Presets control prompt structure. Use them to decide how instructions, history, lore, agents, and output rules are assembled before a model receives a request.",
+    side: "bottom",
+    openPanel: "presets",
+    sprite: { src: "/sprites/mari/Mari_point_up_left.png", flip: true },
+  },
+  {
+    target: "panel-connections",
+    title: "Connections",
+    body: "Connections are the first thing to set up before chatting. Add your provider, model, endpoint, and API key here so Marinara knows where to send generations.",
+    side: "bottom",
+    openPanel: "connections",
+    sprite: { src: "/sprites/mari/Mari_point_up_left.png", flip: true },
+  },
+  {
+    target: "panel-agents",
+    title: "Agents",
+    body: "Agents add optional abilities on top of chats. They can track state, retrieve knowledge, process messages, trigger images, guide story events, and more depending on what you enable.",
+    side: "bottom",
+    openPanel: "agents",
+    sprite: { src: "/sprites/mari/Mari_point_up_left.png", flip: true },
+  },
+  {
+    target: "panel-personas",
+    title: "Personas",
+    body: "Personas define who you are in a chat. Give yourself a name, avatar, description, scenario details, and metadata so characters know who they are speaking to.",
+    side: "bottom",
+    openPanel: "personas",
+    sprite: { src: "/sprites/mari/Mari_point_up_left.png", flip: true },
+  },
+  {
+    target: "panel-settings",
+    title: "Settings",
+    body: "Settings control the whole app: appearance, behavior, imports, themes, image defaults, notifications, extensions, data tools, and other global preferences.",
+    side: "bottom",
+    openPanel: "settings",
+    settingsTab: "general",
+    sprite: { src: "/sprites/mari/Mari_point_up_left.png", flip: true },
+  },
+  {
+    target: "sidebar-toggle",
+    title: "Chats",
+    body: "Now let's open the Chats tab. This is where your Conversations, Roleplays, and Games live, with folders, search, sorting, and branch-aware chat lists.",
+    side: "right",
+    openSidebar: true,
     sprite: { src: "/sprites/mari/Mari_point_middle_left.png" },
   },
   {
-    target: null,
-    title: "Three Ways to Chat",
-    body: "Marinara Engine has three chat modes:\n\n**Conversation:** Like Discord DMs. Casual texting, character schedules, statuses, and autonomous messaging. Great for slice-of-life and hanging out.\n\n**Roleplay:** Creative writing and storytelling. Rich narration, AI agents that handle tracking, narrative, and more. Perfect for adventures and immersive stories.\n\n**Game:** An RPG-flavored visual novel layer on top of your story, directed by an AI Game Master. Visual effects, tactical combat, party management, a developed plot line, and more. The most immersive experience out of all the available ones.\n\nUpon selecting any of these options, you will be presented with a setup wizard, so don't worry about anything, we'll guide you through the process step by step!",
-    sprite: { src: "/sprites/mari/Mari_explaining.png" },
+    target: "chat-mode-conversation",
+    title: "Conversation Mode",
+    body: "Conversation mode feels like private DMs. Use it for casual character chats, statuses, schedules, autonomous messages, commands, selfies, and quick back-and-forth texting.",
+    side: "right",
+    chatMode: "conversation",
+    sprite: { src: "/sprites/mari/Mari_point_middle_left.png" },
   },
   {
-    target: null,
-    title: "Meet Professor Mari!",
-    body: "That's me! I'm your built-in assistant. I come pre-installed and I'm always here to help. You can message me anytime to ask questions about the app, and I can even **do things for you:** like create characters, personas, start new chats, and navigate the app.\n\n**Heads up:** when you ask me to update or edit a character or persona, I write directly to your library. Character edits keep a recoverable version snapshot you can roll back to from that character's history, but **persona edits overwrite without a snapshot — back up the persona first** if you want to keep the old version.\n\nI've set up a chat with me in the Chats sidebar already. Feel free to ask me anything after the tour!",
-    sprite: { src: "/sprites/mari/Mari_greet.png" },
+    target: "chat-mode-roleplay",
+    title: "Roleplay Mode",
+    body: "Roleplay mode is for co-writing scenes and immersive stories. It supports richer narration, lorebooks, branches, summaries, author's notes, trackers, agents, galleries, and roleplay-focused controls.",
+    side: "right",
+    chatMode: "roleplay",
+    sprite: { src: "/sprites/mari/Mari_point_middle_left.png" },
   },
   {
-    target: null,
-    title: "Set Up a Connection",
-    body: "Before you start chatting, you'll need to connect an AI provider. Click the chain-link icon (🔗) in the top-right tab buttons, then add your API key for OpenAI, Anthropic, or another provider.",
-    sprite: { src: "/sprites/mari/Mari_explaining.png" },
+    target: "chat-mode-game",
+    title: "Game Mode",
+    body: "Game mode turns Marinara into an RPG-style adventure with an AI Game Master. Use it for party members, goals, maps, dice, session history, journals, combat, and custom HUD widgets.",
+    side: "right",
+    chatMode: "game",
+    sprite: { src: "/sprites/mari/Mari_point_middle_left.png" },
   },
   {
-    target: null,
-    title: "Optional: Local AI Model",
-    body: "If you want Marinara to run a helper model on your own device, open the Connections panel and use the Local Model card. From there you can open Local AI Model settings, install the runtime for your machine, and then choose a curated Gemma preset or your own local model.",
-    actionLabel: "Open Local Model",
-    actionKey: "local-model",
-    sprite: { src: "/sprites/mari/Mari_thinking.png" },
-  },
-  {
-    target: null,
+    target: "panel-settings",
     title: "Migrating from SillyTavern?",
-    body: "If you have characters, chats, or presets from SillyTavern, you can import them all in one go from the Settings panel.",
-    actionLabel: "Take Me There",
-    actionKey: "migrate",
+    body: "If you have characters, chats, or presets from SillyTavern, open Settings and use the Import tab. Marinara can bring those files in so you do not have to rebuild your library by hand.",
+    side: "bottom",
+    openPanel: "settings",
+    settingsTab: "import",
     sprite: { src: "/sprites/mari/Mari_thinking.png" },
   },
   {
-    target: null,
+    target: "panel-connections",
     title: "You're All Set!",
-    body: "Look for the (?) icons throughout the app. Hover over them at any time to learn what each option does. Have fun exploring!\n\nAnd if you have any further questions, need help, or want to report a bug, feel free to join our Discord server! You can find the invite link on the home page.",
+    body: "Professor Mari is available from the Home page whenever you need help. For your first real step, set up a Connection so Marinara can talk to a model.\n\nThank you for trying Marinara Engine. Have fun, and please report bugs or rough edges through the ME Discord or GitHub so we can keep improving it.",
+    side: "bottom",
+    openPanel: "connections",
     sprite: { src: "/sprites/mari/Mari_greet.png" },
   },
 ];
@@ -243,14 +306,12 @@ function TourCardContent({
   isLast,
   onNext,
   onSkip,
-  onAction,
 }: {
   step: number;
   currentStep: TourStep;
   isLast: boolean;
   onNext: () => void;
   onSkip: () => void;
-  onAction?: (key: string) => void;
 }) {
   return (
     <>
@@ -306,17 +367,6 @@ function TourCardContent({
         ))}
       </div>
 
-      {/* Action button (e.g. migrate) */}
-      {currentStep.actionLabel && currentStep.actionKey && onAction && (
-        <button
-          onClick={() => onAction(currentStep.actionKey!)}
-          className="mb-3 flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--primary)]/30 bg-[var(--primary)]/10 px-4 py-2 text-xs font-medium text-[var(--primary)] transition-all hover:bg-[var(--primary)]/20 active:scale-[0.98]"
-        >
-          <ArrowRightLeft size="0.8125rem" />
-          {currentStep.actionLabel}
-        </button>
-      )}
-
       {/* Buttons */}
       <div className="flex items-center justify-between">
         <button
@@ -348,107 +398,41 @@ export function OnboardingTutorial() {
 function OnboardingTutorialInner() {
   const setCompleted = useUIStore((s) => s.setHasCompletedOnboarding);
   const openRightPanel = useUIStore((s) => s.openRightPanel);
+  const closeRightPanel = useUIStore((s) => s.closeRightPanel);
   const setSettingsTab = useUIStore((s) => s.setSettingsTab);
   const setSidebarOpen = useUIStore((s) => s.setSidebarOpen);
-  const setShowDownloadModal = useSidecarStore((s) => s.setShowDownloadModal);
-  const fetchSidecarStatus = useSidecarStore((s) => s.fetchStatus);
-
-  const createChat = useCreateChat();
+  const requestChatModeShortcut = useUIStore((s) => s.requestChatModeShortcut);
+  const trackAchievement = useTrackAchievement();
 
   const [step, setStep] = useState(0);
   const [targetRect, setTargetRect] = useState<Rect | null>(null);
   const rafRef = useRef<number>(0);
-  const mariChatIdRef = useRef<string | null>(null);
-  const prevStepRef = useRef(0);
-  const createChatRef = useRef(createChat);
-  createChatRef.current = createChat;
 
   const currentStep = STEPS[step];
   const isLast = step === STEPS.length - 1;
 
-  // Set activeChatId without persisting to localStorage (demo-only)
-  const setDemoChatActive = useCallback((id: string | null) => {
-    useChatStore.setState({
-      activeChatId: id,
-      swipeIndex: new Map(),
-      ...(!id && { activeChat: null }),
-    });
-  }, []);
-
   // ── Side-effects when step changes ──
   useEffect(() => {
-    const prev = prevStepRef.current;
-    prevStepRef.current = step;
+    if (currentStep.chatMode) {
+      closeRightPanel();
+      requestChatModeShortcut(currentStep.chatMode);
+      return;
+    }
 
-    // Step 1 (sidebar): open sidebar on enter
-    if (step === 1) {
+    if (currentStep.openSidebar) {
+      closeRightPanel();
       setSidebarOpen(true);
+      return;
     }
-    // Leaving step 1: close sidebar
-    if (prev === 1 && step !== 1) {
+
+    if (currentStep.openPanel) {
       setSidebarOpen(false);
-    }
-
-    // Step 3 (chat area): create persistent Assistant Chat with Mari
-    if (step === 3 && !mariChatIdRef.current) {
-      mariChatIdRef.current = "pending";
-      createChatRef.current
-        .mutateAsync({
-          name: "Assistant Chat With Mari",
-          mode: "conversation",
-          characterIds: [PROFESSOR_MARI_ID],
-          connectionId: DEFAULT_CONNECTION_ID,
-        })
-        .then(async (chat) => {
-          mariChatIdRef.current = chat.id;
-          // Disable autonomous messages, cross-chat awareness, and memory recall
-          // BEFORE activating the chat — otherwise ConversationView triggers schedule generation
-          try {
-            await api.patch(`/chats/${chat.id}/metadata`, {
-              autonomousMessages: false,
-              crossChatAwareness: false,
-              enableMemoryRecall: false,
-            });
-          } catch {
-            /* non-critical */
-          }
-          // Insert Mari's first message BEFORE activating the chat
-          // so the ConversationView picks it up on first render
-          try {
-            const char = await api.get<{ data: string }>(`/characters/${PROFESSOR_MARI_ID}`);
-            const charData = JSON.parse(char.data) as { first_mes?: string };
-            if (charData.first_mes) {
-              await api.post(`/chats/${chat.id}/messages`, {
-                role: "assistant",
-                characterId: PROFESSOR_MARI_ID,
-                content: charData.first_mes,
-              });
-            }
-          } catch {
-            /* non-critical */
-          }
-          // Now activate the chat — ConversationView will see the message + correct metadata
-          setDemoChatActive(chat.id);
-        })
-        .catch(() => {
-          mariChatIdRef.current = null;
-        });
-    }
-    // Leaving step 3: deselect chat (but keep it — it's persistent)
-    if (prev === 3 && step !== 3) {
-      setDemoChatActive(null);
-    }
-  }, [step, setSidebarOpen, setDemoChatActive]);
-
-  // Cleanup on unmount: deselect the Mari chat (but keep it — it's persistent)
-  useEffect(() => {
-    return () => {
-      if (mariChatIdRef.current && mariChatIdRef.current !== "pending") {
-        mariChatIdRef.current = null;
-        useChatStore.setState({ activeChatId: null, activeChat: null, swipeIndex: new Map() });
+      openRightPanel(currentStep.openPanel);
+      if (currentStep.settingsTab) {
+        setSettingsTab(currentStep.settingsTab);
       }
-    };
-  }, []);
+    }
+  }, [closeRightPanel, currentStep, openRightPanel, requestChatModeShortcut, setSettingsTab, setSidebarOpen]);
 
   // Track the target element position (handles resize/scroll)
   const lastRectRef = useRef<Rect | null>(null);
@@ -481,27 +465,10 @@ function OnboardingTutorialInner() {
     return () => cancelAnimationFrame(rafRef.current);
   }, [updateRect]);
 
-  const finish = useCallback(() => setCompleted(true), [setCompleted]);
-
-  const handleAction = useCallback(
-    (key: string) => {
-      if (key === "migrate") {
-        openRightPanel("settings");
-        setSettingsTab("import");
-        // Jump to last step instead of finishing
-        setStep(STEPS.length - 1);
-        return;
-      }
-
-      if (key === "local-model") {
-        openRightPanel("connections");
-        void fetchSidecarStatus();
-        setShowDownloadModal(true);
-        finish();
-      }
-    },
-    [fetchSidecarStatus, finish, openRightPanel, setSettingsTab, setShowDownloadModal],
-  );
+  const finish = useCallback(() => {
+    setCompleted(true);
+    trackAchievement.mutate("tutorial_completed");
+  }, [setCompleted, trackAchievement]);
 
   const next = useCallback(() => {
     if (isLast) {
@@ -542,14 +509,7 @@ function OnboardingTutorialInner() {
               className="pointer-events-auto rounded-2xl border border-[var(--border)] bg-[var(--popover)] p-5 shadow-2xl ring-1 ring-[var(--primary)]/20 max-h-[90vh] overflow-x-hidden overflow-y-auto"
               style={{ width: Math.min(380, window.innerWidth - 32) }}
             >
-              <TourCardContent
-                step={step}
-                currentStep={currentStep}
-                isLast={isLast}
-                onNext={next}
-                onSkip={finish}
-                onAction={handleAction}
-              />
+              <TourCardContent step={step} currentStep={currentStep} isLast={isLast} onNext={next} onSkip={finish} />
             </motion.div>
           </AnimatePresence>
         </div>
@@ -564,14 +524,7 @@ function OnboardingTutorialInner() {
             className="pointer-events-auto rounded-2xl border border-[var(--border)] bg-[var(--popover)] p-5 shadow-2xl ring-1 ring-[var(--primary)]/20"
             style={computeTooltipStyle(targetRect!, currentStep.side)}
           >
-            <TourCardContent
-              step={step}
-              currentStep={currentStep}
-              isLast={isLast}
-              onNext={next}
-              onSkip={finish}
-              onAction={handleAction}
-            />
+            <TourCardContent step={step} currentStep={currentStep} isLast={isLast} onNext={next} onSkip={finish} />
           </motion.div>
         </AnimatePresence>
       )}

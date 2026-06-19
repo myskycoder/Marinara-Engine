@@ -181,7 +181,7 @@ function isEnabledFlag(value: string | undefined | null) {
   return ["1", "true", "yes", "on"].includes((value ?? "").trim().toLowerCase());
 }
 
-function isDockerRuntime() {
+export function isDockerRuntime() {
   return (
     isEnabledFlag(process.env.MARINARA_DOCKER) ||
     normalizeEnvValue(process.env.MARINARA_DOCKER_USER) !== null ||
@@ -224,6 +224,20 @@ export function getLogLevel() {
 
 export function getLogPreset() {
   return normalizeEnvValue(process.env.LOG_PRESET)?.toLowerCase() ?? "default";
+}
+
+/**
+ * Kill switch for the `claude_subscription` provider's resume code path.
+ * Default `true`; set `CLAUDE_SUBSCRIPTION_USE_RESUME=false` (or `0`/`off`/`no`)
+ * to revert to the legacy transcript-fold path. When enabled, prior turns are
+ * fed to the Claude Agent SDK through its `sessionStore` resume mechanism so
+ * prompt caching holds across turns; if that setup fails (e.g. a read-only
+ * data directory) the provider degrades to transcript-fold for that request.
+ */
+export function isClaudeSubscriptionResumeEnabled() {
+  const raw = normalizeEnvValue(process.env.CLAUDE_SUBSCRIPTION_USE_RESUME);
+  if (raw === null) return true;
+  return !isDisabledFlag(raw);
 }
 
 export function isPromptConnectionLogPreset() {
@@ -426,6 +440,16 @@ export function isUpdatesRemoteApplyAllowed() {
 
 export function isProviderLocalUrlsEnabled() {
   return isEnabledFlag(process.env.PROVIDER_LOCAL_URLS_ENABLED);
+}
+
+export function getEmbeddingRequestTimeoutMs() {
+  const defaultTimeoutMs = 300_000;
+  const maxTimeoutMs = 2_147_483_647;
+  const raw = normalizeEnvValue(process.env.EMBEDDING_TIMEOUT_MS);
+  if (!raw || !/^\d+$/.test(raw)) return defaultTimeoutMs;
+
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, maxTimeoutMs) : defaultTimeoutMs;
 }
 
 export function isImageLocalUrlsEnabled() {

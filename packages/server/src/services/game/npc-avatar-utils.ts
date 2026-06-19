@@ -27,9 +27,14 @@ export function isInvalidBuiltInMariNpcAvatar(npc: Pick<GameNpc, "name" | "avata
 export function sanitizeGameNpcAvatarUrls(npcs: GameNpc[]): GameNpc[] {
   let changed = false;
   const sanitized = npcs.map((npc) => {
-    if (!isInvalidBuiltInMariNpcAvatar(npc)) return npc;
+    const { met: _met, ...withoutMet } = npc as GameNpc & { met?: unknown };
+    const hasLegacyMet = "met" in npc;
+    if (!isInvalidBuiltInMariNpcAvatar(withoutMet)) {
+      if (hasLegacyMet) changed = true;
+      return withoutMet;
+    }
     changed = true;
-    const { avatarUrl: _avatarUrl, ...rest } = npc;
+    const { avatarUrl: _avatarUrl, ...rest } = withoutMet;
     return rest;
   });
   return changed ? sanitized : npcs;

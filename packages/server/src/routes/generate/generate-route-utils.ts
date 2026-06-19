@@ -1,12 +1,29 @@
+import { isDeepStrictEqual } from "node:util";
 import {
   PROVIDERS,
+  applyTrackerFieldLocksToGameStatePatch,
   generationParametersSchema,
+  normalizeThinkingTagPairs,
+  parseTrackerFieldLocks,
+  type CharacterStat,
   type GameState,
   type GenerationParameters,
+  type InventoryItem,
+  type PlayerStats,
 } from "@marinara-engine/shared";
 import { wrapContent } from "../../services/prompt/format-engine.js";
 
-export type SimpleMessage = { role: "system" | "user" | "assistant"; content: string };
+export type SimpleMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
+  images?: string[];
+  contextKind?: "prompt" | "history" | "injection";
+};
+export type SpeakerPrefixMessage = SimpleMessage & {
+  characterId?: string | null;
+  name?: string | null;
+  providerMetadata?: Record<string, unknown>;
+};
 export type StoredGenerationParameters = Partial<GenerationParameters>;
 export type PromptAttachment = {
   type?: string | null;
@@ -17,6 +34,10 @@ export type PromptAttachment = {
   prompt?: string | null;
   galleryId?: string | null;
 };
+
+function createEmptyPlayerStats(): PlayerStats {
+  return { stats: [], attributes: null, skills: {}, inventory: [], activeQuests: [], status: "" };
+}
 
 const TEXT_ATTACHMENT_CHAR_LIMIT = 60_000;
 const IMAGE_ATTACHMENT_PROVIDER_BYTE_LIMIT = 6 * 1024 * 1024;
@@ -37,8 +58,147 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+function extractPatchRecord(patch: Record<string, unknown>, field: string): Record<string, unknown> | null {
+  const value = patch[field];
+  return isPlainRecord(value) ? value : null;
+}
+
+function extractPatchArray<T>(patch: Record<string, unknown>, field: string, fallback: T[]): T[] {
+  const value = patch[field];
+  return Array.isArray(value) ? (value as T[]) : fallback;
+}
+
+function extractPlayerStatsPatch(patch: Record<string, unknown>): Record<string, unknown> {
+  return extractPatchRecord(patch, "playerStats") ?? {};
+}
+
+function extractPlayerStatsPatchArray<T>(patch: Record<string, unknown>, field: keyof PlayerStats, fallback: T[]): T[] {
+  const value = extractPlayerStatsPatch(patch)[field];
+  return Array.isArray(value) ? (value as T[]) : fallback;
+}
+
+type PlayerStatsArrayField = {
+  [K in keyof PlayerStats]-?: NonNullable<PlayerStats[K]> extends unknown[] ? K : never;
+}[keyof PlayerStats];
+
+export function buildLockedPlayerStatsArrayPatch<T>({
+  field,
+  values,
+  snapshot,
+  lockState,
+  basePlayerStats,
+}: {
+  field: PlayerStatsArrayField;
+  values: T[];
+  snapshot: { playerStats?: unknown } | null | undefined;
+  lockState: GameState | null | undefined;
+  basePlayerStats?: PlayerStats;
+}) {
+  const existingPlayerStats = parseSnapshotPlayerStats(snapshot);
+  const lockedPatch = applyTrackerFieldLocksToGameStatePatch({ playerStats: { [field]: values } }, lockState);
+  const lockedValues = extractPlayerStatsPatchArray<T>(lockedPatch, field, values);
+  const playerStats = { ...(basePlayerStats ?? existingPlayerStats), [field]: lockedValues };
+  const existingValues = existingPlayerStats[field];
+  const changed = !isDeepStrictEqual(lockedValues, Array.isArray(existingValues) ? existingValues : []);
+  const patch = {
+    playerStats: { [field]: lockedValues },
+  } as { playerStats: Partial<Record<PlayerStatsArrayField, T[]>> };
+  return { changed, patch, playerStats, values: lockedValues };
+}
+
+function parseSnapshotPersonaStats(snapshot: { personaStats?: unknown } | null | undefined): CharacterStat[] {
+  const raw = snapshot?.personaStats;
+  if (!raw) return [];
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return Array.isArray(parsed) ? (parsed as CharacterStat[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function buildLockedPersonaTrackerPatch({
+  stats,
+  status,
+  inventory,
+  snapshot,
+  lockState,
+}: {
+  stats: CharacterStat[];
+  status: string;
+  inventory: InventoryItem[];
+  snapshot: { personaStats?: unknown; playerStats?: unknown } | null | undefined;
+  lockState: GameState | null | undefined;
+}) {
+  const rawPatch: Record<string, unknown> = {};
+  if (stats.length > 0) rawPatch.personaStats = stats;
+
+  const rawPlayerStatsPatch: Record<string, unknown> = {};
+  if (status) rawPlayerStatsPatch.status = status;
+  if (inventory.length > 0) rawPlayerStatsPatch.inventory = inventory;
+  if (Object.keys(rawPlayerStatsPatch).length > 0) rawPatch.playerStats = rawPlayerStatsPatch;
+
+  const patch = applyTrackerFieldLocksToGameStatePatch(rawPatch, lockState);
+  const updates: Record<string, string> = {};
+  const existingPersonaStats = parseSnapshotPersonaStats(snapshot);
+  const existingPlayerStats = parseSnapshotPlayerStats(snapshot);
+
+  const lockedPersonaStats = extractPatchArray<CharacterStat>(patch, "personaStats", []);
+  const personaStatsChanged =
+    Array.isArray(patch.personaStats) && !isDeepStrictEqual(lockedPersonaStats, existingPersonaStats);
+  if (personaStatsChanged) updates.personaStats = JSON.stringify(lockedPersonaStats);
+
+  const lockedPlayerStatsPatch = extractPlayerStatsPatch(patch);
+  const playerStats = { ...existingPlayerStats };
+  let hasPlayerStatsPatch = false;
+  if (Object.prototype.hasOwnProperty.call(lockedPlayerStatsPatch, "status")) {
+    playerStats.status = typeof lockedPlayerStatsPatch.status === "string" ? lockedPlayerStatsPatch.status : "";
+    hasPlayerStatsPatch = true;
+  }
+  if (Array.isArray(lockedPlayerStatsPatch.inventory)) {
+    playerStats.inventory = lockedPlayerStatsPatch.inventory as InventoryItem[];
+    hasPlayerStatsPatch = true;
+  }
+
+  const playerStatsChanged = hasPlayerStatsPatch && !isDeepStrictEqual(playerStats, existingPlayerStats);
+  if (playerStatsChanged) updates.playerStats = JSON.stringify(playerStats);
+
+  return {
+    changed: personaStatsChanged || playerStatsChanged,
+    inventory: Array.isArray(lockedPlayerStatsPatch.inventory)
+      ? (lockedPlayerStatsPatch.inventory as InventoryItem[])
+      : [],
+    patch,
+    updates,
+  };
+}
+
+export function parseSnapshotPlayerStats(snapshot: { playerStats?: unknown } | null | undefined): PlayerStats {
+  const raw = snapshot?.playerStats;
+  if (!raw) return createEmptyPlayerStats();
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return isPlainRecord(parsed) ? (parsed as unknown as PlayerStats) : createEmptyPlayerStats();
+  } catch {
+    return createEmptyPlayerStats();
+  }
+}
+
 export function shouldAbortOnPassiveGenerationDisconnect(args: { chatMode: string; impersonate?: boolean }): boolean {
   return args.chatMode !== "conversation" || args.impersonate === true;
+}
+
+export function resolveProviderTopK(provider: unknown, topK: number): number | undefined {
+  const normalized = Number.isFinite(topK) ? Math.max(0, Math.trunc(topK)) : 0;
+  const providerId = typeof provider === "string" ? provider.toLowerCase() : "";
+  if (providerId === "google" || providerId === "google_vertex") {
+    return normalized;
+  }
+  return normalized > 0 ? normalized : undefined;
+}
+
+export function normalizeServiceTier(value: unknown): "flex" | "priority" | null {
+  return value === "flex" || value === "priority" ? value : null;
 }
 
 export function mergeCustomParameters(
@@ -59,12 +219,136 @@ export function mergeCustomParameters(
   return merged;
 }
 
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const trimmed = item.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+  return normalized;
+}
+
+export function resolveKnowledgeSourceLorebookIds(args: {
+  settings: Record<string, unknown> | null | undefined;
+  chatActiveLorebookIds: unknown;
+}): { sourceLorebookIds: string[]; source: "manual" | "chat_active" | "none" } {
+  const manualIds = normalizeStringArray(args.settings?.sourceLorebookIds);
+  if (manualIds.length > 0) {
+    return { sourceLorebookIds: manualIds, source: "manual" };
+  }
+
+  if (args.settings?.useChatActiveLorebooks === false) {
+    return { sourceLorebookIds: [], source: "none" };
+  }
+
+  const chatActiveIds = normalizeStringArray(args.chatActiveLorebookIds);
+  return {
+    sourceLorebookIds: chatActiveIds,
+    source: chatActiveIds.length > 0 ? "chat_active" : "none",
+  };
+}
+
 /** Find last message index matching a role (or predicate). Returns -1 if not found. */
 export function findLastIndex(messages: SimpleMessage[], role: string): number {
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i]!.role === role) return i;
   }
   return -1;
+}
+
+function isLastMessagePromptBlock(content: unknown): boolean {
+  if (typeof content !== "string") return false;
+  return /<\/?last_message>/i.test(content) || /(?:^|\n)\s*##\s+Last Message\s*(?:\n|$)/i.test(content);
+}
+
+function stripBoundaryLastMessageWrapper(content: string): string {
+  return content
+    .replace(/^\s*<last_message>\s*\n?/i, "")
+    .replace(/\n?\s*<\/last_message>\s*$/i, "")
+    .replace(/^\s*##\s+Last Message\s*\n/i, "")
+    .trim();
+}
+
+function hasBoundaryChatHistoryClose(content: string): boolean {
+  return /\n?\s*<\/chat_history>\s*$/i.test(content);
+}
+
+function stripBoundaryChatHistoryClose(content: string): string {
+  return content.replace(/\n?\s*<\/chat_history>\s*$/i, "").trimEnd();
+}
+
+function appendBoundaryChatHistoryClose(content: string): string {
+  return `${content.trimEnd()}\n</chat_history>`;
+}
+
+export function dedupeLastMessageWrappers<T extends { content: string }>(messages: T[]): void {
+  const lastMessageIndexes: number[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (isLastMessagePromptBlock(messages[i]!.content)) {
+      lastMessageIndexes.push(i);
+    }
+  }
+  if (lastMessageIndexes.length <= 1) return;
+
+  const keepIndex = lastMessageIndexes[lastMessageIndexes.length - 1]!;
+  for (const index of lastMessageIndexes) {
+    if (index === keepIndex) continue;
+    let content = stripBoundaryLastMessageWrapper(messages[index]!.content);
+    const previousMessage = messages[index - 1];
+    if (previousMessage && hasBoundaryChatHistoryClose(previousMessage.content)) {
+      messages[index - 1] = {
+        ...previousMessage,
+        content: stripBoundaryChatHistoryClose(previousMessage.content),
+      };
+      content = appendBoundaryChatHistoryClose(content);
+    }
+    messages[index] = {
+      ...messages[index]!,
+      content,
+    };
+  }
+}
+
+/** Tracker context is injected outside chat history, directly before the latest history/last-message block. */
+export function findTrackerContextInsertIndex(
+  messages: Array<{ role: "system" | "user" | "assistant"; content?: string; contextKind?: string }>,
+): number {
+  let latestHistoryIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.contextKind === "history") {
+      latestHistoryIndex = i;
+      break;
+    }
+  }
+
+  let latestLastMessageBlockIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (isLastMessagePromptBlock(messages[i]!.content)) {
+      latestLastMessageBlockIndex = i;
+      break;
+    }
+  }
+
+  if (latestLastMessageBlockIndex >= 0 && latestLastMessageBlockIndex > latestHistoryIndex) {
+    return latestLastMessageBlockIndex;
+  }
+  if (latestHistoryIndex >= 0) {
+    return latestHistoryIndex;
+  }
+  if (latestLastMessageBlockIndex >= 0) {
+    return latestLastMessageBlockIndex;
+  }
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role === "user") return i;
+  }
+
+  return messages.length;
 }
 
 /** Parse a JSON extra field safely. */
@@ -79,6 +363,213 @@ export function parseExtra(extra: unknown): Record<string, unknown> {
 
 export function isMessageHiddenFromAI(message: { extra?: unknown }): boolean {
   return parseExtra(message.extra).hiddenFromAI === true;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function readCharacterName(data: unknown): string | null {
+  try {
+    const parsed = typeof data === "string" ? JSON.parse(data) : data;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const name = (parsed as { name?: unknown }).name;
+    return typeof name === "string" && name.trim() ? name.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveCharacterNameMap(
+  characterIds: string[],
+  getCharacterById: (id: string) => Promise<{ data?: unknown } | null | undefined>,
+): Promise<Map<string, string>> {
+  const entries = await Promise.all(
+    characterIds.map(async (id) => {
+      const row = await getCharacterById(id);
+      const name = readCharacterName(row?.data);
+      return name ? ([id, name] as const) : null;
+    }),
+  );
+
+  return new Map(entries.filter((entry): entry is readonly [string, string] => !!entry));
+}
+
+function prefixSpeakerName(content: string, speakerName: string): string {
+  const speaker = speakerName.trim();
+  if (!speaker) return content;
+  const trimmed = content.trim();
+  const alreadyPrefixed = new RegExp(`^${escapeRegex(speaker)}\\s*:`, "i").test(trimmed);
+  if (alreadyPrefixed) return trimmed;
+  return trimmed ? `${speaker}: ${trimmed}` : `${speaker}:`;
+}
+
+export function prefixGroupIndividualHistorySpeakers<T extends SpeakerPrefixMessage>(
+  messages: T[],
+  options: {
+    personaName: string;
+    characterNamesById: ReadonlyMap<string, string>;
+  },
+): T[] {
+  const personaName = options.personaName.trim() || "User";
+
+  return messages.map((message) => {
+    let speakerName: string | null = null;
+    if (message.role === "user") {
+      speakerName = personaName;
+    } else if (message.role === "assistant") {
+      speakerName =
+        (message.characterId ? (options.characterNamesById.get(message.characterId) ?? null) : null) ??
+        (typeof message.name === "string" && message.name.trim() ? message.name.trim() : null);
+    }
+
+    if (!speakerName) return message;
+    const content = prefixSpeakerName(message.content, speakerName);
+    return content === message.content ? message : { ...message, content };
+  });
+}
+
+export function canUseMessageForUserRegeneration(input: {
+  message: { role?: unknown; extra?: unknown };
+  supportsHiddenFromAI: boolean;
+}): boolean {
+  return !(input.message.role === "user" && input.supportsHiddenFromAI && isMessageHiddenFromAI(input.message));
+}
+
+function parsePromptAttachments(extra: unknown): PromptAttachment[] | undefined {
+  const rawAttachments = parseExtra(extra).attachments;
+  if (!Array.isArray(rawAttachments)) return undefined;
+  const attachments = rawAttachments.filter(isPromptAttachment);
+  return attachments.length ? attachments : undefined;
+}
+
+export function resolveUserRegenerationPersistentAttachments(message: {
+  role?: unknown;
+  extra?: unknown;
+}): PromptAttachment[] | undefined {
+  if (message.role !== "user") return undefined;
+  return parsePromptAttachments(message.extra);
+}
+
+function isPromptAttachment(value: unknown): value is PromptAttachment {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Build the instruction used when regenerating a user-authored message as a swipe.
+ * The original user text and readable attachments are wrapped in
+ * <original_user_message> tags so downstream generation can return only
+ * replacement user-message text.
+ */
+export function buildUserMessageRegenerationInstruction(message: { content?: unknown; extra?: unknown }): string {
+  const original = typeof message.content === "string" ? message.content.trim() : "";
+  const attachments = parsePromptAttachments(message.extra);
+  const originalWithAttachments = appendReadableAttachmentsToContent(original, attachments);
+  return [
+    "Regenerate the user's previous message as an alternate swipe.",
+    "Write only the replacement user message text.",
+    "Do not answer as the assistant, continue the assistant side, or describe what the assistant does next.",
+    "",
+    "<original_user_message>",
+    originalWithAttachments,
+    "</original_user_message>",
+  ].join("\n");
+}
+
+export function buildUserMessageRegenerationPrompt(message: { content?: unknown; extra?: unknown }): SimpleMessage {
+  const attachments = parsePromptAttachments(message.extra);
+  const images = extractImageAttachmentDataUrls(attachments);
+  return {
+    role: "user",
+    content: buildUserMessageRegenerationInstruction(message),
+    ...(images.length ? { images } : {}),
+  };
+}
+
+export function buildUserMessageRegenerationPromptFromSource(source: SimpleMessage): SimpleMessage {
+  return {
+    role: "user",
+    content: buildUserMessageRegenerationInstruction({ content: source.content }),
+    ...(source.images?.length ? { images: source.images } : {}),
+  };
+}
+
+/**
+ * Build the context-facing version of a user message being regenerated.
+ * This preserves the original user text and attachments for prompt shaping
+ * without adding the provider-facing rewrite instruction.
+ */
+export function buildUserMessageRegenerationSourceMessage(message: {
+  content?: unknown;
+  extra?: unknown;
+}): SimpleMessage {
+  const original = typeof message.content === "string" ? message.content : "";
+  const attachments = parsePromptAttachments(message.extra);
+  const content = appendReadableAttachmentsToContent(original, attachments);
+  const images = extractImageAttachmentDataUrls(attachments);
+  return {
+    role: "user",
+    content,
+    ...(images.length ? { images } : {}),
+  };
+}
+
+export function appendGenerationTailMessages(
+  messages: SimpleMessage[],
+  options: {
+    assistantPrefill: string;
+    followUpIteration: number;
+    impersonate: boolean;
+    isGoogleProvider: boolean;
+    regenerateUserMessage: SimpleMessage | null;
+  },
+): { assistantPrefillInjected: boolean; googleUserRegenerationInjected: boolean } {
+  if (options.followUpIteration !== 0) {
+    return { assistantPrefillInjected: false, googleUserRegenerationInjected: false };
+  }
+
+  const shouldAppendGoogleUserRegeneration =
+    !options.impersonate && options.isGoogleProvider && !!options.regenerateUserMessage;
+  const assistantPrefill = options.assistantPrefill.trim();
+
+  if (assistantPrefill) {
+    messages.push({ role: "assistant", content: options.assistantPrefill });
+  }
+
+  if (shouldAppendGoogleUserRegeneration) {
+    messages.push(options.regenerateUserMessage!);
+  }
+
+  return {
+    assistantPrefillInjected: !!assistantPrefill,
+    googleUserRegenerationInjected: shouldAppendGoogleUserRegeneration,
+  };
+}
+
+export function resolveActiveCharacterIds(
+  characterIds: string[],
+  metadata: Record<string, unknown>,
+  options: { mode?: string; allowEmpty?: boolean } = {},
+): string[] {
+  if (options.mode === "game") return characterIds;
+
+  const inactiveIds = Array.isArray(metadata.inactiveCharacterIds)
+    ? new Set(metadata.inactiveCharacterIds.filter((id): id is string => typeof id === "string"))
+    : new Set<string>();
+  const activeIds = characterIds.filter((id) => !inactiveIds.has(id));
+
+  if (activeIds.length > 0 || options.allowEmpty) return activeIds;
+  return characterIds;
+}
+
+export function resolvePromptCharacterIdsForTarget(
+  characterIds: string[],
+  targetCharacterId: string | null | undefined,
+): string[] {
+  if (typeof targetCharacterId === "string" && characterIds.includes(targetCharacterId)) {
+    return [targetCharacterId];
+  }
+  return characterIds;
 }
 
 export function shouldPreferLatestVisibleGameState(input: {
@@ -307,14 +798,20 @@ export function parseStoredGenerationParameters(raw: unknown): StoredGenerationP
   }
   if (
     source.reasoningEffort === null ||
-    ["low", "medium", "high", "maximum"].includes(String(source.reasoningEffort))
+    ["low", "medium", "high", "xhigh", "maximum"].includes(String(source.reasoningEffort))
   ) {
     out.reasoningEffort = source.reasoningEffort as StoredGenerationParameters["reasoningEffort"];
   }
   if (source.verbosity === null || ["low", "medium", "high"].includes(String(source.verbosity))) {
     out.verbosity = source.verbosity as StoredGenerationParameters["verbosity"];
   }
+  if (source.serviceTier === null || source.serviceTier === "flex" || source.serviceTier === "priority") {
+    out.serviceTier = source.serviceTier as StoredGenerationParameters["serviceTier"];
+  }
   if (typeof source.assistantPrefill === "string") out.assistantPrefill = source.assistantPrefill;
+  if (Array.isArray(source.customThinkingTags)) {
+    out.customThinkingTags = normalizeThinkingTagPairs(source.customThinkingTags);
+  }
   if (isPlainRecord(source.customParameters)) {
     out.customParameters = source.customParameters;
   }
@@ -372,10 +869,31 @@ export function wrapFields(
   return parts;
 }
 
+function trackerCharacterIdKey(character: Record<string, unknown>) {
+  return typeof character.characterId === "string" ? character.characterId.trim().toLowerCase() : "";
+}
+
+function trackerCharacterNameKey(character: Record<string, unknown>) {
+  return typeof character.name === "string" ? character.name.trim().toLowerCase() : "";
+}
+
 function trackerCharacterKey(character: Record<string, unknown>) {
-  const id = typeof character.characterId === "string" ? character.characterId.trim().toLowerCase() : "";
-  const name = typeof character.name === "string" ? character.name.trim().toLowerCase() : "";
-  return id || name || null;
+  return trackerCharacterIdKey(character) || trackerCharacterNameKey(character) || null;
+}
+
+function isNpcTrackerAvatarPath(value: unknown): value is string {
+  return typeof value === "string" && value.trim().startsWith("/api/avatars/npc/");
+}
+
+export function isManualTrackerCharacterId(value: unknown): boolean {
+  return typeof value === "string" && value.trim().startsWith("manual-");
+}
+
+function canUseManualTrackerNameFallback(character: Record<string, unknown>) {
+  const id = trackerCharacterIdKey(character);
+  if (!id || isManualTrackerCharacterId(id)) return true;
+  const name = trackerCharacterNameKey(character);
+  return !!name && id === name;
 }
 
 export function preserveTrackerCharacterUiFields(
@@ -383,35 +901,67 @@ export function preserveTrackerCharacterUiFields(
   previousCharacters: Array<Record<string, unknown>>,
 ): void {
   const previousByKey = new Map<string, Record<string, unknown>>();
+  const previousManualByName = new Map<string, Record<string, unknown>>();
+  const previousNameCounts = new Map<string, number>();
   for (const character of previousCharacters) {
     const key = trackerCharacterKey(character);
     if (key) previousByKey.set(key, character);
+    const name = trackerCharacterNameKey(character);
+    if (name) previousNameCounts.set(name, (previousNameCounts.get(name) ?? 0) + 1);
+    if (name && isManualTrackerCharacterId(character.characterId)) {
+      previousManualByName.set(name, character);
+    }
   }
 
   for (const character of nextCharacters) {
     const key = trackerCharacterKey(character);
-    const previous = key ? previousByKey.get(key) : null;
+    const name = trackerCharacterNameKey(character);
+    const previous =
+      (key ? previousByKey.get(key) : null) ??
+      (name && previousNameCounts.get(name) === 1 && canUseManualTrackerNameFallback(character)
+        ? previousManualByName.get(name)
+        : null);
     const previousPortraitFocusX = previous?.portraitFocusX;
     const previousPortraitFocusY = previous?.portraitFocusY;
+    const previousPortraitZoom = previous?.portraitZoom;
+    const previousAvatarPath = previous?.avatarPath;
     if (
-      typeof character.portraitFocusX !== "number" &&
+      (typeof character.avatarPath !== "string" || !character.avatarPath.trim()) &&
+      isNpcTrackerAvatarPath(previousAvatarPath)
+    ) {
+      character.avatarPath = previousAvatarPath.trim();
+    }
+    if (
+      (typeof character.portraitFocusX !== "number" || !Number.isFinite(character.portraitFocusX)) &&
       typeof previousPortraitFocusX === "number" &&
       Number.isFinite(previousPortraitFocusX)
     ) {
       character.portraitFocusX = previousPortraitFocusX;
     }
     if (
-      typeof character.portraitFocusY !== "number" &&
+      (typeof character.portraitFocusY !== "number" || !Number.isFinite(character.portraitFocusY)) &&
       typeof previousPortraitFocusY === "number" &&
       Number.isFinite(previousPortraitFocusY)
     ) {
       character.portraitFocusY = previousPortraitFocusY;
+    }
+    if (
+      (typeof character.portraitZoom !== "number" || !Number.isFinite(character.portraitZoom)) &&
+      typeof previousPortraitZoom === "number" &&
+      Number.isFinite(previousPortraitZoom)
+    ) {
+      character.portraitZoom = previousPortraitZoom;
     }
   }
 }
 
 /** Parse game state JSON fields from a DB row. */
 export function parseGameStateRow(row: Record<string, unknown>): GameState {
+  const manualOverrides =
+    row.manualOverrides && typeof row.manualOverrides === "string"
+      ? (JSON.parse(row.manualOverrides) as Record<string, string>)
+      : null;
+  const fieldLocks = parseTrackerFieldLocks(row.fieldLocks);
   return {
     id: row.id as string,
     chatId: row.chatId as string,
@@ -426,6 +976,8 @@ export function parseGameStateRow(row: Record<string, unknown>): GameState {
     recentEvents: JSON.parse((row.recentEvents as string) ?? "[]"),
     playerStats: row.playerStats ? JSON.parse(row.playerStats as string) : null,
     personaStats: row.personaStats ? JSON.parse(row.personaStats as string) : null,
+    manualOverrides,
+    fieldLocks,
     createdAt: row.createdAt as string,
   };
 }

@@ -6,7 +6,7 @@
 // sidecar runtime.
 // ──────────────────────────────────────────────
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   BrainCircuit,
   Check,
@@ -180,6 +180,8 @@ export function ModelDownloadModal({ open, onClose }: Props) {
   const [temperatureInput, setTemperatureInput] = useState(String(config.temperature));
   const [topPInput, setTopPInput] = useState(String(config.topP));
   const [topKInput, setTopKInput] = useState(String(config.topK));
+  const modalScrollRef = useRef<HTMLDivElement>(null);
+  const previousScrollLayoutRef = useRef({ isBlockingSetup: false, showRuntimeSettings: false });
 
   const activeBackend = runtime.backend ?? config.backend;
   const isSystemRuntime = runtime.source === "system";
@@ -288,6 +290,19 @@ export function ModelDownloadModal({ open, onClose }: Props) {
               : "Installed"
             : "Not downloaded yet";
 
+  useEffect(() => {
+    const previous = previousScrollLayoutRef.current;
+    previousScrollLayoutRef.current = { isBlockingSetup, showRuntimeSettings };
+
+    if (!open) return;
+
+    const runtimeSettingsOpened = showRuntimeSettings && !previous.showRuntimeSettings;
+    const setupVisibilityChanged = isBlockingSetup !== previous.isBlockingSetup;
+    if (!runtimeSettingsOpened && !setupVisibilityChanged) return;
+
+    modalScrollRef.current?.scrollTo({ top: 0 });
+  }, [isBlockingSetup, open, showRuntimeSettings]);
+
   const handleSkip = () => {
     markPrompted();
     onClose();
@@ -354,10 +369,8 @@ export function ModelDownloadModal({ open, onClose }: Props) {
     if (
       !Number.isFinite(parsedContextSize) ||
       parsedContextSize < 512 ||
-      parsedContextSize > 32768 ||
       !Number.isFinite(parsedMaxTokens) ||
       parsedMaxTokens < 64 ||
-      parsedMaxTokens > 32768 ||
       !Number.isFinite(parsedTemperature) ||
       parsedTemperature < 0 ||
       parsedTemperature > 2 ||
@@ -388,10 +401,8 @@ export function ModelDownloadModal({ open, onClose }: Props) {
   const generationSettingsValid =
     Number.isFinite(parsedContextSize) &&
     parsedContextSize >= 512 &&
-    parsedContextSize <= 32768 &&
     Number.isFinite(parsedMaxTokens) &&
     parsedMaxTokens >= 64 &&
-    parsedMaxTokens <= 32768 &&
     Number.isFinite(parsedTemperature) &&
     parsedTemperature >= 0 &&
     parsedTemperature <= 2 &&
@@ -413,7 +424,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
   };
 
   return (
-    <Modal open={open} onClose={onClose} title="Local AI Model" width="max-w-2xl">
+    <Modal open={open} onClose={onClose} title="Local AI Model" width="max-w-2xl" contentRef={modalScrollRef}>
       <div className="flex flex-col gap-5">
         <div className="flex items-start gap-3">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-purple-500/10">
@@ -721,7 +732,8 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                 <div className="mt-3 flex items-center justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
                   <div className="text-xs text-[var(--muted-foreground)]/70">
                     Max response tokens caps how much the local runtime can generate. If it is too large relative to the
-                    context window, Marinara has to trim more of the prompt to make room.
+                    context window, Marinara has to trim more of the prompt to make room. Marinara does not impose an
+                    upper limit here; the selected model and your hardware still decide what can actually run.
                   </div>
                   <button
                     onClick={handleApplyGenerationSettings}

@@ -10,6 +10,8 @@ docker compose up -d
 
 Then open **<http://127.0.0.1:7860>**.
 
+The Compose file tracks `ghcr.io/pasta-devs/marinara-engine:latest`. Every tagged release also publishes immutable version tags, such as `ghcr.io/pasta-devs/marinara-engine:1.6.1`, plus the matching lite tag `ghcr.io/pasta-devs/marinara-engine:1.6.1-lite`.
+
 Compose binds to `127.0.0.1` by default. To expose the container to your LAN, change the port mapping to `${PORT:-7860}:7860`, set `BASIC_AUTH_USER`, `BASIC_AUTH_PASS`, and `ADMIN_SECRET`, then restart. See [Access Control](../CONFIGURATION.md#access-control).
 
 Data (file-backed storage, uploads, fonts, default backgrounds) is stored in the named volume `marinara-data`. To inspect it:
@@ -119,7 +121,7 @@ podman compose down && podman compose pull && podman compose up -d
 
 ### In-App Update Check
 
-You can also go to **Settings → Advanced → Updates** and click **Check for Updates**. For container installs, the UI shows the command to run: `docker compose pull && docker compose up -d`.
+You can also go to **Settings → Advanced → Updates** and click **Check for Updates**. For container installs, the UI identifies the server as Docker, shows the versioned release image tag, and gives the host command to run: `docker compose pull && docker compose up -d`.
 
 > Container images are published from `v*` release tags. Auto-update is not available for container installs; you pull new images manually.
 

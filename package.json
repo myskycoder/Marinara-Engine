@@ -1,6 +1,6 @@
 {
   "name": "marinara-engine",
-  "version": "1.6.0",
+  "version": "2.0.0",
   "private": true,
   "description": "AI Chat & Roleplay Frontend — Conversation, Roleplay, Visual Novel",
   "author": "Marianna",
@@ -12,16 +12,18 @@
     "pnpm": ">=10.33.2"
   },
   "scripts": {
-    "dev": "pnpm build:shared && pnpm --filter @marinara-engine/server --filter @marinara-engine/client -r --parallel run dev",
+    "preinstall": "node ./scripts/clean-stale-client-artifacts.mjs",
+    "dev": "node ./scripts/dev.mjs",
     "dev:server": "pnpm --filter @marinara-engine/server dev",
     "dev:client": "pnpm build:shared && pnpm --filter @marinara-engine/client dev",
-    "build": "pnpm --filter @marinara-engine/shared build && pnpm --filter @marinara-engine/server --filter @marinara-engine/client --parallel run build",
+    "build": "pnpm clean:stale-client && pnpm --filter @marinara-engine/shared build && pnpm --filter @marinara-engine/server --filter @marinara-engine/client --parallel run build",
     "build:shared": "pnpm --filter @marinara-engine/shared build",
     "build:server": "pnpm --filter @marinara-engine/server build",
     "build:client": "pnpm build:shared && pnpm --filter @marinara-engine/client build",
-    "check": "pnpm impeccable:check && pnpm lint && pnpm build",
+    "check": "pnpm clean:stale-client && pnpm impeccable:check && pnpm lint && pnpm build",
     "start": "node packages/server/dist/index.js",
     "format": "prettier --write \"packages/**/*.{ts,tsx}\"",
+    "clean:stale-client": "node ./scripts/clean-stale-client-artifacts.mjs",
     "impeccable:check": "node ./scripts/check-impeccable-context.mjs",
     "lint": "pnpm -r run lint",
     "test": "node ./scripts/check-windows-installer-layout.mjs && pnpm -r run test",
@@ -36,21 +38,5 @@
   "devDependencies": {
     "esbuild": "^0.27.7",
     "prettier": "^3.8.3"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild",
-      "sharp",
-      "onnxruntime-node",
-      "protobufjs"
-    ],
-    "overrides": {
-      "onnxruntime-common": "1.24.3",
-      "onnxruntime-node": "1.24.3",
-      "onnxruntime-web": "1.24.3",
-      "protobufjs": "7.5.5",
-      "brace-expansion": "5.0.5",
-      "@anthropic-ai/sdk": "0.91.1"
-    }
   }
 }

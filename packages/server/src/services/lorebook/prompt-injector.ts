@@ -16,6 +16,13 @@ export interface PromptMessage {
   name?: string;
 }
 
+export interface InjectAtDepthOptions {
+  /** Earliest index an entry may be inserted at. */
+  minIndex?: number;
+  /** Index considered "after the last message" for depth 0. Defaults to the full prompt length. */
+  anchorIndex?: number;
+}
+
 /**
  * Build the World Info content blocks from activated entries.
  * Position 0 = WORLD_INFO_BEFORE (before character defs)
@@ -74,32 +81,38 @@ export function getDepthInjectedEntries(activatedEntries: ActivatedEntry[]): Arr
 
 /**
  * Inject depth-based entries into a message array.
- * Depth 0 = after the last message, depth 1 = before the last message, etc.
+ * Depth 0 = after the latest message, depth 1 = before the last message, etc.
  */
 export function injectAtDepth(
   messages: PromptMessage[],
   depthEntries: Array<{ content: string; role: LorebookRole; depth: number }>,
+  options: InjectAtDepthOptions = {},
 ): PromptMessage[] {
   if (depthEntries.length === 0) return messages;
 
   const result = [...messages];
+  const baseLength = messages.length;
+  const minIndex = Math.min(Math.max(0, options.minIndex ?? 0), baseLength);
+  const anchorIndex = Math.min(Math.max(minIndex, options.anchorIndex ?? baseLength), baseLength);
 
-  // Group entries by depth
-  const byDepth = new Map<number, Array<{ content: string; role: LorebookRole }>>();
-  for (const entry of depthEntries) {
-    const list = byDepth.get(entry.depth) ?? [];
-    list.push({ content: entry.content, role: entry.role });
-    byDepth.set(entry.depth, list);
+  // Group entries by the final original-array insertion index. Computing
+  // all targets before splicing keeps depth 0 anchored after the original
+  // last message even when deeper entries are inserted earlier.
+  const byIndex = new Map<number, Array<{ content: string; role: LorebookRole; depth: number; order: number }>>();
+  for (const [order, entry] of depthEntries.entries()) {
+    const depth = Number.isFinite(entry.depth) ? Math.max(0, Math.floor(entry.depth)) : 0;
+    const insertionIndex = Math.max(minIndex, anchorIndex - depth);
+    const list = byIndex.get(insertionIndex) ?? [];
+    list.push({ content: entry.content, role: entry.role, depth, order });
+    byIndex.set(insertionIndex, list);
   }
 
-  // Process depths from highest to lowest (to preserve indices)
-  const depths = [...byDepth.keys()].sort((a, b) => b - a);
+  // Process later original indices first so earlier insertions do not shift them.
+  const insertionIndexes = [...byIndex.keys()].sort((a, b) => b - a);
 
-  for (const depth of depths) {
-    const entries = byDepth.get(depth) ?? [];
-    const insertionIndex = Math.max(0, result.length - depth);
+  for (const insertionIndex of insertionIndexes) {
+    const entries = (byIndex.get(insertionIndex) ?? []).sort((a, b) => a.depth - b.depth || a.order - b.order);
 
-    // Insert all entries for this depth at the same position
     const toInsert: PromptMessage[] = entries.map((e) => ({
       role: e.role,
       content: e.content,

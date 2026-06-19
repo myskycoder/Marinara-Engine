@@ -17,7 +17,6 @@ import { createGameStateStorage } from "../services/storage/game-state.storage.j
 import { createLLMProvider } from "../services/llm/provider-registry.js";
 import { enterAiAuditContext } from "../services/ai-audit/audit-context.js";
 import { stripConversationPromptTimestamps } from "../services/conversation/transcript-sanitize.js";
-import { getCharacterDescriptionWithExtensions } from "../services/prompt/index.js";
 import { DATA_DIR } from "../utils/data-dir.js";
 import type { ChatCompletionResult, ChatMessage } from "../services/llm/base-provider.js";
 import type {
@@ -85,7 +84,7 @@ async function buildCharacterContext(chars: ReturnType<typeof createCharactersSt
     const row = await chars.getById(cid);
     if (!row) continue;
     const data = typeof row.data === "string" ? JSON.parse(row.data) : row.data;
-    const description = getCharacterDescriptionWithExtensions(data);
+    const description = typeof data.description === "string" ? data.description : "";
     ctx += `<character="${data.name}" id="${cid}">\n`;
     if (description) ctx += `${description}\n`;
     if (data.personality) ctx += `${data.personality}\n`;

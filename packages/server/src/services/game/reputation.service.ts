@@ -127,7 +127,6 @@ export function applyReputationChange(
   const updated: GameNpc = {
     ...npc,
     reputation: newReputation,
-    met: true,
     notes: [
       ...npc.notes,
       `[${action}] reputation ${modifier >= 0 ? "+" : ""}${modifier} → ${newReputation} (${newTier})`,
@@ -193,7 +192,7 @@ export function buildNpcRelationshipSummary(npcs: GameNpc[]): string {
 
   const lines = npcs.map((n) => {
     const tier = getReputationTier(n.reputation);
-    return `- ${n.emoji} ${n.name}: ${tier} (${n.reputation}/100)${n.met ? "" : " [not yet met]"}`;
+    return `- ${n.emoji} ${n.name}: ${tier} (${n.reputation}/100)`;
   });
 
   return lines.join("\n");

@@ -148,9 +148,9 @@ export function QuickReplyMenu({ actions, disabled = false }: QuickReplyMenuProp
         disabled={singleDisabled}
         aria-label={`${singleAction.label}: ${singleAction.description}`}
         className={cn(
-          "flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-all duration-200 focus-visible:ring-2 focus-visible:ring-[var(--primary)]",
+          "flex h-11 w-11 shrink-0 items-center justify-center rounded-full transition-all duration-200 focus-visible:ring-2 focus-visible:ring-foreground/20 sm:h-8 sm:w-8",
           !singleDisabled
-            ? "text-foreground/70 hover:bg-foreground/10 hover:text-[var(--primary)] active:scale-90"
+            ? "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70 active:scale-90"
             : "cursor-not-allowed text-foreground/20",
         )}
         title={formatActionTitle(singleAction)}
@@ -161,7 +161,7 @@ export function QuickReplyMenu({ actions, disabled = false }: QuickReplyMenuProp
   }
 
   return (
-    <div ref={rootRef} className="relative flex h-8 w-8 shrink-0 items-center justify-center">
+    <div ref={rootRef} className="relative flex h-11 w-11 shrink-0 items-center justify-center sm:h-8 sm:w-8">
       <button
         ref={triggerRef}
         type="button"
@@ -172,11 +172,11 @@ export function QuickReplyMenu({ actions, disabled = false }: QuickReplyMenuProp
         aria-haspopup="menu"
         aria-expanded={open}
         className={cn(
-          "flex h-8 w-8 items-center justify-center rounded-full transition-all duration-200",
+          "flex h-11 w-11 items-center justify-center rounded-full transition-all duration-200 sm:h-8 sm:w-8",
           open
-            ? "bg-[var(--primary)]/15 text-[var(--primary)] ring-1 ring-[var(--primary)]/30"
+            ? "bg-foreground/10 text-foreground/75 ring-1 ring-foreground/20"
             : !isDisabled
-              ? "text-foreground/70 hover:bg-foreground/10 hover:text-foreground active:scale-90"
+              ? "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70 active:scale-90"
               : "text-foreground/20",
         )}
         title="Quick replies"
@@ -214,10 +214,10 @@ export function QuickReplyMenu({ actions, disabled = false }: QuickReplyMenuProp
                   onKeyDown={(event) => handleItemKeyDown(event, index)}
                   aria-label={`${action.label}: ${action.description}`}
                   className={cn(
-                    "group relative flex h-10 w-10 items-center justify-center rounded-full border shadow-xl outline-none transition-colors focus-visible:ring-2 focus-visible:ring-[var(--primary)]",
+                    "group relative flex h-11 w-11 items-center justify-center rounded-full border shadow-xl outline-none transition-colors focus-visible:ring-2 focus-visible:ring-foreground/20 sm:h-10 sm:w-10",
                     action.disabled
-                      ? "cursor-not-allowed border-[var(--border)] bg-[var(--card)]/75 opacity-45"
-                      : "border-[var(--primary)]/25 bg-[var(--card)] text-[var(--primary)] hover:border-[var(--primary)]/45 hover:bg-[var(--primary)] hover:text-[var(--primary-foreground)] active:scale-95",
+                      ? "cursor-not-allowed border-foreground/10 bg-[var(--card)]/75 opacity-45"
+                      : "border-foreground/20 bg-[var(--card)] text-foreground/55 hover:bg-foreground/10 hover:text-foreground/80 active:scale-95",
                   )}
                   title={formatActionTitle(action)}
                   variants={{
@@ -248,7 +248,7 @@ export function QuickReplyMenu({ actions, disabled = false }: QuickReplyMenuProp
                       "flex h-8 w-8 shrink-0 items-center justify-center rounded-full ring-1 transition-colors",
                       action.disabled
                         ? "bg-foreground/5 text-foreground/40 ring-transparent"
-                        : "bg-[var(--primary)]/12 ring-[var(--primary)]/20 group-hover:bg-transparent group-hover:ring-transparent",
+                        : "bg-foreground/10 ring-foreground/15 group-hover:bg-transparent group-hover:ring-transparent",
                     )}
                   >
                     {action.icon}

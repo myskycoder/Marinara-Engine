@@ -8,7 +8,12 @@ import { execFile } from "child_process";
 import { existsSync, readFileSync } from "fs";
 import { resolve } from "path";
 import { promisify } from "util";
-import { getMonorepoRoot, isUpdatesApplyEnabled, isUpdatesRemoteApplyAllowed } from "../config/runtime-config.js";
+import {
+  getMonorepoRoot,
+  isDockerRuntime,
+  isUpdatesApplyEnabled,
+  isUpdatesRemoteApplyAllowed,
+} from "../config/runtime-config.js";
 import { getBuildCommit, getBuildLabel } from "../config/build-info.js";
 import { requirePrivilegedAccess } from "../middleware/privileged-gate.js";
 
@@ -24,6 +29,7 @@ const UPDATE_BRANCH = "main";
 const UPDATE_REF = `${UPDATE_REMOTE}/${UPDATE_BRANCH}`;
 const UPDATE_FETCH_REF = `+refs/heads/${UPDATE_BRANCH}:refs/remotes/${UPDATE_REMOTE}/${UPDATE_BRANCH}`;
 const DEFAULT_PNPM_VERSION = "10.33.2";
+const DOCKER_IMAGE = "ghcr.io/pasta-devs/marinara-engine";
 const MANUAL_GIT_UPDATE_COMMAND =
   "git fetch origin +refs/heads/main:refs/remotes/origin/main && (git merge --ff-only origin/main || git checkout --detach origin/main) && pnpm install && pnpm build && pnpm start";
 const DOCKER_UPDATE_COMMAND = "docker compose pull && docker compose up -d";
@@ -46,10 +52,75 @@ let cachedCommitsBehind: number | null = null;
 let commitCheckTimestamp = 0;
 const COMMIT_CHECK_TTL_MS = 5 * 60_000;
 
+type InstallType = "git" | "docker" | "standalone";
+type ServerPlatform = "windows" | "macos" | "linux" | "android-termux" | "unknown";
+type ClientPlatform = "ios" | "android" | "desktop" | "unknown";
+type ApplyUnavailableReason = "disabled" | "unsupported-install" | "container-install" | null;
+
 /** Detect whether this install is a git repo. */
 function isGitInstall(): boolean {
   const monorepoRoot = getMonorepoRoot();
   return existsSync(resolve(monorepoRoot, ".git"));
+}
+
+function getInstallType(gitInstall: boolean): InstallType {
+  if (gitInstall) return "git";
+  if (isDockerRuntime() || existsSync("/.dockerenv")) return "docker";
+  return "standalone";
+}
+
+function getServerPlatform(): ServerPlatform {
+  switch (process.platform) {
+    case "win32":
+      return "windows";
+    case "darwin":
+      return "macos";
+    case "linux":
+      return "linux";
+    case "android":
+      return "android-termux";
+    default:
+      return "unknown";
+  }
+}
+
+function getClientPlatform(userAgentHeader: string | string[] | undefined): ClientPlatform {
+  const userAgent = Array.isArray(userAgentHeader) ? userAgentHeader.join(" ") : (userAgentHeader ?? "");
+  if (!userAgent) return "unknown";
+  if (/\b(iPhone|iPad|iPod)\b/i.test(userAgent)) return "ios";
+  if (/\bAndroid\b/i.test(userAgent)) return "android";
+  return "desktop";
+}
+
+function getGitLauncherCommand(platform: ServerPlatform) {
+  switch (platform) {
+    case "windows":
+      return "start.bat";
+    case "android-termux":
+      return "./start-termux.sh";
+    case "macos":
+    case "linux":
+      return "./start.sh";
+    default:
+      return MANUAL_GIT_UPDATE_COMMAND;
+  }
+}
+
+function getManualUpdateCommand(installType: InstallType, platform: ServerPlatform) {
+  if (installType === "docker") return DOCKER_UPDATE_COMMAND;
+  if (installType === "git") return getGitLauncherCommand(platform);
+  return null;
+}
+
+function getManualUpdateHint(installType: InstallType, platform: ServerPlatform) {
+  if (installType === "docker") {
+    return "Pull the published container image and restart the container. Versioned tags are published from vX.Y.Z release tags.";
+  }
+  if (installType === "git") {
+    const launcher = getGitLauncherCommand(platform);
+    return `Relaunch Marinara with ${launcher} to let the platform launcher fetch origin/main, install dependencies, rebuild, and start the new version.`;
+  }
+  return "Download the release asset or update the host install manually, then restart Marinara.";
 }
 
 async function fetchUpdateRef(root: string) {
@@ -317,22 +388,44 @@ type ApplyUpdateBody = {
   targetCommit?: string;
 };
 
-function getApplyAvailability(gitInstall: boolean) {
+function buildReleasePayload(release: NonNullable<typeof cachedRelease>) {
+  const releaseTag = `v${release.latestVersion}`;
+  return {
+    ...release,
+    releaseTag,
+    dockerImage: DOCKER_IMAGE,
+    dockerImageTag: `${DOCKER_IMAGE}:${release.latestVersion}`,
+    dockerLiteImageTag: `${DOCKER_IMAGE}:${release.latestVersion}-lite`,
+  };
+}
+
+function getApplyAvailability(installType: InstallType, platform: ServerPlatform) {
   const enabled = isUpdatesApplyEnabled();
-  if (!gitInstall) {
+  if (installType === "docker") {
     return {
       applyAvailable: false,
       updatesApplyEnabled: enabled,
-      applyUnavailableReason: "unsupported-install",
-      manualUpdateCommand: DOCKER_UPDATE_COMMAND,
+      applyUnavailableReason: "container-install" as ApplyUnavailableReason,
+      manualUpdateCommand: getManualUpdateCommand(installType, platform),
+      manualUpdateHint: getManualUpdateHint(installType, platform),
+    };
+  }
+  if (installType !== "git") {
+    return {
+      applyAvailable: false,
+      updatesApplyEnabled: enabled,
+      applyUnavailableReason: "unsupported-install" as ApplyUnavailableReason,
+      manualUpdateCommand: getManualUpdateCommand(installType, platform),
+      manualUpdateHint: getManualUpdateHint(installType, platform),
     };
   }
   if (!enabled) {
     return {
       applyAvailable: false,
       updatesApplyEnabled: false,
-      applyUnavailableReason: "disabled",
-      manualUpdateCommand: MANUAL_GIT_UPDATE_COMMAND,
+      applyUnavailableReason: "disabled" as ApplyUnavailableReason,
+      manualUpdateCommand: getManualUpdateCommand(installType, platform),
+      manualUpdateHint: getManualUpdateHint(installType, platform),
     };
   }
   return {
@@ -340,6 +433,7 @@ function getApplyAvailability(gitInstall: boolean) {
     updatesApplyEnabled: true,
     applyUnavailableReason: null,
     manualUpdateCommand: null,
+    manualUpdateHint: null,
   };
 }
 
@@ -349,12 +443,15 @@ export async function updatesRoutes(app: FastifyInstance) {
   // Fetches the newest stable Git tag from GitHub, then hydrates it
   // with matching release metadata when that release exists.
   // For git installs, also checks if the local commit is behind origin/main.
-  app.get("/check", async (_req, reply) => {
+  app.get("/check", async (req, reply) => {
     const now = Date.now();
     const currentCommit = getBuildCommit();
     const currentBuild = getBuildLabel();
     const gitInstall = isGitInstall();
-    const applyAvailability = getApplyAvailability(gitInstall);
+    const installType = getInstallType(gitInstall);
+    const serverPlatform = getServerPlatform();
+    const clientPlatform = getClientPlatform(req.headers["user-agent"]);
+    const applyAvailability = getApplyAvailability(installType, serverPlatform);
 
     // Check commits behind for git installs
     let commitsBehind: number | null = null;
@@ -375,11 +472,13 @@ export async function updatesRoutes(app: FastifyInstance) {
         currentVersion: APP_VERSION,
         currentCommit,
         currentBuild,
-        ...cachedRelease,
+        ...buildReleasePayload(cachedRelease),
         updateAvailable: versionUpdate || (commitsBehind != null && commitsBehind > 0),
         versionUpdate,
         commitsBehind: commitsBehind ?? 0,
-        installType: gitInstall ? "git" : "standalone",
+        installType,
+        serverPlatform,
+        clientPlatform,
         ...applyAvailability,
         targetRef: UPDATE_REF,
         targetCommit: gitInstall ? await resolveGitRef(getMonorepoRoot(), UPDATE_REF) : null,
@@ -401,11 +500,13 @@ export async function updatesRoutes(app: FastifyInstance) {
         currentVersion: APP_VERSION,
         currentCommit,
         currentBuild,
-        ...cachedRelease,
+        ...buildReleasePayload(cachedRelease),
         updateAvailable: versionUpdate || (commitsBehind != null && commitsBehind > 0),
         versionUpdate,
         commitsBehind: commitsBehind ?? 0,
-        installType: gitInstall ? "git" : "standalone",
+        installType,
+        serverPlatform,
+        clientPlatform,
         ...applyAvailability,
         targetRef: UPDATE_REF,
         targetCommit: gitInstall ? await resolveGitRef(getMonorepoRoot(), UPDATE_REF) : null,
@@ -419,7 +520,9 @@ export async function updatesRoutes(app: FastifyInstance) {
         currentBuild,
         updateAvailable: commitsBehind != null && commitsBehind > 0,
         commitsBehind: commitsBehind ?? 0,
-        installType: gitInstall ? "git" : "standalone",
+        installType,
+        serverPlatform,
+        clientPlatform,
         ...applyAvailability,
       });
     }
@@ -429,23 +532,35 @@ export async function updatesRoutes(app: FastifyInstance) {
   // POST /api/updates/apply
   // Fast-forwards to origin/main, installs, rebuilds, then signals the process to restart.
   app.post<{ Body: ApplyUpdateBody }>("/apply", async (req, reply) => {
-    if (!isGitInstall()) {
+    const gitInstall = isGitInstall();
+    const installType = getInstallType(gitInstall);
+    const serverPlatform = getServerPlatform();
+
+    if (!gitInstall) {
+      const manualUpdateCommand = getManualUpdateCommand(installType, serverPlatform);
       return reply.status(400).send({
         error: "Auto-update apply is unavailable for this install type",
-        message: `Auto-update is only available for git-based installs. For Docker, run: ${DOCKER_UPDATE_COMMAND}`,
-        installType: "standalone",
-        applyUnavailableReason: "unsupported-install",
-        manualUpdateCommand: DOCKER_UPDATE_COMMAND,
+        message:
+          installType === "docker"
+            ? `Container installs cannot update themselves from inside the browser. Run: ${DOCKER_UPDATE_COMMAND}`
+            : "Auto-update is only available for git-based installs. Download the latest release or update the host manually.",
+        installType,
+        serverPlatform,
+        applyUnavailableReason: installType === "docker" ? "container-install" : "unsupported-install",
+        manualUpdateCommand,
+        manualUpdateHint: getManualUpdateHint(installType, serverPlatform),
       });
     }
 
     if (!isUpdatesApplyEnabled()) {
       return reply.status(403).send({
         error: "Auto-update apply is disabled for this install",
-        message: `Update manually with: ${MANUAL_GIT_UPDATE_COMMAND}. Advanced git installs can enable server-side update application with UPDATES_APPLY_ENABLED=true.`,
+        message: `Update manually with: ${getGitLauncherCommand(serverPlatform)}. Advanced git installs can enable server-side update application with UPDATES_APPLY_ENABLED=true.`,
         installType: "git",
+        serverPlatform,
         applyUnavailableReason: "disabled",
-        manualUpdateCommand: MANUAL_GIT_UPDATE_COMMAND,
+        manualUpdateCommand: getManualUpdateCommand("git", serverPlatform),
+        manualUpdateHint: getManualUpdateHint("git", serverPlatform),
       });
     }
 
@@ -583,11 +698,28 @@ export async function updatesRoutes(app: FastifyInstance) {
         message: "Update applied successfully. Please relaunch the app to use the new version.",
       };
 
-      // Give Fastify time to flush the response, then exit
+      // Give Fastify time to flush the response and clear the file-backed
+      // store's write-back debounce window (SAVE_DEBOUNCE_MS = 750ms), then
+      // shut down GRACEFULLY so pending dirty tables reach disk before exit.
       setTimeout(() => {
-        logger.info("[Update] Shutting down after update...");
-        process.exit(0);
-      }, 500);
+        void (async () => {
+          try {
+            // Mirror index.ts shutdown() (and the onClose hook in app.ts):
+            // app.close() runs Fastify onClose -> closeDB() -> fileStore.close()
+            // -> flush(true), plus stops the sidecar. A bare process.exit(0)
+            // bypasses onClose/beforeExit and silently drops debounced writes.
+            await app.close();
+            logger.info("[Update] Shutting down after update...");
+            process.exit(0);
+          } catch (err) {
+            // Flush/close failed: log it (process is being torn down for a
+            // user-initiated relaunch, so still exit 0 rather than signal a
+            // crash to any supervisor).
+            logger.error(err, "[Update] Graceful shutdown failed; exiting anyway");
+            process.exit(0);
+          }
+        })();
+      }, 1_000);
 
       return result;
     } catch (err: unknown) {

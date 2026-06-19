@@ -6,6 +6,9 @@ import { z } from "zod";
 export const ttsSourceSchema = z.enum(["openai", "elevenlabs", "pockettts"]);
 export type TTSSource = z.infer<typeof ttsSourceSchema>;
 
+export const ttsAudioFormatSchema = z.enum(["mp3", "wav"]);
+export type TTSAudioFormat = z.infer<typeof ttsAudioFormatSchema>;
+
 export const ttsDialogueScopeSchema = z.enum(["all", "character"]);
 export type TTSDialogueScope = z.infer<typeof ttsDialogueScopeSchema>;
 
@@ -113,6 +116,8 @@ export const ttsConfigSchema = z.object({
   elevenLabsLanguageCode: z.string().max(8).default(""),
   voiceMode: ttsVoiceModeSchema.default("single"),
   voiceAssignments: z.array(ttsVoiceAssignmentSchema).default([]),
+  narratorVoiceEnabled: z.boolean().default(false),
+  narratorVoice: z.string().default(""),
   npcDefaultVoicesEnabled: z.boolean().default(false),
   npcDefaultMaleVoices: z.array(z.string()).default([]),
   npcDefaultFemaleVoices: z.array(z.string()).default([]),
@@ -120,6 +125,7 @@ export const ttsConfigSchema = z.object({
   autoplayConvo: z.boolean().default(false),
   autoplayGame: z.boolean().default(false),
   dialogueOnly: z.boolean().default(false),
+  audioFormat: ttsAudioFormatSchema.default("mp3"),
   dialogueScope: ttsDialogueScopeSchema.default("all"),
   dialogueCharacterName: z.string().default(""),
 });

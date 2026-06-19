@@ -35,6 +35,7 @@ const PeekPromptModal = lazy(async () => {
 });
 
 type ChatData = ComponentProps<typeof ChatSettingsDrawer>["chat"];
+export type ChatFloatingPanelAnchor = { right: number; top: number } | null;
 
 type SharedSceneSettingsProps = {
   spriteArrangeMode: boolean;
@@ -181,9 +182,11 @@ type ChatCommonOverlaysProps = {
   chat: ChatData | null | undefined;
   activeChatId: string;
   settingsOpen: boolean;
+  settingsAnchor: ChatFloatingPanelAnchor;
   filesOpen: boolean;
   galleryOpen: boolean;
   sceneJournalOpen: boolean;
+  galleryAnchor: ChatFloatingPanelAnchor;
   wizardOpen: boolean;
   peekPromptData: PeekPromptData | null;
   deleteDialogMessageId: string | null;
@@ -209,6 +212,8 @@ type ChatCommonOverlaysProps = {
   onClearCgPlate?: () => void;
   /** Manually trigger the Scene Painter agent */
   onPaintScene?: () => void;
+  /** Manually trigger the Illustrator agent */
+  onIllustrate?: () => void | Promise<void>;
   onWizardFinish: () => void;
   onClosePeekPrompt: () => void;
   onDeleteConfirm: () => void;
@@ -226,9 +231,11 @@ export function ChatCommonOverlays({
   chat,
   activeChatId,
   settingsOpen,
+  settingsAnchor,
   filesOpen,
   galleryOpen,
   sceneJournalOpen,
+  galleryAnchor,
   wizardOpen,
   peekPromptData,
   deleteDialogMessageId,
@@ -248,6 +255,7 @@ export function ChatCommonOverlays({
   onManualImpactSceneNsfw,
   onClearCgPlate,
   onPaintScene,
+  onIllustrate,
   onWizardFinish,
   onClosePeekPrompt,
   onDeleteConfirm,
@@ -269,6 +277,7 @@ export function ChatCommonOverlays({
               chat={chat}
               open={settingsOpen}
               onClose={onCloseSettings}
+              anchor={settingsAnchor}
               spriteArrangeMode={sceneSettings.spriteArrangeMode}
               onToggleSpriteArrange={sceneSettings.onToggleSpriteArrange}
               onResetSpritePlacements={sceneSettings.onResetSpritePlacements}
@@ -289,6 +298,8 @@ export function ChatCommonOverlays({
               chat={chat}
               open={galleryOpen}
               onClose={onCloseGallery}
+              anchor={galleryAnchor}
+              onIllustrate={onIllustrate}
               onManualImpactSfw={onManualImpactSfw}
               onManualImpactNsfw={onManualImpactNsfw}
               onManualImpactSceneSfw={onManualImpactSceneSfw}

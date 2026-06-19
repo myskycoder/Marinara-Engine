@@ -7,7 +7,7 @@ import { createPromptsStorage } from "../storage/prompts.storage.js";
 import type { PromptVariableGroup } from "@marinara-engine/shared";
 import type { TimestampOverrides } from "./import-timestamps.js";
 
-const VALID_REASONING = new Set(["low", "medium", "high", "maximum"]);
+const VALID_REASONING = new Set(["low", "medium", "high", "xhigh", "maximum"]);
 
 /** Friendly display names for consolidated markers. */
 const MARKER_DISPLAY_NAMES: Partial<Record<string, string>> = {
@@ -26,8 +26,10 @@ function normalizeTopP(v: number | null | undefined) {
   const clamped = clamp(v ?? 1, 0, 1);
   return clamped <= 0 ? 1 : clamped;
 }
-function toReasoningEffort(v: unknown): "low" | "medium" | "high" | "maximum" | null {
-  if (typeof v === "string" && VALID_REASONING.has(v)) return v as "low" | "medium" | "high" | "maximum";
+function toReasoningEffort(v: unknown): "low" | "medium" | "high" | "xhigh" | "maximum" | null {
+  if (typeof v === "string" && v === "auto") return "maximum";
+  if (typeof v === "string" && VALID_REASONING.has(v))
+    return v as "low" | "medium" | "high" | "xhigh" | "maximum";
   return null;
 }
 
@@ -99,6 +101,7 @@ export async function importSTPreset(
         presencePenalty: clamp(preset.presence_penalty ?? 0, -2, 2),
         reasoningEffort: toReasoningEffort(preset.reasoning_effort),
         verbosity: null,
+        serviceTier: null,
         assistantPrefill: "",
         customParameters: {},
         squashSystemMessages: preset.squash_system_messages ?? true,

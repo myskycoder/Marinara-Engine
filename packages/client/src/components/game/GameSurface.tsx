@@ -1,7 +1,16 @@
 // ──────────────────────────────────────────────
 // Game: Main Surface (rendered by ChatArea when mode === "game")
 // ──────────────────────────────────────────────
-import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  lazy,
+  Suspense,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { useShallow } from "zustand/react/shallow";
 import { toast } from "sonner";
 import { useGameModeStore } from "../../stores/game-mode.store";
@@ -40,6 +49,7 @@ import {
 } from "../../hooks/use-game";
 import {
   chatKeys,
+  useBranchChat,
   useCreateMessage,
   useDeleteChat,
   useUpdateChat,
@@ -48,17 +58,18 @@ import {
 } from "../../hooks/use-chats";
 import { useConnections } from "../../hooks/use-connections";
 import { useGenerate } from "../../hooks/use-generate";
+import { useAgentStore } from "../../stores/agent.store";
 import { useIsMutating, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { spriteKeys, type SpriteInfo } from "../../hooks/use-characters";
 import { api, ApiError, getJsonRepairRequest, type JsonRepairRequest } from "../../lib/api-client";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { cn, type AvatarCrop, type LegacyAvatarCrop, type AvatarCropValue } from "../../lib/utils";
 import { filterLanguageGenerationConnections } from "../../lib/connection-filters";
+import { gameAssetFileUrl } from "../../lib/game-asset-urls";
 import { audioManager } from "../../lib/game-audio";
 import {
   parseGmTags,
   parseSegmentInventoryUpdates,
-  stripGmTags,
   type CombatEncounterTag,
   type ElementAttackTag,
   type CombatStatusTag,
@@ -74,7 +85,7 @@ import { useSceneAnalysis } from "../../hooks/use-scene-analysis";
 import { useSidecarStore } from "../../stores/sidecar.store";
 import { parsePartyDialogue } from "../../lib/party-dialogue-parser";
 import { dispatchSpotifySceneTrackChange } from "../../lib/spotify-playback-events";
-import { ActiveWorldInfoButton, ActiveWorldInfoModal } from "../chat/ActiveWorldInfoButton";
+import { ActiveLorebookEntriesButton, ActiveLorebookEntriesModal } from "../chat/ActiveLorebookEntriesButton";
 import type {
   PartyDialogueLine,
   CombatSummary,
@@ -95,12 +106,14 @@ import type {
 } from "@marinara-engine/shared";
 import type { SceneSegmentEffect } from "@marinara-engine/shared";
 import {
+  formatTextQuotes,
   scoreMusic,
   scoreAmbient,
   canRequestAutoCgIllustration,
   normalizeGameCgFrequency,
   GAME_ILLUSTRATION_DRAFT_MAX,
   GAME_ILLUSTRATION_NARRATION_EXCERPT_MAX,
+  BUILT_IN_AGENTS,
 } from "@marinara-engine/shared";
 import { GameNarration, formatNarration } from "./GameNarration";
 import { GameInput } from "./GameInput";
@@ -119,7 +132,7 @@ import { GameCheckpoints } from "./GameCheckpoints";
 import { GameTransitionManager } from "./GameTransitionManager";
 import { GameChoiceCards } from "./GameChoiceCards";
 import { GameQteOverlay } from "./GameQteOverlay";
-import { GameJournal } from "./GameJournal";
+import { GameJournal, type GameJournalTabId } from "./GameJournal";
 import { GameJsonRepairModal } from "./GameJsonRepairModal";
 import {
   GameImagePromptReviewModal,
@@ -138,6 +151,20 @@ import {
 } from "./game-asset-generation-payload";
 import { ChatGalleryDrawer } from "../chat/ChatGalleryDrawer";
 import { ChatSceneJournalDrawer } from "../chat/ChatSceneJournalDrawer";
+import { ChatBranchSelector } from "../chat/ChatBranchSelector";
+import { GameAssetsBrowserView } from "../game-assets/GameAssetsBrowserView";
+import {
+  CHAT_TOOLBAR_ICON_GAP_CLASS,
+  CHAT_TOOLBAR_OVERFLOW_MENU_CLASS,
+  getChatToolbarButtonClass,
+} from "../chat/ChatToolbarControls";
+import {
+  ROLEPLAY_POPOVER_HEADER,
+  ROLEPLAY_POPOVER_SCROLL_AREA,
+  ROLEPLAY_POPOVER_SHELL,
+  ROLEPLAY_POPOVER_SUBTITLE,
+  ROLEPLAY_POPOVER_TITLE,
+} from "../chat/roleplay-popover-styles";
 import type { ReadableTag } from "../../lib/game-tag-parser";
 import type { DirectionCommand, GameNpc } from "@marinara-engine/shared";
 
@@ -162,7 +189,13 @@ type GameAssetGenerationPayload = {
   };
   /** Placeholder tag the UI is currently rendering as fallback. */
   placeholderTag?: string;
-  npcsNeedingAvatars?: Array<{ id?: string; name: string; description: string }>;
+  npcsNeedingAvatars?: Array<{
+    id?: string;
+    name: string;
+    description: string;
+    gender?: string | null;
+    pronouns?: string | null;
+  }>;
   forceNpcAvatarNames?: string[];
   illustration?: import("@marinara-engine/shared").SceneIllustrationRequest;
   /**
@@ -194,6 +227,27 @@ type GameAssetGenerationResult = {
   fallbackBackground?: string | null;
   generatedIllustration: { tag: string; segment?: number } | null;
   generatedNpcAvatars: Array<{ name: string; avatarUrl: string }>;
+};
+
+const GAME_TOP_ICON_BUTTON = getChatToolbarButtonClass();
+const GAME_MOBILE_ROOT_BUTTON = getChatToolbarButtonClass({ sizeClassName: "h-8 w-10" });
+const GAME_MOBILE_ICON_BUTTON = getChatToolbarButtonClass({ compact: true });
+const GAME_ACTION_MENU = cn(ROLEPLAY_POPOVER_SHELL, "flex w-72 max-w-[calc(100vw-2rem)] flex-col gap-1 p-1.5");
+const GAME_MOBILE_ACTIONS_MENU = cn(
+  CHAT_TOOLBAR_OVERFLOW_MENU_CLASS,
+  "absolute right-0 top-9",
+);
+const GAME_MOBILE_ACTION_MENU = cn(ROLEPLAY_POPOVER_SHELL, "flex w-72 max-w-[calc(100vw-4rem)] flex-col gap-1 p-1.5");
+const GAME_ACTION_MENU_ITEM =
+  "marinara-chat-popover__item flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-[var(--marinara-chat-chrome-panel-text)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:text-[var(--marinara-chat-chrome-highlight-text)] disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent";
+
+type PreparedCombatState = {
+  messageId: string;
+  party: Combatant[];
+  enemies: Combatant[];
+  itemEffects: CombatItemEffect[];
+  mechanics: CombatMechanic[];
+  dialogueCues: CombatDialogueCue[];
 };
 
 type GameAssetGenerationOptions = {
@@ -696,16 +750,16 @@ function isValidCombatant(value: unknown): value is Combatant {
 function generatedPartyMemberToCombatant(
   member: CombatPartyMember,
   index: number,
-  partyMembers: GamePartyMemberInfo[],
+  avatarCandidates: GamePartyMemberInfo[],
   fallbackLevel: number,
 ): Combatant {
-  const matchedPartyMember = findNamedEntry(partyMembers, member.name, (entry) => entry.name);
+  const matchedAvatar = findNamedEntry(avatarCandidates, member.name, (entry) => entry.name);
   const maxHp = Math.max(1, Number(member.maxHp) || Number(member.hp) || 1);
   const hp = Math.max(0, Math.min(maxHp, Number(member.hp) || maxHp));
   const level = combatLevelFromHp(maxHp, fallbackLevel);
   const element = member.attacks?.find((attack) => attack.element)?.element;
   return {
-    id: matchedPartyMember?.id ?? `generated-party-${index}-${slugifyCombatantId(member.name)}`,
+    id: matchedAvatar?.id ?? `generated-party-${index}-${slugifyCombatantId(member.name)}`,
     name: member.name || `Ally ${index + 1}`,
     hp,
     maxHp,
@@ -716,11 +770,27 @@ function generatedPartyMemberToCombatant(
     speed: 6 + level,
     level,
     side: "player",
-    sprite: matchedPartyMember?.avatarUrl ?? undefined,
+    sprite: matchedAvatar?.avatarUrl ?? undefined,
     statusEffects: combatStatusEffectsFromGenerated(member.statuses),
     skills: combatSkillsFromGeneratedAttacks(member.attacks, level),
     element,
   };
+}
+
+function hydrateCombatPartyAvatars(party: Combatant[], avatarCandidates: GamePartyMemberInfo[]): Combatant[] {
+  if (avatarCandidates.length === 0) return party;
+
+  let changed = false;
+  const nextParty = party.map((combatant) => {
+    if (combatant.side !== "player") return combatant;
+    const matchedAvatar = findNamedEntry(avatarCandidates, combatant.name, (entry) => entry.name);
+    const avatarUrl = matchedAvatar?.avatarUrl?.trim();
+    if (!avatarUrl || combatant.sprite === avatarUrl) return combatant;
+    changed = true;
+    return { ...combatant, sprite: avatarUrl };
+  });
+
+  return changed ? nextParty : party;
 }
 
 function generatedEnemyToCombatant(enemy: CombatEnemy, index: number, fallbackLevel: number): Combatant {
@@ -1015,7 +1085,6 @@ function mergeSceneAssetNpcCandidates(
       description: existing.description || description,
       location: existing.location || currentLocation || "",
       avatarUrl: existing.avatarUrl || avatarUrl,
-      met: true,
     });
   }
 
@@ -1029,7 +1098,6 @@ function mergeSceneAssetNpcCandidates(
     candidates.set(normalizedName, {
       ...existing,
       description: existing.description || candidate.description,
-      met: true,
     });
   }
 
@@ -1074,6 +1142,7 @@ const GameCombatUI = lazy(async () => {
 });
 
 import { Modal } from "../ui/Modal";
+import { TrackerPanelIcon } from "../ui/TrackerPanelIcon";
 import type { Chat, SessionSummary, Combatant, Message, GameCombatStateSnapshot } from "@marinara-engine/shared";
 import type { CharacterMap, PersonaInfo } from "../chat/chat-area.types";
 
@@ -1172,7 +1241,7 @@ function backgroundAssetUrl(entry: { path: string }): string {
     const filename = entry.path.replace("__user_bg__/", "");
     return `/api/backgrounds/file/${encodeURIComponent(filename)}`;
   }
-  return `/api/game-assets/file/${entry.path}`;
+  return gameAssetFileUrl(entry.path) ?? "";
 }
 
 const BACKGROUND_FALLBACK_IGNORED_WORDS = new Set(["background", "backgrounds", "generated", "user"]);
@@ -1622,11 +1691,10 @@ import {
   AlertTriangle,
   BookOpen,
   Bookmark,
+  CircleHelp,
+  Feather,
   Folder,
   GitBranch,
-  Globe,
-  HelpCircle,
-  History,
   Image,
   ImageOff,
   Loader2,
@@ -1688,21 +1756,18 @@ function GameVolumeMixer({
   ];
 
   return (
-    <div
-      className={cn(
-        "w-64 max-w-[calc(100vw-1.5rem)] rounded-xl border border-white/15 bg-black/85 p-3 shadow-xl backdrop-blur-md",
-        className,
-      )}
-    >
-      <div className="mb-2 flex items-center justify-between gap-3 border-b border-white/10 pb-2">
-        <span className="text-[0.6875rem] font-semibold uppercase text-white/60">Volume</span>
+    <div className={cn(ROLEPLAY_POPOVER_SHELL, "w-64 max-w-[calc(100vw-1.5rem)] p-3", className)}>
+      <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--marinara-chat-chrome-panel-divider)] pb-2">
+        <span className="text-[0.6875rem] font-semibold uppercase text-[var(--marinara-chat-chrome-panel-muted)]">
+          Volume
+        </span>
         <button
           onClick={onToggleMute}
           className={cn(
-            "flex h-7 w-7 items-center justify-center rounded-full transition-colors",
+            "flex h-7 w-7 items-center justify-center rounded-lg transition-colors",
             audioMuted
               ? "bg-red-500/30 text-red-300 hover:bg-red-500/50"
-              : "bg-white/10 text-white/60 hover:bg-white/20 hover:text-white",
+              : "bg-[var(--marinara-chat-chrome-button-bg)] text-[var(--marinara-chat-chrome-button-text)] ring-1 ring-[var(--marinara-chat-chrome-button-border)] hover:bg-[var(--marinara-chat-chrome-button-bg-hover)] hover:text-[var(--marinara-chat-chrome-button-text-hover)]",
           )}
           title={audioMuted ? "Unmute" : "Mute"}
           aria-label={audioMuted ? "Unmute" : "Mute"}
@@ -1714,7 +1779,7 @@ function GameVolumeMixer({
       <div className="flex flex-col gap-2.5">
         {rows.map((row) => (
           <label key={row.id} className="grid grid-cols-[5.5rem_1fr_2rem] items-center gap-2">
-            <span className="truncate text-[0.6875rem] text-white/70">{row.label}</span>
+            <span className="truncate text-[0.6875rem] text-[var(--foreground)]/75">{row.label}</span>
             <input
               type="range"
               min={0}
@@ -1730,9 +1795,9 @@ function GameVolumeMixer({
                 onAudioInteract?.();
                 row.onChange(Number(e.target.value));
               }}
-              className="h-1.5 w-full cursor-pointer accent-[var(--primary)]"
+              className="h-1.5 w-full cursor-pointer accent-[var(--foreground)]"
             />
-            <span className="text-right text-[0.6875rem] tabular-nums text-white/55">{row.value}</span>
+            <span className="text-right text-[0.6875rem] tabular-nums text-[var(--muted-foreground)]">{row.value}</span>
           </label>
         ))}
       </div>
@@ -1913,7 +1978,7 @@ interface GameSurfaceProps {
   }>;
   personaInfo?: PersonaInfo;
   chatBackground?: string | null;
-  onOpenSettings: () => void;
+  onOpenSettings: (event?: ReactMouseEvent<HTMLElement>) => void;
   onDeleteMessage: (messageId: string) => void;
   multiSelectMode?: boolean;
   selectedMessageIds?: Set<string>;
@@ -1989,12 +2054,37 @@ export function GameSurface({
   const chatBackgroundBlur = useUIStore((s) => s.chatBackgroundBlur);
   const gameMiddleMouseNav = useUIStore((s) => s.gameMiddleMouseNav);
   const messagesPerPage = useUIStore((s) => s.messagesPerPage);
-  const openGameAssetsBrowser = useUIStore((s) => s.openGameAssetsBrowser);
+  const quoteFormat = useUIStore((s) => s.quoteFormat);
+  const musicPlayerSource = useUIStore((s) => s.musicPlayerSource);
+  const trackerPanelEnabled = useUIStore((s) => s.trackerPanelEnabled);
+  const trackerPanelOpen = useUIStore((s) => s.trackerPanelOpen);
+  const toggleTrackerPanel = useUIStore((s) => s.toggleTrackerPanel);
+  const isAgentProcessing = useAgentStore((s) => s.isProcessing);
   const gameSnapshot = useGameStateStore((s) => (s.current?.chatId === activeChatId ? s.current : null));
   const chatCharacterIds = useMemo(() => getChatCharacterIds(chat.characterIds), [chat.characterIds]);
-  const useSpotifyGameMusic = chatMeta.gameUseSpotifyMusic === true;
+  const gameMusicDjEnabled =
+    chatMeta.gameUseMusicDj === true ||
+    chatMeta.gameUseSpotifyMusic === true ||
+    (Array.isArray(chatMeta.activeAgentIds) && (chatMeta.activeAgentIds as string[]).includes("youtube"));
+  const useSpotifyGameMusic = gameMusicDjEnabled && musicPlayerSource === "spotify";
+  const useYoutubeGameMusic = gameMusicDjEnabled && musicPlayerSource === "youtube";
+  const enabledGameAgentTypes = useMemo(() => {
+    const set = new Set<string>();
+    if (chatMeta.enableAgents !== true && chatMeta.enableAgents !== "true") return set;
+    const activeAgentIds: string[] = Array.isArray(chatMeta.activeAgentIds) ? chatMeta.activeAgentIds : [];
+    for (const id of activeAgentIds) set.add(id);
+    return set;
+  }, [chatMeta.activeAgentIds, chatMeta.enableAgents]);
+  const gameTrackerAgentTypes = useMemo(
+    () =>
+      BUILT_IN_AGENTS.filter((agent) => agent.category === "tracker" && !agent.libraryHidden).map((agent) => agent.id),
+    [],
+  );
+  const activeGameMetaId = typeof chatMeta.gameId === "string" ? chatMeta.gameId : "";
+  const sceneRuntimeScopeKey = `${activeChatId}:${activeGameMetaId}`;
   const { data: connectionsList } = useConnections();
   const updateChat = useUpdateChat();
+  const branchChat = useBranchChat();
   const languageConnections = useMemo(
     () =>
       filterLanguageGenerationConnections(
@@ -2155,19 +2245,22 @@ export function GameSurface({
   const fetchManifest = useGameAssetStore((s) => s.fetchManifest);
 
   useEffect(() => {
-    if (!useSpotifyGameMusic) return;
+    if (!useSpotifyGameMusic && !useYoutubeGameMusic) return;
     audioManager.stopMusic();
     useGameAssetStore.getState().setCurrentMusic(null);
-  }, [useSpotifyGameMusic]);
+  }, [useSpotifyGameMusic, useYoutubeGameMusic]);
 
-  const [historyOpen, setHistoryOpen] = useState(false);
   const [forkTimelineOpen, setForkTimelineOpen] = useState(false);
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
-  const [journalOpen, setJournalOpen] = useState(false);
-  const [galleryOpen, setGalleryOpen] = useState(false);
   const [sceneJournalOpen, setSceneJournalOpen] = useState(false);
+  const [sessionPanelOpen, setSessionPanelOpen] = useState(false);
+  const [sessionPanelTab, setSessionPanelTab] = useState<"history" | "journal">("history");
+  const [journalInitialTab, setJournalInitialTab] = useState<GameJournalTabId | undefined>(undefined);
+  const [galleryOpen, setGalleryOpen] = useState(false);
+  const [galleryAnchor, setGalleryAnchor] = useState<{ right: number; top: number } | null>(null);
   const [combatLogsOpen, setCombatLogsOpen] = useState(false);
   const [spotifyRetryPending, setSpotifyRetryPending] = useState(false);
+  const [youtubeRetryPending, setYoutubeRetryPending] = useState(false);
   const combatLogScrolledRef = useRef(false);
   const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
   const [confirmEndSessionOpen, setConfirmEndSessionOpen] = useState(false);
@@ -2177,6 +2270,25 @@ export function GameSurface({
   const [prepareInitialWidgetsOpen, setPrepareInitialWidgetsOpen] = useState(false);
   const [savingSessionSummary, setSavingSessionSummary] = useState<number | null>(null);
   const [savingCurrentSessionSecrets, setSavingCurrentSessionSecrets] = useState(false);
+  const readFloatingPanelAnchor = useCallback((event?: ReactMouseEvent<HTMLElement>) => {
+    if (!event || typeof window === "undefined" || window.innerWidth < 768) return null;
+    const rect = event.currentTarget.getBoundingClientRect();
+    return {
+      right: Math.max(12, Math.round(window.innerWidth - rect.right)),
+      top: Math.max(56, Math.round(rect.bottom + 8)),
+    };
+  }, []);
+  const handleOpenGalleryPanel = useCallback(
+    (event?: ReactMouseEvent<HTMLElement>) => {
+      setGalleryAnchor(readFloatingPanelAnchor(event));
+      setGalleryOpen(true);
+    },
+    [readFloatingPanelAnchor],
+  );
+  const handleCloseGalleryPanel = useCallback(() => {
+    setGalleryOpen(false);
+    setGalleryAnchor(null);
+  }, []);
   const [activeChoices, setActiveChoices] = useState<string[] | null>(null);
   const [activeQte, setActiveQte] = useState<{ actions: string[]; timer: number } | null>(null);
   const [queuedQte, setQueuedQte] = useState<{ qte: { actions: string[]; timer: number }; messageId: string } | null>(
@@ -2189,7 +2301,9 @@ export function GameSurface({
     null,
   );
   const [queuedCombatGeneration, setQueuedCombatGeneration] = useState<{ messageId: string } | null>(null);
+  const [preparedCombatState, setPreparedCombatState] = useState<PreparedCombatState | null>(null);
   const [combatGenerationPending, setCombatGenerationPending] = useState(false);
+  const [combatGenerationError, setCombatGenerationError] = useState<string | null>(null);
   const [combatItemEffects, setCombatItemEffects] = useState<CombatItemEffect[]>([]);
   const [combatMechanics, setCombatMechanics] = useState<CombatMechanic[]>([]);
   const [combatDialogueCues, setCombatDialogueCues] = useState<CombatDialogueCue[]>([]);
@@ -2390,13 +2504,14 @@ export function GameSurface({
   const [imagePromptReviewSubmitting, setImagePromptReviewSubmitting] = useState(false);
   const imagePromptReviewResolveRef = useRef<((overrides: GameImagePromptOverride[] | null) => void) | null>(null);
   const [volumePopoverOpen, setVolumePopoverOpen] = useState(false);
+  const [gameAssetsPanelOpen, setGameAssetsPanelOpen] = useState(false);
   const [retryMenuOpen, setRetryMenuOpen] = useState(false);
   const [mobileRetryMenuOpen, setMobileRetryMenuOpen] = useState(false);
   /** Bumped after background PNG is overwritten so the browser refetches despite long Cache-Control on game-assets. */
   const [backgroundUrlCacheBust, setBackgroundUrlCacheBust] = useState(0);
   const [regenerateBackgroundPending, setRegenerateBackgroundPending] = useState(false);
   const [refreshBackgroundPromptPending, setRefreshBackgroundPromptPending] = useState(false);
-  const [mobileWorldInfoOpen, setMobileWorldInfoOpen] = useState(false);
+  const [mobileActiveContextOpen, setMobileActiveContextOpen] = useState(false);
   const [persistedGameAudioSettings] = useState(readPersistedGameAudioSettings);
   const [masterVolume, setMasterVolume] = useState(persistedGameAudioSettings.masterVolume);
   const [musicVolume, setMusicVolume] = useState(persistedGameAudioSettings.musicVolume);
@@ -2412,6 +2527,10 @@ export function GameSurface({
   const volumePopoverRef = useRef<HTMLDivElement>(null);
   const mobileVolumePopoverRef = useRef<HTMLDivElement>(null);
   const retryMenuRef = useRef<HTMLDivElement>(null);
+  const sessionPanelRef = useRef<HTMLDivElement>(null);
+  const mobileSessionPanelRef = useRef<HTMLDivElement>(null);
+  const gameAssetsPanelRef = useRef<HTMLDivElement>(null);
+  const mobileGameAssetsPanelRef = useRef<HTMLDivElement>(null);
   const hudSurfaceRef = useRef<HTMLDivElement>(null);
   const compactHudWidgetsRef = useRef(compactHudWidgets);
   const compactHudReleaseWidthRef = useRef<number | null>(null);
@@ -2440,8 +2559,8 @@ export function GameSurface({
   const narrationAutoPlayBlocked =
     !!activeReadable ||
     !!activeQte ||
-    historyOpen ||
-    journalOpen ||
+    sessionPanelOpen ||
+    gameAssetsPanelOpen ||
     galleryOpen ||
     sceneJournalOpen ||
     combatLogsOpen ||
@@ -2451,8 +2570,8 @@ export function GameSurface({
     mobileActionsOpen;
   const narrationVoicePlaybackBlocked =
     !!activeReadable ||
-    historyOpen ||
-    journalOpen ||
+    sessionPanelOpen ||
+    gameAssetsPanelOpen ||
     galleryOpen ||
     combatLogsOpen ||
     inventoryOpen ||
@@ -2499,15 +2618,15 @@ export function GameSurface({
     setAudioSettingsHydrated(true);
   }, [persistedGameAudioSettings]);
 
-  // Clear stale party dialogue when switching chats (M7)
-  const prevActiveChatRef = useRef(activeChatId);
+  // Clear stale runtime state when switching chats or replacing the game in the same chat.
+  const prevSceneRuntimeScopeRef = useRef(sceneRuntimeScopeKey);
   useEffect(() => {
     inventoryItemsRef.current = inventoryItems;
   }, [inventoryItems]);
 
   useEffect(() => {
-    if (prevActiveChatRef.current === activeChatId) return; // skip initial mount
-    prevActiveChatRef.current = activeChatId;
+    if (prevSceneRuntimeScopeRef.current === sceneRuntimeScopeKey) return; // skip initial mount
+    prevSceneRuntimeScopeRef.current = sceneRuntimeScopeKey;
     recentMusicHistoryRef.current = normalizeRecentMusicHistory(chatMeta.gameRecentMusic);
     recentSpotifyTrackHistoryRef.current = normalizeRecentSpotifyTrackHistory(chatMeta.gameRecentSpotifyTracks);
     setPartyDialogue([]);
@@ -2525,7 +2644,7 @@ export function GameSurface({
     setCombatSpriteSuggestion(null);
     setNarrationDoneMsgId(null);
     lastProcessedMsgRef.current = null;
-    // Reset inventory/readables for the new chat
+    // Reset inventory/readables for the new chat or game.
     setInventoryItems((chatMeta.gameInventory as Array<{ name: string; quantity: number }>) ?? []);
     setInventoryNotifications([]);
     setPendingInventorySegmentUpdates([]);
@@ -2541,7 +2660,7 @@ export function GameSurface({
     // Allow the auto-tutorial to re-evaluate for the new chat (guard still gates on disabled flag)
     tutorialAutoTriggeredRef.current = false;
     setBackgroundUrlCacheBust(0);
-  }, [activeChatId, chatMeta.gameInventory, chatMeta.gameRecentMusic, chatMeta.gameRecentSpotifyTracks]);
+  }, [sceneRuntimeScopeKey, chatMeta.gameInventory, chatMeta.gameRecentMusic, chatMeta.gameRecentSpotifyTracks]);
 
   const clearPendingInteractiveCommands = useCallback(() => {
     setActiveChoices(null);
@@ -2677,21 +2796,21 @@ export function GameSurface({
     fetchManifest();
   }, [fetchManifest]);
 
-  // Clean up audio + reset playback state when SWITCHING chats.
+  // Clean up audio + reset playback state when switching chats or replacing the game in the same chat.
   // On unmount, only dispose audio (stop sounds) but keep store state intact so that
   // same-chat remount (e.g. returning from persona editor) can read it immediately
   // without waiting for the scene restore effect.
-  const prevChatIdRef = useRef(activeChatId);
+  const prevSceneMediaScopeRef = useRef(sceneRuntimeScopeKey);
   useEffect(() => {
-    if (prevChatIdRef.current !== activeChatId) {
+    if (prevSceneMediaScopeRef.current !== sceneRuntimeScopeKey) {
       audioManager.dispose();
       useGameAssetStore.getState().resetPlaybackState();
-      prevChatIdRef.current = activeChatId;
+      prevSceneMediaScopeRef.current = sceneRuntimeScopeKey;
     }
     return () => {
       audioManager.dispose();
     };
-  }, [activeChatId]);
+  }, [sceneRuntimeScopeKey]);
 
   // Reconnect audio and background on mount if the store was disposed
   // (e.g. user left to home and returned to the same game).
@@ -2707,13 +2826,19 @@ export function GameSurface({
         useGameAssetStore.getState().setCurrentBackground(savedBg);
       }
     }
-    if (!useSpotifyGameMusic && currentMusic && assetMap?.[currentMusic] && !audioManager.getState().musicTag) {
+    if (
+      !useSpotifyGameMusic &&
+      !useYoutubeGameMusic &&
+      currentMusic &&
+      assetMap?.[currentMusic] &&
+      !audioManager.getState().musicTag
+    ) {
       audioManager.playMusic(currentMusic, assetMap);
     }
     if (currentAmbient && assetMap?.[currentAmbient] && !audioManager.getState().ambientTag) {
       audioManager.playAmbient(currentAmbient, assetMap);
     }
-  }, [assetManifest, chatMeta.gameSceneBackground, scopedAssetMap, useSpotifyGameMusic]);
+  }, [assetManifest, chatMeta.gameSceneBackground, scopedAssetMap, useSpotifyGameMusic, useYoutubeGameMusic]);
 
   const gameCharacterIds = useMemo(() => {
     const ids = new Set<string>();
@@ -2739,8 +2864,9 @@ export function GameSurface({
   // Also resolve persona sprite ID for expression lookup
   const personaSpriteId = useMemo(() => {
     const config = chatMeta.gameSetupConfig as Record<string, unknown> | undefined;
-    return (config?.personaId as string | undefined) ?? null;
-  }, [chatMeta.gameSetupConfig]);
+    const configuredPersonaId = typeof config?.personaId === "string" ? config.personaId.trim() : "";
+    return personaInfo?.id ?? (configuredPersonaId || null);
+  }, [chatMeta.gameSetupConfig, personaInfo?.id]);
 
   const spriteQueries = useQueries({
     queries: characterIds.map((id) => ({
@@ -2917,6 +3043,15 @@ export function GameSurface({
 
   const activeFullBodySprite = useMemo(() => {
     if (!fullBodyTarget) return null;
+    const targetName = normalizeSceneAssetName(fullBodyTarget.name);
+    const personaName = personaInfo?.name ? normalizeSceneAssetName(personaInfo.name) : "";
+    if (personaSpriteId && personaName && targetName === personaName) {
+      const pose =
+        fullBodyTarget.mode === "combat"
+          ? resolveCombatFullBodyPose(fullBodyTarget.token, personaSpriteQuery.data)
+          : resolveDialogueFullBodyPose(fullBodyTarget.token, personaSpriteQuery.data);
+      return pose ? { characterId: personaSpriteId, pose: `full_${pose}` } : null;
+    }
     const activeCharacterEntries = characterIds.flatMap((id) => {
       const character = characterMap.get(id);
       return character ? ([[id, character]] as Array<[string, NonNullable<ReturnType<typeof characterMap.get>>]>) : [];
@@ -2973,6 +3108,9 @@ export function GameSurface({
     npcSpriteEntries,
     npcSpriteQueries,
     npcs,
+    personaInfo?.name,
+    personaSpriteId,
+    personaSpriteQuery.data,
     speakingLibraryCharacters,
     spriteQueries,
   ]);
@@ -3077,7 +3215,7 @@ export function GameSurface({
             const resolved = resolveAssetTag(fx.background, "backgrounds", assetMap);
             useGameAssetStore.getState().setCurrentBackground(resolved);
           }
-          if (fx.music && !useSpotifyGameMusic) {
+          if (fx.music && !useSpotifyGameMusic && !useYoutubeGameMusic) {
             const resolved = resolveAssetTag(fx.music, "music", assetMap);
             audioManager.playMusic(resolved, assetMap);
             useGameAssetStore.getState().setCurrentMusic(resolved);
@@ -3113,6 +3251,7 @@ export function GameSurface({
       applyInventoryUpdates,
       playDirections,
       useSpotifyGameMusic,
+      useYoutubeGameMusic,
       tryReconcileDeferredEndPlate,
     ],
   );
@@ -3131,16 +3270,6 @@ export function GameSurface({
     () => (latestAssistantMsg?.content ? parseGmTags(latestAssistantMsg.content).cleanContent.trim() : ""),
     [latestAssistantMsg?.content],
   );
-
-  // The GM prose that triggered combat, used as the opening combat-log entry so the
-  // player can read what set up the fight without having to open the Logs modal.
-  const combatStartNarration = useMemo(() => {
-    if (!combatStartMessageId) return null;
-    const triggerMsg = messages.find((m) => m.id === combatStartMessageId);
-    if (!triggerMsg?.content) return null;
-    const cleaned = stripGmTags(triggerMsg.content).trim();
-    return cleaned.length > 0 ? cleaned : null;
-  }, [combatStartMessageId, messages]);
 
   const combatLogEntries = useMemo(
     () =>
@@ -3194,7 +3323,13 @@ export function GameSurface({
         (npc) =>
           !npc.avatarUrl && !npcAvatarLookup.has(normalizeSceneAssetName(npc.name)) && npc.description && npc.name,
       )
-      .map((npc) => ({ id: npc.id, name: npc.name, description: npc.description }))
+      .map((npc) => ({
+        id: npc.id,
+        name: npc.name,
+        description: npc.description,
+        gender: npc.gender ?? null,
+        pronouns: npc.pronouns ?? null,
+      }))
       .slice(0, 10);
 
     return list;
@@ -3319,9 +3454,17 @@ export function GameSurface({
   const canRetryTurn = !!latestAssistantMsg?.id && !isStreaming;
   const canRetryScene =
     sceneAnalysisEnabled && !!latestAssistantMsg?.content && !isStreaming && !sceneAnalysis.isPending;
+  const canRetryTrackers =
+    sceneAnalysisEnabled &&
+    gameTrackerAgentTypes.some((type) => enabledGameAgentTypes.has(type)) &&
+    !!latestAssistantMsg?.id &&
+    !isStreaming &&
+    !isAgentProcessing;
   const canRetryAssets = !!retryableAssetGeneration && (assetGenerationFailed || !pendingAssetGeneration);
   const canRetrySpotifyMusic =
     useSpotifyGameMusic && !!activeChatId && !isStreaming && !sceneAnalysis.isPending && !spotifyRetryPending;
+  const canRetryYoutubeMusic =
+    useYoutubeGameMusic && !!activeChatId && !isStreaming && !sceneAnalysis.isPending && !youtubeRetryPending;
 
   const fetchSpotifySceneCandidates = useCallback(
     async (
@@ -3332,6 +3475,9 @@ export function GameSurface({
       if (!useSpotifyGameMusic || !activeChatId) return [];
       setSpotifyRetryPending(true);
       try {
+        if (chatMeta.gameUseSpotifyMusic !== true) {
+          await api.patch(`/chats/${activeChatId}/metadata`, { gameUseSpotifyMusic: true }).catch(() => undefined);
+        }
         const result = await api.post<GameSpotifyCandidatesResponse>(
           "/game/spotify/candidates",
           {
@@ -3351,7 +3497,7 @@ export function GameSurface({
         setSpotifyRetryPending(false);
       }
     },
-    [activeChatId, useSpotifyGameMusic],
+    [activeChatId, chatMeta.gameUseSpotifyMusic, useSpotifyGameMusic],
   );
 
   const playSpotifySceneTrack = useCallback(
@@ -3473,6 +3619,18 @@ export function GameSurface({
   // ── Restore scene assets (background/music/ambient) from chat metadata on page load ──
   const sceneRestoredRef = useRef(false);
   const partyDialogueRestoredRef = useRef(false);
+  const restoredSceneScopeRef = useRef(sceneRuntimeScopeKey);
+
+  useEffect(() => {
+    if (restoredSceneScopeRef.current === sceneRuntimeScopeKey) return;
+    restoredSceneScopeRef.current = sceneRuntimeScopeKey;
+    sceneRestoredRef.current = false;
+    partyDialogueRestoredRef.current = false;
+    isRestoredRef.current = false;
+    sceneReadyMsgIdRef.current = undefined;
+    weatherMsgRef.current = null;
+    lastProcessedMsgRef.current = null;
+  }, [sceneRuntimeScopeKey]);
 
   if (sceneReadyMsgIdRef.current === undefined && !isMessagesLoading) {
     if (latestAssistantMsg && !isStreaming) {
@@ -3506,7 +3664,7 @@ export function GameSurface({
     // same-chat remount (store may already match) and different-chat mount.
     useGameAssetStore.getState().setCurrentBackground(savedBg ?? null);
 
-    if (savedMusic && !useSpotifyGameMusic && assetMap?.[savedMusic]) {
+    if (savedMusic && !useSpotifyGameMusic && !useYoutubeGameMusic && assetMap?.[savedMusic]) {
       useGameAssetStore.getState().setCurrentMusic(savedMusic);
       // Play music — may be blocked by autoplay, audioManager queues retry on gesture
       if (audioManager.getState().musicTag !== savedMusic) {
@@ -3564,6 +3722,7 @@ export function GameSurface({
     hasCombatResultAfterMessage,
     handlePartyChangeCommands,
     useSpotifyGameMusic,
+    useYoutubeGameMusic,
   ]);
 
   // ── Restore party dialogue from the last [party-chat] message on page load ──
@@ -3983,6 +4142,8 @@ export function GameSurface({
     setQueuedQte(null);
     setQueuedEncounter(null);
     setQueuedCombatGeneration(null);
+    setPreparedCombatState(null);
+    setCombatGenerationError(null);
     setCombatItemEffects([]);
     setCombatMechanics([]);
     setCombatDialogueCues([]);
@@ -4195,8 +4356,13 @@ export function GameSurface({
       currentSpotifyTrack: recentSpotifyTrackHistoryRef.current[0] ?? null,
       recentSpotifyTracks: recentSpotifyTrackHistoryRef.current,
       currentAmbient: useGameAssetStore.getState().currentAmbient,
+      currentLocation: gameSnapshot?.location ?? null,
       currentWeather: gameSnapshot?.weather ?? null,
       currentTimeOfDay: gameSnapshot?.time ?? null,
+      genre: ((chatMeta.gameSetupConfig as Record<string, unknown> | undefined)?.genre as string | undefined) ?? null,
+      setting:
+        ((chatMeta.gameSetupConfig as Record<string, unknown> | undefined)?.setting as string | undefined) ?? null,
+      worldOverview: (chatMeta.gameWorldOverview as string | undefined) ?? null,
       canGenerateBackgrounds: !!chatMeta.enableSpriteGeneration && !!chatMeta.gameImageConnectionId,
       canGenerateIllustrations: autoCgSceneGate.canGenerateIllustrations,
       cgFrequency: autoCgSceneGate.cgFrequency,
@@ -4336,7 +4502,7 @@ export function GameSurface({
       recentMusic: recentMusicHistoryRef.current,
       availableMusic: musicTags,
     });
-    if (scoredMusic && !useSpotifyGameMusic) {
+    if (scoredMusic && !useSpotifyGameMusic && !useYoutubeGameMusic) {
       audioManager.playMusic(scoredMusic, assetMap);
       useGameAssetStore.getState().setCurrentMusic(scoredMusic);
     }
@@ -4635,7 +4801,7 @@ export function GameSurface({
         useGameAssetStore.getState().setCurrentBackground(pick);
       }
     }
-    if (result.music && !useSpotifyGameMusic) {
+    if (result.music && !useSpotifyGameMusic && !useYoutubeGameMusic) {
       const resolved = resolveAssetTag(result.music, "music", assetMap);
       audioManager.playMusic(resolved, assetMap);
       useGameAssetStore.getState().setCurrentMusic(resolved);
@@ -4793,18 +4959,19 @@ export function GameSurface({
       // fallback would otherwise discard the LLM's visual brief.
       const pendingBg = result.pendingBackgroundGeneration ?? null;
       const pendingIllustration = result.generatedIllustration ? null : result.illustration;
-
       if (
         gameImageGenerationEnabled &&
         (pendingBg || unresolvedBg || pendingIllustration || npcsNeedingAvatars.length > 0)
       ) {
+        const messageTags = "content" in msg && typeof msg.content === "string" ? parseGmTags(msg.content) : null;
+        const combatTransitionTurn = !!(messageTags?.combatEncounter || messageTags?.stateChange === "combat");
         const assetPayload: GameAssetGenerationPayload = {
           chatId: activeChatId,
           illustration: pendingIllustration ?? undefined,
           npcsNeedingAvatars: npcsNeedingAvatars.length > 0 ? npcsNeedingAvatars : undefined,
           debugMode: useUIStore.getState().debugMode,
         };
-        const blocksScene = introPresented;
+        const blocksScene = introPresented && !combatTransitionTurn;
         const markSceneReady = () => {
           sceneReadyMsgIdRef.current = msg.id;
           setSceneReadyTick((t) => t + 1);
@@ -5215,6 +5382,8 @@ export function GameSurface({
     const handler = (e: Event) => {
       const chatId = (e as CustomEvent).detail?.chatId;
       if (chatId !== activeChatId) return;
+      startGameGuardRef.current = false;
+      setStartGameRequested(false);
       setGenerationFailed(true);
     };
     window.addEventListener("marinara:generation-error", handler);
@@ -5358,6 +5527,26 @@ export function GameSurface({
     }
   }, [activeChatId, generate, isStreaming]);
 
+  const handleRetryYoutubeMusic = useCallback(async () => {
+    if (!activeChatId || !useYoutubeGameMusic || isStreaming || sceneAnalysis.isPending) return;
+    setRetryMenuOpen(false);
+    setMobileRetryMenuOpen(false);
+    setMobileActionsOpen(false);
+    setYoutubeRetryPending(true);
+    try {
+      // Music DJ YouTube mode needs no scene-candidate flow — re-running the agent (with the
+      // manualRetry constraint the server injects) emits a fresh play intent that
+      // the in-app player swaps in.
+      await retryAgents(activeChatId, ["spotify"]);
+      toast.success("Music DJ picking a fresh YouTube track…", { duration: 1800 });
+    } catch (error) {
+      console.warn("[youtube/game] Retry failed:", error);
+      toast.error("Music DJ retry failed.");
+    } finally {
+      setYoutubeRetryPending(false);
+    }
+  }, [activeChatId, isStreaming, retryAgents, sceneAnalysis.isPending, useYoutubeGameMusic]);
+
   const handleRetrySpotifyMusic = useCallback(async () => {
     if (!activeChatId || !useSpotifyGameMusic || isStreaming || sceneAnalysis.isPending) return;
     const msg = latestAssistantMsgRef.current;
@@ -5397,8 +5586,12 @@ export function GameSurface({
       currentSpotifyTrack: recentSpotifyTrackHistoryRef.current[0] ?? null,
       recentSpotifyTracks: recentSpotifyTrackHistoryRef.current,
       currentAmbient: useGameAssetStore.getState().currentAmbient,
+      currentLocation: gameSnapshot?.location ?? null,
       currentWeather: gameSnapshot?.weather ?? null,
       currentTimeOfDay: gameSnapshot?.time ?? null,
+      genre: (setupConfig?.genre as string | undefined) ?? null,
+      setting: (setupConfig?.setting as string | undefined) ?? null,
+      worldOverview: (chatMeta.gameWorldOverview as string | undefined) ?? null,
       canGenerateBackgrounds: !!chatMeta.enableSpriteGeneration && !!chatMeta.gameImageConnectionId,
       canGenerateIllustrations: autoCgSceneGate.canGenerateIllustrations,
       cgFrequency: autoCgSceneGate.cgFrequency,
@@ -5458,8 +5651,10 @@ export function GameSurface({
     chatMeta.gameImagePromptInstructions,
     chatMeta.gameSceneConnectionId,
     chatMeta.gameSetupConfig,
+    chatMeta.gameWorldOverview,
     currentBackground,
     fetchSpotifySceneCandidates,
+    gameSnapshot?.location,
     gameSnapshot?.time,
     gameSnapshot?.weather,
     gameState,
@@ -5483,11 +5678,11 @@ export function GameSurface({
       generate({
         chatId: activeChatId,
         connectionId: null,
-        userMessage: message,
+        userMessage: formatTextQuotes(message, quoteFormat),
         ...(attachments?.length ? { attachments } : {}),
       });
     },
-    [activeChatId, chatMeta.gameSessionStatus, generate],
+    [activeChatId, chatMeta.gameSessionStatus, generate, quoteFormat],
   );
 
   // Game mutations
@@ -5667,7 +5862,6 @@ export function GameSurface({
           pronouns: null,
           location: "",
           reputation: 0,
-          met: true,
           notes: [],
         } satisfies GameNpc);
 
@@ -5728,7 +5922,6 @@ export function GameSurface({
           pronouns: null,
           location: "",
           reputation: 0,
-          met: true,
           notes: [],
         } satisfies GameNpc);
 
@@ -5737,7 +5930,14 @@ export function GameSurface({
         const result = await runGameAssetGeneration(
           {
             chatId: activeChatId,
-            npcsNeedingAvatars: [{ name: targetNpc.name, description: targetNpc.description ?? "" }],
+            npcsNeedingAvatars: [
+              {
+                name: targetNpc.name,
+                description: targetNpc.description ?? "",
+                gender: targetNpc.gender ?? null,
+                pronouns: targetNpc.pronouns ?? null,
+              },
+            ],
             forceNpcAvatarNames: [targetNpc.name],
             debugMode: useUIStore.getState().debugMode,
           },
@@ -6265,6 +6465,7 @@ export function GameSurface({
 
     const onWheel = (event: WheelEvent) => {
       if (event.deltaY === 0) return;
+      if (event.ctrlKey) return;
       if (inSkipUi(event.target)) return;
       const now = Date.now();
       // Throttle ~60ms so a single physical scroll-tick doesn't fire many times on touchpads.
@@ -6461,6 +6662,112 @@ export function GameSurface({
     return baseMembers;
   }, [chatCharacterIds, chatMeta, characters, characterMap, npcs, personaInfo]);
 
+  const combatAvatarCandidates = useMemo(() => {
+    const candidatesByName = new Map<string, GamePartyMemberInfo>();
+    const addCandidate = (candidate: GamePartyMemberInfo) => {
+      const normalizedName = normalizeSceneAssetName(candidate.name);
+      if (!normalizedName) return;
+      const existing = candidatesByName.get(normalizedName);
+      if (!existing || (!existing.avatarUrl && candidate.avatarUrl)) {
+        candidatesByName.set(normalizedName, candidate);
+      }
+    };
+
+    for (const member of partyMembers) addCandidate(member);
+    if (Array.isArray(chatMeta.gameNpcs)) {
+      for (const rawNpc of chatMeta.gameNpcs) {
+        if (!rawNpc || typeof rawNpc !== "object") continue;
+        const npc = rawNpc as Partial<GameNpc>;
+        if (typeof npc.name !== "string" || !npc.name.trim()) continue;
+        addCandidate({
+          id: typeof npc.id === "string" && npc.id.trim() ? npc.id : `npc:${normalizeSceneAssetName(npc.name)}`,
+          name: npc.name,
+          avatarUrl: typeof npc.avatarUrl === "string" ? npc.avatarUrl : null,
+          canRemove: false,
+        });
+      }
+    }
+    for (const character of characters) {
+      addCandidate({
+        id: character.id,
+        name: character.name,
+        avatarUrl: character.avatarUrl ?? null,
+        avatarCrop: character.avatarCrop ?? null,
+        nameColor: character.nameColor,
+        dialogueColor: character.dialogueColor,
+        canRemove: false,
+      });
+    }
+    for (const npc of npcs) {
+      addCandidate({
+        id: npc.id,
+        name: npc.name,
+        avatarUrl: npc.avatarUrl ?? null,
+        canRemove: false,
+      });
+    }
+    for (const presentCharacter of (gameSnapshot?.presentCharacters as SceneAssetPresentCharacter[] | undefined) ??
+      []) {
+      const name = typeof presentCharacter.name === "string" ? presentCharacter.name.trim() : "";
+      if (!name) continue;
+      addCandidate({
+        id: `present:${normalizeSceneAssetName(name)}`,
+        name,
+        avatarUrl:
+          typeof presentCharacter.avatarPath === "string" && presentCharacter.avatarPath.trim()
+            ? presentCharacter.avatarPath
+            : null,
+        canRemove: false,
+      });
+    }
+    if (personaInfo?.name) {
+      addCandidate({
+        id: "persona:active",
+        name: personaInfo.name,
+        avatarUrl: personaInfo.avatarUrl ?? null,
+        avatarCrop: personaInfo.avatarCrop ?? null,
+        nameColor: personaInfo.nameColor,
+        dialogueColor: personaInfo.dialogueColor,
+        canRemove: false,
+      });
+    }
+    for (const [normalizedName, avatarUrl] of npcAvatarLookup.entries()) {
+      const existing = candidatesByName.get(normalizedName);
+      if (existing) {
+        if (!existing.avatarUrl) {
+          candidatesByName.set(normalizedName, { ...existing, avatarUrl });
+        }
+        continue;
+      }
+      candidatesByName.set(normalizedName, {
+        id: `avatar:${normalizedName}`,
+        name: normalizedName,
+        avatarUrl,
+        canRemove: false,
+      });
+    }
+
+    return Array.from(candidatesByName.values());
+  }, [
+    characters,
+    chatMeta.gameNpcs,
+    gameSnapshot?.presentCharacters,
+    npcAvatarLookup,
+    npcs,
+    partyMembers,
+    personaInfo,
+  ]);
+
+  // Party-side combatants can be generated from story NPCs or restored from an
+  // older snapshot before their avatar was known. Re-check the wider character,
+  // NPC, present-character, and persona avatar pool whenever it changes so
+  // allies do not fall back to initials while their cards already have images.
+  useEffect(() => {
+    if (!combatParty) return;
+    const hydratedParty = hydrateCombatPartyAvatars(combatParty, combatAvatarCandidates);
+    if (hydratedParty !== combatParty) setCombatParty(hydratedParty);
+  }, [combatAvatarCandidates, combatParty]);
+
   // Auto-open the in-game tutorial on the user's first game.
   // Guard: only when setup is complete, party is loaded, and the user
   // hasn't permanently disabled it. Fires once per chat mount.
@@ -6506,6 +6813,14 @@ export function GameSurface({
 
   const combatUiActive = gameState === "combat" && !!combatParty && !!combatEnemies;
   const topOverlayOffsetClass = "top-3";
+  const queuedCombatMatchesLatest =
+    !!queuedCombatGeneration?.messageId &&
+    !!latestAssistantMsg?.id &&
+    queuedCombatGeneration.messageId === latestAssistantMsg.id;
+  const combatStartGateReached =
+    queuedCombatMatchesLatest && !isStreaming && !scenePreparing && (!latestNarrationText || narrationDone);
+  const combatStarting = combatStartGateReached && combatGenerationPending && !combatUiActive;
+  const combatGenerationFailedAtGate = combatStartGateReached && !!combatGenerationError && !combatUiActive;
 
   const combatDialogueLines = useMemo(() => {
     if (!combatUiActive || !latestAssistantMsg?.content || isStreaming) return [];
@@ -6528,7 +6843,7 @@ export function GameSurface({
       const fallbackLevel = sessionNumber ?? 5;
       const partyCombatants = Array.isArray(combatState.party)
         ? combatState.party.map((member, index) =>
-            generatedPartyMemberToCombatant(member, index, partyMembers, fallbackLevel),
+            generatedPartyMemberToCombatant(member, index, combatAvatarCandidates, fallbackLevel),
           )
         : [];
       const enemyCombatants = Array.isArray(combatState.enemies)
@@ -6538,7 +6853,7 @@ export function GameSurface({
       if (partyCombatants.length === 0 || enemyCombatants.length === 0) return null;
       return { party: partyCombatants, enemies: enemyCombatants };
     },
-    [partyMembers, sessionNumber],
+    [combatAvatarCandidates, sessionNumber],
   );
 
   useEffect(() => {
@@ -6599,6 +6914,121 @@ export function GameSurface({
     transitionGameState,
   ]);
 
+  const generateCombatStateForMessage = useCallback(
+    (messageId: string) => {
+      if (combatGenerationPending) return;
+      const debugMode = useUIStore.getState().debugMode;
+      if (debugMode) {
+        console.warn("[game-combat] Starting combat state generation", { chatId: activeChatId, messageId });
+      }
+      setCombatGenerationError(null);
+      setCombatGenerationPending(true);
+      api
+        .post<EncounterInitResponse>("/encounter/init", {
+          chatId: activeChatId,
+          connectionId: null,
+          settings: GAME_COMBAT_GENERATION_SETTINGS,
+          spellbookId: null,
+          debugMode,
+        })
+        .then(async (response) => {
+          const combatants = hydrateGeneratedCombatState(response.combatState);
+          if (!combatants) {
+            throw new Error("Combat generator returned an empty party or enemy list.");
+          }
+
+          const visuals = response.combatState.visuals;
+          const enemyAvatarRequests = (
+            Array.isArray(visuals?.enemyImagePrompts) && visuals.enemyImagePrompts.length > 0
+              ? visuals.enemyImagePrompts
+              : response.combatState.enemies.map((enemy) => ({
+                  name: enemy.name,
+                  prompt: enemy.description || enemy.sprite || `${enemy.name} combat enemy portrait`,
+                }))
+          )
+            .map((enemy) => ({
+              name: String(enemy.name ?? "").trim(),
+              description: String(enemy.prompt ?? "")
+                .trim()
+                .slice(0, 1000),
+            }))
+            .filter((enemy) => enemy.name && enemy.description)
+            .slice(0, 10);
+          const shouldGenerateBossVisuals = !!visuals?.isBossFight && !!chatMeta.enableSpriteGeneration;
+          const shouldGenerateEnemyAvatars = !!chatMeta.enableSpriteGeneration && enemyAvatarRequests.length > 0;
+          if (
+            (shouldGenerateBossVisuals && (visuals?.backgroundPrompt || visuals?.illustrationPrompt)) ||
+            shouldGenerateEnemyAvatars
+          ) {
+            const illustrationPrompt = visuals?.illustrationPrompt?.trim() || "";
+            const backgroundPrompt = visuals?.backgroundPrompt?.trim() || "";
+            const assetPayload = {
+              chatId: activeChatId,
+              backgroundTag: backgroundPrompt ? `boss fight: ${backgroundPrompt}` : undefined,
+              illustration:
+                illustrationPrompt.length >= 40
+                  ? {
+                      prompt: illustrationPrompt,
+                      reason: "Boss fight splash illustration",
+                      slug: visuals?.slug || "boss-fight",
+                      characters: [
+                        ...combatants.party.map((member) => member.name),
+                        ...combatants.enemies.map((enemy) => enemy.name),
+                      ].slice(0, 6),
+                    }
+                  : undefined,
+              npcsNeedingAvatars: shouldGenerateEnemyAvatars ? enemyAvatarRequests : undefined,
+              debugMode: useUIStore.getState().debugMode,
+            };
+            void requestAssetGeneration(assetPayload, { allowPromptReview: false })
+              .then((assetResult) => {
+                if (!assetResult?.generatedNpcAvatars?.length) return;
+                const avatarByName = new Map(
+                  assetResult.generatedNpcAvatars.map(
+                    (entry) => [normalizeSceneAssetName(entry.name), entry.avatarUrl] as const,
+                  ),
+                );
+                const applyAvatars = (enemies: Combatant[]) =>
+                  enemies.map((enemy) => {
+                    const avatarUrl = avatarByName.get(normalizeSceneAssetName(enemy.name));
+                    return avatarUrl ? { ...enemy, sprite: avatarUrl } : enemy;
+                  });
+                setPreparedCombatState((current) =>
+                  current?.messageId === messageId ? { ...current, enemies: applyAvatars(current.enemies) } : current,
+                );
+                setCombatEnemies((currentEnemies) => (currentEnemies ? applyAvatars(currentEnemies) : currentEnemies));
+              })
+              .catch((err) => {
+                console.warn("[game-combat] Failed to generate combat visuals", err);
+              });
+          }
+
+          setPreparedCombatState({
+            messageId,
+            party: combatants.party,
+            enemies: combatants.enemies,
+            itemEffects: Array.isArray(response.combatState.itemEffects) ? response.combatState.itemEffects : [],
+            mechanics: Array.isArray(response.combatState.mechanics) ? response.combatState.mechanics : [],
+            dialogueCues: Array.isArray(response.combatState.dialogueCues) ? response.combatState.dialogueCues : [],
+          });
+        })
+        .catch((err) => {
+          const message = err instanceof Error ? err.message : "Combat generation failed.";
+          console.warn("[game-combat] Failed to generate combat state", err);
+          setCombatGenerationError(message);
+          toast.error(`${message} Use the Combat button to retry.`);
+        })
+        .finally(() => setCombatGenerationPending(false));
+    },
+    [
+      activeChatId,
+      chatMeta.enableSpriteGeneration,
+      combatGenerationPending,
+      hydrateGeneratedCombatState,
+      requestAssetGeneration,
+    ],
+  );
+
   useEffect(() => {
     if (!queuedCombatGeneration || !latestAssistantMsg?.id) return;
     if (queuedCombatGeneration.messageId !== latestAssistantMsg.id) return;
@@ -6608,125 +7038,103 @@ export function GameSurface({
       )
     ) {
       setQueuedCombatGeneration(null);
+      setPreparedCombatState(null);
+      setCombatGenerationError(null);
       return;
     }
-    if (pendingEncounter || combatUiActive || combatGenerationPending) return;
-    if (isStreaming || scenePreparing || assetGenerationBlocksScene || directionsPlaying) return;
-    if (latestNarrationText && !narrationDone) return;
+    if (pendingEncounter || combatUiActive || combatGenerationPending || combatGenerationError) return;
+    if (preparedCombatState?.messageId === queuedCombatGeneration.messageId) return;
+    if (isStreaming || scenePreparing || assetGenerationBlocksScene) return;
 
-    setCombatGenerationPending(true);
-    api
-      .post<EncounterInitResponse>("/encounter/init", {
-        chatId: activeChatId,
-        connectionId: null,
-        settings: GAME_COMBAT_GENERATION_SETTINGS,
-        spellbookId: null,
-      })
-      .then(async (response) => {
-        const combatants = hydrateGeneratedCombatState(response.combatState);
-        if (!combatants) {
-          throw new Error("Combat generator returned an empty party or enemy list.");
-        }
-
-        const visuals = response.combatState.visuals;
-        const enemyAvatarRequests = (
-          Array.isArray(visuals?.enemyImagePrompts) && visuals.enemyImagePrompts.length > 0
-            ? visuals.enemyImagePrompts
-            : response.combatState.enemies.map((enemy) => ({
-                name: enemy.name,
-                prompt: enemy.description || enemy.sprite || `${enemy.name} combat enemy portrait`,
-              }))
-        )
-          .map((enemy) => ({
-            name: String(enemy.name ?? "").trim(),
-            description: String(enemy.prompt ?? "")
-              .trim()
-              .slice(0, 1000),
-          }))
-          .filter((enemy) => enemy.name && enemy.description)
-          .slice(0, 10);
-        const shouldGenerateBossVisuals = !!visuals?.isBossFight && !!chatMeta.enableSpriteGeneration;
-        const shouldGenerateEnemyAvatars = !!chatMeta.enableSpriteGeneration && enemyAvatarRequests.length > 0;
-        if (
-          (shouldGenerateBossVisuals && (visuals?.backgroundPrompt || visuals?.illustrationPrompt)) ||
-          shouldGenerateEnemyAvatars
-        ) {
-          const illustrationPrompt = visuals?.illustrationPrompt?.trim() || "";
-          const backgroundPrompt = visuals?.backgroundPrompt?.trim() || "";
-          const assetPayload = {
-            chatId: activeChatId,
-            backgroundTag: backgroundPrompt ? `boss fight: ${backgroundPrompt}` : undefined,
-            illustration:
-              illustrationPrompt.length >= 40
-                ? {
-                    prompt: illustrationPrompt,
-                    reason: "Boss fight splash illustration",
-                    slug: visuals?.slug || "boss-fight",
-                    characters: [
-                      ...combatants.party.map((member) => member.name),
-                      ...combatants.enemies.map((enemy) => enemy.name),
-                    ].slice(0, 6),
-                  }
-                : undefined,
-            npcsNeedingAvatars: shouldGenerateEnemyAvatars ? enemyAvatarRequests : undefined,
-            debugMode: useUIStore.getState().debugMode,
-          };
-          void requestAssetGeneration(assetPayload, { allowPromptReview: false }).then((assetResult) => {
-            if (!assetResult?.generatedNpcAvatars?.length) return;
-            const avatarByName = new Map(
-              assetResult.generatedNpcAvatars.map(
-                (entry) => [normalizeSceneAssetName(entry.name), entry.avatarUrl] as const,
-              ),
-            );
-            setCombatEnemies((currentEnemies) =>
-              currentEnemies
-                ? currentEnemies.map((enemy) => {
-                    const avatarUrl = avatarByName.get(normalizeSceneAssetName(enemy.name));
-                    return avatarUrl ? { ...enemy, sprite: avatarUrl } : enemy;
-                  })
-                : currentEnemies,
-            );
-          });
-        }
-
-        setCombatParty(combatants.party);
-        setCombatEnemies(combatants.enemies);
-        setCombatItemEffects(Array.isArray(response.combatState.itemEffects) ? response.combatState.itemEffects : []);
-        setCombatMechanics(Array.isArray(response.combatState.mechanics) ? response.combatState.mechanics : []);
-        setCombatDialogueCues(
-          Array.isArray(response.combatState.dialogueCues) ? response.combatState.dialogueCues : [],
-        );
-        setCombatStartMessageId(queuedCombatGeneration.messageId);
-        setQueuedCombatGeneration(null);
-        useGameModeStore.getState().setGameState("combat");
-        transitionGameState.mutate({ chatId: activeChatId, newState: "combat" });
-      })
-      .catch((err) => {
-        const message = err instanceof Error ? err.message : "Combat generation failed.";
-        console.warn("[game-combat] Failed to generate combat state", err);
-        toast.error(message);
-        setQueuedCombatGeneration(null);
-      })
-      .finally(() => setCombatGenerationPending(false));
+    generateCombatStateForMessage(queuedCombatGeneration.messageId);
   }, [
     activeChatId,
     combatGenerationPending,
+    combatGenerationError,
+    combatUiActive,
+    generateCombatStateForMessage,
+    isStreaming,
+    latestAssistantMsg?.id,
+    assetGenerationBlocksScene,
+    pendingEncounter,
+    preparedCombatState?.messageId,
+    queuedCombatGeneration,
+    scenePreparing,
+  ]);
+
+  useEffect(() => {
+    if (!queuedCombatGeneration || !latestAssistantMsg?.id) return;
+    if (queuedCombatGeneration.messageId !== latestAssistantMsg.id) return;
+    if (!preparedCombatState || preparedCombatState.messageId !== queuedCombatGeneration.messageId) return;
+    if (pendingEncounter || combatUiActive) return;
+    if (isStreaming || scenePreparing || assetGenerationBlocksScene || directionsPlaying) return;
+    if (latestNarrationText && !narrationDone) return;
+
+    setCombatParty(preparedCombatState.party);
+    setCombatEnemies(preparedCombatState.enemies);
+    setCombatItemEffects(preparedCombatState.itemEffects);
+    setCombatMechanics(preparedCombatState.mechanics);
+    setCombatDialogueCues(preparedCombatState.dialogueCues);
+    setCombatStartMessageId(preparedCombatState.messageId);
+    setQueuedCombatGeneration(null);
+    setPreparedCombatState(null);
+    setCombatGenerationError(null);
+    useGameModeStore.getState().setGameState("combat");
+    transitionGameState.mutate({ chatId: activeChatId, newState: "combat" });
+  }, [
+    activeChatId,
+    assetGenerationBlocksScene,
     combatUiActive,
     directionsPlaying,
-    chatMeta.enableSpriteGeneration,
-    hydrateGeneratedCombatState,
     isStreaming,
     latestAssistantMsg?.id,
     latestNarrationText,
     narrationDone,
-    assetGenerationBlocksScene,
     pendingEncounter,
+    preparedCombatState,
     queuedCombatGeneration,
-    requestAssetGeneration,
-    runGameAssetGeneration,
     scenePreparing,
     transitionGameState,
   ]);
+
+  const retryCombatGeneration = useCallback(() => {
+    const messageId = queuedCombatGeneration?.messageId ?? latestAssistantMsg?.id;
+    if (!messageId) {
+      toast.error("No current turn is available for combat generation.");
+      return;
+    }
+    setQueuedCombatGeneration({ messageId });
+    setPreparedCombatState(null);
+    setCombatGenerationError(null);
+    generateCombatStateForMessage(messageId);
+  }, [generateCombatStateForMessage, latestAssistantMsg?.id, queuedCombatGeneration?.messageId]);
+
+  const handleRequestManualCombatStart = useCallback(async () => {
+    if (combatUiActive) {
+      toast("Combat is already active.");
+      return;
+    }
+    if (combatGenerationPending) {
+      toast("Combat is already being prepared.");
+      return;
+    }
+    const messageId = latestAssistantMsg?.id;
+    if (!messageId) {
+      toast.error("The GM needs to write at least one turn before combat can start.");
+      return;
+    }
+    const confirmed = await showConfirmDialog({
+      title: "Start combat?",
+      message: "Generate a tactical combat encounter from the current game state?",
+      confirmLabel: "Yes",
+      cancelLabel: "No",
+    });
+    if (!confirmed) return;
+    setQueuedCombatGeneration({ messageId });
+    setPreparedCombatState(null);
+    setCombatGenerationError(null);
+    generateCombatStateForMessage(messageId);
+  }, [combatGenerationPending, combatUiActive, generateCombatStateForMessage, latestAssistantMsg?.id]);
 
   useEffect(() => {
     if (!queuedQte || !latestAssistantMsg?.id) return;
@@ -7962,6 +8370,75 @@ export function GameSurface({
     return () => document.removeEventListener("pointerdown", handler);
   }, [retryMenuOpen]);
 
+  useEffect(() => {
+    if (!sessionPanelOpen && !gameAssetsPanelOpen) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as Node;
+      const inSessionPanel =
+        (sessionPanelRef.current?.contains(target) ?? false) ||
+        (mobileSessionPanelRef.current?.contains(target) ?? false);
+      const inAssetsPanel =
+        (gameAssetsPanelRef.current?.contains(target) ?? false) ||
+        (mobileGameAssetsPanelRef.current?.contains(target) ?? false);
+      if (sessionPanelOpen && !inSessionPanel) {
+        setSessionPanelOpen(false);
+      }
+      if (gameAssetsPanelOpen && !inAssetsPanel) {
+        setGameAssetsPanelOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", handler);
+    return () => document.removeEventListener("pointerdown", handler);
+  }, [gameAssetsPanelOpen, sessionPanelOpen]);
+
+  const handleOpenSessionPanel = useCallback(
+    (tab: "history" | "journal" = "history") => {
+      setSessionPanelTab(tab);
+      if (tab === "history") setJournalInitialTab(undefined);
+      setSessionPanelOpen((open) => (tab === sessionPanelTab ? !open : true));
+      setGameAssetsPanelOpen(false);
+      setRetryMenuOpen(false);
+    },
+    [sessionPanelTab],
+  );
+
+  const handleOpenJournalPanel = useCallback(() => {
+    setJournalInitialTab("npcs");
+    if (sessionPanelOpen && sessionPanelTab === "journal") {
+      setSessionPanelOpen(false);
+      return;
+    }
+    setSessionPanelTab("journal");
+    setSessionPanelOpen(true);
+    setGameAssetsPanelOpen(false);
+    setRetryMenuOpen(false);
+  }, [sessionPanelOpen, sessionPanelTab]);
+
+  useEffect(() => {
+    if (!sessionPanelOpen) setJournalInitialTab(undefined);
+  }, [sessionPanelOpen]);
+
+  const handleOpenGameAssetsPanel = useCallback(() => {
+    setGameAssetsPanelOpen((open) => !open);
+    setSessionPanelOpen(false);
+    setRetryMenuOpen(false);
+  }, []);
+
+  const handleBranchMessage = useCallback(
+    (messageId: string) => {
+      if (!activeChatId || branchChat.isPending) return;
+      branchChat.mutate(
+        { chatId: activeChatId, upToMessageId: messageId },
+        {
+          onSuccess: (newChat) => {
+            if (newChat) useChatStore.getState().setActiveChatId(newChat.id);
+          },
+        },
+      );
+    },
+    [activeChatId, branchChat],
+  );
+
   // Retry scene analysis for the latest message
   const handleRetryScene = useCallback(() => {
     if (!sceneAnalysisEnabled || !latestAssistantMsg?.content) return;
@@ -8000,8 +8477,12 @@ export function GameSurface({
       currentMusic: useGameAssetStore.getState().currentMusic,
       recentMusic: recentMusicHistoryRef.current,
       currentAmbient: useGameAssetStore.getState().currentAmbient,
+      currentLocation: gameSnapshot?.location ?? null,
       currentWeather: gameSnapshot?.weather ?? null,
       currentTimeOfDay: gameSnapshot?.time ?? null,
+      genre: (setupConfig?.genre as string | undefined) ?? null,
+      setting: (setupConfig?.setting as string | undefined) ?? null,
+      worldOverview: (chatMeta.gameWorldOverview as string | undefined) ?? null,
       canGenerateBackgrounds: !!chatMeta.enableSpriteGeneration && !!chatMeta.gameImageConnectionId,
       canGenerateIllustrations: autoCgSceneGate.canGenerateIllustrations,
       cgFrequency: autoCgSceneGate.cgFrequency,
@@ -8049,6 +8530,14 @@ export function GameSurface({
     autoCgSceneGate.canGenerateIllustrations,
     autoCgSceneGate.cgFrequency,
   ]);
+
+  const handleRetryTrackers = useCallback(async () => {
+    if (!activeChatId || !canRetryTrackers) return;
+    setRetryMenuOpen(false);
+    const types = gameTrackerAgentTypes.filter((type) => enabledGameAgentTypes.has(type));
+    if (types.length === 0) return;
+    await retryAgents(activeChatId, types);
+  }, [activeChatId, canRetryTrackers, enabledGameAgentTypes, gameTrackerAgentTypes, retryAgents]);
 
   // Remap legacy hud_bottom widgets to left/right (hud_bottom was removed)
   const normalizedWidgets = useMemo(() => {
@@ -8215,23 +8704,23 @@ export function GameSurface({
     chatMeta.gameBackgroundAssetRevision,
   ]);
 
-  const lastResolvedBackgroundRef = useRef<{ chatId: string; url?: string }>({ chatId: activeChatId });
+  const lastResolvedBackgroundRef = useRef<{ scopeKey: string; url?: string }>({ scopeKey: sceneRuntimeScopeKey });
   useEffect(() => {
-    if (lastResolvedBackgroundRef.current.chatId !== activeChatId) {
-      lastResolvedBackgroundRef.current = { chatId: activeChatId };
+    if (lastResolvedBackgroundRef.current.scopeKey !== sceneRuntimeScopeKey) {
+      lastResolvedBackgroundRef.current = { scopeKey: sceneRuntimeScopeKey };
     }
-  }, [activeChatId]);
+  }, [sceneRuntimeScopeKey]);
   useEffect(() => {
     if (resolvedBackground !== undefined) {
-      lastResolvedBackgroundRef.current = { chatId: activeChatId, url: resolvedBackground };
-    } else if (!scenePreparing && lastResolvedBackgroundRef.current.chatId === activeChatId) {
-      lastResolvedBackgroundRef.current = { chatId: activeChatId };
+      lastResolvedBackgroundRef.current = { scopeKey: sceneRuntimeScopeKey, url: resolvedBackground };
+    } else if (!scenePreparing && lastResolvedBackgroundRef.current.scopeKey === sceneRuntimeScopeKey) {
+      lastResolvedBackgroundRef.current = { scopeKey: sceneRuntimeScopeKey };
     }
-  }, [activeChatId, resolvedBackground, scenePreparing]);
+  }, [sceneRuntimeScopeKey, resolvedBackground, scenePreparing]);
 
   const displayedBackground =
     resolvedBackground ??
-    (scenePreparing && lastResolvedBackgroundRef.current.chatId === activeChatId
+    (scenePreparing && lastResolvedBackgroundRef.current.scopeKey === sceneRuntimeScopeKey
       ? lastResolvedBackgroundRef.current.url
       : undefined);
 
@@ -8345,11 +8834,13 @@ export function GameSurface({
   // Don't auto-dismiss: wait for user to click Continue after typewriter finishes.
 
   const awaitingFirstTurn = sessionStatus === "active" && !introPresented;
+  const initialTurnFailed = generationFailed && !hasEverHadPlayableContent && !isStreaming && !startGame.isPending;
   if (
     (sessionStatus === "ready" && !introPresented) ||
     startGame.isPending ||
     startGameRequested ||
-    awaitingFirstTurn
+    awaitingFirstTurn ||
+    initialTurnFailed
   ) {
     const worldOverview = (chatMeta.gameWorldOverview as string) || null;
     const setupConfig = chatMeta.gameSetupConfig as Record<string, unknown> | undefined;
@@ -8390,7 +8881,7 @@ export function GameSurface({
                   value={chat.connectionId ?? ""}
                   onChange={(e) => handleStartScreenConnectionChange(e.target.value)}
                   disabled={isStreaming || startGame.isPending || updateChat.isPending}
-                  className="w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--foreground)] outline-none ring-1 ring-[var(--border)] transition-all focus:ring-[var(--primary)]/40 disabled:opacity-60 dark:bg-white/10"
+                  className="w-full rounded-lg bg-zinc-950/80 px-3 py-2 text-xs text-[var(--foreground)] outline-none ring-1 ring-zinc-700/80 transition-all focus:ring-zinc-400/40 disabled:opacity-60 dark:bg-white/10"
                 >
                   <option value="">None</option>
                   <option value="random">Random</option>
@@ -8419,24 +8910,30 @@ export function GameSurface({
                         // Retry any autoplay-blocked audio now that we have a user gesture
                         audioManager.retryPending();
                       }}
-                      className="group flex items-center gap-2 rounded-xl bg-[var(--primary)] px-6 py-3 text-sm font-semibold text-white transition-all hover:scale-105 hover:shadow-lg hover:shadow-[var(--primary)]/30"
+                      className="group flex items-center gap-2 rounded-lg bg-zinc-900 px-6 py-3 text-sm font-semibold text-zinc-100 ring-1 ring-zinc-700/80 transition-all hover:scale-105 hover:bg-zinc-800 hover:shadow-lg hover:shadow-black/25"
                     >
                       Continue
                     </button>
                   ) : (
                     <>
-                      <div className="flex items-center gap-3 text-sm text-[var(--muted-foreground)] dark:text-white/60">
-                        <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--muted)]/40 border-t-[var(--foreground)]/70 dark:border-white/20 dark:border-t-white/70" />
-                        <span>
-                          {hasEverHadPlayableContent && !sceneProcessed
-                            ? "Preparing the scene..."
-                            : hasEverHadPlayableContent && pendingAssetGeneration && !assetGenerationFailed
-                              ? "Generating images..."
-                              : hasEverHadPlayableContent && isStreaming
-                                ? "The GM is narrating..."
-                                : "The adventure begins..."}
-                        </span>
-                      </div>
+                      {initialTurnFailed ? (
+                        <div className="max-w-sm text-sm text-[var(--muted-foreground)] dark:text-white/60">
+                          Game generation failed. Choose another GM / Party Model or retry this one.
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-3 text-sm text-[var(--muted-foreground)] dark:text-white/60">
+                          <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--muted)]/40 border-t-[var(--foreground)]/70 dark:border-white/20 dark:border-t-white/70" />
+                          <span>
+                            {hasEverHadPlayableContent && !sceneProcessed
+                              ? "Preparing the scene..."
+                              : hasEverHadPlayableContent && pendingAssetGeneration && !assetGenerationFailed
+                                ? "Generating images..."
+                                : hasEverHadPlayableContent && isStreaming
+                                  ? "The GM is narrating..."
+                                  : "The adventure begins..."}
+                          </span>
+                        </div>
+                      )}
                       {/* Retry only when scene analysis actually failed */}
                       {hasEverHadPlayableContent && !isStreaming && sceneAnalysisFailed && (
                         <div className="flex items-center gap-2">
@@ -8476,7 +8973,7 @@ export function GameSurface({
                     handleStartGameRequest();
                   }}
                   disabled={startGame.isPending || startGameRequested}
-                  className="group flex items-center gap-2 rounded-xl bg-[var(--primary)] px-6 py-3 text-sm font-semibold text-white transition-all hover:scale-105 hover:shadow-lg hover:shadow-[var(--primary)]/30 disabled:opacity-50 disabled:hover:scale-100"
+                  className="group flex items-center gap-2 rounded-lg bg-zinc-900 px-6 py-3 text-sm font-semibold text-zinc-100 ring-1 ring-zinc-700/80 transition-all hover:scale-105 hover:bg-zinc-800 hover:shadow-lg hover:shadow-black/25 disabled:opacity-50 disabled:hover:scale-100"
                 >
                   <Play size={18} className="transition-transform group-hover:scale-110" />
                   Start Game
@@ -8503,8 +9000,169 @@ export function GameSurface({
     );
   }
 
+  const sessionActionLabel = sessionStatus !== "concluded" ? "End Session" : "New Session";
+  const sessionActionIcon =
+    sessionStatus !== "concluded" ? (
+      <Square size={12} />
+    ) : startSessionLocked ? (
+      <Loader2 size={12} className="animate-spin" />
+    ) : (
+      <Play size={12} />
+    );
+  const sessionActionDisabled = sessionStatus === "concluded" && startSessionLocked;
+  const handleSessionAction = () => {
+    if (sessionStatus !== "concluded") {
+      handleRequestEndSession();
+      return;
+    }
+    handleStartNewSession();
+  };
+
+  const renderSessionPanel = (mobile = false) => (
+    <div
+      className={cn(
+        ROLEPLAY_POPOVER_SHELL,
+        "absolute z-50 flex max-h-[min(42rem,calc(100vh-6rem))] w-[min(42rem,calc(100vw-1.5rem))] flex-col overflow-hidden",
+        mobile ? "right-9 top-0 max-h-[min(40rem,calc(100vh-5rem))] w-[calc(100vw-4rem)]" : "right-0 top-9",
+      )}
+    >
+      <div className={ROLEPLAY_POPOVER_HEADER}>
+        <div>
+          <div className={ROLEPLAY_POPOVER_TITLE}>
+            <Feather size="0.8rem" className="shrink-0 text-[var(--muted-foreground)]" />
+            Session
+          </div>
+          <div className={ROLEPLAY_POPOVER_SUBTITLE}>
+            Session {displaySessionNumber} · {sessionStatus}
+          </div>
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setTutorialOpen(true)}
+            className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--marinara-chat-chrome-button-text)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:text-[var(--marinara-chat-chrome-highlight-text)]"
+            title="Game tutorial"
+            aria-label="Game tutorial"
+          >
+            <CircleHelp size={14} />
+          </button>
+          <button
+            type="button"
+            onClick={() => setSessionPanelOpen(false)}
+            className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--marinara-chat-chrome-button-text)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:text-[var(--marinara-chat-chrome-highlight-text)]"
+            title="Close session"
+            aria-label="Close session"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      </div>
+
+      <div className="flex gap-1 border-b border-[var(--marinara-chat-chrome-panel-divider)] p-2">
+        {(["history", "journal"] as const).map((tab) => (
+          <button
+            key={tab}
+            type="button"
+            onClick={() => setSessionPanelTab(tab)}
+            className={cn(
+              "flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[0.6875rem] font-medium transition-colors",
+              sessionPanelTab === tab
+                ? "bg-[var(--marinara-chat-chrome-highlight-bg)] text-[var(--marinara-chat-chrome-highlight-text)]"
+                : "text-[var(--marinara-chat-chrome-panel-muted)] hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:text-[var(--marinara-chat-chrome-highlight-text)]",
+            )}
+          >
+            {tab === "history" ? <ScrollText size={12} /> : <BookOpen size={12} />}
+            {tab === "history" ? "Session History" : "Journal"}
+          </button>
+        ))}
+      </div>
+
+      <div className={cn(ROLEPLAY_POPOVER_SCROLL_AREA, "min-h-0 flex-1 overflow-y-auto p-2")}>
+        {sessionPanelTab === "history" ? (
+          <GameSessionHistory
+            summaries={sessionSummaries}
+            currentSessionNumber={displaySessionNumber}
+            currentSessionDate={
+              (chatMeta.gameCurrentSessionStartedAt as string | undefined) || chat.createdAt || chat.updatedAt
+            }
+            currentSecrets={currentSessionSecrets}
+            savingSessionNumber={savingSessionSummary}
+            savingCurrentSecrets={savingCurrentSessionSecrets}
+            regeneratingSessionNumber={
+              regenerateSessionConclusion.isPending
+                ? (regenerateSessionConclusion.variables?.sessionNumber ?? null)
+                : null
+            }
+            lorebookKeeperEnabled={chatMeta.gameLorebookKeeperEnabled === true}
+            lorebookKeeperLastRun={
+              chatMeta.gameLorebookKeeperLastRun &&
+              typeof chatMeta.gameLorebookKeeperLastRun === "object" &&
+              !Array.isArray(chatMeta.gameLorebookKeeperLastRun)
+                ? (chatMeta.gameLorebookKeeperLastRun as {
+                    sessionNumber: number;
+                    status: "running" | "success" | "failed";
+                    updatedAt: string;
+                    entryCount?: number;
+                    error?: string;
+                  })
+                : null
+            }
+            regeneratingLorebookSessionNumber={
+              regenerateSessionLorebook.isPending ? (regenerateSessionLorebook.variables?.sessionNumber ?? null) : null
+            }
+            updatingPlotArcsSessionNumber={
+              updateCampaignProgression.isPending ? (updateCampaignProgression.variables?.sessionNumber ?? null) : null
+            }
+            onSaveCurrentSecrets={handleSaveCurrentSessionSecrets}
+            onSaveSession={handleSaveSessionDetails}
+            onRegenerateSession={handleRegenerateSessionConclusion}
+            onRegenerateLorebook={handleRegenerateSessionLorebook}
+            onUpdatePlotArcs={handleUpdateCampaignProgression}
+            currentSessionActionLabel={sessionActionLabel}
+            currentSessionActionIcon={sessionActionIcon}
+            currentSessionActionDisabled={sessionActionDisabled}
+            onCurrentSessionAction={handleSessionAction}
+            onClose={() => setSessionPanelOpen(false)}
+            embedded
+          />
+        ) : (
+          <GameJournal
+            chatId={activeChatId}
+            npcs={npcs}
+            npcAssetsActivityPending={journalNpcActivityPending}
+            npcSpriteExpressions={journalNpcSpriteExpressions}
+            initialTab={journalInitialTab}
+            onClose={() => {
+              setSessionPanelOpen(false);
+            }}
+            onNpcPortraitClick={handleNpcPortraitClick}
+            onNpcPortraitGenerate={handleNpcPortraitGenerate}
+            npcPortraitGenerationEnabled={
+              chatMeta.enableSpriteGeneration === true && typeof chatMeta.gameImageConnectionId === "string"
+            }
+            generatingNpcPortraitNames={generatingNpcPortraitNames}
+            onNpcRemove={handleRemoveNpcFromJournal}
+            embedded
+          />
+        )}
+      </div>
+    </div>
+  );
+
+  const renderGameAssetsPanel = (mobile = false) => (
+    <div
+      className={cn(
+        ROLEPLAY_POPOVER_SHELL,
+        "absolute z-50 flex h-[min(42rem,calc(100vh-6rem))] w-[min(54rem,calc(100vw-1.5rem))] flex-col overflow-hidden",
+        mobile ? "right-9 top-0 h-[min(40rem,calc(100vh-5rem))] w-[calc(100vw-4rem)]" : "right-0 top-9",
+      )}
+    >
+      <GameAssetsBrowserView embedded onClose={() => setGameAssetsPanelOpen(false)} />
+    </div>
+  );
+
   return (
-    <div className="relative flex h-full overflow-hidden bg-black">
+    <div className="relative flex h-full overflow-hidden bg-black mari-card-css" data-chat-mode="game">
       <GameTransitionManager gameState={gameState} location={gameSnapshot?.location ?? null}>
         <DirectionEngine
           directions={activeDirections}
@@ -8548,29 +9206,22 @@ export function GameSurface({
               {/* Top-right action controls */}
               <div
                 data-tour="game-controls"
+                data-tracker-panel-anchor="roleplay-hud"
                 className={cn("pointer-events-none absolute right-3 z-30", topOverlayOffsetClass)}
               >
                 {/* Desktop controls */}
-                <div className="pointer-events-auto hidden items-center gap-1.5 md:flex">
-                  <button
-                    onClick={() => setTutorialOpen(true)}
-                    className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white"
-                    title="Game Mode Tutorial"
-                  >
-                    <HelpCircle size={14} />
-                  </button>
-                  <button
-                    onClick={() => setHistoryOpen(true)}
-                    className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white"
-                    title="History"
-                  >
-                    <History size={14} />
-                  </button>
+                <div className={cn("pointer-events-auto hidden items-center md:flex", CHAT_TOOLBAR_ICON_GAP_CLASS)}>
+                  <ChatBranchSelector
+                    activeChatId={activeChatId}
+                    activeChatName={chat.name}
+                    groupId={chat.groupId ?? null}
+                    variant="roleplay"
+                  />
                   <button
                     type="button"
                     onClick={() => setForkTimelineOpen(true)}
                     disabled={isMessagesLoading || messages.length === 0}
-                    className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                    className={GAME_TOP_ICON_BUTTON}
                     title="Fork timeline — new game from an earlier message"
                   >
                     <GitBranch size={14} />
@@ -8578,63 +9229,203 @@ export function GameSurface({
                   <button
                     type="button"
                     onClick={() => setCheckpointsOpen(true)}
-                    className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white"
+                    className={GAME_TOP_ICON_BUTTON}
                     title="Checkpoints — save points and restore"
                   >
                     <Bookmark size={14} />
                   </button>
-                  <ActiveWorldInfoButton
-                    chatId={activeChatId}
-                    iconSize={14}
-                    buttonClassName="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white"
-                  />
-                  {sessionStatus !== "concluded" ? (
-                    <button
-                      onClick={handleRequestEndSession}
-                      className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white"
-                      title="End Session"
-                    >
-                      <Square size={13} />
-                    </button>
-                  ) : (
-                    <button
-                      onClick={handleStartNewSession}
-                      disabled={startSessionLocked}
-                      className="flex h-9 w-9 items-center justify-center rounded-full border border-emerald-300/25 bg-emerald-500/20 text-emerald-200 backdrop-blur-md transition-colors hover:bg-emerald-500/35 disabled:opacity-50 disabled:hover:bg-emerald-500/20"
-                      title={startSessionLocked ? "Generating next session" : "New Session"}
-                    >
-                      {startSessionLocked ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
-                    </button>
-                  )}
-                  <div className="relative">
-                    <button
-                      type="button"
-                      onClick={() => setJournalOpen(true)}
-                      aria-busy={journalNpcActivityPending}
-                      className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white"
-                      title={journalNpcActivityPending ? "Journal — NPC portraits or sprites are still generating" : "Journal"}
-                    >
-                      <BookOpen size={14} />
-                    </button>
-                    {journalNpcActivityPending && (
-                      <Loader2
-                        size={12}
-                        className="pointer-events-none absolute -bottom-0.5 -right-0.5 animate-spin text-sky-300 drop-shadow-[0_0_4px_rgba(0,0,0,0.9)]"
-                        aria-hidden
-                      />
+                  {trackerPanelEnabled &&
+                    gameTrackerAgentTypes.some((type) => enabledGameAgentTypes.has(type)) &&
+                    !trackerPanelOpen && (
+                      <button
+                        type="button"
+                        data-tracker-panel-toggle="roleplay-hud"
+                        onClick={toggleTrackerPanel}
+                        className={GAME_TOP_ICON_BUTTON}
+                        title="Tracker panel — characters present, world state, persona stats"
+                        aria-label="Show tracker panel"
+                      >
+                        <TrackerPanelIcon size={14} strokeWidth={1.95} />
+                      </button>
                     )}
+                  <div className="relative" ref={retryMenuRef}>
+                    <button
+                      onClick={() => setRetryMenuOpen((open) => !open)}
+                      className={GAME_TOP_ICON_BUTTON}
+                      title="Retry..."
+                      aria-label="Retry..."
+                    >
+                      <RotateCcw
+                        size={14}
+                        className={sceneAnalysis.isPending || spotifyRetryPending ? "animate-spin" : ""}
+                      />
+                    </button>
+                    {retryMenuOpen && (
+                      <div className={cn(GAME_ACTION_MENU, "absolute right-0 top-9 z-50")}>
+                        <button
+                          onClick={() => {
+                            void handleRetryTurn();
+                          }}
+                          disabled={!canRetryTurn}
+                          className={GAME_ACTION_MENU_ITEM}
+                        >
+                          <RotateCcw size={13} />
+                          <span>Retry Turn</span>
+                        </button>
+                        <button onClick={handleRetryScene} disabled={!canRetryScene} className={GAME_ACTION_MENU_ITEM}>
+                          <RefreshCw size={13} className={sceneAnalysis.isPending ? "animate-spin" : ""} />
+                          <span>Retry Scene Analysis</span>
+                        </button>
+                        <button
+                          onClick={() => void handleRetryTrackers()}
+                          disabled={!canRetryTrackers}
+                          className={GAME_ACTION_MENU_ITEM}
+                        >
+                          <RefreshCw size={13} />
+                          <span>Retry HUD Trackers</span>
+                        </button>
+                        {useSpotifyGameMusic && (
+                          <button
+                            onClick={handleRetrySpotifyMusic}
+                            disabled={!canRetrySpotifyMusic}
+                            className={GAME_ACTION_MENU_ITEM}
+                          >
+                            {spotifyRetryPending ? (
+                              <RefreshCw size={13} className="animate-spin" />
+                            ) : (
+                              <Volume2 size={13} />
+                            )}
+                            <span>Retry Music DJ</span>
+                          </button>
+                        )}
+                        {useYoutubeGameMusic && (
+                          <button
+                            onClick={handleRetryYoutubeMusic}
+                            disabled={!canRetryYoutubeMusic}
+                            className={GAME_ACTION_MENU_ITEM}
+                          >
+                            {youtubeRetryPending ? (
+                              <RefreshCw size={13} className="animate-spin" />
+                            ) : (
+                              <Volume2 size={13} />
+                            )}
+                            <span>Retry Music DJ</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setRetryMenuOpen(false);
+                            handleClearCgPlate();
+                          }}
+                          disabled={!cgIllustrationBackground}
+                          title={
+                            cgIllustrationBackground
+                              ? "Снять CG-подложку (illustrations:…) и показать обычный фон локации"
+                              : "Сейчас активна не CG-подложка"
+                          }
+                          className={GAME_ACTION_MENU_ITEM}
+                        >
+                          <ImageOff size={13} />
+                          <span>Снять CG</span>
+                        </button>
+                        <button
+                          onClick={() => void handleRegenerateBackground()}
+                          disabled={!canRegenerateBackground || bgCatalogActionPending}
+                          title={
+                            canRegenerateBackground
+                              ? "Regenerate the current location background using the saved scene prompt"
+                              : "Requires sprite generation, an image connection, and a catalog entry for this background"
+                          }
+                          className={GAME_ACTION_MENU_ITEM}
+                        >
+                          {regenerateBackgroundPending ? (
+                            <Loader2 size={13} className="animate-spin" />
+                          ) : (
+                            <Sparkles size={13} />
+                          )}
+                          <span>Regenerate Background</span>
+                        </button>
+                        <button
+                          onClick={() => void handleRefreshBackgroundPrompt()}
+                          disabled={!canRegenerateBackground || bgCatalogActionPending}
+                          title={
+                            canRegenerateBackground
+                              ? "Rewrite the scene brief with the LLM from latest narration, then regenerate the image"
+                              : "Requires sprite generation, an image connection, and a catalog entry for this background"
+                          }
+                          className={GAME_ACTION_MENU_ITEM}
+                        >
+                          {refreshBackgroundPromptPending ? (
+                            <Loader2 size={13} className="animate-spin" />
+                          ) : (
+                            <Wand2 size={13} />
+                          )}
+                          <span>{"Refresh prompt & regenerate"}</span>
+                        </button>
+                        <button
+                          onClick={() => {
+                            setRetryMenuOpen(false);
+                            retryAssetGeneration({ showSuccessToast: true });
+                          }}
+                          disabled={!canRetryAssets}
+                          className={GAME_ACTION_MENU_ITEM}
+                        >
+                          <Image size={13} />
+                          <span>Retry Assets Image Generation</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  <div className="relative flex items-center gap-1" ref={sessionPanelRef}>
+                    <button
+                      onClick={() => handleOpenSessionPanel("history")}
+                      className={getChatToolbarButtonClass({
+                        open: sessionPanelOpen && sessionPanelTab === "history",
+                      })}
+                      title="Session"
+                      aria-label="Session"
+                    >
+                      <Feather size={14} />
+                    </button>
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={handleOpenJournalPanel}
+                        aria-busy={journalNpcActivityPending}
+                        className={getChatToolbarButtonClass({
+                          open: sessionPanelOpen && sessionPanelTab === "journal",
+                        })}
+                        title={
+                          journalNpcActivityPending
+                            ? "Journal — NPC portraits or sprites are still generating"
+                            : "Journal — NPCs"
+                        }
+                        aria-label="Journal — NPCs"
+                      >
+                        <BookOpen size={14} />
+                      </button>
+                      {journalNpcActivityPending && (
+                        <Loader2
+                          size={11}
+                          className="pointer-events-none absolute -bottom-0.5 -right-0.5 animate-spin text-sky-300"
+                          aria-hidden
+                        />
+                      )}
+                    </div>
+                    {sessionPanelOpen && renderSessionPanel(false)}
                   </div>
                   <div className="relative" ref={volumePopoverRef}>
                     <button
                       onClick={() => setVolumePopoverOpen((v) => !v)}
-                      className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white"
+                      className={GAME_TOP_ICON_BUTTON}
                       title="Volume"
                     >
                       {audioMuted || masterVolume === 0 ? <VolumeX size={14} /> : <Volume2 size={14} />}
                     </button>
                     {volumePopoverOpen && (
                       <GameVolumeMixer
-                        className="absolute right-0 top-11 z-50"
+                        className="absolute right-0 top-9 z-50"
                         audioMuted={audioMuted || masterVolume === 0}
                         masterVolume={masterVolume}
                         musicVolume={musicVolume}
@@ -8653,145 +9444,36 @@ export function GameSurface({
                       />
                     )}
                   </div>
-                  <button
-                    onClick={() => setGalleryOpen(true)}
-                    className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white"
-                    title="Gallery"
-                  >
+                  <div className="relative" ref={gameAssetsPanelRef}>
+                    <button
+                      onClick={handleOpenGameAssetsPanel}
+                      className={getChatToolbarButtonClass({
+                        open: gameAssetsPanelOpen,
+                      })}
+                      title="Game Assets"
+                      aria-label="Game Assets"
+                    >
+                      <Folder size={14} />
+                    </button>
+                    {gameAssetsPanelOpen && renderGameAssetsPanel(false)}
+                  </div>
+                  <ActiveLorebookEntriesButton
+                    chatId={activeChatId}
+                    iconSize={14}
+                    buttonClassName={GAME_TOP_ICON_BUTTON}
+                  />
+                  <button onClick={handleOpenGalleryPanel} className={GAME_TOP_ICON_BUTTON} title="Gallery">
                     <Image size={14} />
                   </button>
                   <button
                     type="button"
                     onClick={() => setSceneJournalOpen(true)}
-                    className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white"
+                    className={GAME_TOP_ICON_BUTTON}
                     title="Scene descriptions"
                   >
                     <ScrollText size={14} />
                   </button>
-                  <button
-                    type="button"
-                    onClick={openGameAssetsBrowser}
-                    className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white"
-                    title="Game Assets"
-                  >
-                    <Folder size={14} />
-                  </button>
-                  <div className="relative" ref={retryMenuRef}>
-                    <button
-                      onClick={() => setRetryMenuOpen((open) => !open)}
-                      className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white"
-                      title="Retry..."
-                      aria-label="Retry..."
-                    >
-                      <RotateCcw
-                        size={14}
-                        className={sceneAnalysis.isPending || spotifyRetryPending ? "animate-spin" : ""}
-                      />
-                    </button>
-                    {retryMenuOpen && (
-                      <div className="absolute right-0 top-11 z-50 flex w-72 max-w-[calc(100vw-2rem)] flex-col gap-1 rounded-xl border border-white/15 bg-black/80 p-1.5 shadow-xl backdrop-blur-md">
-                        <button
-                          onClick={() => {
-                            void handleRetryTurn();
-                          }}
-                          disabled={!canRetryTurn}
-                          className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-white/85 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
-                        >
-                          <RotateCcw size={13} />
-                          <span>Retry Turn</span>
-                        </button>
-                        <button
-                          onClick={handleRetryScene}
-                          disabled={!canRetryScene}
-                          className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-white/85 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
-                        >
-                          <RefreshCw size={13} className={sceneAnalysis.isPending ? "animate-spin" : ""} />
-                          <span>Retry Scene Analysis</span>
-                        </button>
-                        {useSpotifyGameMusic && (
-                          <button
-                            onClick={handleRetrySpotifyMusic}
-                            disabled={!canRetrySpotifyMusic}
-                            className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-white/85 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
-                          >
-                            {spotifyRetryPending ? (
-                              <RefreshCw size={13} className="animate-spin" />
-                            ) : (
-                              <Volume2 size={13} />
-                            )}
-                            <span>Retry Spotify DJ Music Generation</span>
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setRetryMenuOpen(false);
-                            handleClearCgPlate();
-                          }}
-                          disabled={!cgIllustrationBackground}
-                          title={
-                            cgIllustrationBackground
-                              ? "Снять CG-подложку (illustrations:…) и показать обычный фон локации"
-                              : "Сейчас активна не CG-подложка"
-                          }
-                          className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-white/85 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
-                        >
-                          <ImageOff size={13} />
-                          <span>Снять CG</span>
-                        </button>
-                        <button
-                          onClick={() => void handleRegenerateBackground()}
-                          disabled={!canRegenerateBackground || bgCatalogActionPending}
-                          title={
-                            canRegenerateBackground
-                              ? "Regenerate the current location background using the saved scene prompt"
-                              : "Requires sprite generation, an image connection, and a catalog entry for this background"
-                          }
-                          className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-white/85 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
-                        >
-                          {regenerateBackgroundPending ? (
-                            <Loader2 size={13} className="animate-spin" />
-                          ) : (
-                            <Sparkles size={13} />
-                          )}
-                          <span>Regenerate Background</span>
-                        </button>
-                        <button
-                          onClick={() => void handleRefreshBackgroundPrompt()}
-                          disabled={!canRegenerateBackground || bgCatalogActionPending}
-                          title={
-                            canRegenerateBackground
-                              ? "Rewrite the scene brief with the LLM from latest narration, then regenerate the image"
-                              : "Requires sprite generation, an image connection, and a catalog entry for this background"
-                          }
-                          className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-white/85 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
-                        >
-                          {refreshBackgroundPromptPending ? (
-                            <Loader2 size={13} className="animate-spin" />
-                          ) : (
-                            <Wand2 size={13} />
-                          )}
-                          <span>{"Refresh prompt & regenerate"}</span>
-                        </button>
-                        <button
-                          onClick={() => {
-                            setRetryMenuOpen(false);
-                            retryAssetGeneration({ showSuccessToast: true });
-                          }}
-                          disabled={!canRetryAssets}
-                          className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-white/85 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
-                        >
-                          <Image size={13} />
-                          <span>Retry Assets Image Generation</span>
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                  <button
-                    onClick={onOpenSettings}
-                    className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white"
-                    title="Chat Settings"
-                  >
+                  <button onClick={onOpenSettings} className={GAME_TOP_ICON_BUTTON} title="Chat Settings">
                     <Settings2 size={14} />
                   </button>
                 </div>
@@ -8807,34 +9489,21 @@ export function GameSurface({
                           return nextOpen;
                         });
                       }}
-                      className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/50 text-white/85 backdrop-blur-md transition-colors hover:bg-black/65 hover:text-white"
+                      className={GAME_MOBILE_ROOT_BUTTON}
                       title="Game actions"
                     >
                       <MoreHorizontal size={15} />
                     </button>
 
                     {mobileActionsOpen && (
-                      <div className="absolute right-0 top-11 flex w-9 flex-col items-center gap-1 rounded-xl border border-white/15 bg-black/70 p-0.5 backdrop-blur-xl shadow-lg">
-                        <button
-                          onClick={() => {
-                            setTutorialOpen(true);
-                            setMobileActionsOpen(false);
-                          }}
-                          className="flex h-8 w-8 items-center justify-center rounded-lg text-white/85 transition-colors hover:bg-white/10 hover:text-white"
-                          title="Game Mode Tutorial"
-                        >
-                          <HelpCircle size={14} />
-                        </button>
-                        <button
-                          onClick={() => {
-                            setHistoryOpen(true);
-                            setMobileActionsOpen(false);
-                          }}
-                          className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white"
-                          title="History"
-                        >
-                          <History size={14} />
-                        </button>
+                      <div className={GAME_MOBILE_ACTIONS_MENU}>
+                        <ChatBranchSelector
+                          activeChatId={activeChatId}
+                          activeChatName={chat.name}
+                          groupId={chat.groupId ?? null}
+                          variant="roleplay"
+                          compact
+                        />
                         <button
                           type="button"
                           onClick={() => {
@@ -8842,7 +9511,7 @@ export function GameSurface({
                             setMobileActionsOpen(false);
                           }}
                           disabled={isMessagesLoading || messages.length === 0}
-                          className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                          className={GAME_MOBILE_ICON_BUTTON}
                           title="Fork timeline"
                         >
                           <GitBranch size={14} />
@@ -8853,84 +9522,211 @@ export function GameSurface({
                             setCheckpointsOpen(true);
                             setMobileActionsOpen(false);
                           }}
-                          className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+                          className={GAME_MOBILE_ICON_BUTTON}
                           title="Checkpoints"
                         >
                           <Bookmark size={14} />
                         </button>
-                        <button
-                          onClick={() => {
-                            setMobileWorldInfoOpen(true);
-                            setMobileActionsOpen(false);
-                          }}
-                          className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white"
-                          title="Active World Info"
-                          aria-label="Active World Info"
-                        >
-                          <Globe size={14} />
-                        </button>
-                        {sessionStatus !== "concluded" ? (
-                          <button
-                            onClick={() => {
-                              handleRequestEndSession();
-                              setMobileActionsOpen(false);
-                            }}
-                            className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10"
-                            title="End Session"
-                          >
-                            <Square size={13} />
-                          </button>
-                        ) : (
-                          <button
-                            onClick={() => {
-                              handleStartNewSession();
-                              setMobileActionsOpen(false);
-                            }}
-                            disabled={startSessionLocked}
-                            className="flex h-8 w-8 items-center justify-center rounded-lg text-emerald-200 transition-colors hover:bg-emerald-500/20 disabled:opacity-50 disabled:hover:bg-transparent"
-                            title={startSessionLocked ? "Generating next session" : "New Session"}
-                          >
-                            {startSessionLocked ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
-                          </button>
-                        )}
                         <div className="relative">
                           <button
-                            type="button"
-                            onClick={() => {
-                              setJournalOpen(true);
-                              setMobileActionsOpen(false);
-                            }}
-                            aria-busy={journalNpcActivityPending}
-                            className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white"
-                            title={
-                              journalNpcActivityPending
-                                ? "Journal — NPC portraits or sprites are still generating"
-                                : "Journal"
-                            }
+                            onClick={() => setMobileRetryMenuOpen((v) => !v)}
+                            className={GAME_MOBILE_ICON_BUTTON}
+                            title="Retry"
+                            aria-label="Retry"
                           >
-                            <BookOpen size={14} />
-                          </button>
-                          {journalNpcActivityPending && (
-                            <Loader2
-                              size={11}
-                              className="pointer-events-none absolute -bottom-0.5 -right-0.5 animate-spin text-sky-300 drop-shadow-[0_0_4px_rgba(0,0,0,0.9)]"
-                              aria-hidden
+                            <RotateCcw
+                              size={14}
+                              className={sceneAnalysis.isPending || spotifyRetryPending ? "animate-spin" : ""}
                             />
+                          </button>
+                          {mobileRetryMenuOpen && (
+                            <div className={cn(GAME_MOBILE_ACTION_MENU, "absolute right-9 top-0 z-50")}>
+                              <button
+                                onClick={() => {
+                                  setMobileRetryMenuOpen(false);
+                                  setMobileActionsOpen(false);
+                                  void handleRetryTurn();
+                                }}
+                                disabled={!canRetryTurn}
+                                className={GAME_ACTION_MENU_ITEM}
+                              >
+                                <RotateCcw size={13} />
+                                <span>Retry Turn</span>
+                              </button>
+                              <button
+                                onClick={() => {
+                                  handleRetryScene();
+                                  setMobileRetryMenuOpen(false);
+                                  setMobileActionsOpen(false);
+                                }}
+                                disabled={!canRetryScene}
+                                className={GAME_ACTION_MENU_ITEM}
+                              >
+                                <RefreshCw size={13} className={sceneAnalysis.isPending ? "animate-spin" : ""} />
+                                <span>Retry Scene Analysis</span>
+                              </button>
+                              {useSpotifyGameMusic && (
+                                <button
+                                  onClick={handleRetrySpotifyMusic}
+                                  disabled={!canRetrySpotifyMusic}
+                                  className={GAME_ACTION_MENU_ITEM}
+                                >
+                                  {spotifyRetryPending ? (
+                                    <RefreshCw size={13} className="animate-spin" />
+                                  ) : (
+                                    <Volume2 size={13} />
+                                  )}
+                                  <span>Retry Music DJ</span>
+                                </button>
+                              )}
+                              {useYoutubeGameMusic && (
+                                <button
+                                  onClick={handleRetryYoutubeMusic}
+                                  disabled={!canRetryYoutubeMusic}
+                                  className={GAME_ACTION_MENU_ITEM}
+                                >
+                                  {youtubeRetryPending ? (
+                                    <RefreshCw size={13} className="animate-spin" />
+                                  ) : (
+                                    <Volume2 size={13} />
+                                  )}
+                                  <span>Retry Music DJ</span>
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setMobileRetryMenuOpen(false);
+                                  setMobileActionsOpen(false);
+                                  handleClearCgPlate();
+                                }}
+                                disabled={!cgIllustrationBackground}
+                                className={GAME_ACTION_MENU_ITEM}
+                                title={
+                                  cgIllustrationBackground
+                                    ? "Снять CG-подложку (illustrations:…) и показать обычный фон локации"
+                                    : "Сейчас активна не CG-подложка"
+                                }
+                              >
+                                <ImageOff size={13} />
+                                <span>Снять CG</span>
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setMobileRetryMenuOpen(false);
+                                  setMobileActionsOpen(false);
+                                  void handleRegenerateBackground();
+                                }}
+                                disabled={!canRegenerateBackground || bgCatalogActionPending}
+                                className={GAME_ACTION_MENU_ITEM}
+                                title={
+                                  canRegenerateBackground
+                                    ? "Regenerate the current location background"
+                                    : "Requires sprite generation, an image connection, and a catalog entry for this background"
+                                }
+                              >
+                                {regenerateBackgroundPending ? (
+                                  <Loader2 size={13} className="animate-spin" />
+                                ) : (
+                                  <Sparkles size={13} />
+                                )}
+                                <span>Regenerate Background</span>
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setMobileRetryMenuOpen(false);
+                                  setMobileActionsOpen(false);
+                                  void handleRefreshBackgroundPrompt();
+                                }}
+                                disabled={!canRegenerateBackground || bgCatalogActionPending}
+                                className={GAME_ACTION_MENU_ITEM}
+                                title={
+                                  canRegenerateBackground
+                                    ? "Rewrite the scene brief with the LLM, then regenerate the image"
+                                    : "Requires sprite generation, an image connection, and a catalog entry for this background"
+                                }
+                              >
+                                {refreshBackgroundPromptPending ? (
+                                  <Loader2 size={13} className="animate-spin" />
+                                ) : (
+                                  <Wand2 size={13} />
+                                )}
+                                <span>{"Refresh prompt & regenerate"}</span>
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setMobileRetryMenuOpen(false);
+                                  setMobileActionsOpen(false);
+                                  retryAssetGeneration({ showSuccessToast: true });
+                                }}
+                                disabled={!canRetryAssets}
+                                className={GAME_ACTION_MENU_ITEM}
+                              >
+                                <Image size={13} />
+                                <span>Retry Assets Image Generation</span>
+                              </button>
+                            </div>
                           )}
+                        </div>
+                        <div className="relative flex items-center gap-1" ref={mobileSessionPanelRef}>
+                          <button
+                            onClick={() => {
+                              handleOpenSessionPanel("history");
+                              setMobileRetryMenuOpen(false);
+                            }}
+                            className={getChatToolbarButtonClass({
+                              compact: true,
+                              open: sessionPanelOpen && sessionPanelTab === "history",
+                            })}
+                            title="Session"
+                            aria-label="Session"
+                          >
+                            <Feather size={14} />
+                          </button>
+                          <div className="relative">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handleOpenJournalPanel();
+                                setMobileRetryMenuOpen(false);
+                              }}
+                              aria-busy={journalNpcActivityPending}
+                              className={getChatToolbarButtonClass({
+                                compact: true,
+                                open: sessionPanelOpen && sessionPanelTab === "journal",
+                              })}
+                              title={
+                                journalNpcActivityPending
+                                  ? "Journal — NPC portraits or sprites are still generating"
+                                  : "Journal — NPCs"
+                              }
+                              aria-label="Journal — NPCs"
+                            >
+                              <BookOpen size={14} />
+                            </button>
+                            {journalNpcActivityPending && (
+                              <Loader2
+                                size={10}
+                                className="pointer-events-none absolute -bottom-0.5 -right-0.5 animate-spin text-sky-300"
+                                aria-hidden
+                              />
+                            )}
+                          </div>
+                          {sessionPanelOpen && renderSessionPanel(true)}
                         </div>
                         <div className="relative" ref={mobileVolumePopoverRef}>
                           <button
                             onClick={() => {
                               setVolumePopoverOpen((open) => !open);
                             }}
-                            className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+                            className={GAME_MOBILE_ICON_BUTTON}
                             title="Volume"
                           >
                             {audioMuted || masterVolume === 0 ? <VolumeX size={14} /> : <Volume2 size={14} />}
                           </button>
                           {volumePopoverOpen && (
                             <GameVolumeMixer
-                              className="absolute right-10 top-0 z-50 max-w-[calc(100vw-4.5rem)]"
+                              className="absolute right-9 top-0 z-50 max-w-[calc(100vw-4rem)]"
                               audioMuted={audioMuted || masterVolume === 0}
                               masterVolume={masterVolume}
                               musicVolume={musicVolume}
@@ -8951,12 +9747,40 @@ export function GameSurface({
                             />
                           )}
                         </div>
+                        <div className="relative" ref={mobileGameAssetsPanelRef}>
+                          <button
+                            onClick={() => {
+                              handleOpenGameAssetsPanel();
+                              setMobileRetryMenuOpen(false);
+                            }}
+                            className={getChatToolbarButtonClass({
+                              compact: true,
+                              open: gameAssetsPanelOpen,
+                            })}
+                            title="Game Assets"
+                            aria-label="Game Assets"
+                          >
+                            <Folder size={14} />
+                          </button>
+                          {gameAssetsPanelOpen && renderGameAssetsPanel(true)}
+                        </div>
                         <button
                           onClick={() => {
-                            setGalleryOpen(true);
+                            setMobileActiveContextOpen(true);
                             setMobileActionsOpen(false);
                           }}
-                          className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+                          className={GAME_MOBILE_ICON_BUTTON}
+                          title="Active Context"
+                          aria-label="Active Context"
+                        >
+                          <BookOpen size={14} />
+                        </button>
+                        <button
+                          onClick={(event) => {
+                            handleOpenGalleryPanel(event);
+                            setMobileActionsOpen(false);
+                          }}
+                          className={GAME_MOBILE_ICON_BUTTON}
                           title="Gallery"
                         >
                           <Image size={14} />
@@ -8967,7 +9791,7 @@ export function GameSurface({
                             setSceneJournalOpen(true);
                             setMobileActionsOpen(false);
                           }}
-                          className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+                          className={GAME_MOBILE_ICON_BUTTON}
                           title="Scene descriptions"
                         >
                           <ScrollText size={14} />
@@ -8978,164 +9802,17 @@ export function GameSurface({
                             setCombatLogsOpen(true);
                             setMobileActionsOpen(false);
                           }}
-                          className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+                          className={GAME_MOBILE_ICON_BUTTON}
                           title="Combat logs"
                         >
                           <Swords size={14} />
                         </button>
                         <button
-                          type="button"
-                          onClick={() => {
-                            openGameAssetsBrowser();
+                          onClick={(event) => {
+                            onOpenSettings(event);
                             setMobileActionsOpen(false);
                           }}
-                          className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white"
-                          title="Game Assets"
-                        >
-                          <Folder size={14} />
-                        </button>
-                        <div className="relative">
-                          <button
-                            onClick={() => setMobileRetryMenuOpen((v) => !v)}
-                            className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white"
-                            title="Retry"
-                            aria-label="Retry"
-                          >
-                            <RotateCcw
-                              size={14}
-                              className={sceneAnalysis.isPending || spotifyRetryPending ? "animate-spin" : ""}
-                            />
-                          </button>
-                          {mobileRetryMenuOpen && (
-                            <div className="absolute right-10 top-0 z-50 flex w-72 max-w-[calc(100vw-4rem)] flex-col gap-1 rounded-xl border border-white/15 bg-black/85 p-1.5 shadow-xl backdrop-blur-xl">
-                              <button
-                                onClick={() => {
-                                  setMobileRetryMenuOpen(false);
-                                  setMobileActionsOpen(false);
-                                  void handleRetryTurn();
-                                }}
-                                disabled={!canRetryTurn}
-                                className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-white/85 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
-                              >
-                                <RotateCcw size={13} />
-                                <span>Retry Turn</span>
-                              </button>
-                              <button
-                                onClick={() => {
-                                  handleRetryScene();
-                                  setMobileRetryMenuOpen(false);
-                                  setMobileActionsOpen(false);
-                                }}
-                                disabled={!canRetryScene}
-                                className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-white/85 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
-                              >
-                                <RefreshCw size={13} className={sceneAnalysis.isPending ? "animate-spin" : ""} />
-                                <span>Retry Scene Analysis</span>
-                              </button>
-                              {useSpotifyGameMusic && (
-                                <button
-                                  onClick={handleRetrySpotifyMusic}
-                                  disabled={!canRetrySpotifyMusic}
-                                  className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-white/85 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
-                                >
-                                  {spotifyRetryPending ? (
-                                    <RefreshCw size={13} className="animate-spin" />
-                                  ) : (
-                                    <Volume2 size={13} />
-                                  )}
-                                  <span>Retry Spotify DJ Music Generation</span>
-                                </button>
-                              )}
-                              <button
-                                onClick={() => {
-                                  setMobileRetryMenuOpen(false);
-                                  setMobileActionsOpen(false);
-                                  retryAssetGeneration({ showSuccessToast: true });
-                                }}
-                                disabled={!canRetryAssets}
-                                className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-white/85 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
-                              >
-                                <Image size={13} />
-                                <span>Retry Assets Image Generation</span>
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setMobileActionsOpen(false);
-                            handleClearCgPlate();
-                          }}
-                          disabled={!cgIllustrationBackground}
-                          className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-white/80 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
-                          title={
-                            cgIllustrationBackground
-                              ? "Снять CG-подложку (illustrations:…) и показать обычный фон локации"
-                              : "Сейчас активна не CG-подложка"
-                          }
-                        >
-                          <ImageOff size={14} />
-                          <span>Снять CG</span>
-                        </button>
-                        <button
-                          onClick={() => {
-                            setMobileActionsOpen(false);
-                            void handleRegenerateBackground();
-                          }}
-                          disabled={!canRegenerateBackground || bgCatalogActionPending}
-                          className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-white/80 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
-                          title={
-                            canRegenerateBackground
-                              ? "Regenerate the current location background"
-                              : "Requires sprite generation, an image connection, and a catalog entry for this background"
-                          }
-                        >
-                          {regenerateBackgroundPending ? (
-                            <Loader2 size={14} className="animate-spin" />
-                          ) : (
-                            <Sparkles size={14} />
-                          )}
-                          <span>Regenerate Background</span>
-                        </button>
-                        <button
-                          onClick={() => {
-                            setMobileActionsOpen(false);
-                            void handleRefreshBackgroundPrompt();
-                          }}
-                          disabled={!canRegenerateBackground || bgCatalogActionPending}
-                          className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-white/80 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
-                          title={
-                            canRegenerateBackground
-                              ? "Rewrite the scene brief with the LLM, then regenerate the image"
-                              : "Requires sprite generation, an image connection, and a catalog entry for this background"
-                          }
-                        >
-                          {refreshBackgroundPromptPending ? (
-                            <Loader2 size={14} className="animate-spin" />
-                          ) : (
-                            <Wand2 size={14} />
-                          )}
-                          <span>{"Refresh prompt & regenerate"}</span>
-                        </button>
-                        <button
-                          onClick={() => {
-                            setMobileActionsOpen(false);
-                            retryAssetGeneration({ showSuccessToast: true });
-                          }}
-                          disabled={!canRetryAssets}
-                          className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-white/80 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
-                          title="Retry Assets Image Generation"
-                        >
-                          <Image size={14} />
-                          <span>Retry Assets Image Generation</span>
-                        </button>
-                        <button
-                          onClick={() => {
-                            onOpenSettings();
-                            setMobileActionsOpen(false);
-                          }}
-                          className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+                          className={GAME_MOBILE_ICON_BUTTON}
                           title="Chat Settings"
                         >
                           <Settings2 size={14} />
@@ -9146,10 +9823,10 @@ export function GameSurface({
                 </div>
               </div>
 
-              <ActiveWorldInfoModal
+              <ActiveLorebookEntriesModal
                 chatId={activeChatId}
-                open={mobileWorldInfoOpen}
-                onClose={() => setMobileWorldInfoOpen(false)}
+                open={mobileActiveContextOpen}
+                onClose={() => setMobileActiveContextOpen(false)}
               />
 
               {pendingReaction && (
@@ -9395,7 +10072,7 @@ export function GameSurface({
                             onCustomInstruction={handleCombatCustomInstruction}
                             onSpriteSuggestionChange={setCombatSpriteSuggestion}
                             _isStreaming={isStreaming}
-                            narration={combatStartNarration ?? "Combat starts!"}
+                            narration="Battle starts."
                             combatDialogue={combatDialogueLines}
                             combatDialogueCues={combatDialogueCues}
                             combatItemEffects={combatItemEffects}
@@ -9456,7 +10133,12 @@ export function GameSurface({
                           skillCheckSlot={skillCheckSlot}
                           onOpenInventory={() => setInventoryOpen(true)}
                           inventoryCount={inventoryItems.length}
+                          onRequestCombatStart={handleRequestManualCombatStart}
+                          combatStarting={combatStarting}
+                          combatGenerationFailed={combatGenerationFailedAtGate}
+                          onRetryCombatGeneration={retryCombatGeneration}
                           onDeleteMessage={onDeleteMessage}
+                          onBranchMessage={handleBranchMessage}
                           multiSelectMode={multiSelectMode}
                           selectedMessageIds={selectedMessageIds}
                           onDeleteSegment={handleDeleteSegment}
@@ -9471,6 +10153,7 @@ export function GameSurface({
                           messageOffset={messageOffset}
                           onStepForward={handleStepForward}
                           onJumpToLatest={handleReturnToLatest}
+                          onSetReviewOffset={setMessageOffset}
                           nextActionToken={nextActionToken}
                           onMaxNavOffsetChange={handleMaxNavOffsetChange}
                           inputSlot={
@@ -9537,7 +10220,12 @@ export function GameSurface({
                       skillCheckSlot={skillCheckSlot}
                       onOpenInventory={() => setInventoryOpen(true)}
                       inventoryCount={inventoryItems.length}
+                      onRequestCombatStart={handleRequestManualCombatStart}
+                      combatStarting={combatStarting}
+                      combatGenerationFailed={combatGenerationFailedAtGate}
+                      onRetryCombatGeneration={retryCombatGeneration}
                       onDeleteMessage={onDeleteMessage}
+                      onBranchMessage={handleBranchMessage}
                       multiSelectMode={multiSelectMode}
                       selectedMessageIds={selectedMessageIds}
                       onDeleteSegment={handleDeleteSegment}
@@ -9552,6 +10240,7 @@ export function GameSurface({
                       messageOffset={messageOffset}
                       onStepForward={handleStepForward}
                       onJumpToLatest={handleReturnToLatest}
+                      onSetReviewOffset={setMessageOffset}
                       nextActionToken={nextActionToken}
                       onMaxNavOffsetChange={handleMaxNavOffsetChange}
                       inputSlot={
@@ -9584,55 +10273,6 @@ export function GameSurface({
                       onDismiss={handleDismissQte}
                     />
                   </div>
-                )}
-
-                {/* Session history panel (full overlay) */}
-                {historyOpen && (
-                  <GameSessionHistory
-                    summaries={sessionSummaries}
-                    currentSessionNumber={displaySessionNumber}
-                    currentSessionDate={
-                      (chatMeta.gameCurrentSessionStartedAt as string | undefined) || chat.createdAt || chat.updatedAt
-                    }
-                    currentSecrets={currentSessionSecrets}
-                    savingSessionNumber={savingSessionSummary}
-                    savingCurrentSecrets={savingCurrentSessionSecrets}
-                    regeneratingSessionNumber={
-                      regenerateSessionConclusion.isPending
-                        ? (regenerateSessionConclusion.variables?.sessionNumber ?? null)
-                        : null
-                    }
-                    lorebookKeeperEnabled={chatMeta.gameLorebookKeeperEnabled === true}
-                    lorebookKeeperLastRun={
-                      chatMeta.gameLorebookKeeperLastRun &&
-                      typeof chatMeta.gameLorebookKeeperLastRun === "object" &&
-                      !Array.isArray(chatMeta.gameLorebookKeeperLastRun)
-                        ? (chatMeta.gameLorebookKeeperLastRun as {
-                            sessionNumber: number;
-                            status: "running" | "success" | "failed";
-                            updatedAt: string;
-                            entryCount?: number;
-                            error?: string;
-                          })
-                        : null
-                    }
-                    regeneratingLorebookSessionNumber={
-                      regenerateSessionLorebook.isPending
-                        ? (regenerateSessionLorebook.variables?.sessionNumber ?? null)
-                        : null
-                    }
-                    updatingPlotArcsSessionNumber={
-                      updateCampaignProgression.isPending
-                        ? (updateCampaignProgression.variables?.sessionNumber ?? null)
-                        : null
-                    }
-                    onSaveCurrentSecrets={handleSaveCurrentSessionSecrets}
-                    onSaveSession={handleSaveSessionDetails}
-                    onRegenerateSession={handleRegenerateSessionConclusion}
-                    onRegenerateLorebook={handleRegenerateSessionLorebook}
-                    onUpdatePlotArcs={handleUpdateCampaignProgression}
-                    onClose={() => setHistoryOpen(false)}
-                  />
                 )}
 
                 <GameForkTimelineModal
@@ -9680,7 +10320,7 @@ export function GameSurface({
                         <button
                           type="button"
                           onClick={() => setCombatLogsOpen(false)}
-                          className="rounded p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+                          className="rounded-lg p-1 text-[var(--muted-foreground)] transition-colors hover:bg-zinc-800/80 hover:text-[var(--foreground)]"
                           title="Close logs"
                         >
                           <X size={16} />
@@ -9744,23 +10384,6 @@ export function GameSurface({
                 )}
               </div>
 
-              {/* Journal overlay — positioned on the outer column so it covers state indicator + content */}
-              {journalOpen && (
-                <GameJournal
-                  chatId={activeChatId}
-                  npcs={npcs}
-                  npcAssetsActivityPending={journalNpcActivityPending}
-                  npcSpriteExpressions={journalNpcSpriteExpressions}
-                  onClose={() => setJournalOpen(false)}
-                  onNpcPortraitClick={handleNpcPortraitClick}
-                  onNpcPortraitGenerate={handleNpcPortraitGenerate}
-                  npcPortraitGenerationEnabled={
-                    chatMeta.enableSpriteGeneration === true && typeof chatMeta.gameImageConnectionId === "string"
-                  }
-                  generatingNpcPortraitNames={generatingNpcPortraitNames}
-                  onNpcRemove={handleRemoveNpcFromJournal}
-                />
-              )}
 
               <input
                 ref={npcPortraitUploadInputRef}
@@ -9783,7 +10406,8 @@ export function GameSurface({
               <ChatGalleryDrawer
                 chat={chat}
                 open={galleryOpen}
-                onClose={() => setGalleryOpen(false)}
+                onClose={handleCloseGalleryPanel}
+                anchor={galleryAnchor}
                 gameArtStylePrompt={
                   (
                     (chatMeta.gameSetupConfig as Record<string, unknown> | undefined)?.artStylePrompt as
@@ -9796,6 +10420,7 @@ export function GameSurface({
                 onManualImpactSceneSfw={() => requestManualExtraIllustration("sfw", "scene")}
                 onManualImpactSceneNsfw={() => requestManualExtraIllustration("nsfw", "scene")}
                 onClearCgPlate={handleClearCgPlate}
+                onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
               />
 
               <ChatSceneJournalDrawer
@@ -9916,7 +10541,7 @@ export function GameSurface({
           <div className="flex flex-wrap items-center justify-end gap-2">
             <button
               onClick={closeInterruptModal}
-              className="rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+              className="rounded-lg bg-zinc-950/80 px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-zinc-700/80 transition-colors hover:bg-zinc-800/80 hover:text-[var(--foreground)]"
             >
               No
             </button>
@@ -9979,7 +10604,7 @@ export function GameSurface({
                 rows={4}
                 maxLength={5000}
                 placeholder="Leave empty to let the GM steer naturally."
-                className="resize-none rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] outline-none placeholder:text-[var(--muted-foreground)]/70 focus:border-[var(--primary)]"
+                className="resize-none rounded-lg border border-zinc-700/80 bg-zinc-950/80 px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] outline-none placeholder:text-[var(--muted-foreground)]/70 focus:border-zinc-400/60"
               />
             </label>
           )}
@@ -9988,7 +10613,7 @@ export function GameSurface({
             <button
               onClick={handleCloseEndSessionDialog}
               disabled={concludeSession.isPending}
-              className="rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-lg bg-zinc-950/80 px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-zinc-700/80 transition-colors hover:bg-zinc-800/80 hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
             >
               Cancel
             </button>

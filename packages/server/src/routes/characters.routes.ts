@@ -14,17 +14,20 @@ import {
 import type { ExportEnvelope } from "@marinara-engine/shared";
 import { createCharactersStorage } from "../services/storage/characters.storage.js";
 import { createCharacterGalleryStorage } from "../services/storage/character-gallery.storage.js";
+import { createPersonaGalleryStorage } from "../services/storage/persona-gallery.storage.js";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { generateImage } from "../services/image/image-generation.js";
 import { comfyWorkflowFieldsFromConnection } from "../services/image/comfy-workflow.js";
 import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
 import { loadImageGenerationUserSettings } from "../services/image/image-generation-settings.js";
+import { compileImagePrompt } from "../services/image/image-prompt-compiler.js";
 import { writeFile, mkdir, readFile, readdir } from "fs/promises";
 import { join } from "path";
 import { DATA_DIR } from "../utils/data-dir.js";
 import { createWriteStream, existsSync, rmSync, unlinkSync } from "fs";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
 import { assertInsideDir, extensionFromImageMime, isAllowedImageBuffer } from "../utils/security.js";
+import { logger } from "../lib/logger.js";
 import { importSTLorebook } from "../services/import/st-lorebook.importer.js";
 import AdmZip from "adm-zip";
 import { extname } from "path";
@@ -32,13 +35,50 @@ import { pipeline } from "stream/promises";
 import { newId } from "../utils/id-generator.js";
 
 const CHARACTER_GALLERY_ROOT = join(DATA_DIR, "gallery", "characters");
+const PERSONA_GALLERY_ROOT = join(DATA_DIR, "gallery", "personas");
 const ALLOWED_GALLERY_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"]);
 const CHARACTER_CARD_PNG_KEYWORDS = new Set(["chara", "ccv3"]);
+const CUSTOM_NAME_RE = /^[a-z0-9_]{1,32}$/;
+const CUSTOM_KIND_MAX_DIMENSION = {
+  emoji: 256,
+  sticker: 512,
+} as const;
 
 async function ensureCharacterGalleryDir(characterId: string) {
   const dir = join(CHARACTER_GALLERY_ROOT, characterId);
   await mkdir(dir, { recursive: true });
   return dir;
+}
+
+async function ensurePersonaGalleryDir(personaId: string) {
+  if (isUnsafePathSegment(personaId)) {
+    throw new Error("Invalid persona id");
+  }
+  const dir = assertInsideDir(PERSONA_GALLERY_ROOT, join(PERSONA_GALLERY_ROOT, personaId));
+  await mkdir(dir, { recursive: true });
+  return dir;
+}
+
+function isUnsafePathSegment(value: string) {
+  return value === "." || value === ".." || value.includes("..") || value.includes("/") || value.includes("\\");
+}
+
+function isValidCustomDimension(value: unknown, max: number): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= max;
+}
+
+function validateCustomTagPayload(
+  kind: "emoji" | "sticker" | null,
+  name: string,
+  width: unknown,
+  height: unknown,
+) {
+  if (kind === null) return null;
+  if (!CUSTOM_NAME_RE.test(name)) return "customName must use 1-32 lowercase letters, numbers, or underscores";
+  const max = CUSTOM_KIND_MAX_DIMENSION[kind];
+  if (width !== undefined && !isValidCustomDimension(width, max)) return `width must be an integer from 1 to ${max}`;
+  if (height !== undefined && !isValidCustomDimension(height, max)) return `height must be an integer from 1 to ${max}`;
+  return null;
 }
 
 function toSafeExportName(name: string, fallback: string) {
@@ -52,6 +92,7 @@ function toSafeExportName(name: string, fallback: string) {
 type AvatarGenerationPromptOverride = {
   id: string;
   prompt: string;
+  negativePrompt?: string;
 };
 
 type AvatarGenerationBody = {
@@ -61,6 +102,7 @@ type AvatarGenerationBody = {
   referenceImages?: string[];
   width?: number;
   height?: number;
+  styleProfileId?: string | null;
   promptOverrides?: AvatarGenerationPromptOverride[];
 };
 
@@ -270,11 +312,13 @@ function buildCompatiblePersonaExport(persona: Record<string, unknown>) {
 export async function charactersRoutes(app: FastifyInstance) {
   const storage = createCharactersStorage(app.db);
   const characterGallery = createCharacterGalleryStorage(app.db);
+  const personaGallery = createPersonaGalleryStorage(app.db);
 
   // ── Characters ──
 
   app.get("/", async () => {
-    return storage.list();
+    const characters = await storage.list();
+    return characters.filter((character) => character.id !== PROFESSOR_MARI_ID);
   });
 
   app.post("/avatar-generation/preview", async (req, reply) => {
@@ -285,7 +329,14 @@ export async function charactersRoutes(app: FastifyInstance) {
     const imageSettings = await loadImageGenerationUserSettings(app.db);
     const width = body.width ?? imageSettings.portrait.width;
     const height = body.height ?? imageSettings.portrait.height;
-    const prompt = buildAvatarGenerationPrompt(body);
+    const imageDefaults = resolveConnectionImageDefaults(resolved.conn);
+    const compiled = compileImagePrompt({
+      kind: "avatar",
+      prompt: buildAvatarGenerationPrompt(body),
+      styleProfiles: imageSettings.styleProfiles,
+      styleProfileId: body.styleProfileId,
+      imageDefaults,
+    });
 
     return {
       items: [
@@ -293,7 +344,8 @@ export async function charactersRoutes(app: FastifyInstance) {
           id: avatarGenerationPromptId(body.name ?? "character"),
           kind: "avatar",
           title: `Avatar: ${body.name?.trim() || "Character"}`,
-          prompt,
+          prompt: compiled.prompt,
+          negativePrompt: compiled.negativePrompt,
           width,
           height,
         },
@@ -310,9 +362,25 @@ export async function charactersRoutes(app: FastifyInstance) {
     const imageSettings = await loadImageGenerationUserSettings(app.db);
     const width = body.width ?? imageSettings.portrait.width;
     const height = body.height ?? imageSettings.portrait.height;
-    const promptOverrideById = new Map((body.promptOverrides ?? []).map((item) => [item.id, item.prompt.trim()]));
-    const prompt =
-      promptOverrideById.get(avatarGenerationPromptId(body.name ?? "character")) ?? buildAvatarGenerationPrompt(body);
+    const rawPromptOverrides: unknown[] = Array.isArray(body.promptOverrides) ? body.promptOverrides : [];
+    const promptOverrideById = new Map(
+      rawPromptOverrides.flatMap((item) => {
+        if (!item || typeof item !== "object") return [];
+        const override = item as Record<string, unknown>;
+        if (typeof override.id !== "string" || typeof override.prompt !== "string") return [];
+        return [
+          [
+            override.id,
+            {
+              prompt: override.prompt.trim(),
+              negativePrompt:
+                typeof override.negativePrompt === "string" ? override.negativePrompt.trim() || undefined : undefined,
+            },
+          ] as const,
+        ];
+      }),
+    );
+    const promptOverride = promptOverrideById.get(avatarGenerationPromptId(body.name ?? "character"));
     const referenceImages = (body.referenceImages ?? [])
       .map((image) => image.trim())
       .filter((image) => image.startsWith("data:image/") || /^[A-Za-z0-9+/=\s]+$/.test(image))
@@ -324,10 +392,23 @@ export async function charactersRoutes(app: FastifyInstance) {
     const imgSource = conn.imageGenerationSource || imgModel;
     const imgServiceHint = conn.imageService || imgSource;
     const imageDefaults = resolveConnectionImageDefaults(conn);
+    const compiled = promptOverride
+      ? {
+          prompt: promptOverride.prompt,
+          negativePrompt: promptOverride.negativePrompt || "",
+        }
+      : compileImagePrompt({
+          kind: "avatar",
+          prompt: buildAvatarGenerationPrompt(body),
+          styleProfiles: imageSettings.styleProfiles,
+          styleProfileId: body.styleProfileId,
+          imageDefaults,
+        });
 
     try {
       const result = await generateImage(imgModel, imgBaseUrl, imgApiKey, imgServiceHint, {
-        prompt,
+        prompt: compiled.prompt,
+        negativePrompt: compiled.negativePrompt || undefined,
         model: imgModel || undefined,
         width,
         height,
@@ -339,7 +420,7 @@ export async function charactersRoutes(app: FastifyInstance) {
       });
       return {
         image: `data:${result.mimeType};base64,${result.base64}`,
-        prompt,
+        prompt: compiled.prompt,
       };
     } catch (err) {
       req.log.error(err, "Avatar generation failed");
@@ -400,6 +481,7 @@ export async function charactersRoutes(app: FastifyInstance) {
       versionSource,
       versionReason,
       skipVersionSnapshot,
+      mergeExtensions: false,
     });
   });
 
@@ -500,6 +582,31 @@ export async function charactersRoutes(app: FastifyInstance) {
 
     await characterGallery.remove(imageId);
     return { success: true };
+  });
+
+  app.patch<{
+    Params: { id: string; imageId: string };
+    Body: { customKind?: string | null; customName?: string | null; width?: number; height?: number };
+  }>("/:id/gallery/:imageId/tag", async (req, reply) => {
+    const { id, imageId } = req.params;
+    const image = await characterGallery.getById(imageId);
+    if (!image || image.characterId !== id) {
+      return reply.status(404).send({ error: "Not found" });
+    }
+    const kind = req.body?.customKind ?? null;
+    if (kind !== null && kind !== "emoji" && kind !== "sticker") {
+      return reply.status(400).send({ error: "Invalid customKind" });
+    }
+    const name = typeof req.body?.customName === "string" ? req.body.customName.trim() : "";
+    const error = validateCustomTagPayload(kind, name, req.body?.width, req.body?.height);
+    if (error) return reply.status(400).send({ error });
+
+    return characterGallery.setTag(imageId, {
+      customKind: kind,
+      customName: kind === null ? null : name,
+      width: kind !== null && typeof req.body?.width === "number" ? req.body.width : undefined,
+      height: kind !== null && typeof req.body?.height === "number" ? req.body.height : undefined,
+    });
   });
 
   // ── Duplicate ──
@@ -644,7 +751,13 @@ export async function charactersRoutes(app: FastifyInstance) {
       const filename = char.avatarPath.split("?")[0]!.split("/").pop()!;
       const avatarFile = join(DATA_DIR, "avatars", filename);
       if (existsSync(avatarFile)) {
-        pngBuffer = await readFile(avatarFile);
+        try {
+          const avatarBuffer = await readFile(avatarFile);
+          const imageInfo = isAllowedImageBuffer(avatarBuffer, extname(filename));
+          pngBuffer = imageInfo?.mimeType === "image/png" ? avatarBuffer : createMinimalPng();
+        } catch {
+          pngBuffer = createMinimalPng();
+        }
       } else {
         pngBuffer = createMinimalPng();
       }
@@ -699,6 +812,15 @@ export async function charactersRoutes(app: FastifyInstance) {
     return storage.updateAvatar(id, avatarPath);
   });
 
+  app.delete<{ Params: { id: string } }>("/:id/avatar", async (req, reply) => {
+    const { id } = req.params;
+    const char = await storage.getById(id);
+    if (!char) return reply.status(404).send({ error: "Character not found" });
+
+    const updated = await storage.updateAvatar(id, null);
+    return updated ?? reply.status(404).send({ error: "Character not found" });
+  });
+
   // ── Personas ──
 
   app.get("/personas/list", async () => {
@@ -711,10 +833,38 @@ export async function charactersRoutes(app: FastifyInstance) {
     return persona;
   });
 
+  app.get<{ Params: { id: string } }>("/personas/:id/versions", async (req, reply) => {
+    const persona = await storage.getPersona(req.params.id);
+    if (!persona) return reply.status(404).send({ error: "Persona not found" });
+    return storage.listPersonaVersions(req.params.id);
+  });
+
+  app.post<{ Params: { id: string; versionId: string } }>(
+    "/personas/:id/versions/:versionId/restore",
+    async (req, reply) => {
+      const restored = await storage.restorePersonaVersion(req.params.id, req.params.versionId);
+      if (!restored) return reply.status(404).send({ error: "Persona version not found" });
+      return restored;
+    },
+  );
+
+  app.delete<{ Params: { id: string; versionId: string } }>(
+    "/personas/:id/versions/:versionId",
+    async (req, reply) => {
+      const deleted = await storage.deletePersonaVersion(req.params.id, req.params.versionId);
+      if (!deleted) return reply.status(404).send({ error: "Persona version not found" });
+      return reply.status(204).send();
+    },
+  );
+
   app.post("/personas", async (req) => {
     const { name, description, createdAt, updatedAt, ...extra } = req.body as {
       name: string;
       description?: string;
+      comment?: string;
+      creator?: string;
+      personaVersion?: string;
+      creatorNotes?: string;
       personality?: string;
       scenario?: string;
       backstory?: string;
@@ -761,7 +911,7 @@ export async function charactersRoutes(app: FastifyInstance) {
     const filepath = assertInsideDir(avatarsDir, join(avatarsDir, filename));
     await writeFile(filepath, imageBuffer);
     const avatarPath = `/api/avatars/file/${filename}`;
-    return storage.updatePersona(req.params.id, { avatarPath });
+    return storage.updatePersona(req.params.id, { avatarPath }, { versionReason: "Avatar update" });
   });
 
   app.put<{ Params: { id: string } }>("/personas/:id/activate", async (req) => {
@@ -770,8 +920,148 @@ export async function charactersRoutes(app: FastifyInstance) {
   });
 
   app.delete<{ Params: { id: string } }>("/personas/:id", async (req, reply) => {
-    await storage.removePersona(req.params.id);
+    const { id } = req.params;
+    if (isUnsafePathSegment(id)) {
+      return reply.status(400).send({ error: "Invalid persona id" });
+    }
+    const persona = await storage.getPersona(id);
+    if (!persona) return reply.status(404).send({ error: "Persona not found" });
+
+    const galleryDir = assertInsideDir(PERSONA_GALLERY_ROOT, join(PERSONA_GALLERY_ROOT, id));
+    if (existsSync(galleryDir)) {
+      rmSync(galleryDir, { recursive: true, force: true });
+    }
+    await storage.removePersona(id);
     return reply.status(204).send();
+  });
+
+  // ── Persona Gallery ──
+
+  app.get<{ Params: { id: string } }>("/personas/:id/gallery", async (req, reply) => {
+    const persona = await storage.getPersona(req.params.id);
+    if (!persona) return reply.status(404).send({ error: "Persona not found" });
+
+    const images = await personaGallery.listByPersonaId(req.params.id);
+    return images.map((img) => ({
+      ...img,
+      url: `/api/characters/personas/${req.params.id}/gallery/file/${encodeURIComponent(img.filePath.split("/").pop()!)}`,
+    }));
+  });
+
+  app.post<{ Params: { id: string } }>("/personas/:id/gallery/upload", async (req, reply) => {
+    const { id } = req.params;
+    const persona = await storage.getPersona(id);
+    if (!persona) return reply.status(404).send({ error: "Persona not found" });
+
+    const data = await req.file();
+    if (!data) {
+      return reply.status(400).send({ error: "No file uploaded" });
+    }
+
+    const ext = extname(data.filename).toLowerCase();
+    if (!ALLOWED_GALLERY_EXTS.has(ext)) {
+      return reply.status(400).send({ error: `Unsupported file type: ${ext}` });
+    }
+
+    const dir = await ensurePersonaGalleryDir(id);
+    const filename = `${newId()}${ext}`;
+    const filePath = join(dir, filename);
+
+    await pipeline(data.file, createWriteStream(filePath));
+
+    const fields = data.fields as Record<string, { value?: string } | undefined>;
+    const prompt = fields?.prompt?.value ?? "";
+    const provider = fields?.provider?.value ?? "";
+    const model = fields?.model?.value ?? "";
+    const width = fields?.width?.value ? parseInt(fields.width.value, 10) : undefined;
+    const height = fields?.height?.value ? parseInt(fields.height.value, 10) : undefined;
+
+    try {
+      const image = await personaGallery.create({
+        personaId: id,
+        filePath: `personas/${id}/${filename}`,
+        prompt,
+        provider,
+        model,
+        width: Number.isFinite(width) ? width : undefined,
+        height: Number.isFinite(height) ? height : undefined,
+      });
+
+      return {
+        ...image,
+        url: `/api/characters/personas/${id}/gallery/file/${encodeURIComponent(filename)}`,
+      };
+    } catch (err) {
+      // Roll back the just-written file so a metadata failure can't strand an orphan on disk.
+      if (existsSync(filePath)) unlinkSync(filePath);
+      logger.error(err, "Failed to persist persona gallery image for %s", id);
+      return reply.status(500).send({ error: "Failed to save image metadata" });
+    }
+  });
+
+  app.get<{ Params: { id: string; filename: string } }>(
+    "/personas/:id/gallery/file/:filename",
+    async (req, reply) => {
+      const { id, filename } = req.params;
+      if (isUnsafePathSegment(id) || isUnsafePathSegment(filename)) {
+        return reply.status(400).send({ error: "Invalid path" });
+      }
+
+      const galleryDir = assertInsideDir(PERSONA_GALLERY_ROOT, join(PERSONA_GALLERY_ROOT, id));
+      const filePath = assertInsideDir(galleryDir, join(galleryDir, filename));
+      if (!existsSync(filePath)) {
+        return reply.status(404).send({ error: "Not found" });
+      }
+
+      return reply.sendFile(filename, galleryDir);
+    },
+  );
+
+  app.delete<{ Params: { id: string; imageId: string } }>("/personas/:id/gallery/:imageId", async (req, reply) => {
+    const { id, imageId } = req.params;
+    const image = await personaGallery.getById(imageId);
+    if (!image || image.personaId !== id) {
+      return reply.status(404).send({ error: "Not found" });
+    }
+
+    // assertInsideDir guards against a poisoned stored filePath escaping the gallery dir.
+    try {
+      const galleryRoot = join(DATA_DIR, "gallery");
+      const filePath = assertInsideDir(galleryRoot, join(galleryRoot, image.filePath));
+      if (existsSync(filePath)) {
+        unlinkSync(filePath);
+      }
+    } catch (err) {
+      logger.warn(err, "Skipped persona gallery file unlink for %s: path escapes gallery dir", imageId);
+    }
+
+    await personaGallery.remove(imageId);
+    return { success: true };
+  });
+
+  app.patch<{
+    Params: { id: string; imageId: string };
+    Body: { customKind?: string | null; customName?: string | null; width?: number; height?: number };
+  }>("/personas/:id/gallery/:imageId/tag", async (req, reply) => {
+    const { id, imageId } = req.params;
+    const image = await personaGallery.getById(imageId);
+    if (!image || image.personaId !== id) {
+      return reply.status(404).send({ error: "Not found" });
+    }
+    const kind = req.body?.customKind ?? null;
+    if (kind !== null && kind !== "emoji" && kind !== "sticker") {
+      return reply.status(400).send({ error: "Invalid customKind" });
+    }
+    const name = typeof req.body?.customName === "string" ? req.body.customName.trim() : "";
+    const error = validateCustomTagPayload(kind, name, req.body?.width, req.body?.height);
+    if (error) return reply.status(400).send({ error });
+
+    return personaGallery.setTag(imageId, {
+      customKind: kind,
+      customName: kind === null ? null : name,
+      width: kind !== null && typeof req.body?.width === "number" ? req.body.width : undefined,
+      height: kind !== null && typeof req.body?.height === "number" ? req.body.height : undefined,
+    });
   });
 
   // ── Persona Duplicate ──

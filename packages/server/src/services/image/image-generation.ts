@@ -34,6 +34,40 @@ import {
 import { normalizeLoopbackUrl, safeFetch, validateOutboundUrl } from "../../utils/security.js";
 import { recordAiRequest } from "../ai-audit/audit-logger.js";
 
+// sharp is an optional native module (no prebuilds on some platforms like Termux).
+// Lazy-load so the server boots even when sharp is missing; the only callers that
+// need it (Draw Things img2img init resize) fall back to passing the original.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type SharpFn = any;
+let _sharp: SharpFn | null = null;
+let _sharpLoadAttempted = false;
+async function tryLoadSharp(): Promise<SharpFn | null> {
+  if (_sharp || _sharpLoadAttempted) return _sharp;
+  _sharpLoadAttempted = true;
+  try {
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore - optional native dep
+    const mod = await import("sharp");
+    _sharp = (mod.default ?? mod) as SharpFn;
+    return _sharp;
+  } catch {
+    return null;
+  }
+}
+
+async function resizeBase64ToExactSize(b64: string, width: number, height: number): Promise<string> {
+  const sharpFn = await tryLoadSharp();
+  if (!sharpFn) return b64;
+  try {
+    const buf = Buffer.from(b64, "base64");
+    const out = await sharpFn(buf).resize(width, height, { fit: "cover", position: "attention" }).png().toBuffer();
+    return out.toString("base64");
+  } catch (err) {
+    logger.warn(err, "[image-gen] init image resize failed, sending original");
+    return b64;
+  }
+}
+
 const GALLERY_DIR = join(DATA_DIR, "gallery");
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -130,123 +164,127 @@ export async function generateImage(
   serviceHint: string,
   request: ImageGenRequest,
 ): Promise<ImageGenResult> {
-  const resolvedSource = resolveImageBackend(source, baseUrl, serviceHint, request.model);
-  const normalizedBaseUrl = normalizeImageUrl(baseUrl);
-  const scopedRequest = {
-    ...request,
-    allowLocalUrls:
-      request.allowLocalUrls ?? (await shouldAllowLocalUrlsForImageConnection(normalizedBaseUrl, resolvedSource)),
-  };
+  return withImageGenerationDeadline(
+    (async () => {
+      const resolvedSource = resolveImageBackend(source, baseUrl, serviceHint, request.model);
+      const normalizedBaseUrl = normalizeImageUrl(baseUrl);
+      const scopedRequest = {
+        ...request,
+        allowLocalUrls:
+          request.allowLocalUrls ?? (await shouldAllowLocalUrlsForImageConnection(normalizedBaseUrl, resolvedSource)),
+      };
 
-  const start = Date.now();
-  let result: ImageGenResult | undefined;
-  let finalError: unknown = null;
-  try {
-    switch (resolvedSource) {
-      case "openai":
-        result = await generateOpenAI(normalizedBaseUrl, apiKey, scopedRequest);
-        break;
-      case "nanogpt":
-        result = await generateNanoGPT(normalizedBaseUrl, apiKey, scopedRequest);
-        break;
-      case "openrouter":
-        result = await generateOpenRouter(normalizedBaseUrl, apiKey, scopedRequest);
-        break;
-      case "pollinations":
-        result = await generatePollinations(scopedRequest);
-        break;
-      case "stability":
-        result = await generateStability(normalizedBaseUrl, apiKey, scopedRequest);
-        break;
-      case "togetherai":
-        result = await generateTogetherAI(normalizedBaseUrl, apiKey, scopedRequest);
-        break;
-      case "novelai":
-        result = await generateNovelAI(normalizedBaseUrl, apiKey, scopedRequest);
-        break;
-      case "horde":
-        result = await generateHorde(normalizedBaseUrl, apiKey, scopedRequest);
-        break;
-      case "xai":
-        result = await generateXAI(normalizedBaseUrl, apiKey, scopedRequest);
-        break;
-      case "comfyui":
-        result = await generateComfyUI(normalizedBaseUrl, scopedRequest);
-        break;
-      case "runpod_comfyui": {
-        const endpointId = scopedRequest.imageEndpointId || "";
-        if (!endpointId) {
-          throw new Error(
-            "RunPod ComfyUI requires an endpoint ID. " +
-              "Enter your RunPod endpoint ID in the Endpoint ID field (e.g. 'abc123def456').",
-          );
-        }
-        result = await generateRunPodComfyUI(normalizedBaseUrl, endpointId, apiKey, scopedRequest);
-        break;
-      }
-      case "automatic1111":
-        result = await generateAutomatic1111(normalizedBaseUrl, scopedRequest);
-        break;
-      case "gemini_image":
-        result = await generateViaChatCompletions(normalizedBaseUrl, apiKey, scopedRequest);
-        break;
-      default:
-        // Fallback: try OpenAI-compatible endpoint
-        result = await generateOpenAI(normalizedBaseUrl, apiKey, scopedRequest);
-        break;
-    }
-    return result;
-  } catch (err) {
-    finalError = err;
-    throw err;
-  } finally {
-    const status = finalError ? "error" : "ok";
-    const errorMessage = finalError instanceof Error ? finalError.message : finalError ? String(finalError) : null;
-    const activeComfyWorkflow = resolveActiveComfyWorkflow(request);
-    const hasComfyWorkflowFields = Boolean(
-      request.comfyWorkflow?.trim() || request.comfyWorkflowWithReference?.trim(),
-    );
-    recordAiRequest({
-      kind: "image",
-      provider: resolvedSource,
-      model: request.model ?? "",
-      source: "image_generation",
-      status,
-      errorMessage,
-      durationMs: Date.now() - start,
-      request: {
-        prompt: request.prompt,
-        negativePrompt: request.negativePrompt,
-        width: request.width,
-        height: request.height,
-        model: request.model,
-        transparentBackground: request.transparentBackground,
-        hasReferenceImage: !!(request.referenceImage || (request.referenceImages && request.referenceImages.length > 0)),
-        referenceImageCount: request.referenceImages?.length ?? (request.referenceImage ? 1 : 0),
-        comfyWorkflowProvided: !!request.comfyWorkflow?.trim(),
-        ...(hasComfyWorkflowFields
-          ? {
-              comfyWorkflowWithReferenceProvided: !!request.comfyWorkflowWithReference?.trim(),
-              comfyWorkflowVariant: describeComfyWorkflowVariant(request),
-              comfyWorkflowExpectsBackgroundReference:
-                comfyWorkflowExpectsBackgroundReference(activeComfyWorkflow),
-              comfyReferenceImageCount: countActiveComfyReferenceImages(request, activeComfyWorkflow),
+      const start = Date.now();
+      let result: ImageGenResult | undefined;
+      let finalError: unknown = null;
+      try {
+        switch (resolvedSource) {
+          case "openai":
+            result = await generateOpenAI(normalizedBaseUrl, apiKey, scopedRequest);
+            break;
+          case "nanogpt":
+            result = await generateNanoGPT(normalizedBaseUrl, apiKey, scopedRequest);
+            break;
+          case "openrouter":
+            result = await generateOpenRouter(normalizedBaseUrl, apiKey, scopedRequest);
+            break;
+          case "pollinations":
+            result = await generatePollinations(scopedRequest);
+            break;
+          case "stability":
+            result = await generateStability(normalizedBaseUrl, apiKey, scopedRequest);
+            break;
+          case "togetherai":
+            result = await generateTogetherAI(normalizedBaseUrl, apiKey, scopedRequest);
+            break;
+          case "novelai":
+            result = await generateNovelAI(normalizedBaseUrl, apiKey, scopedRequest);
+            break;
+          case "horde":
+            result = await generateHorde(normalizedBaseUrl, apiKey, scopedRequest);
+            break;
+          case "xai":
+            result = await generateXAI(normalizedBaseUrl, apiKey, scopedRequest);
+            break;
+          case "comfyui":
+            result = await generateComfyUI(normalizedBaseUrl, scopedRequest);
+            break;
+          case "runpod_comfyui": {
+            const endpointId = scopedRequest.imageEndpointId || "";
+            if (!endpointId) {
+              throw new Error(
+                "RunPod ComfyUI requires an endpoint ID. " +
+                  "Enter your RunPod endpoint ID in the Endpoint ID field (e.g. 'abc123def456').",
+              );
             }
-          : {}),
-        baseUrl: normalizedBaseUrl,
-        serviceHint,
-        sourceHint: source,
-      },
-      response: result
-        ? {
-            mimeType: result.mimeType,
-            ext: result.ext,
-            base64Bytes: typeof result.base64 === "string" ? result.base64.length : 0,
+            result = await generateRunPodComfyUI(normalizedBaseUrl, endpointId, apiKey, scopedRequest);
+            break;
           }
-        : undefined,
-      metadata: { resolvedSource },
-    });
-  }
+          case "automatic1111":
+            result = await generateAutomatic1111(normalizedBaseUrl, scopedRequest, serviceHint);
+            break;
+          case "gemini_image":
+            result = await generateViaChatCompletions(normalizedBaseUrl, apiKey, scopedRequest);
+            break;
+          default:
+            // Fallback: try OpenAI-compatible endpoint
+            result = await generateOpenAI(normalizedBaseUrl, apiKey, scopedRequest);
+            break;
+        }
+        return result;
+      } catch (err) {
+        finalError = err;
+        throw err;
+      } finally {
+        const status = finalError ? "error" : "ok";
+        const errorMessage = finalError instanceof Error ? finalError.message : finalError ? String(finalError) : null;
+        const activeComfyWorkflow = resolveActiveComfyWorkflow(request);
+        const hasComfyWorkflowFields = Boolean(
+          request.comfyWorkflow?.trim() || request.comfyWorkflowWithReference?.trim(),
+        );
+        recordAiRequest({
+          kind: "image",
+          provider: resolvedSource,
+          model: request.model ?? "",
+          source: "image_generation",
+          status,
+          errorMessage,
+          durationMs: Date.now() - start,
+          request: {
+            prompt: request.prompt,
+            negativePrompt: request.negativePrompt,
+            width: request.width,
+            height: request.height,
+            model: request.model,
+            transparentBackground: request.transparentBackground,
+            hasReferenceImage: !!(request.referenceImage || (request.referenceImages && request.referenceImages.length > 0)),
+            referenceImageCount: request.referenceImages?.length ?? (request.referenceImage ? 1 : 0),
+            comfyWorkflowProvided: !!request.comfyWorkflow?.trim(),
+            ...(hasComfyWorkflowFields
+              ? {
+                  comfyWorkflowWithReferenceProvided: !!request.comfyWorkflowWithReference?.trim(),
+                  comfyWorkflowVariant: describeComfyWorkflowVariant(request),
+                  comfyWorkflowExpectsBackgroundReference:
+                    comfyWorkflowExpectsBackgroundReference(activeComfyWorkflow),
+                  comfyReferenceImageCount: countActiveComfyReferenceImages(request, activeComfyWorkflow),
+                }
+              : {}),
+            baseUrl: normalizedBaseUrl,
+            serviceHint,
+            sourceHint: source,
+          },
+          response: result
+            ? {
+                mimeType: result.mimeType,
+                ext: result.ext,
+                base64Bytes: typeof result.base64 === "string" ? result.base64.length : 0,
+              }
+            : undefined,
+          metadata: { resolvedSource },
+        });
+      }
+    })(),
+  );
 }
 
 /**
@@ -273,6 +311,25 @@ const IMAGE_GEN_TIMEOUT = Number(process.env.IMAGE_GEN_TIMEOUT_MS ?? 300_000);
 const IMAGE_FETCH_CONNECT_TIMEOUT_MS = Number(process.env.IMAGE_FETCH_CONNECT_TIMEOUT_MS ?? 120_000);
 const MAX_IMAGE_RESPONSE_BYTES = 30 * 1024 * 1024;
 const LOCAL_IMAGE_BACKENDS = new Set(["comfyui", "automatic1111"]);
+
+class ImageGenerationDeadlineError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Image generation timed out after ${Math.round(timeoutMs / 1000)} seconds`);
+    this.name = "ImageGenerationDeadlineError";
+  }
+}
+
+function withImageGenerationDeadline<T>(promise: Promise<T>): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const deadline = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => reject(new ImageGenerationDeadlineError(IMAGE_GEN_TIMEOUT)), IMAGE_GEN_TIMEOUT);
+    timeout.unref?.();
+  });
+
+  return Promise.race([promise, deadline]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
+}
 
 function normalizeImageUrl(url: string | URL): string {
   try {
@@ -308,6 +365,7 @@ function imageFetch(url: string | URL, init?: RequestInit, options: { allowLocal
     },
     agentOptions: { connectTimeout: IMAGE_FETCH_CONNECT_TIMEOUT_MS },
     maxResponseBytes: MAX_IMAGE_RESPONSE_BYTES,
+    decodeCompressedResponse: true,
   });
 }
 
@@ -319,11 +377,32 @@ function isOpenAIGptImageModel(model?: string): boolean {
   return !!model && /^gpt-image-(?:1|1\.5|2)(?:$|-)/i.test(model.trim());
 }
 
+function isOpenAIGptImage2Model(model?: string): boolean {
+  return !!model && /^gpt-image-2(?:$|-)/i.test(model.trim());
+}
+
 function supportsOpenAITransparentBackground(model?: string): boolean {
   const m = model?.trim().toLowerCase() ?? "";
   // OpenAI documents transparent backgrounds for GPT Image output generally,
   // but explicitly excludes GPT Image 2 from background: "transparent".
   return /^gpt-image-(?:1|1\.5)(?:$|-)/i.test(m);
+}
+
+const OPENAI_GPT_IMAGE_2_MIN_PIXELS = 1024 * 1024;
+const OPENAI_GPT_IMAGE_2_SIZE_MULTIPLE = 32;
+
+function roundUpToMultiple(value: number, multiple: number): number {
+  return Math.ceil(value / multiple) * multiple;
+}
+
+function openAIGptImage2Size(width: number, height: number): string {
+  const requestedPixels = width * height;
+  if (requestedPixels >= OPENAI_GPT_IMAGE_2_MIN_PIXELS) return `${width}x${height}`;
+
+  const scale = Math.sqrt(OPENAI_GPT_IMAGE_2_MIN_PIXELS / Math.max(1, requestedPixels));
+  const scaledWidth = roundUpToMultiple(width * scale, OPENAI_GPT_IMAGE_2_SIZE_MULTIPLE);
+  const scaledHeight = roundUpToMultiple(height * scale, OPENAI_GPT_IMAGE_2_SIZE_MULTIPLE);
+  return `${scaledWidth}x${scaledHeight}`;
 }
 
 function openAIImageSize(request: ImageGenRequest): string {
@@ -341,6 +420,10 @@ function openAIImageSize(request: ImageGenRequest): string {
     if (ratio > 1.12) return "1792x1024";
     if (ratio < 0.88) return "1024x1792";
     return "1024x1024";
+  }
+
+  if (isOpenAIGptImage2Model(model)) {
+    return openAIGptImage2Size(width, height);
   }
 
   // GPT Image models reject small custom dimensions such as 1024x576.
@@ -410,6 +493,32 @@ function imageExtensionFromMimeType(mimeType: string): string {
   if (mimeType.includes("webp")) return "webp";
   if (mimeType.includes("gif")) return "gif";
   return "png";
+}
+
+function imageResultMetadata(
+  filename: string,
+  contentType: string | null,
+  base64: string,
+): Pick<ImageGenResult, "mimeType" | "ext"> {
+  const normalizedContentType = contentType?.toLowerCase() ?? "";
+  const normalizedFilename = filename.toLowerCase();
+
+  if (
+    normalizedContentType.includes("jpeg") ||
+    normalizedContentType.includes("jpg") ||
+    /\.jpe?g(?:$|[?#])/i.test(normalizedFilename)
+  ) {
+    return { mimeType: "image/jpeg", ext: "jpg" };
+  }
+  if (normalizedContentType.includes("webp") || /\.webp(?:$|[?#])/i.test(normalizedFilename)) {
+    return { mimeType: "image/webp", ext: "webp" };
+  }
+  if (normalizedContentType.includes("gif") || /\.gif(?:$|[?#])/i.test(normalizedFilename)) {
+    return { mimeType: "image/gif", ext: "gif" };
+  }
+
+  const detectedMimeType = detectImageMimeType(base64);
+  return { mimeType: detectedMimeType, ext: imageExtensionFromMimeType(detectedMimeType) };
 }
 
 function decodeImageDataUrl(imageUrl: string): ImageGenResult {
@@ -572,13 +681,21 @@ async function downloadImageUrl(imageUrl: string, allowLocalUrls = false): Promi
   return { base64, mimeType, ext: imageExtensionFromMimeType(mimeType) };
 }
 
+function openAITextPrompt(request: ImageGenRequest): string {
+  const prompt = request.prompt.trim();
+  const negativePrompt = request.negativePrompt?.trim();
+  if (!negativePrompt) return prompt;
+  return `${prompt}\n\nDo not include: ${negativePrompt}.`;
+}
+
 async function generateOpenAI(baseUrl: string, apiKey: string, request: ImageGenRequest): Promise<ImageGenResult> {
   const usesGptImageApi = isOpenAIGptImageModel(request.model);
   const references = openAIReferenceImages(request);
+  const prompt = openAITextPrompt(request);
 
   if (usesGptImageApi && references.length > 0) {
     const formData = new FormData();
-    formData.append("prompt", request.prompt);
+    formData.append("prompt", prompt);
     formData.append("n", "1");
     formData.append("size", openAIImageSize(request));
     formData.append("output_format", "png");
@@ -614,7 +731,7 @@ async function generateOpenAI(baseUrl: string, apiKey: string, request: ImageGen
 
   const url = openAIImagesUrl(baseUrl, "generations");
   const body: Record<string, unknown> = {
-    prompt: request.prompt,
+    prompt,
     n: 1,
     size: openAIImageSize(request),
   };
@@ -1720,6 +1837,21 @@ const DEFAULT_COMFYUI_WORKFLOW: Record<string, unknown> = {
 };
 
 const COMFYUI_GEN_TIMEOUT_SECONDS = Number(process.env.COMFYUI_GEN_TIMEOUT ?? 300);
+const COMFYUI_PLACEHOLDER_REFERENCE_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+const COMFYUI_MAX_REFERENCE_IMAGES = 4;
+const COMFYUI_OUTPUT_FILE_KEYS = ["gifs", "images"] as const;
+
+interface ComfyUiOutputFile {
+  filename: string;
+  subfolder?: string;
+  type?: string;
+}
+
+interface ComfyUiNodeOutput {
+  images?: ComfyUiOutputFile[];
+  gifs?: ComfyUiOutputFile[];
+}
 
 function randomSeed(): number {
   return Math.floor(Math.random() * 2 ** 32);
@@ -1813,6 +1945,22 @@ async function uploadComfyReferenceImage(base: string, reference: string): Promi
   return result.name;
 }
 
+function collectComfyReferenceImages(request: ImageGenRequest, defaults: ComfyUiDefaults): string[] {
+  const references = [request.referenceImage, ...(request.referenceImages ?? [])]
+    .filter((reference): reference is string => typeof reference === "string" && reference.trim().length > 0)
+    .filter((reference, index, all) => all.indexOf(reference) === index)
+    .slice(0, COMFYUI_MAX_REFERENCE_IMAGES);
+  if (references.length > 0) return references;
+  return defaults.uploadPlaceholderOnMissingReference ? [COMFYUI_PLACEHOLDER_REFERENCE_BASE64] : [];
+}
+
+function numberedComfyReferencePlaceholder(
+  baseName: "reference_image" | "reference_image_name",
+  index: number,
+): string {
+  return `%${baseName}_${String(index + 1).padStart(2, "0")}%`;
+}
+
 async function generateComfyUI(baseUrl: string, request: ImageGenRequest): Promise<ImageGenResult> {
   const base = baseUrl.replace(/\/+$/, "");
   const defaults = resolveComfyUiDefaults(request);
@@ -1859,16 +2007,24 @@ async function generateComfyUI(baseUrl: string, request: ImageGenRequest): Promi
     replacements["%model%"] = request.model;
   }
   const workflowJson = JSON.stringify(workflow);
-  const reference = request.referenceImage ?? request.referenceImages?.[0];
+  const references = collectComfyReferenceImages(request, defaults);
+  for (let i = 0; i < references.length; i++) {
+    const reference = references[i]!;
+    const imagePlaceholder = numberedComfyReferencePlaceholder("reference_image", i);
+    const namePlaceholder = numberedComfyReferencePlaceholder("reference_image_name", i);
+
+    replacements[imagePlaceholder] = reference;
+    if (i === 0) replacements["%reference_image%"] = reference;
+
+    if (workflowJson.includes(namePlaceholder) || (i === 0 && workflowJson.includes("%reference_image_name%"))) {
+      const uploadedName = await uploadComfyReferenceImage(base, reference);
+      replacements[namePlaceholder] = uploadedName;
+      if (i === 0) replacements["%reference_image_name%"] = uploadedName;
+    }
+  }
   const backgroundReference = comfyWorkflowExpectsBackgroundReference(workflowJson)
     ? request.referenceImages?.[1]
     : undefined;
-  if (reference) {
-    replacements["%reference_image%"] = reference;
-    if (workflowJson.includes("%reference_image_name%")) {
-      replacements["%reference_image_name%"] = await uploadComfyReferenceImage(base, reference);
-    }
-  }
   if (backgroundReference && workflowJson.includes("%background_reference_image_name%")) {
     replacements["%background_reference_image_name%"] = await uploadComfyReferenceImage(
       base,
@@ -1901,39 +2057,35 @@ async function generateComfyUI(baseUrl: string, request: ImageGenRequest): Promi
     });
     if (!historyResp.ok) continue;
 
-    const history = (await historyResp.json()) as Record<
-      string,
-      {
-        outputs?: Record<string, { images?: Array<{ filename: string; subfolder: string; type: string }> }>;
-      }
-    >;
+    const history = (await historyResp.json()) as Record<string, { outputs?: Record<string, ComfyUiNodeOutput> }>;
 
     const entry = history[prompt_id];
     if (!entry?.outputs) continue;
 
-    // Find the first output with images
-    for (const nodeOutput of Object.values(entry.outputs)) {
-      const images = nodeOutput.images;
-      if (images && images.length > 0) {
-        const img = images[0]!;
-        const params = new URLSearchParams({
-          filename: img.filename,
-          subfolder: img.subfolder || "",
-          type: img.type || "output",
-        });
+    // Video Helper Suite's Video Combine reports animated WebP files as "gifs".
+    for (const outputKey of COMFYUI_OUTPUT_FILE_KEYS) {
+      for (const nodeOutput of Object.values(entry.outputs)) {
+        const outputFiles = nodeOutput[outputKey];
+        if (outputFiles && outputFiles.length > 0) {
+          const img = outputFiles[0]!;
+          const params = new URLSearchParams({
+            filename: img.filename,
+            subfolder: img.subfolder || "",
+            type: img.type || "output",
+          });
 
-        const imgResp = await localImageBackendFetch(`${base}/view?${params}`, {
-          signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
-        });
-        if (!imgResp.ok) {
-          throw new Error(`ComfyUI image fetch failed (${imgResp.status})`);
+          const imgResp = await localImageBackendFetch(`${base}/view?${params}`, {
+            signal: AbortSignal.timeout(IMAGE_GEN_TIMEOUT),
+          });
+          if (!imgResp.ok) {
+            throw new Error(`ComfyUI image fetch failed (${imgResp.status})`);
+          }
+
+          const arrayBuffer = await imgResp.arrayBuffer();
+          const base64 = Buffer.from(arrayBuffer).toString("base64");
+          const { mimeType, ext } = imageResultMetadata(img.filename, imgResp.headers.get("content-type"), base64);
+          return { base64, mimeType, ext };
         }
-
-        const arrayBuffer = await imgResp.arrayBuffer();
-        const base64 = Buffer.from(arrayBuffer).toString("base64");
-        const ext = img.filename.endsWith(".jpg") || img.filename.endsWith(".jpeg") ? "jpg" : "png";
-        const mimeType = ext === "jpg" ? "image/jpeg" : "image/png";
-        return { base64, mimeType, ext };
       }
     }
   }
@@ -1943,17 +2095,15 @@ async function generateComfyUI(baseUrl: string, request: ImageGenRequest): Promi
 
 // ── AUTOMATIC1111 / SD Web UI / Forge ──
 
-async function generateAutomatic1111(baseUrl: string, request: ImageGenRequest): Promise<ImageGenResult> {
+async function generateAutomatic1111(
+  baseUrl: string,
+  request: ImageGenRequest,
+  serviceHint?: string,
+): Promise<ImageGenResult> {
   const base = baseUrl.replace(/\/+$/, "");
+  const isDrawThings = serviceHint?.trim().toLowerCase() === "drawthings";
   const defaults = resolveAutomatic1111Defaults(request);
   const useImg2Img = !!(request.referenceImage || request.referenceImages?.length);
-  const overrideSettings: Record<string, unknown> = {};
-  if (request.model) {
-    overrideSettings.sd_model_checkpoint = request.model;
-  }
-  if (defaults.clipSkip) {
-    overrideSettings.CLIP_stop_at_last_layers = defaults.clipSkip;
-  }
 
   const body: Record<string, unknown> = {
     prompt: mergePromptPrefix(defaults.promptPrefix, request.prompt),
@@ -1961,25 +2111,50 @@ async function generateAutomatic1111(baseUrl: string, request: ImageGenRequest):
     width: request.width ?? 512,
     height: request.height ?? 768,
     steps: defaults.steps,
-    cfg_scale: defaults.cfgScale,
     seed: resolveSeed(request.imageDefaults),
     sampler_name: defaults.sampler || DEFAULT_AUTOMATIC1111_DEFAULTS.sampler,
-    batch_size: 1,
-    n_iter: 1,
-    restore_faces: defaults.restoreFaces,
   };
-  if (defaults.scheduler) {
-    body.scheduler = defaults.scheduler;
+
+  if (isDrawThings) {
+    // Draw Things' /sdapi/v1/txt2img diverges from A1111: it uses `guidance_scale`
+    // (not `cfg_scale`), `batch_count` (not `n_iter`/`batch_size`), and rejects
+    // unknown keys like `override_settings`, `scheduler`, and `restore_faces`.
+    // Model / LoRA selection is driven by the Draw Things UI state, not the request.
+    body.guidance_scale = defaults.cfgScale;
+    body.batch_count = 1;
+  } else {
+    body.cfg_scale = defaults.cfgScale;
+    body.batch_size = 1;
+    body.n_iter = 1;
+    body.restore_faces = defaults.restoreFaces;
+    if (defaults.scheduler) {
+      body.scheduler = defaults.scheduler;
+    }
+    const overrideSettings: Record<string, unknown> = {};
+    if (request.model) {
+      overrideSettings.sd_model_checkpoint = request.model;
+    }
+    if (defaults.clipSkip) {
+      overrideSettings.CLIP_stop_at_last_layers = defaults.clipSkip;
+    }
+    if (Object.keys(overrideSettings).length > 0) {
+      body.override_settings = overrideSettings;
+    }
   }
-  if (Object.keys(overrideSettings).length > 0) {
-    body.override_settings = overrideSettings;
-  }
+
   if (useImg2Img) {
-    body.init_images = [request.referenceImage ?? request.referenceImages?.[0]];
+    const rawInit = (request.referenceImage ?? request.referenceImages?.[0]) as string;
+    // Draw Things rejects img2img if init_images dimensions don't match the requested
+    // width/height exactly. A1111/Forge auto-resize internally; Draw Things does not.
+    const initImage = isDrawThings
+      ? await resizeBase64ToExactSize(rawInit, body.width as number, body.height as number)
+      : rawInit;
+    body.init_images = [initImage];
     body.denoising_strength = defaults.denoisingStrength;
   }
 
   const endpoint = useImg2Img ? `${base}/sdapi/v1/img2img` : `${base}/sdapi/v1/txt2img`;
+  const label = isDrawThings ? "Draw Things" : "AUTOMATIC1111";
 
   const resp = await localImageBackendFetch(endpoint, {
     method: "POST",
@@ -1990,12 +2165,15 @@ async function generateAutomatic1111(baseUrl: string, request: ImageGenRequest):
 
   if (!resp.ok) {
     const errText = await resp.text().catch(() => "Unknown error");
-    throw new Error(`AUTOMATIC1111 generation failed (${resp.status}): ${sanitizeErrorText(errText)}`);
+    throw new Error(`${label} generation failed (${resp.status}): ${sanitizeErrorText(errText)}`);
   }
 
   const data = (await resp.json()) as { images?: string[] };
   const b64 = data.images?.[0];
-  if (!b64) throw new Error("No image data in AUTOMATIC1111 response");
+  if (!b64) {
+    const hint = isDrawThings ? " (check that a model is selected in Draw Things and the API server port matches)" : "";
+    throw new Error(`No image data in ${label} response${hint}`);
+  }
 
   return { base64: b64, mimeType: "image/png", ext: "png" };
 }

@@ -1,6 +1,7 @@
 // ──────────────────────────────────────────────
 // TTS Service — Server-proxied audio playback
 // ──────────────────────────────────────────────
+import { getOrCreateCachedTTSAudioBlob } from "./tts-audio-cache";
 
 export type TTSState = "idle" | "loading" | "playing" | "paused" | "error";
 
@@ -12,6 +13,17 @@ export interface TTSSpeakOptions {
   voice?: string;
   signal?: AbortSignal;
   throwOnError?: boolean;
+  cacheKey?: string;
+  cacheAliases?: string[];
+}
+
+export interface TTSSpeakRequest {
+  text: string;
+  speaker?: string;
+  tone?: string;
+  voice?: string;
+  cacheKey?: string;
+  cacheAliases?: string[];
 }
 
 class TTSService {
@@ -92,6 +104,15 @@ class TTSService {
     return res.blob();
   }
 
+  private async getAudioBlob(text: string, options: TTSSpeakOptions = {}): Promise<Blob> {
+    if (!options.cacheKey) return this.generateAudio(text, options);
+    return getOrCreateCachedTTSAudioBlob(
+      options.cacheKey,
+      () => this.generateAudio(text, options),
+      options.cacheAliases,
+    );
+  }
+
   /** Speak the given text. `id` is an optional caller-supplied key (e.g. message id) so callers can track which item is active. */
   async speak(text: string, id?: string, options: TTSSpeakOptions = {}): Promise<void> {
     this.stop();
@@ -104,7 +125,7 @@ class TTSService {
 
     let blob: Blob;
     try {
-      blob = await this.generateAudio(text, { ...options, signal: abortController.signal });
+      blob = await this.getAudioBlob(text, { ...options, signal: abortController.signal });
     } catch (err) {
       if (!this.isCurrentSequence(sequence)) return;
       if (err instanceof Error && err.name === "AbortError") {
@@ -155,6 +176,117 @@ class TTSService {
       this.setState("error");
       if (options.throwOnError) throw error;
     }
+  }
+
+  /**
+   * Generate every request first, then play the resulting clips in order.
+   * This keeps multi-speaker dialogue from starting until the whole spoken queue is ready.
+   */
+  async speakSequence(
+    requests: TTSSpeakRequest[],
+    id?: string,
+    options: Pick<TTSSpeakOptions, "signal" | "throwOnError"> = {},
+  ): Promise<void> {
+    const playableRequests = requests.filter((request) => request.text.trim().length > 0);
+    if (playableRequests.length === 0) return;
+
+    this.stop();
+    const sequence = ++this.sequence;
+    this.lastError = null;
+
+    this.setState("loading", id ?? null);
+    const abortController = new AbortController();
+    this.abortController = abortController;
+
+    const abortFromCaller = () => abortController.abort();
+    if (options.signal?.aborted) {
+      abortController.abort();
+    } else {
+      options.signal?.addEventListener("abort", abortFromCaller, { once: true });
+    }
+
+    let blobs: Blob[];
+    try {
+      blobs = await Promise.all(
+        playableRequests.map((request) =>
+          this.getAudioBlob(request.text, {
+            speaker: request.speaker,
+            tone: request.tone,
+            voice: request.voice,
+            signal: abortController.signal,
+            cacheKey: request.cacheKey,
+            cacheAliases: request.cacheAliases,
+          }),
+        ),
+      );
+    } catch (err) {
+      options.signal?.removeEventListener("abort", abortFromCaller);
+      if (!this.isCurrentSequence(sequence)) return;
+      if (err instanceof Error && err.name === "AbortError") {
+        this.setState("idle");
+        return;
+      }
+      const error = err instanceof Error ? err : new Error("TTS request failed");
+      this.lastError = error.message;
+      this.setState("error");
+      if (options.throwOnError) throw error;
+      return;
+    }
+
+    options.signal?.removeEventListener("abort", abortFromCaller);
+    if (!this.isCurrentSequence(sequence)) return;
+    if (this.abortController === abortController) {
+      this.abortController = null;
+    }
+
+    let index = 0;
+    const playNext = async (): Promise<void> => {
+      if (!this.isCurrentSequence(sequence)) return;
+      this.cleanup();
+
+      const blob = blobs[index];
+      if (!blob) {
+        this.audio = null;
+        this.setState("idle");
+        return;
+      }
+      index += 1;
+
+      const objectUrl = URL.createObjectURL(blob);
+      if (!this.isCurrentSequence(sequence)) {
+        URL.revokeObjectURL(objectUrl);
+        return;
+      }
+      this.currentObjectUrl = objectUrl;
+
+      const audio = new Audio(objectUrl);
+      this.audio = audio;
+
+      audio.onended = () => {
+        if (!this.isCurrentSequence(sequence) || this.audio !== audio) return;
+        void playNext();
+      };
+      audio.onerror = () => {
+        if (!this.isCurrentSequence(sequence) || this.audio !== audio) return;
+        this.cleanup();
+        this.lastError = "Audio playback failed";
+        this.setState("error");
+      };
+
+      this.setState("playing", id ?? null);
+      try {
+        await audio.play();
+      } catch (err) {
+        if (!this.isCurrentSequence(sequence) || this.audio !== audio) return;
+        this.cleanup();
+        const error = err instanceof Error ? err : new Error("Browser blocked audio playback");
+        this.lastError = error.message;
+        this.setState("error");
+        if (options.throwOnError) throw error;
+      }
+    };
+
+    await playNext();
   }
 
   /** Stop any in-progress fetch or playback. */

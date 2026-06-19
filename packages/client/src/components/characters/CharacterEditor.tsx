@@ -1,16 +1,16 @@
 // ──────────────────────────────────────────────
 // Character Editor — Full-page detail view
 // Replaces the chat area when editing a character.
-// Sections: Metadata, Description, Personality, Backstory,
-//           Appearance, Scenario, Dialogue, Advanced, Lorebook
+// Sections: Metadata, Card, Lorebook, Advanced
 // ──────────────────────────────────────────────
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   useCharacter,
   useUpdateCharacter,
   useUploadAvatar,
+  useRemoveAvatar,
   useDeleteCharacter,
   useDuplicateCharacter,
   useCreatePersona,
@@ -19,8 +19,10 @@ import {
   useCharacterGalleryImages,
   useUploadCharacterGalleryImage,
   useDeleteCharacterGalleryImage,
+  useTagCharacterGalleryImage,
   useUploadSprite,
   useDeleteSprite,
+  useExportSprites,
   useCleanupSavedSprites,
   useRestoreSpriteCleanupBackup,
   useSpriteCapabilities,
@@ -33,22 +35,18 @@ import {
 } from "../../hooks/use-characters";
 import { useUIStore } from "../../stores/ui.store";
 import { lorebookKeys, useLorebook } from "../../hooks/use-lorebooks";
-import { useStartChatFromCharacter } from "../../hooks/use-start-chat-from-character";
 import { useConnections } from "../../hooks/use-connections";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { SpriteGenerationModal } from "../ui/SpriteGenerationModal";
 import { AvatarGenerationModal } from "../ui/AvatarGenerationModal";
 import { AvatarCropWidget } from "../ui/AvatarCropWidget";
+import { ImageUploadDropzone } from "../ui/ImageUploadDropzone";
+import { CustomEmojiTagButton } from "../ui/CustomEmojiTagButton";
 import {
   ArrowLeft,
   Save,
   User,
-  FileText,
-  Heart,
-  BookOpen,
-  Eye,
-  MapPin,
-  MessageCircle,
+  IdCard,
   Settings2,
   Library,
   Camera,
@@ -67,7 +65,6 @@ import {
   Loader2,
   Swords,
   Crop,
-  Maximize2,
   ImageDown,
   Download,
   Eraser,
@@ -81,40 +78,82 @@ import { extractColorsFromImage } from "../../lib/avatar-color-extraction";
 import { HelpTooltip } from "../ui/HelpTooltip";
 import { api } from "../../lib/api-client";
 import { ColorPicker } from "../ui/ColorPicker";
-import { TrackerCardColorControls } from "../ui/TrackerCardColorControls";
-import { ExpandedTextarea } from "../ui/ExpandedTextarea";
+import { MacroTextarea } from "../ui/MacroTextarea";
 import { Modal } from "../ui/Modal";
 import { SpriteFrameEditor } from "../ui/SpriteFrameEditor";
 import { SpriteWandCleanupEditor } from "../ui/SpriteWandCleanupEditor";
 import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatDialog";
+import { EditorTabRail } from "../ui/EditorTabRail";
+import { EditorSectionAnchor, EditorSectionJumps } from "../ui/EditorSectionJumps";
 import type { CharacterCardVersion, CharacterData, RPGStatsConfig } from "@marinara-engine/shared";
 import { parseTrackerCardColorConfig, serializeTrackerCardColorConfig } from "../../lib/tracker-card-colors";
+import { useQuoteFormatter } from "../../hooks/use-quote-formatter";
+import { LorebookAssignmentSection } from "../lorebooks/LorebookAssignmentSection";
 
 // ── Tabs ──
 const TABS = [
   { id: "metadata", label: "Metadata", icon: User },
-  { id: "description", label: "Description", icon: FileText },
-  { id: "personality", label: "Personality", icon: Heart },
-  { id: "backstory", label: "Backstory", icon: BookOpen },
-  { id: "appearance", label: "Appearance", icon: Eye },
-  { id: "scenario", label: "Scenario", icon: MapPin },
-  { id: "dialogue", label: "Dialogue", icon: MessageCircle },
+  { id: "card", label: "Card", icon: IdCard },
+  { id: "lorebook", label: "Lorebook", icon: Library },
   { id: "sprites", label: "Sprites", icon: Image },
   { id: "gallery", label: "Gallery", icon: Camera },
   { id: "colors", label: "Colors", icon: Palette },
   { id: "stats", label: "Stats", icon: Swords },
   { id: "advanced", label: "Advanced", icon: Settings2 },
-  { id: "lorebook", label: "Lorebook", icon: Library },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
 
-interface AltDescriptionEntry {
-  id: string;
-  label: string;
-  content: string;
-  active: boolean;
-}
+const CHARACTER_CARD_SECTIONS = [
+  { id: "character-card-description", label: "Description" },
+  { id: "character-card-personality", label: "Personality" },
+  { id: "character-card-backstory", label: "Backstory" },
+  { id: "character-card-appearance", label: "Appearance" },
+  { id: "character-card-scenario", label: "Scenario" },
+  { id: "character-card-dialogue", label: "Dialogue" },
+] as const;
+
+const CHARACTER_METADATA_HELP =
+  "Use metadata for identity, sharing, and library organization. Name is used as {{char}}, creator/version help track authorship and revisions, tags make the card searchable, talkativeness affects group chat response frequency, and creator notes stay private.";
+
+const CHARACTER_CARD_HELP =
+  "Write the fields that define how the model sees and plays the character. Description, personality, backstory, appearance, scenario, and dialogue are kept together here so you can treat the card as one writing document.";
+
+const CHARACTER_DESCRIPTION_HELP =
+  "The character's general identity and role. This is sent in every prompt as part of who the character is.";
+
+const CHARACTER_PERSONALITY_HELP =
+  "A concise summary of temperament, behavior, speech habits, preferences, and emotional patterns.";
+
+const CHARACTER_BACKSTORY_HELP =
+  "History, origin, important relationships, and formative events that explain how the character became who they are.";
+
+const CHARACTER_APPEARANCE_HELP =
+  "Physical description, clothing, posture, distinguishing marks, and visual details the model should remember.";
+
+const CHARACTER_SCENARIO_HELP =
+  "The default setting or situation for new interactions. Use it to establish where the scene starts and what is already happening.";
+
+const CHARACTER_DIALOGUE_HELP =
+  "First Message opens a new chat. Alternate Greetings provide other opening options. Example Dialogue teaches voice and formatting; use <START> to separate examples and {{user}} / {{char}} as placeholders.";
+
+const CHARACTER_ADVANCED_HELP =
+  "Character-specific prompt controls. System Prompt is injected through the preset's character block, Post-History Instructions appear near generation time, and Depth Prompt inserts a reminder at a selected point in chat history.";
+
+const CHARACTER_GALLERY_HELP =
+  "These images belong to the character, so deleting a chat does not remove them. Use this for reference sheets, outfit variants, or imported ST-style character image packs. Chat gallery is still best for scene-specific illustrations and generated message attachments.";
+
+const CHARACTER_SPRITES_HELP =
+  "Upload sprites one by one, or use Upload Folder to bulk-import a folder of PNGs. Each filename becomes the expression name, for example admiration.png becomes admiration. To rotate variants, share a prefix before an underscore, for example happy_01.png and happy_blush.png. Enable the Expression Engine agent so roleplay can pick matching sprites from detected emotions. Sprites appear as VN-style overlays in the chat area.";
+
+const CHARACTER_STATS_HELP =
+  "HP is injected into the prompt so the AI knows the character's current health. Attributes are custom stats, like STR or DEX, that define the character's capabilities. The Character Tracker agent can adjust values based on combat, healing, and narrative events. Values set here serve as the initial/default state for new conversations.";
+
+const CHARACTER_COLORS_HELP =
+  "Name color is applied to the character's display name in chat. Gradients use CSS linear-gradient. Dialogue color applies to text inside dialogue quotation marks and can optionally be bolded from Settings. Box color sets the background color of the character's message bubble in roleplay mode. Leave any field empty to use the default theme colors.";
+
+const CHARACTER_LOREBOOK_HELP =
+  "Attach lorebook/world-info entries to this character. Entries trigger from keywords during conversation; embedded card lorebooks can be imported into Marinara as linked lorebooks for deeper editing.";
 
 interface ParsedCharacter {
   id: string;
@@ -124,26 +163,53 @@ interface ParsedCharacter {
   spriteFolderPath: string | null;
 }
 
-function normalizeAltDescriptions(value: unknown): AltDescriptionEntry[] {
-  const raw = (() => {
-    if (Array.isArray(value)) return value;
-    if (typeof value !== "string" || !value.trim()) return [];
-    try {
-      const parsed = JSON.parse(value);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  })();
+function appendNewTags(existingTags: string[], rawInput: string) {
+  const seen = new Set(existingTags);
+  const additions: string[] = [];
 
-  return raw
-    .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object")
-    .map((entry, index) => ({
-      id: typeof entry.id === "string" && entry.id.trim() ? entry.id : `extension-${index}`,
-      label: typeof entry.label === "string" ? entry.label : "Extension",
-      content: typeof entry.content === "string" ? entry.content : "",
-      active: entry.active !== false,
-    }));
+  for (const tag of rawInput.split(",").map((part) => part.trim())) {
+    if (!tag || seen.has(tag)) continue;
+    seen.add(tag);
+    additions.push(tag);
+  }
+
+  return additions.length > 0 ? [...existingTags, ...additions] : existingTags;
+}
+
+const CHARACTER_QUOTE_FIELD_KEYS = new Set<string>([
+  "description",
+  "personality",
+  "scenario",
+  "first_mes",
+  "mes_example",
+  "system_prompt",
+  "post_history_instructions",
+  "creator_notes",
+]);
+
+const CHARACTER_QUOTE_EXTENSION_KEYS = new Set(["appearance", "backstory"]);
+
+function formatCharacterFieldValue<K extends keyof CharacterData>(
+  key: K,
+  value: CharacterData[K],
+  formatQuotes: (value: string) => string,
+): CharacterData[K] {
+  if (CHARACTER_QUOTE_FIELD_KEYS.has(String(key)) && typeof value === "string") {
+    return formatQuotes(value) as CharacterData[K];
+  }
+  if (key === "alternate_greetings" && Array.isArray(value)) {
+    return value.map((entry) => (typeof entry === "string" ? formatQuotes(entry) : entry)) as CharacterData[K];
+  }
+  return value;
+}
+
+function formatCharacterExtensionValue(key: string, value: unknown, formatQuotes: (value: string) => string): unknown {
+  if (CHARACTER_QUOTE_EXTENSION_KEYS.has(key) && typeof value === "string") return formatQuotes(value);
+  if (key === "depth_prompt" && value && typeof value === "object" && "prompt" in value) {
+    const depthPrompt = value as { prompt?: unknown };
+    if (typeof depthPrompt.prompt === "string") return { ...value, prompt: formatQuotes(depthPrompt.prompt) };
+  }
+  return value;
 }
 
 export function CharacterEditor() {
@@ -152,11 +218,11 @@ export function CharacterEditor() {
   const { data: rawCharacter, isLoading } = useCharacter(characterId);
   const updateCharacter = useUpdateCharacter();
   const uploadAvatar = useUploadAvatar();
+  const removeAvatar = useRemoveAvatar();
   const deleteCharacter = useDeleteCharacter();
   const duplicateCharacter = useDuplicateCharacter();
   const createPersona = useCreatePersona();
   const uploadPersonaAvatar = useUploadPersonaAvatar();
-  const { startChatFromCharacter, isStartingChat } = useStartChatFromCharacter();
   const { data: connectionsList } = useConnections();
 
   const [activeTab, setActiveTab] = useState<TabId>("metadata");
@@ -166,6 +232,7 @@ export function CharacterEditor() {
   const [dirty, setDirty] = useState(false);
   const loadedCharacterIdRef = useRef<string | null>(null);
   const activeCharacterIdRef = useRef<string | null>(characterId);
+  const formatQuotes = useQuoteFormatter();
   const dirtyRef = useRef(false);
   const editRevisionRef = useRef(0);
   const setEditorDirty = useUIStore((s) => s.setEditorDirty);
@@ -230,10 +297,11 @@ export function CharacterEditor() {
 
   const updateField = useCallback(
     <K extends keyof CharacterData>(key: K, value: CharacterData[K]) => {
-      setFormData((prev) => (prev ? { ...prev, [key]: value } : prev));
+      const nextValue = formatCharacterFieldValue(key, value, formatQuotes);
+      setFormData((prev) => (prev ? { ...prev, [key]: nextValue } : prev));
       markDirty();
     },
-    [markDirty],
+    [formatQuotes, markDirty],
   );
 
   const setExtensionValue = useCallback((key: string, value: unknown) => {
@@ -245,10 +313,10 @@ export function CharacterEditor() {
 
   const updateExtension = useCallback(
     (key: string, value: unknown) => {
-      setExtensionValue(key, value);
+      setExtensionValue(key, formatCharacterExtensionValue(key, value, formatQuotes));
       markDirty();
     },
-    [markDirty, setExtensionValue],
+    [formatQuotes, markDirty, setExtensionValue],
   );
 
   const beginAvatarUpload = useCallback(() => {
@@ -334,7 +402,7 @@ export function CharacterEditor() {
       // framing, so the prior normalized crop coords are meaningless and would
       // produce a stale framing on the new file.
       if (shouldClearAvatarCrop) {
-        setExtensionValue("avatarCrop", undefined);
+        setExtensionValue("avatarCrop", null);
       }
       if (fallbackDirty || shouldClearAvatarCrop) {
         setDirtyState(true);
@@ -388,7 +456,7 @@ export function CharacterEditor() {
 
       setAvatarPreview(avatarDataUrl);
       if (shouldClearAvatarCrop) {
-        setExtensionValue("avatarCrop", undefined);
+        setExtensionValue("avatarCrop", null);
       }
       if (fallbackDirty || shouldClearAvatarCrop) {
         setDirtyState(true);
@@ -426,6 +494,35 @@ export function CharacterEditor() {
       uploadAvatar,
     ],
   );
+
+  const handleAvatarRemove = useCallback(async () => {
+    if (!characterId || !avatarPreview) return;
+    if (saving) {
+      toast.error("Wait for the current save to finish before removing the avatar.");
+      return;
+    }
+    if (avatarUploadInFlightRef.current) {
+      toast.error("Wait for the current avatar upload to finish before removing the avatar.");
+      return;
+    }
+
+    const confirmed = await showConfirmDialog({
+      title: "Remove Avatar",
+      message: `Remove the avatar from ${formData?.name || "this character"}? This clears the character card's avatar without deleting the character.`,
+      confirmLabel: "Remove",
+      tone: "destructive",
+    });
+    if (!confirmed) return;
+
+    try {
+      await removeAvatar.mutateAsync(characterId);
+      setAvatarPreview(null);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      toast.success("Avatar removed.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to remove avatar.");
+    }
+  }, [avatarPreview, characterId, formData?.name, removeAvatar, saving]);
 
   const handleDelete = async () => {
     if (!characterId) return;
@@ -493,6 +590,9 @@ export function CharacterEditor() {
       const created = (await createPersona.mutateAsync({
         name: personaName,
         comment: formData.creator_notes ?? "",
+        creator: formData.creator ?? "",
+        personaVersion: formData.character_version ?? "1.0",
+        creatorNotes: formData.creator_notes ?? "",
         description: formData.description ?? "",
         personality: formData.personality ?? "",
         scenario: formData.scenario ?? "",
@@ -505,7 +605,6 @@ export function CharacterEditor() {
           parseTrackerCardColorConfig(formData.extensions.trackerCardColors),
         ),
         personaStats,
-        altDescriptions: "[]",
         tags: JSON.stringify(formData.tags ?? []),
       })) as { id?: string };
 
@@ -561,10 +660,10 @@ export function CharacterEditor() {
   }, [avatarUploading, closeDetail, setDirtyState]);
 
   const addTag = () => {
-    const tag = newTag.trim();
-    if (!tag || !formData) return;
-    if (formData.tags.includes(tag)) return;
-    updateField("tags", [...formData.tags, tag]);
+    if (!formData) return;
+    const nextTags = appendNewTags(formData.tags, newTag);
+    if (nextTags === formData.tags) return;
+    updateField("tags", nextTags);
     setNewTag("");
   };
 
@@ -595,29 +694,16 @@ export function CharacterEditor() {
   const headerActionButtonClass =
     "rounded-xl p-2 text-[var(--muted-foreground)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)] max-md:rounded-lg max-md:p-1.5";
   const saveDisabled = !dirty || saving || avatarUploading;
+  const saveLabel = avatarUploading ? "Uploading…" : saving ? "Saving…" : "Save";
+  const saveButtonClass = cn(
+    "flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-medium transition-all max-md:rounded-lg max-md:px-2.5 max-md:py-1.5",
+    !saveDisabled
+      ? "bg-gradient-to-r from-pink-400 to-purple-500 text-white shadow-md shadow-pink-500/20 hover:shadow-lg active:scale-[0.98]"
+      : "bg-[var(--secondary)] text-[var(--muted-foreground)] cursor-not-allowed",
+  );
 
   const headerActions = (
     <>
-      <button
-        type="button"
-        onClick={() => {
-          if (!characterId) return;
-          startChatFromCharacter({
-            characterId,
-            characterName: formData.name,
-            mode: "roleplay",
-            firstMessage: formData.first_mes,
-            alternateGreetings: formData.alternate_greetings,
-          });
-        }}
-        disabled={!characterId || isStartingChat}
-        className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--primary)] px-3 py-2 text-xs font-medium text-[var(--primary-foreground)] transition-all hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60 max-md:rounded-lg max-md:px-2.5 max-md:py-1.5"
-        title="Start new chat"
-      >
-        <MessageCircle size="1rem" />
-        <span className="max-sm:hidden">Start Chat</span>
-      </button>
-
       <button
         type="button"
         onClick={() => updateExtension("fav", !formData.extensions.fav)}
@@ -721,7 +807,7 @@ export function CharacterEditor() {
       />
 
       {/* ── Header ── */}
-      <div className="flex flex-wrap items-start gap-3 border-b border-[var(--border)] bg-[var(--card)] px-4 py-3 max-md:gap-2 max-md:px-3">
+      <div className="flex flex-wrap items-start gap-3 border-b border-[var(--border)] px-4 py-3 max-md:gap-2 max-md:px-3">
         <div className="flex min-w-0 flex-1 items-center gap-3 max-md:min-w-full">
           <button
             type="button"
@@ -795,18 +881,19 @@ export function CharacterEditor() {
           type="button"
           onClick={handleSave}
           disabled={saveDisabled}
-          className={cn(
-            "flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-medium transition-all",
-            !saveDisabled
-              ? "bg-gradient-to-r from-pink-400 to-purple-500 text-white shadow-md shadow-pink-500/20 hover:shadow-lg active:scale-[0.98]"
-              : "bg-[var(--secondary)] text-[var(--muted-foreground)] cursor-not-allowed",
-          )}
+          className={cn(saveButtonClass, "hidden md:flex")}
         >
           <Save size="0.8125rem" />
-          <span className="max-md:hidden">{avatarUploading ? "Uploading…" : saving ? "Saving…" : "Save"}</span>
+          <span>{saveLabel}</span>
         </button>
 
-        <div className="flex w-full items-center justify-end gap-1 md:hidden">{headerActions}</div>
+        <div className="flex w-full items-center justify-between gap-2 md:hidden">
+          <button type="button" onClick={handleSave} disabled={saveDisabled} className={saveButtonClass}>
+            <Save size="0.8125rem" />
+            <span>{saveLabel}</span>
+          </button>
+          <div className="flex min-w-0 items-center justify-end gap-1">{headerActions}</div>
+        </div>
       </div>
 
       {/* ── Unsaved changes warning ── */}
@@ -846,28 +933,7 @@ export function CharacterEditor() {
 
       {/* ── Body: Tabs + Content ── */}
       <div className="flex flex-1 overflow-hidden @max-5xl:flex-col">
-        {/* Tab Rail */}
-        <nav className="flex w-44 shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-[var(--border)] bg-[var(--card)] p-2 @max-5xl:w-full @max-5xl:flex-row @max-5xl:overflow-x-auto @max-5xl:border-r-0 @max-5xl:border-b @max-5xl:p-1.5">
-          {TABS.map((tab) => {
-            const Icon = tab.icon;
-            return (
-              <button
-                type="button"
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={cn(
-                  "flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-medium transition-all text-left @max-5xl:whitespace-nowrap @max-5xl:px-2.5 @max-5xl:py-1.5",
-                  activeTab === tab.id
-                    ? "bg-gradient-to-r from-pink-400/15 to-purple-500/15 text-[var(--primary)] ring-1 ring-[var(--primary)]/20"
-                    : "text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]",
-                )}
-              >
-                <Icon size="0.875rem" />
-                {tab.label}
-              </button>
-            );
-          })}
-        </nav>
+        <EditorTabRail tabs={TABS} activeId={activeTab} onChange={setActiveTab} />
 
         {/* Tab Content */}
         <div className="flex-1 overflow-y-auto p-6 @max-5xl:p-4">
@@ -885,62 +951,20 @@ export function CharacterEditor() {
                 removeTag={removeTag}
                 removeAllTags={removeAllTags}
                 avatarPreview={avatarPreview}
+                onRemoveAvatar={handleAvatarRemove}
+                removingAvatar={removeAvatar.isPending}
               />
             )}
-            {activeTab === "description" && (
-              <CharacterDescriptionTab
-                formData={formData}
-                updateField={updateField}
-                updateExtension={updateExtension}
-              />
+            {activeTab === "card" && (
+              <CharacterCardTab formData={formData} updateField={updateField} updateExtension={updateExtension} />
             )}
-            {activeTab === "personality" && (
-              <TextareaTab
-                title="Personality"
-                subtitle="A concise summary of the character's personality traits, temperament, and behavioral patterns."
-                value={formData.personality}
-                onChange={(v) => updateField("personality", v)}
-                placeholder="Energetic, curious, and fiercely loyal. Speaks in short bursts. Has a habit of…"
-                rows={8}
-              />
-            )}
-            {activeTab === "backstory" && (
-              <TextareaTab
-                title="Backstory"
-                subtitle="The character's history, origin story, and formative life events."
-                value={(formData.extensions.backstory as string) ?? ""}
-                onChange={(v) => updateExtension("backstory", v)}
-                placeholder="Born in a small village on the outskirts of the empire…"
-                rows={12}
-              />
-            )}
-            {activeTab === "appearance" && (
-              <TextareaTab
-                title="Appearance"
-                subtitle="Detailed physical description — height, build, hair, eyes, clothing, distinguishing features."
-                value={(formData.extensions.appearance as string) ?? ""}
-                onChange={(v) => updateExtension("appearance", v)}
-                placeholder="Tall and willowy with silver-streaked dark hair. Wears a battered leather coat over…"
-                rows={8}
-              />
-            )}
-            {activeTab === "scenario" && (
-              <TextareaTab
-                title="Scenario"
-                subtitle="The default setting or situation where interactions take place."
-                value={formData.scenario}
-                onChange={(v) => updateField("scenario", v)}
-                placeholder="A bustling port city during a trade festival. The streets are alive with merchants and performers…"
-                rows={8}
-              />
-            )}
-            {activeTab === "dialogue" && <DialogueTab formData={formData} updateField={updateField} />}
             {activeTab === "advanced" && (
               <AdvancedTab formData={formData} updateField={updateField} updateExtension={updateExtension} />
             )}
             {activeTab === "sprites" && characterId && (
               <SpritesTab
                 characterId={characterId}
+                characterName={formData.name}
                 defaultAppearance={(formData.extensions.appearance as string) ?? formData.description}
                 defaultAvatarUrl={avatarPreview}
               />
@@ -964,16 +988,29 @@ export function CharacterEditor() {
 // Sub-tab components
 // ──────────────────────────────────────────────
 
-function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }) {
+function SectionHeader({
+  title,
+  subtitle,
+  helpText,
+  helpWide = true,
+}: {
+  title: string;
+  subtitle?: string;
+  helpText?: ReactNode;
+  helpWide?: boolean;
+}) {
   return (
     <div className="mb-4">
-      <h2 className="text-lg font-bold">{title}</h2>
+      <h2 className="inline-flex items-center gap-1.5 text-lg font-bold">
+        {title}
+        {helpText && <HelpTooltip text={helpText} side="bottom" wide={helpWide} size="0.875rem" />}
+      </h2>
       {subtitle && <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">{subtitle}</p>}
     </div>
   );
 }
 
-function CharacterDescriptionTab({
+function CharacterCardTab({
   formData,
   updateField,
   updateExtension,
@@ -982,168 +1019,97 @@ function CharacterDescriptionTab({
   updateField: <K extends keyof CharacterData>(key: K, value: CharacterData[K]) => void;
   updateExtension: (key: string, value: unknown) => void;
 }) {
-  const altDescs = normalizeAltDescriptions(formData.extensions?.altDescriptions);
-  const [expandedField, setExpandedField] = useState<"description" | string | null>(null);
+  return (
+    <div>
+      <SectionHeader
+        title="Card"
+        subtitle="Write the character's core card fields in one focused workspace."
+        helpText={CHARACTER_CARD_HELP}
+      />
+      <EditorSectionJumps items={CHARACTER_CARD_SECTIONS} />
+      <div className="space-y-10">
+        <EditorSectionAnchor id="character-card-description">
+          <CharacterDescriptionTab formData={formData} updateField={updateField} />
+        </EditorSectionAnchor>
+        <EditorSectionAnchor id="character-card-personality">
+          <TextareaTab
+            title="Personality"
+            subtitle="A concise summary of the character's personality traits, temperament, and behavioral patterns."
+            helpText={CHARACTER_PERSONALITY_HELP}
+            value={formData.personality}
+            onChange={(v) => updateField("personality", v)}
+            placeholder="Energetic, curious, and fiercely loyal. Speaks in short bursts. Has a habit of…"
+            rows={8}
+          />
+        </EditorSectionAnchor>
+        <EditorSectionAnchor id="character-card-backstory">
+          <TextareaTab
+            title="Backstory"
+            subtitle="The character's history, origin story, and formative life events."
+            helpText={CHARACTER_BACKSTORY_HELP}
+            value={(formData.extensions.backstory as string) ?? ""}
+            onChange={(v) => updateExtension("backstory", v)}
+            placeholder="Born in a small village on the outskirts of the empire…"
+            rows={12}
+          />
+        </EditorSectionAnchor>
+        <EditorSectionAnchor id="character-card-appearance">
+          <TextareaTab
+            title="Appearance"
+            subtitle="Detailed physical description, height, build, hair, eyes, clothing, distinguishing features."
+            helpText={CHARACTER_APPEARANCE_HELP}
+            value={(formData.extensions.appearance as string) ?? ""}
+            onChange={(v) => updateExtension("appearance", v)}
+            placeholder="Tall and willowy with silver-streaked dark hair. Wears a battered leather coat over…"
+            rows={8}
+          />
+        </EditorSectionAnchor>
+        <EditorSectionAnchor id="character-card-scenario">
+          <TextareaTab
+            title="Scenario"
+            subtitle="The default setting or situation where interactions take place."
+            helpText={CHARACTER_SCENARIO_HELP}
+            value={formData.scenario}
+            onChange={(v) => updateField("scenario", v)}
+            placeholder="A bustling port city during a trade festival. The streets are alive with merchants and performers…"
+            rows={8}
+          />
+        </EditorSectionAnchor>
+        <EditorSectionAnchor id="character-card-dialogue">
+          <DialogueTab formData={formData} updateField={updateField} />
+        </EditorSectionAnchor>
+      </div>
+    </div>
+  );
+}
 
-  const updateAltDescs = (next: AltDescriptionEntry[]) => {
-    updateExtension("altDescriptions", next);
-  };
-
-  const addAltDesc = () => {
-    updateAltDescs([...altDescs, { id: generateClientId(), label: "Extension", content: "", active: true }]);
-  };
-
-  const toggleAltDesc = (id: string) => {
-    updateAltDescs(altDescs.map((desc) => (desc.id === id ? { ...desc, active: !desc.active } : desc)));
-  };
-
-  const updateAltDescField = (id: string, field: "label" | "content", value: string) => {
-    updateAltDescs(altDescs.map((desc) => (desc.id === id ? { ...desc, [field]: value } : desc)));
-  };
-
-  const removeAltDesc = (id: string) => {
-    updateAltDescs(altDescs.filter((desc) => desc.id !== id));
-  };
-
+function CharacterDescriptionTab({
+  formData,
+  updateField,
+}: {
+  formData: CharacterData;
+  updateField: <K extends keyof CharacterData>(key: K, value: CharacterData[K]) => void;
+}) {
   return (
     <div className="space-y-6">
       <div>
-        <div className="flex items-start justify-between gap-2 mb-4">
-          <SectionHeader
-            title="Description"
-            subtitle="The character's general description. This is sent in every prompt as part of the character's identity."
-          />
-          <button
-            type="button"
-            onClick={() => setExpandedField("description")}
-            className="mt-0.5 shrink-0 rounded-lg p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-            title="Expand editor"
-          >
-            <Maximize2 size="0.875rem" />
-          </button>
-        </div>
-        <textarea
+        <SectionHeader
+          title="Description"
+          subtitle="The character's general description. This is sent in every prompt as part of the character's identity."
+          helpText={CHARACTER_DESCRIPTION_HELP}
+        />
+        <MacroTextarea
           value={formData.description}
-          onChange={(event) => updateField("description", event.target.value)}
+          onChange={(value) => updateField("description", value)}
           placeholder="Describe who this character is, their role, and their key traits…"
           rows={12}
+          title="Description"
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm leading-relaxed outline-none transition-colors placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
         />
         <p className="mt-1.5 text-right text-[0.625rem] text-[var(--muted-foreground)]">
           {formData.description.length} characters
         </p>
       </div>
-
-      <div>
-        <div className="mb-4 flex items-start justify-between gap-2">
-          <div>
-            <h3 className="text-sm font-semibold">Description Extensions</h3>
-            <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">
-              Toggleable additions appended to this character's main description. Use these for situational states,
-              relationships, combat details, or story-phase context.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={addAltDesc}
-            className="flex shrink-0 items-center gap-1 rounded-lg bg-[var(--primary)]/15 px-2.5 py-1 text-[0.6875rem] font-medium text-[var(--primary)] transition-colors hover:bg-[var(--primary)]/25"
-          >
-            <Plus size="0.75rem" />
-            Add
-          </button>
-        </div>
-
-        {altDescs.length === 0 ? (
-          <p className="text-[0.6875rem] italic text-[var(--muted-foreground)]">
-            No description extensions yet. Add one to toggle extra character context on and off.
-          </p>
-        ) : (
-          <div className="space-y-3">
-            {altDescs.map((desc) => (
-              <div
-                key={desc.id}
-                className={cn(
-                  "rounded-xl border bg-[var(--card)] p-4 transition-all",
-                  desc.active
-                    ? "border-[var(--primary)]/30 ring-1 ring-[var(--primary)]/10"
-                    : "border-[var(--border)] opacity-60",
-                )}
-              >
-                <div className="mb-3 flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => toggleAltDesc(desc.id)}
-                    className={cn(
-                      "flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors",
-                      desc.active ? "bg-[var(--primary)]" : "bg-[var(--muted-foreground)]/30",
-                    )}
-                    title={desc.active ? "Disable extension" : "Enable extension"}
-                  >
-                    <div
-                      className={cn(
-                        "h-4 w-4 rounded-full bg-[var(--primary-foreground)] shadow-sm transition-transform",
-                        desc.active && "translate-x-4",
-                      )}
-                    />
-                  </button>
-                  <input
-                    value={desc.label}
-                    onChange={(event) => updateAltDescField(desc.id, "label", event.target.value)}
-                    className="flex-1 rounded-lg border border-[var(--border)] bg-[var(--input)] px-2.5 py-1 text-xs font-medium outline-none focus:border-[var(--primary)]/40"
-                    placeholder="Label (e.g. Combat Skills)"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => removeAltDesc(desc.id)}
-                    className="rounded-lg p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
-                    title="Remove extension"
-                  >
-                    <X size="0.75rem" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setExpandedField(desc.id)}
-                    className="rounded-lg p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-                    title="Expand editor"
-                  >
-                    <Maximize2 size="0.75rem" />
-                  </button>
-                </div>
-                <textarea
-                  value={desc.content}
-                  onChange={(event) => updateAltDescField(desc.id, "content", event.target.value)}
-                  placeholder="Additional description content…"
-                  rows={4}
-                  className="w-full resize-y rounded-lg border border-[var(--border)] bg-[var(--secondary)] p-3 text-sm leading-relaxed outline-none transition-colors placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
-                />
-                <p className="mt-1 text-right text-[0.625rem] text-[var(--muted-foreground)]">
-                  {desc.content.length} characters
-                </p>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <ExpandedTextarea
-        open={expandedField === "description"}
-        onClose={() => setExpandedField(null)}
-        title="Description"
-        value={formData.description}
-        onChange={(value) => updateField("description", value)}
-        placeholder="Describe who this character is, their role, and their key traits…"
-      />
-      {altDescs.map((desc) => (
-        <ExpandedTextarea
-          key={desc.id}
-          open={expandedField === desc.id}
-          onClose={() => setExpandedField(null)}
-          title={desc.label || "Description Extension"}
-          value={desc.content}
-          onChange={(value) => updateAltDescField(desc.id, "content", value)}
-          placeholder="Additional description content…"
-        />
-      ))}
     </div>
   );
 }
@@ -1155,44 +1121,28 @@ function TextareaTab({
   onChange,
   placeholder,
   rows = 8,
+  helpText,
 }: {
   title: string;
   subtitle: string;
+  helpText?: ReactNode;
   value: string;
   onChange: (v: string) => void;
   placeholder: string;
   rows?: number;
 }) {
-  const [expanded, setExpanded] = useState(false);
   return (
     <div>
-      <div className="flex items-start justify-between gap-2 mb-4">
-        <SectionHeader title={title} subtitle={subtitle} />
-        <button
-          type="button"
-          onClick={() => setExpanded(true)}
-          className="mt-0.5 shrink-0 rounded-lg p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-          title="Expand editor"
-        >
-          <Maximize2 size="0.875rem" />
-        </button>
-      </div>
-      <textarea
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        rows={rows}
-        className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm leading-relaxed outline-none transition-colors placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
-      />
-      <p className="mt-1.5 text-right text-[0.625rem] text-[var(--muted-foreground)]">{value.length} characters</p>
-      <ExpandedTextarea
-        open={expanded}
-        onClose={() => setExpanded(false)}
-        title={title}
+      <SectionHeader title={title} subtitle={subtitle} helpText={helpText} />
+      <MacroTextarea
         value={value}
         onChange={onChange}
         placeholder={placeholder}
+        rows={rows}
+        title={title}
+        className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm leading-relaxed outline-none transition-colors placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
       />
+      <p className="mt-1.5 text-right text-[0.625rem] text-[var(--muted-foreground)]">{value.length} characters</p>
     </div>
   );
 }
@@ -1209,6 +1159,8 @@ function MetadataTab({
   removeTag,
   removeAllTags,
   avatarPreview,
+  onRemoveAvatar,
+  removingAvatar,
 }: {
   characterId: string | null;
   formData: CharacterData;
@@ -1221,6 +1173,8 @@ function MetadataTab({
   removeTag: (tag: string) => void;
   removeAllTags: () => void;
   avatarPreview: string | null;
+  onRemoveAvatar: () => void;
+  removingAvatar: boolean;
 }) {
   // Read existing crop in either current or legacy shape; the widget handles both
   // and writes back the current shape on first interaction.
@@ -1228,7 +1182,11 @@ function MetadataTab({
 
   return (
     <div className="space-y-5">
-      <SectionHeader title="Metadata" subtitle="Basic character info — name, creator, version, tags." />
+      <SectionHeader
+        title="Metadata"
+        subtitle="Basic character info — name, creator, version, tags."
+        helpText={CHARACTER_METADATA_HELP}
+      />
 
       {/* Avatar Crop */}
       {avatarPreview && (
@@ -1237,6 +1195,8 @@ function MetadataTab({
           alt={formData.name}
           crop={savedCrop}
           onChange={(next) => updateExtension("avatarCrop", next)}
+          onRemove={onRemoveAvatar}
+          removing={removingAvatar}
         />
       )}
 
@@ -1340,7 +1300,12 @@ function MetadataTab({
           <input
             value={newTag}
             onChange={(e) => setNewTag(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && addTag()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                addTag();
+              }
+            }}
             placeholder="Add tag…"
             className="flex-1 rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-1.5 text-xs outline-none focus:border-[var(--primary)]/40"
           />
@@ -1355,19 +1320,20 @@ function MetadataTab({
       </div>
 
       {/* Creator Notes */}
-      <label className="block space-y-1.5">
+      <div className="block space-y-1.5">
         <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
           Creator Notes{" "}
           <HelpTooltip text="Private notes about this character — tips for use, known quirks, recommended settings. Not sent to the AI." />
         </span>
-        <textarea
+        <MacroTextarea
           value={formData.creator_notes}
-          onChange={(e) => updateField("creator_notes", e.target.value)}
+          onChange={(value) => updateField("creator_notes", value)}
           rows={4}
+          title="Creator Notes"
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-3 text-sm outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
           placeholder="Notes about this character, intended use, tips for best results…"
         />
-      </label>
+      </div>
     </div>
   );
 }
@@ -1617,9 +1583,17 @@ function DialogueTab({
   formData: CharacterData;
   updateField: <K extends keyof CharacterData>(key: K, value: CharacterData[K]) => void;
 }) {
-  const [expandedField, setExpandedField] = useState<"first_mes" | "mes_example" | number | null>(null);
+  const greetingKeysRef = useRef<string[]>([]);
+
+  while (greetingKeysRef.current.length < formData.alternate_greetings.length) {
+    greetingKeysRef.current.push(generateClientId());
+  }
+  if (greetingKeysRef.current.length > formData.alternate_greetings.length) {
+    greetingKeysRef.current.length = formData.alternate_greetings.length;
+  }
 
   const addGreeting = () => {
+    greetingKeysRef.current.push(generateClientId());
     updateField("alternate_greetings", [...formData.alternate_greetings, ""]);
   };
 
@@ -1630,6 +1604,7 @@ function DialogueTab({
   };
 
   const removeGreeting = (i: number) => {
+    greetingKeysRef.current.splice(i, 1);
     updateField(
       "alternate_greetings",
       formData.alternate_greetings.filter((_, idx) => idx !== i),
@@ -1641,32 +1616,24 @@ function DialogueTab({
       <SectionHeader
         title="Dialogue & Greetings"
         subtitle="First message, example dialogue, and alternate greetings."
+        helpText={CHARACTER_DIALOGUE_HELP}
       />
 
       {/* First Message */}
-      <label className="block space-y-1.5">
-        <div className="flex items-center justify-between">
-          <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-            First Message{" "}
-            <HelpTooltip text="The character's opening message when a new chat starts. Good first messages set the scene and establish the character's voice." />
-          </span>
-          <button
-            type="button"
-            onClick={() => setExpandedField("first_mes")}
-            className="shrink-0 rounded-lg p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-            title="Expand editor"
-          >
-            <Maximize2 size="0.875rem" />
-          </button>
-        </div>
-        <textarea
+      <div className="block space-y-1.5">
+        <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
+          First Message{" "}
+          <HelpTooltip text="The character's opening message when a new chat starts. Good first messages set the scene and establish the character's voice." />
+        </span>
+        <MacroTextarea
           value={formData.first_mes}
-          onChange={(e) => updateField("first_mes", e.target.value)}
+          onChange={(value) => updateField("first_mes", value)}
           rows={6}
+          title="First Message"
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm leading-relaxed outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
           placeholder="What does the character say when they first meet someone? Use *asterisks* for actions…"
         />
-      </label>
+      </div>
 
       {/* Alternate Greetings */}
       <div className="space-y-3">
@@ -1684,90 +1651,48 @@ function DialogueTab({
           </button>
         </div>
         {formData.alternate_greetings.map((g, i) => (
-          <div key={i} className="relative">
-            <textarea
-              value={g}
-              onChange={(e) => updateGreeting(i, e.target.value)}
-              rows={3}
-              className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-3 pr-16 text-sm outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40"
-              placeholder={`Greeting #${i + 1}…`}
-            />
-            <div className="absolute right-2 top-2 flex items-center gap-0.5">
-              <button
-                type="button"
-                onClick={() => setExpandedField(i)}
-                className="rounded-lg p-1 text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)]"
-                title="Expand editor"
-              >
-                <Maximize2 size="0.75rem" />
-              </button>
+          <MacroTextarea
+            key={greetingKeysRef.current[i] ?? i}
+            value={g}
+            onChange={(value) => updateGreeting(i, value)}
+            rows={3}
+            title={`Alternate Greeting #${i + 1}`}
+            className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-3 text-sm outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40"
+            placeholder={`Greeting #${i + 1}…`}
+            controlPaddingClassName="pr-14"
+            toolbarExtra={
               <button
                 type="button"
                 onClick={() => removeGreeting(i)}
-                className="rounded-lg p-1 text-[var(--muted-foreground)] transition-colors hover:text-[var(--destructive)]"
+                className="rounded p-1 text-[var(--muted-foreground)] transition-colors hover:text-[var(--destructive)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
+                aria-label={`Remove alternate greeting ${i + 1}`}
+                title="Remove greeting"
               >
                 <Trash2 size="0.75rem" />
               </button>
-            </div>
-          </div>
+            }
+          />
         ))}
       </div>
 
       {/* Example Messages */}
-      <label className="block space-y-1.5">
-        <div className="flex items-center justify-between">
-          <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-            Example Dialogue{" "}
-            <HelpTooltip text="Sample conversations showing how the character talks. Helps the AI learn the character's speaking style, vocabulary, and mannerisms." />
-          </span>
-          <button
-            type="button"
-            onClick={() => setExpandedField("mes_example")}
-            className="shrink-0 rounded-lg p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-            title="Expand editor"
-          >
-            <Maximize2 size="0.875rem" />
-          </button>
-        </div>
+      <div className="block space-y-1.5">
+        <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
+          Example Dialogue{" "}
+          <HelpTooltip text="Sample conversations showing how the character talks. Helps the AI learn the character's speaking style, vocabulary, and mannerisms." />
+        </span>
         <p className="text-[0.625rem] text-[var(--muted-foreground)]/70">
           {"Use <START> to separate exchanges. Use {{user}} and {{char}} as placeholders."}
         </p>
-        <textarea
+        <MacroTextarea
           value={formData.mes_example}
-          onChange={(e) => updateField("mes_example", e.target.value)}
+          onChange={(value) => updateField("mes_example", value)}
           rows={10}
+          title="Example Dialogue"
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 font-mono text-xs leading-relaxed outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
           placeholder={"<START>\n{{user}}: Hello!\n{{char}}: *waves excitedly* Hey there!"}
         />
-      </label>
-
-      <ExpandedTextarea
-        open={expandedField === "first_mes"}
-        onClose={() => setExpandedField(null)}
-        title="First Message"
-        value={formData.first_mes}
-        onChange={(value) => updateField("first_mes", value)}
-        placeholder="What does the character say when they first meet someone? Use *asterisks* for actions…"
-      />
-      <ExpandedTextarea
-        open={expandedField === "mes_example"}
-        onClose={() => setExpandedField(null)}
-        title="Example Dialogue"
-        value={formData.mes_example}
-        onChange={(value) => updateField("mes_example", value)}
-        placeholder={"<START>\n{{user}}: Hello!\n{{char}}: *waves excitedly* Hey there!"}
-      />
-      {formData.alternate_greetings.map((g, i) => (
-        <ExpandedTextarea
-          key={i}
-          open={expandedField === i}
-          onClose={() => setExpandedField(null)}
-          title={`Alternate Greeting #${i + 1}`}
-          value={g}
-          onChange={(value) => updateGreeting(i, value)}
-          placeholder={`Greeting #${i + 1}…`}
-        />
-      ))}
+      </div>
     </div>
   );
 }
@@ -1782,83 +1707,56 @@ function AdvancedTab({
   updateExtension: (key: string, value: unknown) => void;
 }) {
   const depthPrompt = formData.extensions.depth_prompt ?? { prompt: "", depth: 4, role: "system" as const };
-  const [expandedField, setExpandedField] = useState<"system_prompt" | "post_history" | "depth_prompt" | null>(null);
 
   return (
     <div className="space-y-6">
       <SectionHeader
         title="Advanced"
         subtitle="System prompt, post-history instructions, and depth prompt injection."
+        helpText={CHARACTER_ADVANCED_HELP}
       />
 
-      <label className="block space-y-1.5">
-        <div className="flex items-center justify-between">
-          <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-            System Prompt{" "}
-            <HelpTooltip text="Overrides or appends to the main system prompt when this character is active. Use this for character-specific instructions the AI must follow." />
-          </span>
-          <button
-            type="button"
-            onClick={() => setExpandedField("system_prompt")}
-            className="shrink-0 rounded-lg p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-            title="Expand editor"
-          >
-            <Maximize2 size="0.875rem" />
-          </button>
-        </div>
-        <textarea
+      <div className="block space-y-1.5">
+        <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
+          System Prompt{" "}
+          <HelpTooltip text="Character-specific instructions inserted by the prompt preset's character block or wherever the preset uses {{charSysInfo}}. This does not replace the chat's main system prompt." />
+        </span>
+        <MacroTextarea
           value={formData.system_prompt}
-          onChange={(e) => updateField("system_prompt", e.target.value)}
+          onChange={(value) => updateField("system_prompt", value)}
           rows={6}
+          title="System Prompt"
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
-          placeholder="Override or append to the system prompt for this character…"
+          placeholder="Character-specific instructions inserted through {{charSysInfo}} or the character prompt block…"
         />
-      </label>
+      </div>
 
-      <label className="block space-y-1.5">
-        <div className="flex items-center justify-between">
-          <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-            Post-History Instructions{" "}
-            <HelpTooltip text="Text inserted after the chat history, right before the AI generates. Great for reminders like 'stay in character' or 'respond in 2 paragraphs'." />
-          </span>
-          <button
-            type="button"
-            onClick={() => setExpandedField("post_history")}
-            className="shrink-0 rounded-lg p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-            title="Expand editor"
-          >
-            <Maximize2 size="0.875rem" />
-          </button>
-        </div>
-        <textarea
+      <div className="block space-y-1.5">
+        <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
+          Post-History Instructions{" "}
+          <HelpTooltip text="Text inserted after the chat history, right before the AI generates. Great for reminders like 'stay in character' or 'respond in 2 paragraphs'." />
+        </span>
+        <MacroTextarea
           value={formData.post_history_instructions}
-          onChange={(e) => updateField("post_history_instructions", e.target.value)}
+          onChange={(value) => updateField("post_history_instructions", value)}
           rows={4}
+          title="Post-History Instructions"
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
           placeholder="Text inserted after the chat history but before generation…"
         />
-      </label>
+      </div>
 
       {/* Depth Prompt */}
       <div className="space-y-3 rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-        <div className="flex items-center justify-between">
-          <span className="inline-flex items-center gap-1 text-xs font-semibold">
-            Depth Prompt{" "}
-            <HelpTooltip text="Injects text at a specific position in the chat history. Depth 0 = at the end, depth 4 = 4 messages back. Useful for persistent reminders." />
-          </span>
-          <button
-            type="button"
-            onClick={() => setExpandedField("depth_prompt")}
-            className="shrink-0 rounded-lg p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-            title="Expand editor"
-          >
-            <Maximize2 size="0.875rem" />
-          </button>
-        </div>
-        <textarea
+        <span className="inline-flex items-center gap-1 text-xs font-semibold">
+          Depth Prompt{" "}
+          <HelpTooltip text="Injects text at a specific position in the chat history. Depth 0 = after the latest message, depth 4 = 4 messages back. Useful for persistent reminders." />
+        </span>
+        <MacroTextarea
           value={depthPrompt.prompt}
-          onChange={(e) => updateExtension("depth_prompt", { ...depthPrompt, prompt: e.target.value })}
+          onChange={(value) => updateExtension("depth_prompt", { ...depthPrompt, prompt: value })}
           rows={4}
+          title="Depth Prompt"
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-3 text-sm outline-none focus:border-[var(--primary)]/40"
           placeholder="Prompt injected at a specific depth in the chat history…"
         />
@@ -1890,31 +1788,6 @@ function AdvancedTab({
           </label>
         </div>
       </div>
-
-      <ExpandedTextarea
-        open={expandedField === "system_prompt"}
-        onClose={() => setExpandedField(null)}
-        title="System Prompt"
-        value={formData.system_prompt}
-        onChange={(value) => updateField("system_prompt", value)}
-        placeholder="Override or append to the system prompt for this character…"
-      />
-      <ExpandedTextarea
-        open={expandedField === "post_history"}
-        onClose={() => setExpandedField(null)}
-        title="Post-History Instructions"
-        value={formData.post_history_instructions}
-        onChange={(value) => updateField("post_history_instructions", value)}
-        placeholder="Text inserted after the chat history but before generation…"
-      />
-      <ExpandedTextarea
-        open={expandedField === "depth_prompt"}
-        onClose={() => setExpandedField(null)}
-        title="Depth Prompt"
-        value={depthPrompt.prompt}
-        onChange={(value) => updateExtension("depth_prompt", { ...depthPrompt, prompt: value })}
-        placeholder="Prompt injected at a specific depth in the chat history…"
-      />
     </div>
   );
 }
@@ -1925,19 +1798,13 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
   const { data: images, isLoading } = useCharacterGalleryImages(characterId);
   const upload = useUploadCharacterGalleryImage(characterId);
   const remove = useDeleteCharacterGalleryImage(characterId);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const tag = useTagCharacterGalleryImage(characterId);
   const [lightbox, setLightbox] = useState<CharacterGalleryImage | null>(null);
 
   const handleUpload = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const input = e.currentTarget;
-      const files = Array.from(input.files ?? []);
+    (files: File[]) => {
       if (files.length === 0) return;
-      upload.mutate(files, {
-        onSettled: () => {
-          input.value = "";
-        },
-      });
+      upload.mutate(files);
     },
     [upload],
   );
@@ -1965,33 +1832,33 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
       <SectionHeader
         title="Character Gallery"
         subtitle="Keep reference art, alternate outfits, and other character images attached to this character even if chats get deleted."
+        helpText={CHARACTER_GALLERY_HELP}
       />
 
-      <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleUpload} />
-
-      <button
-        type="button"
-        onClick={() => fileInputRef.current?.click()}
-        disabled={upload.isPending}
-        className="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-dashed border-[var(--border)] px-4 py-6 text-xs text-[var(--muted-foreground)] transition-all hover:border-[var(--primary)] hover:text-[var(--primary)] disabled:opacity-50"
-      >
-        <Upload size="1rem" />
-        {upload.isPending ? "Uploading…" : "Upload Character Images"}
-      </button>
+      <ImageUploadDropzone
+        label="Upload Character Images"
+        pending={upload.isPending}
+        pendingLabel="Uploading…"
+        dragLabel="Drop character images to upload"
+        onFilesSelected={handleUpload}
+        icon={<Upload size="1rem" />}
+        className="w-full"
+      />
 
       {isLoading ? (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+        <div className="grid grid-cols-3 gap-3 md:grid-cols-4">
           {Array.from({ length: 4 }).map((_, i) => (
             <div key={i} className="shimmer aspect-square rounded-xl" />
           ))}
         </div>
       ) : images && images.length > 0 ? (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+        <div className="grid grid-cols-3 gap-3 md:grid-cols-4">
           {images.map((image) => (
             <div
               key={image.id}
               className="group relative overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)] transition-all hover:border-[var(--primary)]/30 hover:shadow-md"
             >
+              <CustomEmojiTagButton image={image} onApply={(patch) => tag.mutate({ imageId: image.id, patch })} />
               <button
                 type="button"
                 className="block aspect-square w-full bg-[var(--secondary)]"
@@ -2041,15 +1908,6 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
           </div>
         </div>
       )}
-
-      <div className="rounded-xl bg-[var(--card)] p-4 ring-1 ring-[var(--border)]">
-        <h4 className="mb-1.5 text-xs font-semibold">How this differs from chat gallery</h4>
-        <ul className="space-y-1 text-[0.6875rem] text-[var(--muted-foreground)]">
-          <li>• These images belong to the character, so deleting a chat does not remove them.</li>
-          <li>• Use this for reference sheets, outfit variants, or imported ST-style character image packs.</li>
-          <li>• Chat gallery is still best for scene-specific illustrations and generated message attachments.</li>
-        </ul>
-      </div>
 
       {lightbox && (
         <div
@@ -2106,12 +1964,24 @@ const DEFAULT_EXPRESSIONS = [
   "hurt",
 ];
 
+function sanitizeSpriteExportFolderName(value: string, fallback: string): string {
+  const sanitized = value
+    .replace(/[\\/]/g, "_")
+    .replace(/[^a-z0-9._ -]+/gi, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[.\s_-]+|[.\s_-]+$/g, "");
+  return sanitized || fallback;
+}
+
 function SpritesTab({
   characterId,
+  characterName,
   defaultAppearance,
   defaultAvatarUrl,
 }: {
   characterId: string;
+  characterName?: string;
   defaultAppearance?: string;
   defaultAvatarUrl?: string | null;
 }) {
@@ -2121,6 +1991,7 @@ function SpritesTab({
   const { data: spriteCapabilities } = useSpriteCapabilities();
   const uploadSprite = useUploadSprite();
   const deleteSprite = useDeleteSprite();
+  const exportSprites = useExportSprites();
   const cleanupSavedSprites = useCleanupSavedSprites();
   const restoreSpriteCleanupBackup = useRestoreSpriteCleanupBackup();
   const queryClient = useQueryClient();
@@ -2291,36 +2162,32 @@ function SpritesTab({
   }, []);
 
   const handleExportSprites = useCallback(
-    async (spritesToExport: SpriteInfo[], modeLabel: string) => {
+    async (spritesToExport: SpriteInfo[], modeLabel: "visible" | "all") => {
       if (spritesToExport.length === 0) return;
 
       setExporting(true);
-      let successCount = 0;
 
       try {
-        for (const sprite of spritesToExport) {
-          try {
-            await downloadSpriteFile(sprite);
-            successCount += 1;
-          } catch {
-            // Continue exporting remaining sprites.
-          }
-        }
-
-        if (successCount > 0) {
-          toast.success(
-            modeLabel === "all"
-              ? `Exported ${successCount} sprite${successCount === 1 ? "" : "s"}.`
-              : `Exported ${successCount} ${category === "full-body" ? "full-body" : "expression"} sprite${successCount === 1 ? "" : "s"}.`,
-          );
-        } else {
-          toast.error("No sprites were exported. Please try again.");
-        }
+        const scopeLabel =
+          modeLabel === "all" ? "sprites" : category === "full-body" ? "full-body-sprites" : "expressions";
+        const folderName = sanitizeSpriteExportFolderName(`${characterName || "character"}-${scopeLabel}`, "sprites");
+        await exportSprites.mutateAsync({
+          characterId,
+          expressions: spritesToExport.map((sprite) => sprite.expression),
+          folderName,
+        });
+        toast.success(
+          modeLabel === "all"
+            ? `Exported ${spritesToExport.length} sprite${spritesToExport.length === 1 ? "" : "s"} as a folder.`
+            : `Exported ${spritesToExport.length} ${category === "full-body" ? "full-body" : "expression"} sprite${spritesToExport.length === 1 ? "" : "s"} as a folder.`,
+        );
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "No sprites were exported. Please try again.");
       } finally {
         setExporting(false);
       }
     },
-    [category, downloadSpriteFile],
+    [category, characterId, characterName, exportSprites],
   );
 
   const handleCleanVisibleSprites = useCallback(async () => {
@@ -2330,7 +2197,7 @@ function SpritesTab({
     if (
       !(await showConfirmDialog({
         title: "Clean Sprite Backgrounds",
-        message: `Run the local backgroundremover model on ${visibleSprites.length} saved ${modeLabel} sprite${visibleSprites.length === 1 ? "" : "s"} at strength ${savedCleanupStrength}? Marinara will keep a restore point in case the cleanup looks wrong.`,
+        message: `Clean backgrounds on ${visibleSprites.length} saved ${modeLabel} sprite${visibleSprites.length === 1 ? "" : "s"} at strength ${savedCleanupStrength}? Marinara will keep a restore point in case the cleanup looks wrong.`,
         confirmLabel: "Clean",
       }))
     ) {
@@ -2343,14 +2210,18 @@ function SpritesTab({
         characterId,
         expressions: visibleSprites.map((sprite) => sprite.expression),
         cleanupStrength: savedCleanupStrength,
-        engine: "backgroundremover",
+        engine: "auto",
       });
 
       if (result.processed > 0) {
         setLastCleanupBackupId(result.backupId ?? null);
-        toast.success(
-          `Cleaned ${result.processed} saved sprite${result.processed === 1 ? "" : "s"} with backgroundremover.`,
-        );
+        const engineDetails =
+          result.backgroundRemoverProcessed && result.builtinProcessed
+            ? ` with backgroundremover and built-in fallback`
+            : result.backgroundRemoverProcessed
+              ? ` with backgroundremover`
+              : ` with built-in cleanup`;
+        toast.success(`Cleaned ${result.processed} saved sprite${result.processed === 1 ? "" : "s"}${engineDetails}.`);
       }
       if (result.failed.length > 0) {
         toast.warning(`${result.failed.length} sprite${result.failed.length === 1 ? "" : "s"} could not be cleaned.`);
@@ -2430,6 +2301,7 @@ function SpritesTab({
       <SectionHeader
         title="Character Sprites"
         subtitle="Upload VN-style sprites for different expressions. The Expression Engine agent will select the appropriate sprite during roleplay."
+        helpText={CHARACTER_SPRITES_HELP}
       />
 
       <div className="inline-flex rounded-xl bg-[var(--secondary)] p-1 ring-1 ring-[var(--border)]">
@@ -2504,19 +2376,12 @@ function SpritesTab({
             <button
               type="button"
               onClick={() => void handleCleanVisibleSprites()}
-              disabled={
-                cleaningSprites ||
-                backgroundCleanupUnavailable ||
-                backgroundRemoverUnavailable ||
-                visibleSprites.length === 0
-              }
+              disabled={cleaningSprites || backgroundCleanupUnavailable || visibleSprites.length === 0}
               className="flex min-w-0 items-center justify-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-center text-[0.6875rem] font-medium leading-tight text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-40 max-md:flex-1 max-md:basis-[calc(50%-0.25rem)] max-md:px-2.5"
               title={
                 backgroundCleanupUnavailable
                   ? backgroundCleanupReason
-                  : backgroundRemoverUnavailable
-                    ? backgroundRemoverReason
-                    : "Run the local backgroundremover model on the currently visible saved sprites"
+                  : "Clean backgrounds on the currently visible saved sprites"
               }
             >
               {cleaningSprites ? <Loader2 size="0.8125rem" className="animate-spin" /> : <Eraser size="0.8125rem" />}
@@ -2777,27 +2642,6 @@ function SpritesTab({
         </div>
       )}
 
-      {/* Info card */}
-      <div className="rounded-xl bg-[var(--card)] p-4 ring-1 ring-[var(--border)]">
-        <h4 className="mb-1.5 text-xs font-semibold">How sprites work</h4>
-        <ul className="space-y-1 text-[0.6875rem] text-[var(--muted-foreground)]">
-          <li>
-            • Upload sprites one by one, or use <strong className="text-[var(--foreground)]">Upload Folder</strong> to
-            bulk-import a folder of PNGs (each filename = expression name, e.g. admiration.png → "admiration")
-          </li>
-          <li>
-            • To make one expression randomly rotate between variants, use a shared prefix before an underscore, e.g.
-            happy_01.png and happy_blush.png are offered to the agent as "happy"
-          </li>
-          <li>
-            • Enable the <strong className="text-[var(--foreground)]">Expression Engine</strong> agent in the Agents
-            panel
-          </li>
-          <li>• During roleplay, the agent will detect emotions and display the matching sprite</li>
-          <li>• Sprites appear as VN-style overlays in the chat area</li>
-        </ul>
-      </div>
-
       {deleteSpriteRequest && (
         <Modal
           open
@@ -2915,6 +2759,7 @@ function StatsTab({
       <SectionHeader
         title="RPG Stats"
         subtitle="Toggle stat tracking for this character. When enabled, the character's stats are included in the prompt and tracked by agents."
+        helpText={CHARACTER_STATS_HELP}
       />
 
       {/* Enable toggle */}
@@ -2923,7 +2768,7 @@ function StatsTab({
           type="checkbox"
           checked={stats.enabled}
           onChange={(e) => update({ enabled: e.target.checked })}
-          className="h-4 w-4 rounded accent-purple-500"
+          className="h-4 w-4 rounded accent-[var(--primary)]"
         />
         <div>
           <p className="text-sm font-medium">Enable RPG Stats</p>
@@ -2996,26 +2841,6 @@ function StatsTab({
               ))}
             </div>
           </div>
-
-          {/* Info */}
-          <div className="rounded-xl bg-[var(--card)] p-4 ring-1 ring-[var(--border)]">
-            <h4 className="mb-1.5 text-xs font-semibold">How stats work</h4>
-            <ul className="space-y-1 text-[0.6875rem] text-[var(--muted-foreground)]">
-              <li>
-                &bull; <strong className="text-[var(--foreground)]">HP</strong> — Injected into the prompt so the AI
-                knows the character&apos;s current health.
-              </li>
-              <li>
-                &bull; <strong className="text-[var(--foreground)]">Attributes</strong> — Custom stats (STR, DEX, etc.)
-                that define the character&apos;s capabilities.
-              </li>
-              <li>
-                &bull; The Character Tracker agent adjusts these values based on narrative events (combat, healing,
-                etc.).
-              </li>
-              <li>&bull; Values set here serve as the initial/default state for new conversations.</li>
-            </ul>
-          </div>
         </>
       )}
     </div>
@@ -3036,7 +2861,6 @@ function ColorsTab({
   const nameColor = (formData.extensions.nameColor as string) ?? "";
   const dialogueColor = (formData.extensions.dialogueColor as string) ?? "";
   const boxColor = (formData.extensions.boxColor as string) ?? "";
-  const trackerCardColors = parseTrackerCardColorConfig(formData.extensions.trackerCardColors);
   const [extracting, setExtracting] = useState(false);
 
   const handleExtract = async () => {
@@ -3059,6 +2883,7 @@ function ColorsTab({
       <SectionHeader
         title="Character Colors"
         subtitle="Customize how this character appears in chats. Colors are applied to the name, dialogue, and message bubble."
+        helpText={CHARACTER_COLORS_HELP}
       />
 
       {/* Extract from avatar button */}
@@ -3145,34 +2970,6 @@ function ColorsTab({
         label="Message Box Color"
         helpText="Background color for this character's chat message bubbles. Use a semi-transparent color for best results (e.g. rgba)."
       />
-
-      {/* Info */}
-      <div className="rounded-xl bg-[var(--card)] p-4 ring-1 ring-[var(--border)]">
-        <h4 className="mb-1.5 text-xs font-semibold">How colors work</h4>
-        <ul className="space-y-1 text-[0.6875rem] text-[var(--muted-foreground)]">
-          <li>
-            &bull; <strong className="text-[var(--foreground)]">Name color</strong> — Applied to the character&apos;s
-            display name in chat. Gradients use CSS linear-gradient.
-          </li>
-          <li>
-            &bull; <strong className="text-[var(--foreground)]">Dialogue color</strong> — All text inside dialogue
-            quotation marks is automatically colored with this value, and can optionally be bolded from Settings.
-          </li>
-          <li>
-            &bull; <strong className="text-[var(--foreground)]">Box color</strong> — Sets the background color of the
-            character&apos;s message bubble in roleplay mode.
-          </li>
-          <li>&bull; Leave any field empty to use the default theme colors.</li>
-        </ul>
-      </div>
-
-      <TrackerCardColorControls
-        value={trackerCardColors}
-        onChange={(value) => updateExtension("trackerCardColors", value)}
-        chatColors={{ nameColor, dialogueColor, boxColor }}
-        entityLabel="Character"
-        previewName={formData.name || "Character"}
-      />
     </div>
   );
 }
@@ -3236,7 +3033,10 @@ function LorebookTab({ characterId, formData }: { characterId: string | null; fo
       <SectionHeader
         title="Character Lorebook"
         subtitle="World-building entries embedded in this character. Triggered by keywords in conversation."
+        helpText={CHARACTER_LOREBOOK_HELP}
       />
+
+      <LorebookAssignmentSection ownerType="character" ownerId={characterId} ownerName={formData.name} />
 
       {hasEmbeddedLorebook && (
         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2.5">
@@ -3272,17 +3072,7 @@ function LorebookTab({ characterId, formData }: { characterId: string | null; fo
         </div>
       )}
 
-      {entries.length === 0 ? (
-        <div className="flex flex-col items-center gap-3 rounded-xl border-2 border-dashed border-[var(--border)] py-12 text-center">
-          <Library size="1.5rem" className="text-[var(--muted-foreground)]/40" />
-          <div>
-            <p className="text-sm font-medium text-[var(--muted-foreground)]">No lorebook entries</p>
-            <p className="mt-0.5 text-xs text-[var(--muted-foreground)]/60">
-              Import a character with an embedded lorebook, or add entries via the Lorebooks panel.
-            </p>
-          </div>
-        </div>
-      ) : (
+      {entries.length > 0 && (
         <div className="space-y-2">
           {entries.map((entry, i) => (
             <div key={entry.id ?? i} className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-3">

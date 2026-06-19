@@ -26,9 +26,12 @@ import {
   Trash2,
   Plus,
   Minus,
+  Upload,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { downloadJsonFile, sanitizeExportFilenamePart } from "../../lib/download-json";
 import { HelpTooltip } from "../ui/HelpTooltip";
+import { createFolderEntry } from "@marinara-engine/shared";
 
 const EXEC_TYPES = [
   { value: "static", label: "Static Result", icon: FileText, description: "Returns a fixed string when called." },
@@ -140,6 +143,8 @@ export function ToolEditor() {
     return { type: "object", properties, required };
   }, [localParams]);
 
+  const currentEnabled = dbTool ? dbTool.enabled === "true" || dbTool.enabled === "1" : true;
+
   const handleSave = useCallback(async () => {
     if (!toolDetailId) return;
     setSaveError(null);
@@ -169,7 +174,7 @@ export function ToolEditor() {
       webhookUrl: localExecType === "webhook" ? localWebhookUrl || null : null,
       staticResult: localExecType === "static" ? localStaticResult || null : null,
       scriptBody: localExecType === "script" ? localScriptBody || null : null,
-      enabled: true,
+      enabled: currentEnabled,
     };
 
     try {
@@ -194,11 +199,52 @@ export function ToolEditor() {
     localStaticResult,
     localScriptBody,
     dbTool,
+    currentEnabled,
     createTool,
     updateTool,
     buildParamsSchema,
     openToolDetail,
     scriptToolsEnabled,
+  ]);
+
+  const handleExport = useCallback(() => {
+    const config = {
+      name: localName,
+      description: localDesc,
+      parametersSchema: buildParamsSchema(),
+      executionType: localExecType,
+      webhookUrl: localExecType === "webhook" ? localWebhookUrl || null : null,
+      staticResult: localExecType === "static" ? localStaticResult || null : null,
+      scriptBody: localExecType === "script" ? localScriptBody || null : null,
+      enabled: currentEnabled,
+    };
+    downloadJsonFile(
+      {
+        kind: "marinara.function-folder",
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        folderName: "Function Calls",
+        functions: [
+          createFolderEntry({
+            folderName: "Function Calls",
+            itemName: localName,
+            itemKind: "marinara.function",
+            config,
+            fallbackName: "function",
+          }),
+        ],
+      },
+      `${sanitizeExportFilenamePart(localName, "function")}.json`,
+    );
+  }, [
+    currentEnabled,
+    localName,
+    localDesc,
+    localExecType,
+    localWebhookUrl,
+    localStaticResult,
+    localScriptBody,
+    buildParamsSchema,
   ]);
 
   const handleDelete = async () => {
@@ -232,7 +278,7 @@ export function ToolEditor() {
   return (
     <div className="flex flex-1 flex-col overflow-hidden bg-[var(--background)]">
       {/* ── Header ── */}
-      <div className="flex items-center gap-3 border-b border-[var(--border)] bg-[var(--card)] px-4 py-3">
+      <div className="flex items-center gap-3 border-b border-[var(--border)] px-4 py-3">
         <button
           type="button"
           onClick={handleClose}
@@ -265,6 +311,14 @@ export function ToolEditor() {
             </span>
           )}
           {dirty && !saveError && <span className="mr-2 text-[0.625rem] font-medium text-amber-400">Unsaved</span>}
+          {dbTool && (
+            <button
+              onClick={handleExport}
+              className="flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-medium text-[var(--muted-foreground)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)] active:scale-[0.98]"
+            >
+              <Upload size="0.8125rem" /> Export
+            </button>
+          )}
           {dbTool && (
             <button
               onClick={handleDelete}

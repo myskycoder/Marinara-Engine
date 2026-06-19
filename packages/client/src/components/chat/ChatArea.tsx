@@ -10,8 +10,9 @@ import {
   useMemo,
   useRef,
   useState,
-  type ReactNode,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
+import { useQueries } from "@tanstack/react-query";
 import {
   useChatMessages,
   useChatMessageCount,
@@ -22,7 +23,6 @@ import {
   useUpdateMessage,
   useUpdateMessageExtra,
   usePeekPrompt,
-  useCreateChat,
   useSetActiveSwipe,
   useUpdateChatMetadata,
   useBranchChat,
@@ -31,18 +31,18 @@ import {
 
 import { useChatStore } from "../../stores/chat.store";
 import { useGenerate } from "../../hooks/use-generate";
-import { useCharacters, usePersonas } from "../../hooks/use-characters";
-import { useConnections } from "../../hooks/use-connections";
+import { characterKeys, spriteKeys, useCharacters, usePersonas, type SpriteInfo } from "../../hooks/use-characters";
 import { usePageActivity } from "../../hooks/use-page-activity";
 import { api, ApiError } from "../../lib/api-client";
-import { filterLanguageGenerationConnections } from "../../lib/connection-filters";
 import { getChatDisplayName, getConnectedChatDisplayName, parseChatMetadata } from "../../lib/chat-display";
+import { getChatCharacterIds } from "../../lib/chat-macros";
+import { resolveCurrentGameSessionChatId } from "../../lib/game-session-resolution";
 import { parseCharacterDisplayData } from "../../lib/character-display";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { chatBackgroundMetadataToUrl, chatBackgroundUrlToMetadata } from "../../lib/backgrounds";
 import { useGameStateStore } from "../../stores/game-state.store";
 import { toast } from "sonner";
-import { BookOpen, Check, HelpCircle, MessageSquare, Theater, X } from "lucide-react";
+import { Check, HelpCircle, List, X } from "lucide-react";
 import {
   APP_VERSION,
   BUILT_IN_AGENTS,
@@ -60,22 +60,81 @@ import { useEncounterStore } from "../../stores/encounter.store";
 import { useTranslationStore } from "../../stores/translation.store";
 import { ttsService } from "../../lib/tts-service";
 import { useTTSConfig } from "../../hooks/use-tts";
-import { buildTTSMessageText, resolveTTSVoiceForSpeaker } from "../../lib/tts-dialogue";
+import { useTrackAchievement } from "../../hooks/use-achievements";
+import { buildTTSVoiceRequests, normalizeTTSCharacterName, withTTSVoiceRequestCacheKeys } from "../../lib/tts-dialogue";
+import { CHAT_SCROLL_TO_BOTTOM_EVENT, type ChatScrollToBottomDetail } from "../../lib/chat-scroll-events";
 import { mirrorSpritePlacements, normalizeSpritePlacements } from "./sprite-placement";
 import { normalizeSpriteDisplayModes } from "./sprite-display-modes";
-import type { CharacterMap, MessageSelectionToggle, MessageWithSwipes, PeekPromptData } from "./chat-area.types";
+import type {
+  CharacterMap,
+  ExpressionAvatarResolver,
+  MessageSelectionToggle,
+  MessageWithSwipes,
+  PeekPromptData,
+} from "./chat-area.types";
 import { RecentChats } from "./RecentChats";
-import { HomeFaq } from "./HomeFaq";
+import { HomeCreditsModal } from "./HomeCreditsModal";
+import { HomeProfessorMariChat } from "./HomeProfessorMariChat";
+import { HomeAchievements } from "./HomeAchievements";
 import { NewChatConnectionGate } from "./NewChatConnectionGate";
 import { ChatCommonOverlays } from "./ChatCommonOverlays";
+import { CreatorNotesCssInjector, type CardCssMode } from "./CreatorNotesCssInjector";
+import type { ChatModeFilter } from "../../lib/card-css";
 
 export type { CharacterMap };
+
+const BUILT_IN_AGENT_ID_SET = new Set(BUILT_IN_AGENTS.map((agent) => agent.id));
+const BUILT_IN_TRACKER_AGENT_ID_SET = new Set(
+  BUILT_IN_AGENTS.filter((agent) => agent.category === "tracker" && !agent.libraryHidden).map((agent) => agent.id),
+);
 
 const normalizeSpriteDisplayValue = (value: unknown, fallback: number, min: number, max: number): number => {
   const numeric = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(numeric)) return fallback;
   return Math.max(min, Math.min(max, numeric));
 };
+
+function parseMessageExtraRecord(value: unknown): Record<string, unknown> {
+  if (!value) return {};
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function normalizeMessageSpriteExpressions(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const expressions: Record<string, string> = {};
+  for (const [key, expression] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof expression !== "string") continue;
+    const trimmed = expression.trim();
+    if (key && trimmed) expressions[key] = trimmed;
+  }
+  return expressions;
+}
+
+function getPersonaSnapshotName(extra: Record<string, unknown>): string | null {
+  const snapshot = extra.personaSnapshot;
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
+  const name = (snapshot as Record<string, unknown>).name;
+  return typeof name === "string" && name.trim() ? name.trim() : null;
+}
+
+function resolveExpressionAvatarSpriteUrl(sprites: SpriteInfo[] | undefined, expression: string): string | null {
+  const normalizedExpression = expression.trim().toLowerCase();
+  if (!normalizedExpression) return null;
+  const exact = (sprites ?? []).find(
+    (sprite) =>
+      !sprite.expression.toLowerCase().startsWith("full_") &&
+      sprite.expression.trim().toLowerCase() === normalizedExpression,
+  );
+  return exact?.url ?? null;
+}
 
 const INTUITIVE_SWIPE_MIN_DISTANCE = 56;
 const INTUITIVE_SWIPE_MAX_VERTICAL_DRIFT = 44;
@@ -110,6 +169,35 @@ type AgentInjectionReviewRequest = {
   injections: AgentInjectionReviewItem[];
 };
 
+type CharacterRow = { id: string; data: unknown; avatarPath: string | null };
+type CharacterMapValue = NonNullable<ReturnType<CharacterMap["get"]>>;
+
+function toCharacterMapValue(char: CharacterRow): CharacterMapValue {
+  try {
+    const parsed = typeof char.data === "string" ? JSON.parse(char.data) : char.data;
+    const data = parsed && typeof parsed === "object" ? (parsed as Record<string, any>) : {};
+    const extensions = data.extensions && typeof data.extensions === "object" ? data.extensions : {};
+    return {
+      name: data.name ?? "Unknown",
+      description: data.description ?? "",
+      personality: data.personality ?? "",
+      backstory: extensions.backstory ?? "",
+      appearance: extensions.appearance ?? "",
+      scenario: data.scenario ?? "",
+      example: data.mes_example ?? "",
+      avatarUrl: char.avatarPath ?? null,
+      nameColor: extensions.nameColor || undefined,
+      dialogueColor: extensions.dialogueColor || undefined,
+      boxColor: extensions.boxColor || undefined,
+      avatarCrop: extensions.avatarCrop || null,
+      conversationStatus: extensions.conversationStatus || undefined,
+      conversationActivity: extensions.conversationActivity || undefined,
+    };
+  } catch {
+    return { name: "Unknown", avatarUrl: char.avatarPath ?? null };
+  }
+}
+
 const ChatConversationSurface = lazy(async () => {
   const module = await import("./ChatConversationSurface");
   return { default: module.ChatConversationSurface };
@@ -125,6 +213,8 @@ const GameSurface = lazy(async () => {
   return { default: module.GameSurface };
 });
 
+type FloatingPanelAnchor = { right: number; top: number } | null;
+
 export function ChatArea() {
   const activeChatId = useChatStore((s) => s.activeChatId);
   const streamingChatId = useChatStore((s) => s.streamingChatId);
@@ -132,7 +222,6 @@ export function ChatArea() {
   const isStreaming = isStreamingGlobal && streamingChatId === activeChatId;
   const isPageActive = usePageActivity();
   const regenerateMessageId = useChatStore((s) => s.regenerateMessageId);
-  const currentInput = useChatStore((s) => s.currentInput);
   const chatBackground = useUIStore((s) => s.chatBackground);
   const weatherEffects = useUIStore((s) => s.weatherEffects);
   const messagesPerPage = useUIStore((s) => s.messagesPerPage);
@@ -156,10 +245,14 @@ export function ChatArea() {
   const [filesOpen, setFilesOpen] = useState(false);
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [sceneJournalOpen, setSceneJournalOpen] = useState(false);
+  const [settingsAnchor, setSettingsAnchor] = useState<FloatingPanelAnchor>(null);
+  const [galleryAnchor, setGalleryAnchor] = useState<FloatingPanelAnchor>(null);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [spriteArrangeMode, setSpriteArrangeMode] = useState(false);
   const [agentInjectionReview, setAgentInjectionReview] = useState<AgentInjectionReviewRequest | null>(null);
   const [agentInjectionDrafts, setAgentInjectionDrafts] = useState<Record<string, string>>({});
+  const [creditsOpen, setCreditsOpen] = useState(false);
+  const trackAchievement = useTrackAchievement();
 
   // Delete dialog & multi-select state
   const [deleteDialogMessageId, setDeleteDialogMessageId] = useState<string | null>(null);
@@ -167,8 +260,43 @@ export function ChatArea() {
   const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(new Set());
   const [selectionAnchorIndex, setSelectionAnchorIndex] = useState<number | null>(null);
 
-  const { data: chat, error: chatError } = useChat(activeChatId);
+  const { data: chatDetail, error: chatError } = useChat(activeChatId);
   const { data: allChats } = useChats();
+  const listedActiveChat = useMemo(
+    () => (activeChatId ? (allChats?.find((candidate) => candidate.id === activeChatId) ?? null) : null),
+    [activeChatId, allChats],
+  );
+  const readFloatingPanelAnchor = useCallback((event?: ReactMouseEvent<HTMLElement>): FloatingPanelAnchor => {
+    if (!event || typeof window === "undefined" || window.innerWidth < 768) return null;
+    const rect = event.currentTarget.getBoundingClientRect();
+    return {
+      right: Math.max(12, Math.round(window.innerWidth - rect.right)),
+      top: Math.max(56, Math.round(rect.bottom + 8)),
+    };
+  }, []);
+  const handleOpenSettingsPanel = useCallback(
+    (event?: ReactMouseEvent<HTMLElement>) => {
+      setSettingsAnchor(readFloatingPanelAnchor(event));
+      setSettingsOpen(true);
+    },
+    [readFloatingPanelAnchor],
+  );
+  const handleOpenGalleryPanel = useCallback(
+    (event?: ReactMouseEvent<HTMLElement>) => {
+      setGalleryAnchor(readFloatingPanelAnchor(event));
+      setGalleryOpen(true);
+    },
+    [readFloatingPanelAnchor],
+  );
+  const handleCloseSettingsPanel = useCallback(() => {
+    setSettingsOpen(false);
+    setSettingsAnchor(null);
+  }, []);
+  const handleCloseGalleryPanel = useCallback(() => {
+    setGalleryOpen(false);
+    setGalleryAnchor(null);
+  }, []);
+  const chat = chatDetail ?? null;
   // Game mode loads ALL messages (no pagination) so the in-game log
   // shows the full session history instead of only the latest page.
   const isGameChat = (chat as unknown as { mode?: string })?.mode === "game";
@@ -212,14 +340,12 @@ export function ChatArea() {
   }, [messageOffset, messages]);
   const { data: allCharacters } = useCharacters();
   const { data: allPersonas } = usePersonas();
-  const { data: connections } = useConnections();
   const deleteMessage = useDeleteMessage(activeChatId);
   const deleteMessages = useDeleteMessages(activeChatId);
   const deleteSwipe = useDeleteSwipe(activeChatId);
   const updateMessage = useUpdateMessage(activeChatId);
   const updateMessageExtra = useUpdateMessageExtra(activeChatId);
   const peekPrompt = usePeekPrompt();
-  const createChat = useCreateChat();
   const branchChat = useBranchChat();
   const { generate, retryAgents } = useGenerate();
   const setActiveSwipe = useSetActiveSwipe(activeChatId);
@@ -232,6 +358,19 @@ export function ChatArea() {
     if (!activeChatId || !(chatError instanceof ApiError) || chatError.status !== 404) return;
     setActiveChatId(null);
   }, [activeChatId, chatError, setActiveChatId]);
+
+  useEffect(() => {
+    if (!activeChatId || !allChats) return;
+    if (listedActiveChat) return;
+    setActiveChatId(null);
+  }, [activeChatId, allChats, listedActiveChat, setActiveChatId]);
+
+  const currentGameSessionChatId = useMemo(() => resolveCurrentGameSessionChatId(chat, allChats), [allChats, chat]);
+
+  useEffect(() => {
+    if (!currentGameSessionChatId || currentGameSessionChatId === activeChatId) return;
+    setActiveChatId(currentGameSessionChatId);
+  }, [activeChatId, currentGameSessionChatId, setActiveChatId]);
 
   useEffect(() => {
     const handleReviewRequest = (event: Event) => {
@@ -265,71 +404,42 @@ export function ChatArea() {
     setAgentInjectionDrafts({});
   }, []);
 
-  const handleQuickStart = useCallback(
-    (mode: "conversation" | "roleplay" | "game") => {
-      const connectionRows = filterLanguageGenerationConnections(
-        (connections ?? []) as Array<{ id: string; provider?: string }>,
-      ).filter((connection) => !!connection.id);
-      if (connectionRows.length === 0) {
-        useChatStore.getState().setPendingNewChatMode(mode);
-        return;
-      }
+  // Character IDs in the active chat
+  const chatCharIds = useMemo(() => getChatCharacterIds(chat), [chat]);
 
-      const label = mode === "conversation" ? "Conversation" : mode === "game" ? "Game" : "Roleplay";
-      createChat.mutate(
-        { name: `New ${label}`, mode, characterIds: [] },
-        {
-          onSuccess: (chat) => {
-            useChatStore.getState().setActiveChatId(chat.id);
-            useChatStore.getState().setShouldOpenSettings(true);
-            useChatStore.getState().setShouldOpenWizard(true);
-          },
-        },
-      );
-    },
-    [connections, createChat],
-  );
-
-  // Build character lookup map
-  const characterMap: CharacterMap = useMemo(() => {
+  const baseCharacterMap: CharacterMap = useMemo(() => {
     const map: CharacterMap = new Map();
     if (!allCharacters) return map;
-    for (const char of allCharacters as Array<{ id: string; data: string; avatarPath: string | null }>) {
-      try {
-        const parsed = typeof char.data === "string" ? JSON.parse(char.data) : char.data;
-        map.set(char.id, {
-          name: parsed.name ?? "Unknown",
-          description: parsed.description ?? "",
-          personality: parsed.personality ?? "",
-          backstory: parsed.extensions?.backstory ?? "",
-          appearance: parsed.extensions?.appearance ?? "",
-          scenario: parsed.scenario ?? "",
-          example: parsed.mes_example ?? "",
-          avatarUrl: char.avatarPath ?? null,
-          nameColor: parsed.extensions?.nameColor || undefined,
-          dialogueColor: parsed.extensions?.dialogueColor || undefined,
-          boxColor: parsed.extensions?.boxColor || undefined,
-          avatarCrop: parsed.extensions?.avatarCrop || null,
-          conversationStatus: parsed.extensions?.conversationStatus || undefined,
-          conversationActivity: parsed.extensions?.conversationActivity || undefined,
-        });
-      } catch {
-        map.set(char.id, { name: "Unknown", avatarUrl: null });
-      }
+    for (const char of allCharacters as CharacterRow[]) {
+      map.set(char.id, toCharacterMapValue(char));
     }
     return map;
   }, [allCharacters]);
 
-  // Character IDs in the active chat
-  const chatCharIds: string[] = useMemo(
-    () =>
-      chat
-        ? typeof (chat as unknown as { characterIds: unknown }).characterIds === "string"
-          ? JSON.parse((chat as unknown as { characterIds: string }).characterIds)
-          : (chat.characterIds ?? [])
-        : [],
-    [chat],
+  const missingChatCharacterIds = useMemo(
+    () => chatCharIds.filter((id) => !baseCharacterMap.has(id)),
+    [baseCharacterMap, chatCharIds],
   );
+  const missingCharacterQueries = useQueries({
+    queries: missingChatCharacterIds.map((id) => ({
+      queryKey: characterKeys.detail(id),
+      queryFn: () => api.get<CharacterRow>(`/characters/${id}`),
+      enabled: !!chat?.id,
+      staleTime: 5 * 60_000,
+    })),
+  });
+
+  // Build character lookup map. Cold launches can render chat detail before the
+  // full library list has produced every active character, so merge exact
+  // per-chat character fetches as a rescue path.
+  const characterMap: CharacterMap = useMemo(() => {
+    const map: CharacterMap = new Map(baseCharacterMap);
+    for (const query of missingCharacterQueries) {
+      const char = query.data;
+      if (char?.id) map.set(char.id, toCharacterMapValue(char));
+    }
+    return map;
+  }, [baseCharacterMap, missingCharacterQueries]);
 
   const characterNames = useMemo(
     () => chatCharIds.map((id) => characterMap.get(id)?.name).filter((n): n is string => !!n),
@@ -348,7 +458,6 @@ export function ChatArea() {
       scenario?: string;
       backstory?: string;
       appearance?: string;
-      altDescriptions?: string;
       avatarPath?: string | null;
       avatarCrop?: string;
       nameColor?: string;
@@ -363,22 +472,10 @@ export function ChatArea() {
       (chatPersonaId ? personas.find((p) => p.id === chatPersonaId) : null) ??
       (!isGame ? personas.find((p) => p.isActive === "true" || p.isActive === true) : null);
     if (!persona) return undefined;
-    let description = persona.description ?? "";
-    if (persona.altDescriptions) {
-      try {
-        const altDescriptions = JSON.parse(persona.altDescriptions) as Array<{ active?: boolean; content?: string }>;
-        for (const altDescription of altDescriptions) {
-          if (altDescription?.active && typeof altDescription.content === "string" && altDescription.content.trim()) {
-            description = [description, altDescription.content.trim()].filter(Boolean).join("\n");
-          }
-        }
-      } catch {
-        /* ignore malformed JSON */
-      }
-    }
     return {
+      id: persona.id,
       name: persona.name,
-      description,
+      description: persona.description ?? "",
       personality: persona.personality || undefined,
       scenario: persona.scenario || undefined,
       backstory: persona.backstory || undefined,
@@ -410,7 +507,13 @@ export function ChatArea() {
     const raw = (chat as unknown as { metadata?: string | Record<string, unknown> }).metadata;
     return parseChatMetadata(raw);
   }, [chat]);
-  const spriteCharacterIds: string[] = Array.isArray(chatMeta.spriteCharacterIds) ? chatMeta.spriteCharacterIds : [];
+  const spriteCharacterIds = useMemo<string[]>(
+    () =>
+      Array.isArray(chatMeta.spriteCharacterIds)
+        ? chatMeta.spriteCharacterIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+        : [],
+    [chatMeta.spriteCharacterIds],
+  );
   const spriteDisplayModes = normalizeSpriteDisplayModes(chatMeta.spriteDisplayModes);
   const spritePosition: SpriteSide = chatMeta.spritePosition === "right" ? "right" : "left";
   const spriteScale = normalizeSpriteDisplayValue(chatMeta.spriteScale, roleplaySpriteScale, 0.5, 1.75);
@@ -441,6 +544,22 @@ export function ChatArea() {
 
   const updateMeta = useUpdateChatMetadata();
   const summaryContextSize: number = (chatMeta.summaryContextSize as number) ?? 50;
+
+  // Creator-notes card CSS: resolve the per-chat mode (default "chat") and map
+  // the chat mode onto the @chat-mode filter surface (visual novel shares the
+  // roleplay surface). One injector element, reused across every render path.
+  const cardCssMode: CardCssMode =
+    chatMeta.cardCssMode === "exclusive" || chatMeta.cardCssMode === "chat" ? chatMeta.cardCssMode : "disabled";
+  const cardCssChatMode: ChatModeFilter =
+    chatMode === "conversation" ? "conversation" : chatMode === "game" ? "game" : "roleplay";
+  const cardCssInjector = (
+    <CreatorNotesCssInjector
+      characterIds={chatCharIds}
+      allCharacters={allCharacters as CharacterRow[] | undefined}
+      mode={cardCssMode}
+      chatMode={cardCssChatMode}
+    />
+  );
 
   // Sync translation config from chat metadata to the translation store
   useEffect(() => {
@@ -491,7 +610,12 @@ export function ChatArea() {
   });
   useEffect(() => {
     if (!chat?.id) return;
-    const restoredUrl = chatBackgroundMetadataToUrl(chatMeta.background);
+    const savedUrl = chatBackgroundMetadataToUrl(chatMeta.background);
+    const restoredUrl =
+      savedUrl ??
+      (chat.mode === "roleplay" || chat.mode === "visual_novel"
+        ? useUIStore.getState().defaultRoleplayBackground
+        : null);
     restoredChatBackgroundRef.current = { chatId: chat.id, url: restoredUrl, isSyncing: true };
     useUIStore.getState().setChatBackground(restoredUrl);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -639,10 +763,6 @@ export function ChatArea() {
     [chat?.id, hasCustomSpritePlacements, spritePlacements, spritePosition, updateMeta],
   );
 
-  const handleToggleSpritePosition = useCallback(() => {
-    handleSetSpritePosition(spritePosition === "left" ? "right" : "left");
-  }, [handleSetSpritePosition, spritePosition]);
-
   // Set of enabled agent type IDs (respects both global enableAgents toggle and per-chat agent list)
   const enabledAgentTypes = useMemo(() => {
     const set = new Set<string>();
@@ -655,6 +775,51 @@ export function ChatArea() {
 
   const combatAgentEnabled = enabledAgentTypes.has("combat");
   const expressionAgentEnabled = enabledAgentTypes.has("expression");
+  const expressionAvatarsEnabled =
+    isRoleplay &&
+    chatMeta.expressionAvatarsEnabled === true &&
+    expressionAgentEnabled &&
+    (chatCharIds.length > 0 || !!personaInfo?.id);
+  const expressionAvatarCharacterIds = useMemo(() => {
+    const allowedIds = new Set(chatCharIds);
+    if (personaInfo?.id) allowedIds.add(personaInfo.id);
+    const configuredIds =
+      spriteCharacterIds.length > 0 ? spriteCharacterIds.filter((id) => allowedIds.has(id)) : Array.from(allowedIds);
+    if (personaInfo?.id) configuredIds.push(personaInfo.id);
+    return Array.from(new Set(configuredIds.filter((id) => typeof id === "string" && id.trim())));
+  }, [chatCharIds, personaInfo?.id, spriteCharacterIds]);
+  const expressionAvatarSpriteQueries = useQueries({
+    queries: expressionAvatarCharacterIds.map((characterId) => ({
+      queryKey: spriteKeys.list(characterId),
+      queryFn: () => api.get<SpriteInfo[]>(`/sprites/${characterId}`),
+      enabled: expressionAvatarsEnabled,
+      staleTime: 5 * 60_000,
+    })),
+  });
+  const expressionAvatarSpriteMap = useMemo(() => {
+    const map = new Map<string, SpriteInfo[]>();
+    expressionAvatarCharacterIds.forEach((characterId, index) => {
+      const sprites = expressionAvatarSpriteQueries[index]?.data;
+      if (Array.isArray(sprites) && sprites.length > 0) map.set(characterId, sprites);
+    });
+    return map;
+  }, [expressionAvatarCharacterIds, expressionAvatarSpriteQueries]);
+  const expressionAvatarResolver = useMemo<ExpressionAvatarResolver | undefined>(() => {
+    if (!expressionAvatarsEnabled) return undefined;
+    return (message, characterId) => {
+      const extra = parseMessageExtraRecord(message.extra);
+      const expressions = normalizeMessageSpriteExpressions(extra.spriteExpressions);
+      const characterName = characterMap.get(characterId)?.name;
+      const personaName =
+        characterId === personaInfo?.id ? (getPersonaSnapshotName(extra) ?? personaInfo.name) : undefined;
+      const expression =
+        expressions[characterId] ??
+        (characterName ? expressions[characterName] : undefined) ??
+        (personaName ? expressions[personaName] : undefined);
+      if (!expression) return null;
+      return resolveExpressionAvatarSpriteUrl(expressionAvatarSpriteMap.get(characterId), expression);
+    };
+  }, [characterMap, expressionAvatarSpriteMap, expressionAvatarsEnabled, personaInfo?.id, personaInfo?.name]);
   const shouldRefreshGameStateOnSwipe = isGameChat || Boolean(chatMeta.enableAgents);
 
   const refreshVisibleGameState = useCallback(async () => {
@@ -852,6 +1017,7 @@ export function ChatArea() {
       }
       try {
         // Regenerate as a new swipe on the existing message
+        const currentInput = useChatStore.getState().currentInput;
         const hasInput = currentInput ? currentInput.trim().length > 0 : false;
         await generate(
           guideGenerations && hasInput
@@ -868,18 +1034,19 @@ export function ChatArea() {
         // Error toast is shown by the generate hook
       }
     },
-    [activeChatId, isStreaming, generate, currentInput, guideGenerations],
+    [activeChatId, isStreaming, generate, guideGenerations],
   );
 
-  const _handleRetryAgents = useCallback(async () => {
+  const handleRetryAgents = useCallback(async () => {
     if (!activeChatId || isStreaming || agentProcessing || failedAgentTypes.length === 0) return;
     await retryAgents(activeChatId, failedAgentTypes);
   }, [activeChatId, isStreaming, agentProcessing, failedAgentTypes, retryAgents]);
 
   const handleRerunTrackers = useCallback(async () => {
     if (!activeChatId || isStreaming || agentProcessing) return;
-    const trackerIds = new Set(BUILT_IN_AGENTS.filter((a) => a.category === "tracker").map((a) => a.id));
-    const types = Array.from(enabledAgentTypes).filter((t) => trackerIds.has(t));
+    const types = Array.from(enabledAgentTypes).filter(
+      (type) => BUILT_IN_TRACKER_AGENT_ID_SET.has(type) || !BUILT_IN_AGENT_ID_SET.has(type),
+    );
     if (types.length === 0) return;
     await retryAgents(activeChatId, types);
   }, [activeChatId, isStreaming, agentProcessing, enabledAgentTypes, retryAgents]);
@@ -887,8 +1054,7 @@ export function ChatArea() {
   const handleRerunSingleTracker = useCallback(
     async (agentType: string) => {
       if (!activeChatId || isStreaming || agentProcessing) return;
-      const trackerIds = new Set(BUILT_IN_AGENTS.filter((a) => a.category === "tracker").map((a) => a.id));
-      if (!trackerIds.has(agentType) || !enabledAgentTypes.has(agentType)) return;
+      if (!BUILT_IN_TRACKER_AGENT_ID_SET.has(agentType) || !enabledAgentTypes.has(agentType)) return;
       await retryAgents(activeChatId, [agentType]);
     },
     [activeChatId, isStreaming, agentProcessing, enabledAgentTypes, retryAgents],
@@ -1002,6 +1168,15 @@ export function ChatArea() {
     if (!activeChatId) return;
     peekPrompt.mutate(activeChatId, {
       onSuccess: (data) => setPeekPromptData(data),
+      onError: (error) => {
+        const message =
+          error instanceof ApiError
+            ? error.message
+            : error instanceof Error
+              ? error.message
+              : "Could not assemble the prompt preview.";
+        toast.error(message);
+      },
     });
   }, [activeChatId, peekPrompt]);
 
@@ -1237,11 +1412,11 @@ export function ChatArea() {
         setWizardOpen(true);
         useChatStore.getState().setShouldOpenWizard(false);
       } else {
-        setSettingsOpen(true);
+        handleOpenSettingsPanel();
       }
       useChatStore.getState().setShouldOpenSettings(false);
     }
-  }, [shouldOpenSettings, shouldOpenWizard, activeChatId]);
+  }, [shouldOpenSettings, shouldOpenWizard, activeChatId, handleOpenSettingsPanel]);
 
   // Auto-scroll on new messages / streaming (but not on "load more")
   // Only scroll if user is already near the bottom (within 150px).
@@ -1251,6 +1426,53 @@ export function ChatArea() {
   const userScrolledAwayRef = useRef(false);
   const lastScrollTopRef = useRef(0);
   const userScrolledAtRef = useRef(0);
+  const forcedBottomScrollRef = useRef<{ requestedAt: number; behavior: ScrollBehavior } | null>(null);
+  const openedAtBottomChatIdRef = useRef<string | null>(null);
+  const scrollToMessagesBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    const el = scrollRef.current;
+    if (el) {
+      el.scrollTo({ top: el.scrollHeight, behavior });
+      return;
+    }
+    messagesEndRef.current?.scrollIntoView({ behavior });
+  }, []);
+  const scheduleScrollToMessagesBottom = useCallback(
+    (behavior: ScrollBehavior = "smooth") => {
+      scrollToMessagesBottom(behavior);
+      requestAnimationFrame(() => {
+        scrollToMessagesBottom(behavior);
+        requestAnimationFrame(() => scrollToMessagesBottom(behavior));
+      });
+    },
+    [scrollToMessagesBottom],
+  );
+  useEffect(() => {
+    const handleScrollRequest = (event: Event) => {
+      const detail = (event as CustomEvent<ChatScrollToBottomDetail>).detail;
+      if (!detail?.chatId || detail.chatId !== activeChatId) return;
+
+      const behavior = detail.behavior ?? "auto";
+      forcedBottomScrollRef.current = { requestedAt: Date.now(), behavior };
+      userScrolledAwayRef.current = false;
+      isNearBottomRef.current = true;
+      scheduleScrollToMessagesBottom(behavior);
+    };
+
+    window.addEventListener(CHAT_SCROLL_TO_BOTTOM_EVENT, handleScrollRequest);
+    return () => window.removeEventListener(CHAT_SCROLL_TO_BOTTOM_EVENT, handleScrollRequest);
+  }, [activeChatId, scheduleScrollToMessagesBottom]);
+
+  useEffect(() => {
+    if (!activeChatId || isFetchingNextPage || isLoadingMoreRef.current) return;
+    if (openedAtBottomChatIdRef.current === activeChatId) return;
+    if (isLoading && loadedMessageCount === 0) return;
+
+    openedAtBottomChatIdRef.current = activeChatId;
+    userScrolledAwayRef.current = false;
+    isNearBottomRef.current = true;
+    scheduleScrollToMessagesBottom("auto");
+  }, [activeChatId, isFetchingNextPage, isLoading, loadedMessageCount, scheduleScrollToMessagesBottom]);
+
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -1307,6 +1529,17 @@ export function ChatArea() {
   const chatModeRef = useRef(chatMode);
   chatModeRef.current = chatMode;
   const prevIsStreamingRef = useRef(false);
+  const resolveTTSCharacterId = useCallback(
+    (speaker?: string | null) => {
+      const normalizedSpeaker = normalizeTTSCharacterName(speaker);
+      if (!normalizedSpeaker) return null;
+      for (const [characterId, character] of characterMap) {
+        if (normalizeTTSCharacterName(character.name) === normalizedSpeaker) return characterId;
+      }
+      return null;
+    },
+    [characterMap],
+  );
   useEffect(() => {
     const wasStreaming = prevIsStreamingRef.current;
     prevIsStreamingRef.current = isStreaming;
@@ -1331,25 +1564,48 @@ export function ChatArea() {
     }
     if (!lastMsg?.content) return;
 
-    const fallbackSpeaker = lastMsg.characterId ? characterMap.get(lastMsg.characterId)?.name : undefined;
-    const ttsText = buildTTSMessageText(lastMsg.content, cfg, fallbackSpeaker);
-    if (!ttsText) return;
-    const ttsVoice = resolveTTSVoiceForSpeaker(cfg, fallbackSpeaker, lastMsg.characterId);
-    if (cfg.source === "elevenlabs" && !ttsVoice) return;
+    const fallbackSpeaker =
+      lastMsg.role === "narrator"
+        ? "Narrator"
+        : lastMsg.characterId
+          ? characterMap.get(lastMsg.characterId)?.name
+          : undefined;
+    const ttsRequests = buildTTSVoiceRequests(
+      lastMsg.content,
+      cfg,
+      fallbackSpeaker,
+      lastMsg.characterId,
+      resolveTTSCharacterId,
+    );
+    if (ttsRequests.length === 0) return;
 
-    void ttsService.speak(ttsText, lastMsg.id, { speaker: fallbackSpeaker, voice: ttsVoice });
-  }, [characterMap, isStreaming]);
+    void ttsService.speakSequence(withTTSVoiceRequestCacheKeys(ttsRequests, cfg, lastMsg.id), lastMsg.id);
+  }, [characterMap, isStreaming, resolveTTSCharacterId]);
 
   const newestMsgId = msgData?.pages[0]?.[msgData.pages[0].length - 1]?.id;
   const newestMsgSwipeIndex = msgData?.pages[0]?.[msgData.pages[0].length - 1]?.activeSwipeIndex;
   const isOptimistic = newestMsgId?.startsWith("__optimistic_");
   useEffect(() => {
     if (isLoadingMoreRef.current) return;
-    // Always scroll when the user just sent a message (optimistic msg)
-    if (isOptimistic || (isNearBottomRef.current && !userScrolledAwayRef.current)) {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const forcedBottomScroll = forcedBottomScrollRef.current;
+    const hasFreshForcedBottomScroll = !!forcedBottomScroll && Date.now() - forcedBottomScroll.requestedAt < 5000;
+    if (forcedBottomScroll && !hasFreshForcedBottomScroll) {
+      forcedBottomScrollRef.current = null;
     }
-  }, [newestMsgId, newestMsgSwipeIndex, isStreaming, isOptimistic]);
+
+    // Always scroll when the user just sent a message (optimistic msg)
+    if (isOptimistic || hasFreshForcedBottomScroll) {
+      const behavior = forcedBottomScroll?.behavior ?? "auto";
+      forcedBottomScrollRef.current = null;
+      userScrolledAwayRef.current = false;
+      isNearBottomRef.current = true;
+      scheduleScrollToMessagesBottom(behavior);
+      return;
+    }
+    if (isNearBottomRef.current && !userScrolledAwayRef.current) {
+      scheduleScrollToMessagesBottom("smooth");
+    }
+  }, [isOptimistic, isStreaming, newestMsgId, newestMsgSwipeIndex, scheduleScrollToMessagesBottom]);
 
   // Auto-scroll on streamBuffer changes without causing ChatArea re-render.
   // Uses a store subscription so the hot per-token updates bypass React.
@@ -1359,12 +1615,12 @@ export function ChatArea() {
       if (state.streamBuffer !== prev) {
         prev = state.streamBuffer;
         if (!isLoadingMoreRef.current && isNearBottomRef.current && !userScrolledAwayRef.current) {
-          messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+          scrollToMessagesBottom("smooth");
         }
       }
     });
     return unsub;
-  }, []);
+  }, [scrollToMessagesBottom]);
 
   // Preserve scroll position when older messages are prepended
   const pageCount = msgData?.pages.length ?? 0;
@@ -1441,6 +1697,47 @@ export function ChatArea() {
   ]);
 
   // ═══════════════════════════════════════════════
+  // Restoring persisted active chat
+  // ═══════════════════════════════════════════════
+  if (activeChatId && !chat) {
+    const errorMessage =
+      chatError instanceof ApiError
+        ? chatError.message
+        : chatError instanceof Error
+          ? chatError.message
+          : "Opening chat...";
+    const hasOpenError = !!chatError;
+
+    return (
+      <div
+        data-component="ChatArea.RestoringChat"
+        className="flex flex-1 items-center justify-center overflow-hidden p-6"
+      >
+        <div className="flex flex-col items-center gap-3 text-center">
+          {!hasOpenError && (
+            <div className="h-7 w-7 animate-spin rounded-full border-2 border-[var(--border)] border-t-[var(--primary)]" />
+          )}
+          <div className="space-y-1">
+            <p className="text-sm font-medium text-[var(--foreground)]">
+              {hasOpenError ? "Could not open this chat" : "Opening chat..."}
+            </p>
+            {hasOpenError && <p className="max-w-sm text-xs text-[var(--muted-foreground)]">{errorMessage}</p>}
+          </div>
+          {hasOpenError && (
+            <button
+              type="button"
+              onClick={() => setActiveChatId(null)}
+              className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-1.5 text-xs font-medium text-[var(--foreground)] transition-colors hover:bg-[var(--accent)]"
+            >
+              Back to chats
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ═══════════════════════════════════════════════
   // Empty state (no active chat)
   // ═══════════════════════════════════════════════
   if (!activeChatId) {
@@ -1448,16 +1745,17 @@ export function ChatArea() {
 
     return (
       <>
+        <HomeCreditsModal open={creditsOpen} onClose={() => setCreditsOpen(false)} />
         <div
           data-component="ChatArea.EmptyState"
-          className="flex flex-1 flex-col items-center overflow-y-auto p-3 sm:p-5 lg:p-6"
+          className="flex flex-1 flex-col items-center overflow-y-auto p-1.5 sm:p-3 lg:p-3"
         >
-          <div className="flex w-full max-w-2xl flex-col items-center gap-3 py-2 sm:gap-4 sm:py-3 lg:pt-4 lg:pb-5">
+          <div className="flex w-full max-w-3xl flex-col items-center gap-1.5 py-0 sm:gap-2 lg:pt-0 lg:pb-2">
             {/* Central hero */}
             <div className="relative">
               <div
                 className={cn(
-                  "flex h-14 w-14 items-center justify-center overflow-hidden rounded-2xl shadow-xl shadow-orange-500/20 sm:h-20 sm:w-20",
+                  "flex h-12 w-12 items-center justify-center overflow-hidden rounded-2xl shadow-xl shadow-orange-500/20 sm:h-16 sm:w-16",
                   showEmptyStateEffects && "animate-pulse-ring bunny-glow",
                 )}
               >
@@ -1476,58 +1774,25 @@ export function ChatArea() {
             </div>
 
             <div className="text-center">
-              <h3 className="retro-glow-text text-base sm:text-xl font-bold tracking-tight">✧ Marinara Engine ✧</h3>
-              <p className="mt-1.5 sm:mt-2 max-w-xs text-xs sm:text-sm text-[var(--muted-foreground)]">
-                To get started, choose the type of chat you'd like to have with the AI
-              </p>
-            </div>
-
-            <div
-              className={cn(
-                "flex flex-wrap justify-center gap-2 sm:gap-3",
-                showEmptyStateEffects && "stagger-children",
-              )}
-            >
-              <QuickStartCard
-                icon={<MessageSquare size="1.125rem" />}
-                label="Conversation"
-                bg="linear-gradient(135deg, #4de5dd, #3ab8b1)"
-                shadowColor="rgba(77,229,221,0.15)"
-                tooltip="General chat with one or more characters, or a model itself"
-                onClick={() => handleQuickStart("conversation")}
-              />
-              <QuickStartCard
-                icon={<BookOpen size="1.125rem" />}
-                label="Roleplay"
-                bg="linear-gradient(135deg, #eb8951, #d97530)"
-                shadowColor="rgba(235,137,81,0.15)"
-                tooltip="For roleplaying or creative writing with one or more characters"
-                onClick={() => handleQuickStart("roleplay")}
-              />
-              <QuickStartCard
-                icon={<Theater size="1.125rem" />}
-                label="Game"
-                bg="linear-gradient(135deg, #e15c8c, #c94776)"
-                shadowColor="rgba(225,92,140,0.15)"
-                tooltip="AI-managed singleplayer RPG with a Game Master, party, dice, maps, and quests"
-                onClick={() => handleQuickStart("game")}
-              />
+              <h3 className="retro-glow-text text-base sm:text-xl font-bold tracking-tight">Marinara Engine</h3>
             </div>
 
             {/* Recent Chats */}
             <RecentChats />
 
-            <HomeFaq />
+            <HomeProfessorMariChat pageActive={isPageActive} />
+
+            <HomeAchievements />
 
             <div
               className={cn(
-                "w-48",
+                "w-48 [--retro-divider-margin:0]",
                 showEmptyStateEffects ? "retro-divider" : "h-px rounded-[1px] bg-[var(--border)]/40",
               )}
             />
 
             {/* Footer */}
-            <div className="flex w-full max-w-2xl flex-col items-center gap-2">
+            <div className="flex w-full max-w-2xl flex-col items-center gap-1">
               <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-0.5 text-center text-[0.625rem] leading-tight text-[var(--muted-foreground)]/55 sm:text-xs">
                 <span>
                   Created by{" "}
@@ -1563,11 +1828,12 @@ export function ChatArea() {
                   </a>
                 </span>
               </div>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap justify-center gap-2">
                 <a
                   href="https://discord.com/invite/KdAkTg94ME"
                   target="_blank"
                   rel="noopener noreferrer"
+                  onClick={() => trackAchievement.mutate("discord_clicked")}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--secondary)]/60 px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition-all hover:border-[var(--primary)]/40 hover:text-[var(--primary)]"
                 >
                   <svg width="0.875rem" height="0.875rem" viewBox="0 0 24 24" fill="currentColor">
@@ -1579,6 +1845,7 @@ export function ChatArea() {
                   href="https://ko-fi.com/marinara_spaghetti"
                   target="_blank"
                   rel="noopener noreferrer"
+                  onClick={() => trackAchievement.mutate("kofi_clicked")}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--secondary)]/60 px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition-all hover:border-[var(--primary)]/40 hover:text-[var(--primary)]"
                 >
                   <svg width="0.875rem" height="0.875rem" viewBox="0 0 24 24" fill="currentColor">
@@ -1586,16 +1853,18 @@ export function ChatArea() {
                   </svg>
                   Support
                 </a>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCreditsOpen(true);
+                    trackAchievement.mutate("credits_viewed");
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--secondary)]/60 px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition-all hover:border-[var(--primary)]/40 hover:text-[var(--primary)]"
+                >
+                  <List size="0.875rem" />
+                  Credits
+                </button>
               </div>
-
-              {/* Special thanks */}
-              <p className="max-w-[42rem] px-1 text-center text-[0.625rem] leading-snug text-[var(--muted-foreground)]/40 sm:max-w-[46rem]">
-                Special thanks to Xel, Jorge, Cha1latte, Javedz678, Teuku, Shadota, Romu, Mm14141, MagicGoddess, John,
-                Pwildani, Romu, Felor, MuniMuni, Guybrush01, Joshellis625, LukaTheHero, Coxde, JorgeLTE, Seele The Seal
-                King, Loungemeister, Kale, Tabris, GREGOR OVECH, Coins, Tacoman, Jorge, Promansis, Kitsumiro, Sheep,
-                Pod042, Prolix, PlutoMayhem, Mezzeh, Kuc0, Exalted, Yang Best Girl, MidnightSleeper, Geechan,
-                TheLonelyDevil, Artus, and you!
-              </p>
 
               {/* Restart tutorial */}
               <button
@@ -1706,6 +1975,7 @@ export function ChatArea() {
     return (
       <Suspense fallback={surfaceFallback}>
         <>
+          {cardCssInjector}
           <GameSurface
             activeChatId={activeChatId}
             chat={chat!}
@@ -1717,7 +1987,7 @@ export function ChatArea() {
             characters={gameCharacters}
             personaInfo={personaInfo}
             chatBackground={chatBackground}
-            onOpenSettings={() => setSettingsOpen(true)}
+            onOpenSettings={handleOpenSettingsPanel}
             onDeleteMessage={handleDelete}
             multiSelectMode={multiSelectMode}
             selectedMessageIds={selectedMessageIds}
@@ -1727,9 +1997,11 @@ export function ChatArea() {
             chat={chat}
             activeChatId={activeChatId}
             settingsOpen={settingsOpen}
+            settingsAnchor={settingsAnchor}
             filesOpen={filesOpen}
             galleryOpen={galleryOpen}
             sceneJournalOpen={false}
+            galleryAnchor={galleryAnchor}
             wizardOpen={wizardOpen}
             peekPromptData={peekPromptData}
             deleteDialogMessageId={deleteDialogMessageId}
@@ -1744,13 +2016,14 @@ export function ChatArea() {
               onResetSpritePlacements: handleResetSpritePlacements,
               onSpriteSideChange: handleSetSpritePosition,
             }}
-            onCloseSettings={() => setSettingsOpen(false)}
+            onCloseSettings={handleCloseSettingsPanel}
             onCloseFiles={() => setFilesOpen(false)}
-            onCloseGallery={() => setGalleryOpen(false)}
+            onCloseGallery={handleCloseGalleryPanel}
             onCloseSceneJournal={() => {}}
+            onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
             onWizardFinish={() => {
               setWizardOpen(false);
-              setSettingsOpen(true);
+              handleOpenSettingsPanel();
             }}
             onClosePeekPrompt={() => setPeekPromptData(null)}
             onDeleteConfirm={handleDeleteConfirm}
@@ -1774,6 +2047,7 @@ export function ChatArea() {
   if (chatMode === "conversation") {
     return (
       <>
+        {cardCssInjector}
         <Suspense fallback={surfaceFallback}>
           <ChatConversationSurface
             activeChatId={activeChatId}
@@ -1793,9 +2067,10 @@ export function ChatArea() {
             connectedChatName={connectedChatName}
             sceneInfo={conversationSceneInfo}
             settingsOpen={settingsOpen}
-            filesOpen={filesOpen}
+            settingsAnchor={settingsAnchor}
             galleryOpen={galleryOpen}
             sceneJournalOpen={sceneJournalOpen}
+            galleryAnchor={galleryAnchor}
             wizardOpen={wizardOpen}
             peekPromptData={peekPromptData}
             deleteDialogMessageId={deleteDialogMessageId}
@@ -1811,22 +2086,21 @@ export function ChatArea() {
             onSetActiveSwipe={handleSetActiveSwipe}
             onToggleHiddenFromAI={handleToggleHiddenFromAI}
             onPeekPrompt={handlePeekPrompt}
+            onBranch={isSceneChat ? undefined : handleBranch}
             onToggleSelectMessage={handleToggleSelectMessage}
             onSwitchChat={chat?.connectedChatId ? () => setActiveChatId(chat.connectedChatId!) : undefined}
             onConcludeScene={chatMeta.sceneStatus === "active" ? () => concludeScene(activeChatId) : undefined}
             onAbandonScene={chatMeta.sceneStatus === "active" ? () => abandonScene(activeChatId) : undefined}
-            onOpenSettings={() => setSettingsOpen(true)}
-            onOpenFiles={() => setFilesOpen(true)}
-            onOpenGallery={() => setGalleryOpen(true)}
+            onOpenSettings={handleOpenSettingsPanel}
+            onOpenGallery={handleOpenGalleryPanel}
             onOpenSceneJournal={() => setSceneJournalOpen(true)}
-            onCloseSettings={() => setSettingsOpen(false)}
-            onCloseFiles={() => setFilesOpen(false)}
-            onCloseGallery={() => setGalleryOpen(false)}
+            onCloseSettings={handleCloseSettingsPanel}
+            onCloseGallery={handleCloseGalleryPanel}
             onCloseSceneJournal={() => setSceneJournalOpen(false)}
             onPaintScene={() => retryAgents(activeChatId, ["scene-painter"])}
             onWizardFinish={() => {
               setWizardOpen(false);
-              setSettingsOpen(true);
+              handleOpenSettingsPanel();
             }}
             onClosePeekPrompt={() => setPeekPromptData(null)}
             onResetSpritePlacements={handleResetSpritePlacements}
@@ -1862,6 +2136,7 @@ export function ChatArea() {
 
   return (
     <>
+      {cardCssInjector}
       <Suspense fallback={surfaceFallback}>
         <ChatRoleplaySurface
           activeChatId={activeChatId}
@@ -1880,10 +2155,11 @@ export function ChatArea() {
           spriteCharacterIds={spriteCharacterIds}
           spriteDisplayModes={spriteDisplayModes}
           spriteExpressions={spriteExpressions}
+          expressionAvatarsEnabled={expressionAvatarsEnabled}
+          expressionAvatarResolver={expressionAvatarResolver}
           spritePlacements={spritePlacements}
           spriteScale={spriteScale}
           spriteOpacity={spriteOpacity}
-          hasCustomSpritePlacements={hasCustomSpritePlacements}
           spriteArrangeMode={spriteArrangeMode}
           enabledAgentTypes={enabledAgentTypes}
           chatCharIds={chatCharIds}
@@ -1902,9 +2178,11 @@ export function ChatArea() {
           totalMessageCount={totalMessageCount}
           lastAssistantMessageId={lastAssistantMessageId}
           settingsOpen={settingsOpen}
+          settingsAnchor={settingsAnchor}
           filesOpen={filesOpen}
           galleryOpen={galleryOpen}
           sceneJournalOpen={sceneJournalOpen}
+          galleryAnchor={galleryAnchor}
           wizardOpen={wizardOpen}
           peekPromptData={peekPromptData}
           deleteDialogMessageId={deleteDialogMessageId}
@@ -1930,29 +2208,29 @@ export function ChatArea() {
           onToggleSelectMessage={handleToggleSelectMessage}
           onRerunTrackers={handleRerunTrackers}
           onRerunSingleTracker={handleRerunSingleTracker}
+          onRetryFailedAgents={handleRetryAgents}
           onStartEncounter={() => startEncounter()}
           onConcludeScene={() => concludeScene(activeChatId)}
           onAbandonScene={() => abandonScene(activeChatId)}
           onForkScene={forkScene}
           isForkingScene={isForking || isStreaming}
-          onOpenSettings={() => setSettingsOpen(true)}
-          onOpenFiles={() => setFilesOpen(true)}
-          onOpenGallery={() => setGalleryOpen(true)}
+          onOpenSettings={handleOpenSettingsPanel}
+          onOpenGallery={handleOpenGalleryPanel}
           onOpenSceneJournal={() => setSceneJournalOpen(true)}
-          onCloseSettings={() => setSettingsOpen(false)}
+          onCloseSettings={handleCloseSettingsPanel}
           onCloseFiles={() => setFilesOpen(false)}
-          onCloseGallery={() => setGalleryOpen(false)}
+          onCloseGallery={handleCloseGalleryPanel}
           onCloseSceneJournal={() => setSceneJournalOpen(false)}
           onPaintScene={() => retryAgents(activeChatId, ["scene-painter"])}
+          onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
           onWizardFinish={() => {
             setWizardOpen(false);
-            setSettingsOpen(true);
+            handleOpenSettingsPanel();
           }}
           onClosePeekPrompt={() => setPeekPromptData(null)}
           onResetSpritePlacements={handleResetSpritePlacements}
           onSpriteSideChange={handleSetSpritePosition}
           onToggleSpriteArrange={() => setSpriteArrangeMode((prev) => !prev)}
-          onToggleSpritePosition={handleToggleSpritePosition}
           onExpressionChange={handleExpressionChange}
           onSpritePlacementChange={handleSpritePlacementChange}
           onDeleteConfirm={handleDeleteConfirm}
@@ -2058,59 +2336,5 @@ function AgentInjectionReviewModal({
         </div>
       </div>
     </Modal>
-  );
-}
-
-function QuickStartCard({
-  icon,
-  label,
-  bg,
-  shadowColor,
-  onClick,
-  comingSoon,
-  tooltip,
-}: {
-  icon: ReactNode;
-  label: string;
-  bg: string;
-  shadowColor?: string;
-  onClick?: () => void;
-  comingSoon?: boolean;
-  tooltip?: string;
-}) {
-  const [showComingSoon, setShowComingSoon] = useState(false);
-
-  const handleClick = () => {
-    if (comingSoon && !onClick) {
-      setShowComingSoon(true);
-      setTimeout(() => setShowComingSoon(false), 1500);
-      return;
-    }
-    onClick?.();
-  };
-
-  return (
-    <div
-      onClick={handleClick}
-      title={tooltip}
-      className={cn(
-        "group card-3d-tilt btn-scanlines relative flex w-20 sm:w-28 flex-col items-center justify-center gap-1.5 sm:gap-2 rounded-xl border-2 border-[var(--border)] bg-[var(--card)] p-2.5 sm:p-4 text-center transition-all",
-        "cursor-pointer hover:-translate-y-1 hover:border-[var(--primary)]/40 hover:shadow-lg",
-      )}
-      style={shadowColor ? { ["--tw-shadow-color" as string]: shadowColor } : undefined}
-    >
-      {showComingSoon && (
-        <span className="absolute -top-3 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full bg-[var(--secondary)] px-2 py-0.5 text-[0.5625rem] font-semibold uppercase tracking-wider text-[var(--muted-foreground)] shadow-md animate-fade-in-up">
-          Coming Soon
-        </span>
-      )}
-      <div
-        className="flex h-8 w-8 sm:h-10 sm:w-10 items-center justify-center rounded-xl text-white shadow-sm transition-transform group-hover:scale-110"
-        style={{ background: bg }}
-      >
-        {icon}
-      </div>
-      <span className="text-[0.625rem] sm:text-xs font-medium text-[var(--muted-foreground)]">{label}</span>
-    </div>
   );
 }

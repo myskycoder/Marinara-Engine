@@ -6,6 +6,7 @@ import AdmZip from "adm-zip";
 import { logger } from "../lib/logger.js";
 import {
   LOCAL_SIDECAR_CONNECTION_ID,
+  PROFESSOR_MARI_ID,
   createChatSchema,
   createMessageSchema,
   appendChatSummaryEntryToMetadata,
@@ -16,8 +17,12 @@ import {
   nameToXmlTag,
   normalizeChatSummaryEntries,
   resolveMacros,
+  stripMacroComments,
   summariesPatchSchema,
   coerceGameStateTextValue,
+  formatCustomTrackerFieldForPrompt,
+  normalizeTrackerFieldLocks,
+  parseTrackerFieldLocks,
 } from "@marinara-engine/shared";
 import type {
   CharacterData,
@@ -31,6 +36,7 @@ import type {
   LorebookEntryTimingState,
 } from "@marinara-engine/shared";
 import { createChatsStorage } from "../services/storage/chats.storage.js";
+import { createAgentsStorage } from "../services/storage/agents.storage.js";
 import { createCharactersStorage } from "../services/storage/characters.storage.js";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { createGameStateStorage, type GameStateVisibleAnchor } from "../services/storage/game-state.storage.js";
@@ -41,7 +47,7 @@ import { enterAiAuditContext } from "../services/ai-audit/audit-context.js";
 import { generateMissingConversationSummaries } from "../services/conversation/auto-summary.service.js";
 import { rebuildMemoryChunks } from "../services/memory-recall.js";
 import { wrapContent } from "../services/prompt/format-engine.js";
-import { getCharacterDescriptionWithExtensions } from "../services/prompt/index.js";
+import { chatSummaryFingerprintMatches, fingerprintChatSummary } from "../services/prompt/chat-summary-fingerprint.js";
 import { newId } from "../utils/id-generator.js";
 import { characters, gameStateSnapshots, memoryChunks } from "../db/schema/index.js";
 import { and, desc, eq, inArray } from "drizzle-orm";
@@ -59,8 +65,11 @@ import {
 } from "../services/game/context-summary.service.js";
 import {
   findLastIndex,
+  findTrackerContextInsertIndex,
+  isManualTrackerCharacterId,
   parseExtra,
   isMessageHiddenFromAI,
+  resolveActiveCharacterIds,
   resolveVisibleGameStateAnchor,
   shouldEnableAgentsForGeneration,
 } from "./generate/generate-route-utils.js";
@@ -79,11 +88,13 @@ import {
   filterPresentCharactersForContext,
   getGeneratingAssistantTurn,
 } from "../services/game/present-characters-context.js";
+import { applyImmersiveHtmlPromptInjection } from "../services/generation/immersive-html-injection.js";
 
 type TrackerWrapFormat = "xml" | "markdown" | "none";
 type EntryStateOverrides = Record<string, { ephemeral?: number | null; enabled?: boolean }>;
 const MEMORY_RECALL_IMPORT_BODY_LIMIT_BYTES = 25 * 1024 * 1024;
 const MEMORY_RECALL_IMPORT_BATCH_SIZE = 500;
+const PROFESSOR_MARI_INTERNAL_CHAT_MARKER = "professor-mari";
 
 function toSafeExportName(name: string, fallback: string) {
   const safe = name
@@ -96,6 +107,31 @@ function toSafeExportName(name: string, fallback: string) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseChatMetadata(raw: unknown): Record<string, unknown> {
+  if (!raw) return {};
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      return isRecord(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return isRecord(raw) ? raw : {};
+}
+
+function isHomeProfessorMariChat(chat: { metadata?: unknown }) {
+  return parseChatMetadata(chat.metadata).internalAssistant === PROFESSOR_MARI_INTERNAL_CHAT_MARKER;
+}
+
+function hasProfessorMariCharacter(chat: { characterIds?: unknown }) {
+  return resolveChatCharacterIds(chat.characterIds).includes(PROFESSOR_MARI_ID);
+}
+
+function shouldHideProfessorMariChat(chat: { metadata?: unknown; characterIds?: unknown }) {
+  return isHomeProfessorMariChat(chat) || hasProfessorMariCharacter(chat);
 }
 
 function isUsableTimestamp(value: unknown): value is string {
@@ -287,7 +323,7 @@ function formatPeekTrackerContextBlock(args: {
       }
 
       if (hasCustomTracker && Array.isArray(stats?.customTrackerFields) && stats.customTrackerFields.length > 0) {
-        const customLines = stats.customTrackerFields.map((f: any) => `- ${f.name}: ${f.value}`);
+        const customLines = stats.customTrackerFields.map(formatCustomTrackerFieldForPrompt);
         trackerParts.push(wrapContent(customLines.join("\n"), "Custom Tracker", wrapFormat));
       }
     } catch {
@@ -317,6 +353,29 @@ function formatPeekTrackerContextBlock(args: {
 function resolveLorebookGenerationTriggers(mode: unknown): string[] {
   const modeTrigger = mode === "game" ? "game" : typeof mode === "string" && mode.trim() ? mode.trim() : "roleplay";
   return Array.from(new Set([modeTrigger, "chat"]));
+}
+
+function resolveChatCharacterIds(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.filter((id): id is string => typeof id === "string" && id.trim().length > 0);
+  if (typeof raw !== "string") return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function toPeekPromptMessages(
+  messages: Array<{ role: string; content: string }>,
+): Array<{ role: string; content: string }> {
+  return messages.map((message) => ({ role: message.role, content: message.content }));
+}
+
+function cardPromptText(value: unknown): string {
+  return typeof value === "string" ? stripMacroComments(value).trim() : "";
 }
 
 async function buildPersonaSnapshotForChat(app: FastifyInstance, chat: { personaId?: string | null } | null) {
@@ -385,8 +444,11 @@ export async function chatsRoutes(app: FastifyInstance) {
       if (currentExtensions.conversationStatus === "online" && currentExtensions.conversationActivity == null) {
         continue;
       }
-      const extensions: Record<string, unknown> = { ...currentExtensions, conversationStatus: "online" };
-      delete extensions.conversationActivity;
+      const extensions: Record<string, unknown> = {
+        ...currentExtensions,
+        conversationStatus: "online",
+        conversationActivity: undefined,
+      };
       await characterStorage.update(characterId, { extensions } as Partial<CharacterData>, undefined, {
         skipVersionSnapshot: true,
       });
@@ -396,25 +458,70 @@ export async function chatsRoutes(app: FastifyInstance) {
   // List all chats
   app.get("/", async () => {
     const chats = await storage.list();
-    return chats.map(sanitizeChatGameNpcAvatars);
+    return chats.filter((chat) => !shouldHideProfessorMariChat(chat)).map(sanitizeChatGameNpcAvatars);
+  });
+
+  app.get<{ Querystring: { connectionId?: string; personaId?: string } }>("/internal/professor-mari", async (req) => {
+    const chats = await storage.list();
+    const existing = chats.find(isHomeProfessorMariChat) ?? chats.find(hasProfessorMariCharacter);
+    const connectionId =
+      typeof req.query.connectionId === "string" && req.query.connectionId ? req.query.connectionId : null;
+    const personaId = typeof req.query.personaId === "string" && req.query.personaId ? req.query.personaId : null;
+
+    if (existing) {
+      await storage.update(existing.id, {
+        characterIds: [PROFESSOR_MARI_ID],
+        connectionId,
+        personaId,
+        promptPresetId: null,
+      });
+      const updated = await storage.patchMetadata(existing.id, {
+        internalAssistant: PROFESSOR_MARI_INTERNAL_CHAT_MARKER,
+        enableAgents: false,
+        tags: ["internal"],
+      });
+      return sanitizeChatGameNpcAvatars(updated ?? existing);
+    }
+
+    const created = await storage.create({
+      name: "Professor Mari",
+      mode: "conversation",
+      characterIds: [PROFESSOR_MARI_ID],
+      groupId: null,
+      personaId,
+      promptPresetId: null,
+      connectionId,
+    });
+    if (!created) return created;
+    const updated = await storage.patchMetadata(created.id, {
+      internalAssistant: PROFESSOR_MARI_INTERNAL_CHAT_MARKER,
+      enableAgents: false,
+      tags: ["internal"],
+    });
+    return sanitizeChatGameNpcAvatars(updated ?? created);
   });
 
   // List chats by group
   app.get<{ Params: { groupId: string } }>("/group/:groupId", async (req) => {
     const chats = await storage.listByGroup(req.params.groupId);
-    return chats.map(sanitizeChatGameNpcAvatars);
+    return chats.filter((chat) => !shouldHideProfessorMariChat(chat)).map(sanitizeChatGameNpcAvatars);
   });
 
   // Get single chat
   app.get<{ Params: { id: string } }>("/:id", async (req, reply) => {
     const chat = await storage.getById(req.params.id);
-    if (!chat) return reply.status(404).send({ error: "Chat not found" });
+    if (!chat || (hasProfessorMariCharacter(chat) && !isHomeProfessorMariChat(chat))) {
+      return reply.status(404).send({ error: "Chat not found" });
+    }
     return sanitizeChatGameNpcAvatars(chat);
   });
 
   // Create chat
-  app.post("/", async (req) => {
+  app.post("/", async (req, reply) => {
     const input = createChatSchema.parse(req.body);
+    if (input.characterIds.includes(PROFESSOR_MARI_ID)) {
+      return reply.status(400).send({ error: "Professor Mari is only available from the Home screen." });
+    }
     const body = req.body as Record<string, unknown>;
     const chat = await storage.create(
       input,
@@ -451,8 +558,13 @@ export async function chatsRoutes(app: FastifyInstance) {
   // Update chat
   app.patch<{ Params: { id: string } }>("/:id", async (req, reply) => {
     const data = createChatSchema.partial().parse(req.body);
+    if (data.characterIds?.includes(PROFESSOR_MARI_ID)) {
+      return reply.status(400).send({ error: "Professor Mari is only available from the Home screen." });
+    }
     const existing = await storage.getById(req.params.id);
-    if (!existing) return reply.status(404).send({ error: "Chat not found" });
+    if (!existing || (hasProfessorMariCharacter(existing) && !isHomeProfessorMariChat(existing))) {
+      return reply.status(404).send({ error: "Chat not found" });
+    }
     const nextMode = data.mode ?? existing.mode;
     if (nextMode === "conversation") {
       if (data.promptPresetId) {
@@ -475,6 +587,24 @@ export async function chatsRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: "Invalid Discord webhook URL" });
       }
       incoming.discordWebhookUrl = url;
+    }
+    if (incoming.inactiveCharacterIds !== undefined) {
+      if (
+        !Array.isArray(incoming.inactiveCharacterIds) ||
+        !incoming.inactiveCharacterIds.every((id) => typeof id === "string")
+      ) {
+        return reply.status(400).send({ error: "inactiveCharacterIds must be an array of strings" });
+      }
+      const characterIds: string[] =
+        typeof chat.characterIds === "string"
+          ? JSON.parse(chat.characterIds)
+          : Array.isArray(chat.characterIds)
+            ? chat.characterIds
+            : [];
+      const validIds = new Set(characterIds);
+      incoming.inactiveCharacterIds = Array.from(
+        new Set((incoming.inactiveCharacterIds as string[]).filter((id) => validIds.has(id))),
+      );
     }
     if (incoming.conversationSchedulesEnabled === false) {
       await clearConversationScheduleState(chat);
@@ -1141,11 +1271,15 @@ export async function chatsRoutes(app: FastifyInstance) {
     const presentCharacters = JSON.parse((row.presentCharacters as string) ?? "[]") as Array<Record<string, unknown>>;
     const playerStats = row.playerStats ? JSON.parse(row.playerStats as string) : null;
     const personaStats = row.personaStats ? JSON.parse(row.personaStats as string) : null;
+    const storedManualOverrides = row.manualOverrides ? (JSON.parse(row.manualOverrides as string) as Record<string, string>) : null;
+    const fieldLocks = parseTrackerFieldLocks(row.fieldLocks);
 
     // ── Enrich present characters with avatar paths ──
     // Three-phase fallback (character cards → gameNpcs[].avatarUrl → legacy
     // filesystem slug) lives in `npc-avatar-resolver.ts`.
-    const charsNeedingAvatar = presentCharacters.filter((c) => !c.avatarPath && c.name);
+    const charsNeedingAvatar = presentCharacters.filter(
+      (c) => !c.avatarPath && c.name && !isManualTrackerCharacterId(c.characterId),
+    );
     if (charsNeedingAvatar.length > 0) {
       const chat = await storage.getById(req.params.id);
       const chatCharIds: string[] = (() => {
@@ -1200,7 +1334,8 @@ export async function chatsRoutes(app: FastifyInstance) {
       recentEvents: JSON.parse((row.recentEvents as string) ?? "[]"),
       playerStats,
       personaStats,
-      manualOverrides: row.manualOverrides ? JSON.parse(row.manualOverrides as string) : null,
+      manualOverrides: storedManualOverrides,
+      fieldLocks,
       createdAt: row.createdAt,
     };
   });
@@ -1228,6 +1363,7 @@ export async function chatsRoutes(app: FastifyInstance) {
       presentCharacters: any[];
       playerStats: any;
       personaStats: any[];
+      fieldLocks: Record<string, boolean> | null;
     }> = {};
     if (body.date !== undefined) fields.date = coerceGameStateTextValue(body.date);
     if (body.time !== undefined) fields.time = coerceGameStateTextValue(body.time);
@@ -1237,6 +1373,7 @@ export async function chatsRoutes(app: FastifyInstance) {
     if (body.presentCharacters !== undefined) fields.presentCharacters = body.presentCharacters as any[];
     if (body.playerStats !== undefined) fields.playerStats = body.playerStats;
     if (body.personaStats !== undefined) fields.personaStats = body.personaStats as any[];
+    if (body.fieldLocks !== undefined) fields.fieldLocks = normalizeTrackerFieldLocks(body.fieldLocks);
     // Target the same snapshot the GET endpoint returns — the one for the last
     // assistant message's active swipe — so edits persist to the row the user
     // actually sees. Falls back to updateLatest when no messages exist yet.
@@ -1298,6 +1435,7 @@ export async function chatsRoutes(app: FastifyInstance) {
           recentEvents: [],
           playerStats: (fields.playerStats as any) ?? null,
           personaStats: (fields.personaStats as any) ?? null,
+          fieldLocks: normalizeTrackerFieldLocks(fields.fieldLocks),
         },
         Object.keys(manualOverrides).length > 0 ? manualOverrides : null,
       );
@@ -1322,51 +1460,88 @@ export async function chatsRoutes(app: FastifyInstance) {
 
     const chatMessages = await storage.listMessages(req.params.id);
     const chatMeta = typeof chat.metadata === "string" ? JSON.parse(chat.metadata) : (chat.metadata ?? {});
+    const chatMode = (chat.mode as string) ?? "roleplay";
+    const chatSummaryFingerprint = fingerprintChatSummary(chatMeta.summary);
     const visibleGameStateAnchor = resolveVisibleGameStateAnchor(chatMessages);
+    const supportsHiddenFromAI = chatMode === "conversation" || chatMode === "roleplay" || chatMode === "visual_novel";
+
+    const readCachedPrompt = (
+      extra: Record<string, unknown>,
+    ): { messages: Array<{ role: string; content: string }>; generationInfo?: Record<string, unknown> } | null => {
+      const cachedPrompt = Array.isArray(extra.cachedPrompt)
+        ? extra.cachedPrompt
+            .map((entry) => {
+              if (!isRecord(entry) || typeof entry.role !== "string" || typeof entry.content !== "string") {
+                return null;
+              }
+              return { role: entry.role, content: entry.content };
+            })
+            .filter((entry): entry is { role: string; content: string } => entry !== null)
+        : [];
+      if (cachedPrompt.length === 0) return null;
+
+      // Newer prompt caches record the summary fingerprint used at generation time.
+      // Older v1.6.1-era caches did not; those are still exact debug-log prompts,
+      // so prefer them over the live best-effort fallback.
+      if (
+        Object.prototype.hasOwnProperty.call(extra, "chatSummaryFingerprint") &&
+        !chatSummaryFingerprintMatches(extra, chatSummaryFingerprint)
+      ) {
+        return null;
+      }
+
+      return {
+        messages: cachedPrompt,
+        generationInfo: isRecord(extra.generationInfo) ? extra.generationInfo : undefined,
+      };
+    };
 
     // ── Primary: return the cached prompt from the last generation ──
     // This is an exact copy of what was actually sent to the model,
     // including all runtime injections (lorebooks, game state, scene context, etc.).
-    for (let i = chatMessages.length - 1; i >= 0; i--) {
-      const m = chatMessages[i]! as any;
-      if (m.role === "assistant") {
-        let extra = typeof m.extra === "string" ? JSON.parse(m.extra) : (m.extra ?? {});
-        let cachedPrompt = extra.cachedPrompt as Array<{ role: string; content: string }> | undefined;
-        let generationInfo = extra.generationInfo as Record<string, unknown> | undefined;
+    const latestVisibleMessage = (() => {
+      for (let i = chatMessages.length - 1; i >= 0; i--) {
+        const message = chatMessages[i]!;
+        if (supportsHiddenFromAI && isMessageHiddenFromAI(message)) continue;
+        return message as any;
+      }
+      return null;
+    })();
 
-        // If message-level extra doesn't have it (swipe overwrite), check swipes
-        if (!cachedPrompt && m.id) {
-          const swipes = await storage.getSwipes(m.id);
-          const activeSwipe = swipes.find((s: any) => s.index === m.activeSwipeIndex);
-          if (activeSwipe) {
-            const swExtra =
-              typeof activeSwipe.extra === "string" ? JSON.parse(activeSwipe.extra) : (activeSwipe.extra ?? {});
-            cachedPrompt = swExtra.cachedPrompt;
-            if (swExtra.generationInfo) generationInfo = swExtra.generationInfo;
-          }
-          if (!cachedPrompt) {
-            for (const sw of swipes) {
-              const swExtra = typeof sw.extra === "string" ? JSON.parse(sw.extra) : (sw.extra ?? {});
-              if (swExtra.cachedPrompt) {
-                cachedPrompt = swExtra.cachedPrompt;
-                if (swExtra.generationInfo) generationInfo = swExtra.generationInfo;
-                break;
-              }
-            }
+    if (latestVisibleMessage?.role === "assistant") {
+      const extra = parseExtra(latestVisibleMessage.extra) as Record<string, unknown>;
+      let cached = readCachedPrompt(extra);
+
+      // If message-level extra doesn't have it (swipe overwrite), check swipes.
+      if (!cached && latestVisibleMessage.id) {
+        const swipes = await storage.getSwipes(latestVisibleMessage.id);
+        const activeSwipe = swipes.find((s: any) => s.index === latestVisibleMessage.activeSwipeIndex);
+        if (activeSwipe) {
+          cached = readCachedPrompt(parseExtra(activeSwipe.extra) as Record<string, unknown>);
+        }
+        if (!cached) {
+          for (const sw of swipes) {
+            cached = readCachedPrompt(parseExtra(sw.extra) as Record<string, unknown>);
+            if (cached) break;
           }
         }
+      }
 
-        if (cachedPrompt) {
-          return { messages: cachedPrompt, parameters: null, generationInfo: generationInfo ?? null };
-        }
-        break;
+      if (cached) {
+        return {
+          messages: cached.messages,
+          parameters: null,
+          source: "cached",
+          exact: true,
+          generationInfo: cached.generationInfo ?? null,
+          agentNote: "This is the cached text prompt saved after provider preparation for the active assistant swipe.",
+        };
       }
     }
 
     // ── Fallback: live assembly preview (no generation has happened yet) ──
     // This is a best-effort approximation; it won't include runtime-only
     // injections like lorebooks, game state, scene context, semantic memory, etc.
-    const chatMode = (chat.mode as string) ?? "roleplay";
     const activeContextLimit = normalizeContextMessageLimit(chatMeta.contextMessageLimit);
     let gameContextSummary: ReturnType<typeof getStoredGameContextSummary> = null;
     const presetId = chatMode === "conversation" ? null : (chat.promptPresetId ?? chatMeta.presetId);
@@ -1381,17 +1556,20 @@ export async function chatsRoutes(app: FastifyInstance) {
         const preset = await presetStore.getById(presetId);
         if (preset) {
           // Apply conversation-start filter
-          let filteredMessages = chatMessages;
+          let scopedMessages = chatMessages;
           for (let i = chatMessages.length - 1; i >= 0; i--) {
             const extra =
               typeof chatMessages[i]!.extra === "string"
                 ? JSON.parse(chatMessages[i]!.extra as string)
                 : (chatMessages[i]!.extra ?? {});
             if (extra.isConversationStart) {
-              filteredMessages = chatMessages.slice(i);
+              scopedMessages = chatMessages.slice(i);
               break;
             }
           }
+          let filteredMessages = supportsHiddenFromAI
+            ? scopedMessages.filter((message: any) => !isMessageHiddenFromAI(message))
+            : scopedMessages;
 
           // Apply context message limit
           const hasContextOverflow =
@@ -1417,13 +1595,11 @@ export async function chatsRoutes(app: FastifyInstance) {
             presetStore.listChoiceBlocksForPreset(presetId),
           ]);
 
-          const characterIds: string[] = (() => {
-            try {
-              return JSON.parse(chat.characterIds as string);
-            } catch {
-              return [];
-            }
-          })();
+          const allCharacterIds = resolveChatCharacterIds(chat.characterIds);
+          const characterIds = resolveActiveCharacterIds(allCharacterIds, chatMeta, {
+            mode: (chat.mode as string) ?? "roleplay",
+            allowEmpty: true,
+          });
 
           let personaName = "User";
           let personaId: string | null = null;
@@ -1436,30 +1612,13 @@ export async function chatsRoutes(app: FastifyInstance) {
           if (persona) {
             personaId = persona.id as string;
             personaName = persona.name;
-            personaDescription = persona.description;
-
-            // Append active alt description extensions
-            if (persona.altDescriptions) {
-              try {
-                const altDescs = JSON.parse(persona.altDescriptions as string) as Array<{
-                  active: boolean;
-                  content: string;
-                }>;
-                for (const ext of altDescs) {
-                  if (ext.active && ext.content) {
-                    personaDescription += "\n" + ext.content;
-                  }
-                }
-              } catch {
-                /* ignore malformed JSON */
-              }
-            }
+            personaDescription = cardPromptText(persona.description);
 
             personaFields = {
-              personality: persona.personality ?? "",
-              scenario: persona.scenario ?? "",
-              backstory: persona.backstory ?? "",
-              appearance: persona.appearance ?? "",
+              personality: cardPromptText(persona.personality),
+              scenario: cardPromptText(persona.scenario),
+              backstory: cardPromptText(persona.backstory),
+              appearance: cardPromptText(persona.appearance),
             };
           }
 
@@ -1503,6 +1662,11 @@ export async function chatsRoutes(app: FastifyInstance) {
           const promptActiveAgentIds = Array.isArray(chatMeta.activeAgentIds)
             ? (chatMeta.activeAgentIds as string[])
             : [];
+          const activePromptAgentIds = filterGameInternalAgentIds(chatMode, promptActiveAgentIds);
+          const activeChatSummary =
+            chatMeta.enableAgents === true && activePromptAgentIds.includes("chat-summary")
+              ? ((chatMeta.summary as string) ?? "").trim() || null
+              : null;
 
           const assembled = await assemblePrompt({
             db: app.db,
@@ -1519,9 +1683,9 @@ export async function chatsRoutes(app: FastifyInstance) {
             personaFields,
             personaStats,
             chatMessages: mappedMessages,
-            chatSummary: (chatMeta.summary as string) ?? null,
+            chatSummary: activeChatSummary,
             enableAgents: chatMeta.enableAgents === true,
-            activeAgentIds: filterGameInternalAgentIds(chatMode, promptActiveAgentIds),
+            activeAgentIds: activePromptAgentIds,
             activeLorebookIds: Array.isArray(chatMeta.activeLorebookIds)
               ? (chatMeta.activeLorebookIds as string[])
               : [],
@@ -1624,54 +1788,17 @@ export async function chatsRoutes(app: FastifyInstance) {
             }
           }
 
-          // ── Static injection: Immersive HTML agent ──
+          // ── Static injection: Immersive HTML is a prompt directive, not a runtime LLM agent ──
           const peekAgentIds = Array.isArray(chatMeta.activeAgentIds) ? (chatMeta.activeAgentIds as string[]) : [];
-          if (
-            chatMeta.enableAgents === true &&
-            chatMode !== "conversation" &&
-            peekAgentIds.length > 0 &&
-            peekAgentIds.includes("html")
-          ) {
-            const { createAgentsStorage } = await import("../services/storage/agents.storage.js");
-            const agentsStore = createAgentsStorage(app.db);
-            const htmlCfg = await agentsStore.getByType("html");
-            // Per-chat activeAgentIds overrides the global enabled flag (matches generation flow)
-            const htmlPrompt = ((htmlCfg?.promptTemplate as string) || getDefaultAgentPrompt("html")).trim();
-            if (htmlPrompt) {
-              const wrapFmt = (preset as any).wrapFormat || "xml";
-              const htmlBlock = wrapFmt === "markdown" ? `\n## Immersive HTML\n${htmlPrompt}` : htmlPrompt;
-              let injected = false;
-              for (let i = 0; i < assembled.messages.length; i++) {
-                const msg = assembled.messages[i]!;
-                if (msg.content.includes("</output_format>")) {
-                  assembled.messages[i] = {
-                    ...msg,
-                    content: msg.content.replace("</output_format>", "    " + htmlBlock + "\n</output_format>"),
-                  };
-                  injected = true;
-                  break;
-                }
-              }
-              if (!injected) {
-                let lastUserIdx = -1;
-                for (let i = assembled.messages.length - 1; i >= 0; i--) {
-                  if (assembled.messages[i]!.role === "user") {
-                    lastUserIdx = i;
-                    break;
-                  }
-                }
-                const idx = lastUserIdx >= 0 ? lastUserIdx : assembled.messages.length - 1;
-                const target = assembled.messages[idx]!;
-                assembled.messages[idx] = {
-                  ...target,
-                  content:
-                    target.content +
-                    "\n\n" +
-                    (wrapFmt === "xml" ? `<immersive_html>\n${htmlPrompt}\n</immersive_html>` : htmlBlock),
-                };
-              }
-            }
-          }
+          const previewAgentsStore = createAgentsStorage(app.db);
+          await applyImmersiveHtmlPromptInjection({
+            chatMode,
+            enableAgents: chatMeta.enableAgents === true,
+            activeAgentIds: peekAgentIds,
+            wrapFormat: (preset as any).wrapFormat || "xml",
+            messages: assembled.messages,
+            getHtmlAgentConfig: () => previewAgentsStore.getByType("html"),
+          });
 
           // ── Fallback: inject character & persona info if the preset didn't include them ──
           const wrapFormat = ((preset as any).wrapFormat as "xml" | "markdown" | "none") || "xml";
@@ -1686,7 +1813,7 @@ export async function chatsRoutes(app: FastifyInstance) {
             const charData = JSON.parse(charRow.data as string);
             const charName = charData.name ?? "Unknown";
             if (typeof charName === "string" && charName.trim()) protectedCharacterNames.push(charName.trim());
-            const charDesc = getCharacterDescriptionWithExtensions(charData);
+            const charDesc = cardPromptText(charData.description);
             const xmlTag = nameToXmlTag(charName);
             const hasCharInfo =
               (charDesc && allContent.includes(charDesc.split("\n")[0]!.trim().slice(0, 80))) ||
@@ -1701,40 +1828,76 @@ export async function chatsRoutes(app: FastifyInstance) {
                 char: charName,
                 characterFields: {
                   description: charDesc,
-                  personality: charData.personality ?? "",
-                  scenario: charData.scenario ?? "",
-                  backstory: charData.extensions?.backstory ?? "",
-                  appearance: charData.extensions?.appearance ?? "",
-                  example: charData.mes_example ?? "",
-                  systemPrompt: charData.system_prompt ?? "",
-                  postHistoryInstructions: charData.post_history_instructions ?? "",
+                  personality: cardPromptText(charData.personality),
+                  scenario: cardPromptText(charData.scenario),
+                  backstory: cardPromptText(charData.extensions?.backstory),
+                  appearance: cardPromptText(charData.extensions?.appearance),
+                  example: cardPromptText(charData.mes_example),
+                  systemPrompt: cardPromptText(charData.system_prompt),
+                  postHistoryInstructions: cardPromptText(charData.post_history_instructions),
                 },
               };
               const resolveCharacterMacros = (value: string) => resolveMacros(value, characterMacroContext);
               const parts: string[] = [];
               if (charDesc) parts.push(wrapContent(resolveCharacterMacros(charDesc), "description", wrapFormat, 2));
-              if (charData.personality)
-                parts.push(wrapContent(resolveCharacterMacros(charData.personality), "personality", wrapFormat, 2));
-              if (charData.scenario && !hasGroupOverride)
-                parts.push(wrapContent(resolveCharacterMacros(charData.scenario), "scenario", wrapFormat, 2));
-              if (charData.extensions?.backstory)
-                parts.push(
-                  wrapContent(resolveCharacterMacros(charData.extensions.backstory), "backstory", wrapFormat, 2),
-                );
-              if (charData.extensions?.appearance)
-                parts.push(
-                  wrapContent(resolveCharacterMacros(charData.extensions.appearance), "appearance", wrapFormat, 2),
-                );
-              if (charData.system_prompt)
-                parts.push(wrapContent(resolveCharacterMacros(charData.system_prompt), "system_prompt", wrapFormat, 2));
-              if (charData.mes_example)
-                parts.push(
-                  wrapContent(resolveCharacterMacros(charData.mes_example), "example_dialogue", wrapFormat, 2),
-                );
-              if (charData.post_history_instructions)
+              if (characterMacroContext.characterFields.personality)
                 parts.push(
                   wrapContent(
-                    resolveCharacterMacros(charData.post_history_instructions),
+                    resolveCharacterMacros(characterMacroContext.characterFields.personality),
+                    "personality",
+                    wrapFormat,
+                    2,
+                  ),
+                );
+              if (characterMacroContext.characterFields.scenario && !hasGroupOverride)
+                parts.push(
+                  wrapContent(
+                    resolveCharacterMacros(characterMacroContext.characterFields.scenario),
+                    "scenario",
+                    wrapFormat,
+                    2,
+                  ),
+                );
+              if (characterMacroContext.characterFields.backstory)
+                parts.push(
+                  wrapContent(
+                    resolveCharacterMacros(characterMacroContext.characterFields.backstory),
+                    "backstory",
+                    wrapFormat,
+                    2,
+                  ),
+                );
+              if (characterMacroContext.characterFields.appearance)
+                parts.push(
+                  wrapContent(
+                    resolveCharacterMacros(characterMacroContext.characterFields.appearance),
+                    "appearance",
+                    wrapFormat,
+                    2,
+                  ),
+                );
+              if (characterMacroContext.characterFields.systemPrompt)
+                parts.push(
+                  wrapContent(
+                    resolveCharacterMacros(characterMacroContext.characterFields.systemPrompt),
+                    "system_prompt",
+                    wrapFormat,
+                    2,
+                  ),
+                );
+              if (characterMacroContext.characterFields.example)
+                parts.push(
+                  wrapContent(
+                    resolveCharacterMacros(characterMacroContext.characterFields.example),
+                    "example_dialogue",
+                    wrapFormat,
+                    2,
+                  ),
+                );
+              if (characterMacroContext.characterFields.postHistoryInstructions)
+                parts.push(
+                  wrapContent(
+                    resolveCharacterMacros(characterMacroContext.characterFields.postHistoryInstructions),
                     "post_history_instructions",
                     wrapFormat,
                     2,
@@ -1823,16 +1986,23 @@ export async function chatsRoutes(app: FastifyInstance) {
               : null;
 
             if (contextBlock) {
-              const lastUserIdx = findLastIndex(assembled.messages, "user");
-              if (lastUserIdx >= 0) {
-                assembled.messages.splice(lastUserIdx, 0, { role: "system", content: contextBlock });
-              } else {
-                assembled.messages.splice(0, 0, { role: "system", content: contextBlock });
-              }
+              assembled.messages.splice(findTrackerContextInsertIndex(assembled.messages), 0, {
+                role: "user",
+                content: contextBlock,
+                contextKind: "injection",
+              });
             }
           }
 
-          return { messages: assembled.messages, parameters: assembled.parameters, generationInfo: null };
+          return {
+            messages: toPeekPromptMessages(assembled.messages),
+            parameters: assembled.parameters,
+            source: "live_preview",
+            exact: false,
+            generationInfo: null,
+            agentNote:
+              "No saved model request was available, so this is a live best-effort preview assembled without sending.",
+          };
         }
       } catch (e) {
         logger.error(e, "[peek-prompt] Assembler failed, falling through to cached/raw messages");
@@ -1869,7 +2039,14 @@ export async function chatsRoutes(app: FastifyInstance) {
       mappedMessages.pop();
     }
 
-    return { messages: mappedMessages, parameters: null, generationInfo: null };
+    return {
+      messages: mappedMessages,
+      parameters: null,
+      source: "raw_messages",
+      exact: false,
+      generationInfo: null,
+      agentNote: "Prompt assembly was unavailable, so only visible raw chat messages are shown.",
+    };
   });
 
   // ── Swipes ──
@@ -2067,11 +2244,11 @@ export async function chatsRoutes(app: FastifyInstance) {
 
     let chatsToExport: ChatRow[];
     if (scope === "all") {
-      chatsToExport = (await storage.list()) as ChatRow[];
+      chatsToExport = ((await storage.list()) as ChatRow[]).filter((chat) => !shouldHideProfessorMariChat(chat));
     } else {
       if (uniqueIds.length === 0) return reply.status(400).send({ error: "No chats selected for export" });
       const rows = await Promise.all(uniqueIds.map((id) => storage.getById(id)));
-      chatsToExport = rows.filter((chat): chat is ChatRow => Boolean(chat));
+      chatsToExport = rows.filter((chat): chat is ChatRow => chat !== null && !shouldHideProfessorMariChat(chat));
     }
 
     if (chatsToExport.length === 0) return reply.status(404).send({ error: "No chats found to export" });

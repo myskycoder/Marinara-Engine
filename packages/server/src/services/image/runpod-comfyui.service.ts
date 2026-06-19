@@ -28,6 +28,9 @@ import { safeFetch } from "../../utils/security.js";
 const DEFAULT_RUNPOD_POLL_INTERVAL_MS = 2_000;
 const RUNPOD_MAX_POLLS = 90; // 90 × 2s = 3 minutes max by default.
 const RUNPOD_MAX_RESPONSE_BYTES = 30 * 1024 * 1024;
+const RUNPOD_COMFYUI_MAX_REFERENCE_IMAGES = 4;
+const RUNPOD_COMFYUI_PLACEHOLDER_REFERENCE_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 
 interface RunPodRunResponse {
   id: string;
@@ -103,9 +106,14 @@ export async function generateRunPodComfyUI(
   if (request.model) {
     wfStr = wfStr.replace(/%model%/g, escapeJsonStr(request.model));
   }
-  const referenceImage = request.referenceImage || request.referenceImages?.[0];
-  if (referenceImage) {
-    wfStr = wfStr.replace(/%reference_image%/g, escapeJsonStr(referenceImage));
+  const referenceImages = collectRunPodReferenceImages(request, defaults);
+  for (let i = 0; i < referenceImages.length; i++) {
+    const referenceImage = referenceImages[i]!;
+    const numbered = `%reference_image_${String(i + 1).padStart(2, "0")}%`;
+    wfStr = wfStr.replaceAll(numbered, escapeJsonStr(referenceImage));
+    if (i === 0) {
+      wfStr = wfStr.replace(/%reference_image%/g, escapeJsonStr(referenceImage));
+    }
   }
 
   let workflow: Record<string, unknown>;
@@ -162,6 +170,15 @@ export async function generateRunPodComfyUI(
   }
 
   throw new Error("RunPod generation timed out after 3 minutes");
+}
+
+function collectRunPodReferenceImages(request: ImageGenRequest, defaults: ComfyUiDefaults): string[] {
+  const references = [request.referenceImage, ...(request.referenceImages ?? [])]
+    .filter((reference): reference is string => typeof reference === "string" && reference.trim().length > 0)
+    .filter((reference, index, all) => all.indexOf(reference) === index)
+    .slice(0, RUNPOD_COMFYUI_MAX_REFERENCE_IMAGES);
+  if (references.length > 0) return references;
+  return defaults.uploadPlaceholderOnMissingReference ? [RUNPOD_COMFYUI_PLACEHOLDER_REFERENCE_BASE64] : [];
 }
 
 /**

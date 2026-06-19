@@ -319,7 +319,6 @@ function makeGameNpc(char: PresentCharacter, location: string, existingIds: Set<
     description: buildNpcDescription(char, location),
     location,
     reputation: 0,
-    met: true,
     notes: [buildFirstMeetingNote(char, location)],
     avatarUrl: char.avatarPath ?? null,
   };

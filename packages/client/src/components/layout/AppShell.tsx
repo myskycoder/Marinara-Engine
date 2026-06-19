@@ -4,15 +4,15 @@
 import { ChatSidebar } from "./ChatSidebar";
 import { TopBar } from "./TopBar";
 import { SpotifyMobileWidget } from "../spotify/SpotifyMiniPlayer";
+import { YouTubeMobileWidget } from "../chat/YouTubePlayer";
 import { ChatNotificationBubbles } from "../chat/ChatNotificationBubbles";
 import {
+  getTrackerPanelWidthForProfile,
   RIGHT_PANEL_WIDTH_MAX,
   RIGHT_PANEL_WIDTH_MIN,
   SIDEBAR_WIDTH_MAX,
   SIDEBAR_WIDTH_MIN,
-  TRACKER_PANEL_WIDTH_DEFAULT,
-  TRACKER_PANEL_WIDTH_MAX,
-  TRACKER_PANEL_WIDTH_MIN,
+  TRACKER_PANEL_DEFAULT_BACKGROUND_COLOR,
   useUIStore,
 } from "../../stores/ui.store";
 import { useChatStore } from "../../stores/chat.store";
@@ -20,6 +20,7 @@ import { useBackgroundAutonomousPolling } from "../../hooks/use-background-auton
 import { useClearAutonomousUnread } from "../../hooks/use-chats";
 import { useIdleDetection } from "../../hooks/use-idle-detection";
 import { usePageActivity } from "../../hooks/use-page-activity";
+import { getCssBackgroundStyle } from "../../lib/css-colors";
 import { cn } from "../../lib/utils";
 import { parseChatMetadata } from "../../lib/chat-display";
 import { motion, AnimatePresence } from "framer-motion";
@@ -78,6 +79,8 @@ function clampWidth(width: number, min: number, max: number) {
 
 const PANEL_RESIZE_STEP = 16;
 const PANEL_RESIZE_LARGE_STEP = 48;
+const SHARED_SIDEBAR_WIDTH_MIN = Math.max(SIDEBAR_WIDTH_MIN, RIGHT_PANEL_WIDTH_MIN);
+const SHARED_SIDEBAR_WIDTH_MAX = Math.min(SIDEBAR_WIDTH_MAX, RIGHT_PANEL_WIDTH_MAX);
 const RESIZER_HITBOX = 10;
 const TRACKER_PANEL_EDGE_OFFSET = 8;
 const TRACKER_PANEL_HUD_GAP = 6;
@@ -88,6 +91,12 @@ const TRACKER_PANEL_DESKTOP_EXIT_EASE = [0.4, 0, 1, 1] as const;
 const TRACKER_PANEL_TOGGLE_SELECTOR = '[data-tracker-panel-toggle="roleplay-hud"]';
 const TRACKER_PANEL_ANCHOR_SELECTOR = '[data-tracker-panel-anchor="roleplay-hud"]';
 const TOP_BAR_SELECTOR = '[data-component="TopBar"]';
+
+function readVisibleElementRect(element: HTMLElement) {
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0 || window.getComputedStyle(element).display === "none") return null;
+  return rect;
+}
 
 function MainPaneFallback() {
   return (
@@ -157,18 +166,26 @@ export function AppShell() {
   const trackerPanelOpen = useUIStore((s) => s.trackerPanelOpen);
   const trackerPanelSide = useUIStore((s) => s.trackerPanelSide);
   const trackerPanelHideHudWidgets = useUIStore((s) => s.trackerPanelHideHudWidgets);
-  const trackerPanelWidth = useUIStore((s) => s.trackerPanelWidth);
+  const trackerPanelSizeProfile = useUIStore((s) => s.trackerPanelSizeProfile);
+  const trackerPanelBackgroundColor = useUIStore((s) => s.trackerPanelBackgroundColor);
   const setTrackerPanelOpen = useUIStore((s) => s.setTrackerPanelOpen);
-  const setTrackerPanelWidth = useUIStore((s) => s.setTrackerPanelWidth);
   const [sidebarDragWidth, setSidebarDragWidth] = useState<number | null>(null);
   const [rightPanelDragWidth, setRightPanelDragWidth] = useState<number | null>(null);
-  const [trackerPanelDragWidth, setTrackerPanelDragWidth] = useState<number | null>(null);
   const sidebarDragWidthRef = useRef<number | null>(null);
   const rightPanelDragWidthRef = useRef<number | null>(null);
-  const trackerPanelDragWidthRef = useRef<number | null>(null);
-  const liveSidebarWidth = sidebarDragWidth ?? sidebarWidth;
-  const liveRightPanelWidth = rightPanelDragWidth ?? rightPanelWidth;
-  const liveTrackerPanelWidth = trackerPanelDragWidth ?? trackerPanelWidth;
+  const sharedSidebarWidth = clampWidth(
+    rightPanelWidth || sidebarWidth,
+    SHARED_SIDEBAR_WIDTH_MIN,
+    SHARED_SIDEBAR_WIDTH_MAX,
+  );
+  const liveSidebarWidth = sidebarDragWidth ?? rightPanelDragWidth ?? sharedSidebarWidth;
+  const liveRightPanelWidth = rightPanelDragWidth ?? sidebarDragWidth ?? sharedSidebarWidth;
+  const trackerPanelWidth = getTrackerPanelWidthForProfile(trackerPanelSizeProfile);
+  const trackerPanelHasCustomBackground =
+    trackerPanelBackgroundColor.trim().toLowerCase() !== TRACKER_PANEL_DEFAULT_BACKGROUND_COLOR;
+  const trackerPanelBackgroundStyle = trackerPanelHasCustomBackground
+    ? getCssBackgroundStyle(trackerPanelBackgroundColor)
+    : undefined;
 
   // Track mobile breakpoint for right-panel animation strategy
   const [isMobile, setIsMobile] = useState(() => typeof window !== "undefined" && window.innerWidth < 768);
@@ -303,11 +320,11 @@ export function AppShell() {
       const originalUserSelect = document.body.style.userSelect;
       document.body.style.cursor = "col-resize";
       document.body.style.userSelect = "none";
-      sidebarDragWidthRef.current = sidebarWidth;
-      setSidebarDragWidth(sidebarWidth);
+      sidebarDragWidthRef.current = sharedSidebarWidth;
+      setSidebarDragWidth(sharedSidebarWidth);
 
       const onMove = (moveEvent: MouseEvent) => {
-        const nextWidth = clampWidth(moveEvent.clientX, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
+        const nextWidth = clampWidth(moveEvent.clientX, SHARED_SIDEBAR_WIDTH_MIN, SHARED_SIDEBAR_WIDTH_MAX);
         sidebarDragWidthRef.current = nextWidth;
         setSidebarDragWidth(nextWidth);
       };
@@ -315,7 +332,9 @@ export function AppShell() {
       const finishResize = () => {
         if (finished) return;
         finished = true;
-        setSidebarWidth(sidebarDragWidthRef.current ?? useUIStore.getState().sidebarWidth);
+        const nextWidth = sidebarDragWidthRef.current ?? sharedSidebarWidth;
+        setSidebarWidth(nextWidth);
+        setRightPanelWidth(nextWidth);
         sidebarDragWidthRef.current = null;
         setSidebarDragWidth(null);
         document.body.style.cursor = originalCursor;
@@ -329,7 +348,7 @@ export function AppShell() {
       window.addEventListener("mouseup", finishResize);
       window.addEventListener("blur", finishResize);
     },
-    [isMobile, setSidebarWidth, sidebarWidth],
+    [isMobile, setRightPanelWidth, setSidebarWidth, sharedSidebarWidth],
   );
 
   const startRightPanelResize = useCallback(
@@ -340,14 +359,14 @@ export function AppShell() {
       const originalUserSelect = document.body.style.userSelect;
       document.body.style.cursor = "col-resize";
       document.body.style.userSelect = "none";
-      rightPanelDragWidthRef.current = rightPanelWidth;
-      setRightPanelDragWidth(rightPanelWidth);
+      rightPanelDragWidthRef.current = sharedSidebarWidth;
+      setRightPanelDragWidth(sharedSidebarWidth);
 
       const onMove = (moveEvent: MouseEvent) => {
         const nextWidth = clampWidth(
           window.innerWidth - moveEvent.clientX,
-          RIGHT_PANEL_WIDTH_MIN,
-          RIGHT_PANEL_WIDTH_MAX,
+          SHARED_SIDEBAR_WIDTH_MIN,
+          SHARED_SIDEBAR_WIDTH_MAX,
         );
         rightPanelDragWidthRef.current = nextWidth;
         setRightPanelDragWidth(nextWidth);
@@ -356,7 +375,9 @@ export function AppShell() {
       const finishResize = () => {
         if (finished) return;
         finished = true;
-        setRightPanelWidth(rightPanelDragWidthRef.current ?? useUIStore.getState().rightPanelWidth);
+        const nextWidth = rightPanelDragWidthRef.current ?? sharedSidebarWidth;
+        setSidebarWidth(nextWidth);
+        setRightPanelWidth(nextWidth);
         rightPanelDragWidthRef.current = null;
         setRightPanelDragWidth(null);
         document.body.style.cursor = originalCursor;
@@ -370,113 +391,45 @@ export function AppShell() {
       window.addEventListener("mouseup", finishResize);
       window.addEventListener("blur", finishResize);
     },
-    [isMobile, rightPanelWidth, setRightPanelWidth],
-  );
-
-  const startTrackerPanelResize = useCallback(
-    (event: ReactMouseEvent<HTMLDivElement>) => {
-      if (isMobile) return;
-      event.preventDefault();
-      const originalCursor = document.body.style.cursor;
-      const originalUserSelect = document.body.style.userSelect;
-      document.body.style.cursor = "ew-resize";
-      document.body.style.userSelect = "none";
-      trackerPanelDragWidthRef.current = trackerPanelWidth;
-      setTrackerPanelDragWidth(trackerPanelWidth);
-
-      const outerEdge =
-        trackerPanelSide === "left"
-          ? sidebarOpen
-            ? liveSidebarWidth
-            : 0
-          : window.innerWidth - (rightPanelOpen ? liveRightPanelWidth : 0);
-
-      const onMove = (moveEvent: MouseEvent) => {
-        const rawWidth = trackerPanelSide === "left" ? moveEvent.clientX - outerEdge : outerEdge - moveEvent.clientX;
-        const nextWidth = clampWidth(rawWidth, TRACKER_PANEL_WIDTH_MIN, TRACKER_PANEL_WIDTH_MAX);
-        trackerPanelDragWidthRef.current = nextWidth;
-        setTrackerPanelDragWidth(nextWidth);
-      };
-      let finished = false;
-      const finishResize = () => {
-        if (finished) return;
-        finished = true;
-        setTrackerPanelWidth(trackerPanelDragWidthRef.current ?? useUIStore.getState().trackerPanelWidth);
-        trackerPanelDragWidthRef.current = null;
-        setTrackerPanelDragWidth(null);
-        document.body.style.cursor = originalCursor;
-        document.body.style.userSelect = originalUserSelect;
-        window.removeEventListener("mousemove", onMove);
-        window.removeEventListener("mouseup", finishResize);
-        window.removeEventListener("blur", finishResize);
-      };
-
-      window.addEventListener("mousemove", onMove);
-      window.addEventListener("mouseup", finishResize);
-      window.addEventListener("blur", finishResize);
-    },
-    [
-      isMobile,
-      liveRightPanelWidth,
-      liveSidebarWidth,
-      rightPanelOpen,
-      setTrackerPanelWidth,
-      sidebarOpen,
-      trackerPanelSide,
-      trackerPanelWidth,
-    ],
+    [isMobile, setRightPanelWidth, setSidebarWidth, sharedSidebarWidth],
   );
 
   const adjustSidebarWidth = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
       const step = event.shiftKey ? PANEL_RESIZE_LARGE_STEP : PANEL_RESIZE_STEP;
-      let nextWidth = sidebarWidth;
+      let nextWidth: number;
 
-      if (event.key === "ArrowLeft") nextWidth = sidebarWidth - step;
-      else if (event.key === "ArrowRight") nextWidth = sidebarWidth + step;
-      else if (event.key === "Home") nextWidth = SIDEBAR_WIDTH_MIN;
-      else if (event.key === "End") nextWidth = SIDEBAR_WIDTH_MAX;
+      if (event.key === "ArrowLeft") nextWidth = sharedSidebarWidth - step;
+      else if (event.key === "ArrowRight") nextWidth = sharedSidebarWidth + step;
+      else if (event.key === "Home") nextWidth = SHARED_SIDEBAR_WIDTH_MIN;
+      else if (event.key === "End") nextWidth = SHARED_SIDEBAR_WIDTH_MAX;
       else return;
 
       event.preventDefault();
-      setSidebarWidth(clampWidth(nextWidth, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX));
+      const clampedWidth = clampWidth(nextWidth, SHARED_SIDEBAR_WIDTH_MIN, SHARED_SIDEBAR_WIDTH_MAX);
+      setSidebarWidth(clampedWidth);
+      setRightPanelWidth(clampedWidth);
     },
-    [setSidebarWidth, sidebarWidth],
+    [setRightPanelWidth, setSidebarWidth, sharedSidebarWidth],
   );
 
   const adjustRightPanelWidth = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
       const step = event.shiftKey ? PANEL_RESIZE_LARGE_STEP : PANEL_RESIZE_STEP;
-      let nextWidth = rightPanelWidth;
-
-      if (event.key === "ArrowLeft") nextWidth = rightPanelWidth + step;
-      else if (event.key === "ArrowRight") nextWidth = rightPanelWidth - step;
-      else if (event.key === "Home") nextWidth = RIGHT_PANEL_WIDTH_MIN;
-      else if (event.key === "End") nextWidth = RIGHT_PANEL_WIDTH_MAX;
-      else return;
-
-      event.preventDefault();
-      setRightPanelWidth(clampWidth(nextWidth, RIGHT_PANEL_WIDTH_MIN, RIGHT_PANEL_WIDTH_MAX));
-    },
-    [rightPanelWidth, setRightPanelWidth],
-  );
-
-  const adjustTrackerPanelWidth = useCallback(
-    (event: ReactKeyboardEvent<HTMLDivElement>) => {
-      const step = event.shiftKey ? PANEL_RESIZE_LARGE_STEP : PANEL_RESIZE_STEP;
       let nextWidth: number;
 
-      if (event.key === "ArrowLeft") nextWidth = trackerPanelWidth + (trackerPanelSide === "right" ? step : -step);
-      else if (event.key === "ArrowRight")
-        nextWidth = trackerPanelWidth + (trackerPanelSide === "right" ? -step : step);
-      else if (event.key === "Home") nextWidth = TRACKER_PANEL_WIDTH_MIN;
-      else if (event.key === "End") nextWidth = TRACKER_PANEL_WIDTH_MAX;
+      if (event.key === "ArrowLeft") nextWidth = sharedSidebarWidth + step;
+      else if (event.key === "ArrowRight") nextWidth = sharedSidebarWidth - step;
+      else if (event.key === "Home") nextWidth = SHARED_SIDEBAR_WIDTH_MIN;
+      else if (event.key === "End") nextWidth = SHARED_SIDEBAR_WIDTH_MAX;
       else return;
 
       event.preventDefault();
-      setTrackerPanelWidth(clampWidth(nextWidth, TRACKER_PANEL_WIDTH_MIN, TRACKER_PANEL_WIDTH_MAX));
+      const clampedWidth = clampWidth(nextWidth, SHARED_SIDEBAR_WIDTH_MIN, SHARED_SIDEBAR_WIDTH_MAX);
+      setSidebarWidth(clampedWidth);
+      setRightPanelWidth(clampedWidth);
     },
-    [setTrackerPanelWidth, trackerPanelSide, trackerPanelWidth],
+    [setRightPanelWidth, setSidebarWidth, sharedSidebarWidth],
   );
 
   const detailView = regexDetailId ? (
@@ -501,9 +454,16 @@ export function AppShell() {
 
   const showAmbientDecor = isPageActive && !activeChatId && !detailView && !botBrowserOpen && !gameAssetsBrowserOpen;
   const hasDetailView = detailView != null;
+  const trackerPanelModeAvailable =
+    activeChat?.mode === "roleplay" || activeChat?.mode === "visual_novel" || activeChat?.mode === "game";
   const trackerPanelActive = trackerPanelEnabled && trackerPanelOpen;
-  const trackerPanelSurfaceAvailable = !botBrowserOpen && !gameAssetsBrowserOpen && !hasDetailView;
+  const trackerPanelSurfaceAvailable =
+    trackerPanelModeAvailable && !botBrowserOpen && !gameAssetsBrowserOpen && !hasDetailView;
   const trackerPanelVisible = trackerPanelActive && trackerPanelSurfaceAvailable;
+  useEffect(() => {
+    if (!trackerPanelOpen || !activeChat?.mode || trackerPanelModeAvailable) return;
+    setTrackerPanelOpen(false);
+  }, [activeChat?.mode, setTrackerPanelOpen, trackerPanelModeAvailable, trackerPanelOpen]);
   useEffect(() => {
     if (trackerPanelVisible) {
       trackerPanelWasActiveRef.current = true;
@@ -527,8 +487,8 @@ export function AppShell() {
       root?.querySelector<HTMLElement>(TRACKER_PANEL_TOGGLE_SELECTOR) ??
       document.querySelector<HTMLElement>(TRACKER_PANEL_TOGGLE_SELECTOR);
     if (!toggle) return;
-    const rect = toggle.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0 || window.getComputedStyle(toggle).display === "none") return;
+    const rect = readVisibleElementRect(toggle);
+    if (!rect) return;
 
     const nextCenterY = rect.top + rect.height / 2;
     setTrackerPanelToggleAnchorY((current) =>
@@ -537,30 +497,21 @@ export function AppShell() {
   }, []);
   const updateTrackerPanelTop = useCallback(() => {
     const root = mainRef.current;
-    if (trackerPanelDockToEdge) {
-      const topBar =
-        root?.querySelector<HTMLElement>(TOP_BAR_SELECTOR) ?? document.querySelector<HTMLElement>(TOP_BAR_SELECTOR);
-      const rect = topBar?.getBoundingClientRect();
-      const nextTop =
-        rect && rect.height > 0
-          ? Math.max(TRACKER_PANEL_EDGE_OFFSET, Math.ceil(rect.bottom))
-          : TRACKER_PANEL_EDGE_OFFSET;
-      setTrackerPanelTop((current) => (current === nextTop ? current : nextTop));
-      return;
-    }
-    const anchors = Array.from((root ?? document).querySelectorAll<HTMLElement>(TRACKER_PANEL_ANCHOR_SELECTOR));
-    const visibleAnchor = anchors.find((anchor) => {
-      const rect = anchor.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0 && window.getComputedStyle(anchor).display !== "none";
+    const topCandidates = [TRACKER_PANEL_EDGE_OFFSET];
+    const topBar =
+      root?.querySelector<HTMLElement>(TOP_BAR_SELECTOR) ?? document.querySelector<HTMLElement>(TOP_BAR_SELECTOR);
+    const topBarRect = topBar ? readVisibleElementRect(topBar) : null;
+    if (topBarRect) topCandidates.push(Math.ceil(topBarRect.bottom + TRACKER_PANEL_HUD_GAP));
+
+    const anchors = Array.from(document.querySelectorAll<HTMLElement>(TRACKER_PANEL_ANCHOR_SELECTOR));
+    anchors.forEach((anchor) => {
+      const rect = readVisibleElementRect(anchor);
+      if (rect) topCandidates.push(Math.ceil(rect.bottom + TRACKER_PANEL_HUD_GAP));
     });
-    const nextTop = visibleAnchor
-      ? Math.max(
-          TRACKER_PANEL_EDGE_OFFSET,
-          Math.ceil(visibleAnchor.getBoundingClientRect().bottom + TRACKER_PANEL_HUD_GAP),
-        )
-      : TRACKER_PANEL_EDGE_OFFSET;
+
+    const nextTop = Math.max(...topCandidates);
     setTrackerPanelTop((current) => (current === nextTop ? current : nextTop));
-  }, [trackerPanelDockToEdge]);
+  }, []);
 
   useLayoutEffect(() => {
     if (isMobile || trackerPanelVisible || !trackerPanelSurfaceAvailable) return;
@@ -632,14 +583,15 @@ export function AppShell() {
       scheduleUpdate();
     });
     const observeTargets = () => {
-      const selector = trackerPanelDockToEdge ? TOP_BAR_SELECTOR : TRACKER_PANEL_ANCHOR_SELECTOR;
-      const targets = Array.from((mainRef.current ?? document).querySelectorAll<HTMLElement>(selector));
+      const topBarTargets = Array.from(document.querySelectorAll<HTMLElement>(TOP_BAR_SELECTOR));
+      const anchorTargets = Array.from(document.querySelectorAll<HTMLElement>(TRACKER_PANEL_ANCHOR_SELECTOR));
+      const targets = [...topBarTargets, ...anchorTargets];
       targets.forEach((target) => {
         if (observedTargets.has(target)) return;
         observer.observe(target);
         observedTargets.add(target);
       });
-      return targets.length > 0;
+      return anchorTargets.length > 0;
     };
     function scheduleUpdate() {
       if (frame) window.cancelAnimationFrame(frame);
@@ -681,11 +633,11 @@ export function AppShell() {
 
   const trackerPanelChatAvoidance =
     !isMobile && trackerPanelAnchoredForMotion && trackerPanelSurfaceAvailable
-      ? Math.round(liveTrackerPanelWidth * 0.62)
+      ? Math.round(trackerPanelWidth * 0.62)
       : 0;
   const trackerPanelHudClearance =
     !isMobile && trackerPanelAnchoredForMotion && trackerPanelHideHudWidgets && trackerPanelSurfaceAvailable
-      ? liveTrackerPanelWidth + TRACKER_PANEL_HUD_GAP
+      ? trackerPanelWidth + TRACKER_PANEL_HUD_GAP
       : 0;
 
   const trackerPanelDesktop = (side: "left" | "right") =>
@@ -720,16 +672,16 @@ export function AppShell() {
           },
         }}
         data-component={`TrackerDataSidebarDesktop.${side}`}
+        data-tracker-size-profile={trackerPanelSizeProfile}
         aria-label="Tracker data panel"
         className={cn(
-          "mari-tracker-panel fixed z-30 hidden overflow-hidden bg-[var(--background)]/20 shadow-2xl ring-1 ring-[var(--border)]/35 backdrop-blur-2xl will-change-[transform,opacity] md:block",
-          trackerPanelDragWidth == null && "transition-[width] duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]",
+          "mari-tracker-panel fixed z-30 hidden overflow-hidden bg-zinc-950/95 shadow-2xl ring-1 ring-zinc-700/80 backdrop-blur-2xl transition-[width] duration-200 ease-[cubic-bezier(0.16,1,0.3,1)] will-change-[transform,opacity] md:block",
           side === "left" ? "rounded-r-xl" : "rounded-l-xl",
         )}
         style={{
           top: trackerPanelTop,
           maxHeight: `calc(100vh - ${trackerPanelTop + TRACKER_PANEL_EDGE_OFFSET}px)`,
-          width: liveTrackerPanelWidth,
+          width: trackerPanelWidth,
           transformOrigin: `${side === "left" ? "left" : "right"} ${Math.max(
             -56,
             Math.min(56, (trackerPanelToggleAnchorY ?? trackerPanelTop) - trackerPanelTop),
@@ -737,31 +689,9 @@ export function AppShell() {
           ...(side === "left"
             ? { left: sidebarOpen ? liveSidebarWidth + RESIZER_HITBOX : 0 }
             : { right: rightPanelOpen ? liveRightPanelWidth + RESIZER_HITBOX : 0 }),
+          ...(trackerPanelBackgroundStyle ?? {}),
         }}
       >
-        <div
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Resize tracker panel"
-          aria-valuemin={TRACKER_PANEL_WIDTH_MIN}
-          aria-valuemax={TRACKER_PANEL_WIDTH_MAX}
-          aria-valuenow={Math.round(liveTrackerPanelWidth)}
-          tabIndex={0}
-          onMouseDown={startTrackerPanelResize}
-          onDoubleClick={() => setTrackerPanelWidth(TRACKER_PANEL_WIDTH_DEFAULT)}
-          onKeyDown={adjustTrackerPanelWidth}
-          className={cn(
-            "mari-resize-x group/resize absolute inset-y-0 z-20 hidden w-2 touch-none select-none bg-transparent focus-visible:outline-none md:block",
-            side === "left" ? "right-0" : "left-0",
-          )}
-        >
-          <span
-            className={cn(
-              "pointer-events-none absolute inset-y-1.5 w-px rounded-full bg-[var(--primary)]/0 transition-colors group-hover/resize:bg-[var(--primary)]/24 group-focus-visible/resize:bg-[var(--primary)]/42",
-              side === "left" ? "right-0" : "left-0",
-            )}
-          />
-        </div>
         <div className="mari-tracker-panel-scroll max-h-[inherit] overflow-x-hidden overflow-y-auto">
           <Suspense fallback={<SidePanelFallback />}>
             <TrackerDataSidebar />
@@ -821,8 +751,8 @@ export function AppShell() {
           role="separator"
           aria-orientation="vertical"
           aria-label="Resize left sidebar"
-          aria-valuemin={SIDEBAR_WIDTH_MIN}
-          aria-valuemax={SIDEBAR_WIDTH_MAX}
+          aria-valuemin={SHARED_SIDEBAR_WIDTH_MIN}
+          aria-valuemax={SHARED_SIDEBAR_WIDTH_MAX}
           aria-valuenow={Math.round(liveSidebarWidth)}
           tabIndex={0}
           onMouseDown={startSidebarResize}
@@ -897,9 +827,10 @@ export function AppShell() {
               data-component="TrackerDataSidebarMobile"
               aria-label="Tracker data panel"
               className={cn(
-                "mari-tracker-panel !fixed inset-y-0 z-50 w-[calc(100vw-0.5rem)] max-w-[24rem] overflow-hidden bg-[var(--background)]/65 pt-[env(safe-area-inset-top)] shadow-2xl backdrop-blur-xl",
+                "mari-tracker-panel !fixed inset-y-0 z-50 h-[100dvh] w-screen max-w-none overflow-hidden bg-zinc-950/95 pt-[env(safe-area-inset-top)] shadow-2xl ring-1 ring-zinc-700/80 backdrop-blur-xl",
                 trackerPanelSide === "left" ? "left-0" : "right-0",
               )}
+              style={trackerPanelBackgroundStyle}
             >
               <Suspense fallback={<SidePanelFallback />}>
                 <TrackerDataSidebar fillHeight />
@@ -959,8 +890,8 @@ export function AppShell() {
           role="separator"
           aria-orientation="vertical"
           aria-label="Resize right sidebar"
-          aria-valuemin={RIGHT_PANEL_WIDTH_MIN}
-          aria-valuemax={RIGHT_PANEL_WIDTH_MAX}
+          aria-valuemin={SHARED_SIDEBAR_WIDTH_MIN}
+          aria-valuemax={SHARED_SIDEBAR_WIDTH_MAX}
           aria-valuenow={Math.round(liveRightPanelWidth)}
           tabIndex={0}
           onMouseDown={startRightPanelResize}
@@ -977,6 +908,7 @@ export function AppShell() {
         </Suspense>
       )}
       <SpotifyMobileWidget />
+      <YouTubeMobileWidget />
     </div>
   );
 }

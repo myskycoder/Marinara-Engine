@@ -66,11 +66,17 @@ export interface SupportedMacroDefinition {
 }
 
 const CHARACTER_MACRO_PATTERN =
-  /\{\{(?:char|charName|description|personality|backstory|appearance|scenario|example|charSysInfo|charPostHistory)\}\}/i;
+  /\{\{(?:char|charName|description|personality|backstory|appearance|scenario|example|charSysInfo|charPostHistory)\}\}|\{\{\s*#if\s+[^}]*\b(?:char|charName|character|speaker|description|personality|backstory|appearance|scenario|example|charSysInfo|charPostHistory)\b/i;
 const MAX_CHARACTER_FIELD_RESOLUTION_DEPTH = 4;
 // Private placeholders used while character macros are deferred.
 // Internal-only and should be resolved before provider requests.
 const DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX = "\x1eMARINARA_DEFERRED_CHARACTER_";
+const DEFERRED_CHARACTER_CONDITIONAL_TOKEN_PREFIX = "\x1eMARINARA_DEFERRED_CHARACTER_IF:";
+const DEFERRED_CHARACTER_CONDITIONAL_TOKEN_RE = new RegExp(
+  `${DEFERRED_CHARACTER_CONDITIONAL_TOKEN_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^\\x1f]+)\\x1f`,
+  "g",
+);
+const MACRO_COMMENT_PATTERN = /\{\{\/\/[^}]*\}\}/g;
 const DEFERRED_CHARACTER_MACRO_TOKENS = {
   char: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}CHAR\x1f`,
   description: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}DESCRIPTION\x1f`,
@@ -85,9 +91,21 @@ const DEFERRED_CHARACTER_MACRO_TOKENS = {
 
 export type CharacterMacroProfile = NonNullable<MacroContext["characterProfiles"]>[number];
 type CharacterFieldMacroName = Exclude<keyof typeof DEFERRED_CHARACTER_MACRO_TOKENS, "char">;
+type ConditionalBlockPayload = {
+  condition: string;
+  truthy: string;
+  falsy: string;
+};
+
+export function stripMacroComments(template: string): string {
+  return template.replace(MACRO_COMMENT_PATTERN, "");
+}
 
 export function hasDeferredCharacterMacros(template: string): boolean {
-  return template.includes(DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX);
+  return (
+    template.includes(DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX) ||
+    template.includes(DEFERRED_CHARACTER_CONDITIONAL_TOKEN_PREFIX)
+  );
 }
 
 export const SUPPORTED_MACROS: readonly SupportedMacroDefinition[] = [
@@ -156,71 +174,141 @@ export const SUPPORTED_MACROS: readonly SupportedMacroDefinition[] = [
     syntax: "{{lowercase}}...{{/lowercase}}",
     description: "Lowercase a wrapped block",
   },
+  {
+    category: "Formatting",
+    syntax: '{{#if char == "Name"}}...{{else}}...{{/if}}',
+    description: "Conditional block; supports straight or typographic quotes",
+  },
   { category: "Formatting", syntax: "{{noop}}", description: "No-op placeholder removed from output" },
   { category: "Formatting", syntax: "{{// comment}}", description: "Inline author comment removed from output" },
   {
     category: "Formatting",
     syntax: '{{banned "text"}}',
-    description: "Accepted but currently stripped from output",
+    description: "Accepted with straight or typographic quotes, but currently stripped from output",
   },
 ];
 
 function getCharacterFieldValue(profile: CharacterMacroProfile, field: CharacterFieldMacroName): string {
-  return profile[field] ?? "";
+  return stripMacroComments(profile[field] ?? "");
 }
 
 function resolveCharacterFieldValue(
   profile: CharacterMacroProfile,
   field: CharacterFieldMacroName,
   depth: number,
+  baseContext?: MacroContext,
 ): string {
   const value = getCharacterFieldValue(profile, field);
   if (!value) return "";
   if (depth >= MAX_CHARACTER_FIELD_RESOLUTION_DEPTH) return "";
-  return resolveCharacterScopedMacros(value, profile, depth + 1);
+  return resolveCharacterScopedMacros(value, profile, depth + 1, baseContext);
 }
 
-export function resolveCharacterScopedMacros(template: string, profile: CharacterMacroProfile, depth = 0): string {
-  return template
+function macroContextForCharacterProfile(profile: CharacterMacroProfile, base?: MacroContext): MacroContext {
+  return {
+    user: base?.user ?? "User",
+    char: profile.name,
+    characters: base?.characters ?? [profile.name],
+    characterProfiles: base?.characterProfiles ?? [profile],
+    variables: base?.variables ?? {},
+    lastInput: base?.lastInput,
+    chatId: base?.chatId,
+    model: base?.model,
+    agentData: base?.agentData,
+    personaFields: base?.personaFields,
+    characterFields: {
+      description: profile.description ?? "",
+      personality: profile.personality ?? "",
+      backstory: profile.backstory ?? "",
+      appearance: profile.appearance ?? "",
+      scenario: profile.scenario ?? "",
+      example: profile.example ?? "",
+      systemPrompt: profile.systemPrompt ?? "",
+      postHistoryInstructions: profile.postHistoryInstructions ?? "",
+    },
+  };
+}
+
+export function resolveCharacterScopedMacros(
+  template: string,
+  profile: CharacterMacroProfile,
+  depth = 0,
+  baseContext?: MacroContext,
+): string {
+  const scoped = resolveConditionalBlocks(
+    stripMacroComments(template),
+    macroContextForCharacterProfile(profile, baseContext),
+    {},
+  );
+  return scoped
     .replace(/\{\{char(?:Name)?\}\}/gi, profile.name)
-    .replace(/\{\{description\}\}/gi, () => resolveCharacterFieldValue(profile, "description", depth))
-    .replace(/\{\{personality\}\}/gi, () => resolveCharacterFieldValue(profile, "personality", depth))
-    .replace(/\{\{backstory\}\}/gi, () => resolveCharacterFieldValue(profile, "backstory", depth))
-    .replace(/\{\{appearance\}\}/gi, () => resolveCharacterFieldValue(profile, "appearance", depth))
-    .replace(/\{\{scenario\}\}/gi, () => resolveCharacterFieldValue(profile, "scenario", depth))
-    .replace(/\{\{example\}\}/gi, () => resolveCharacterFieldValue(profile, "example", depth))
-    .replace(/\{\{charSysInfo\}\}/gi, () => resolveCharacterFieldValue(profile, "systemPrompt", depth))
-    .replace(/\{\{charPostHistory\}\}/gi, () => resolveCharacterFieldValue(profile, "postHistoryInstructions", depth));
+    .replace(/\{\{description\}\}/gi, () => resolveCharacterFieldValue(profile, "description", depth, baseContext))
+    .replace(/\{\{personality\}\}/gi, () => resolveCharacterFieldValue(profile, "personality", depth, baseContext))
+    .replace(/\{\{backstory\}\}/gi, () => resolveCharacterFieldValue(profile, "backstory", depth, baseContext))
+    .replace(/\{\{appearance\}\}/gi, () => resolveCharacterFieldValue(profile, "appearance", depth, baseContext))
+    .replace(/\{\{scenario\}\}/gi, () => resolveCharacterFieldValue(profile, "scenario", depth, baseContext))
+    .replace(/\{\{example\}\}/gi, () => resolveCharacterFieldValue(profile, "example", depth, baseContext))
+    .replace(/\{\{charSysInfo\}\}/gi, () => resolveCharacterFieldValue(profile, "systemPrompt", depth, baseContext))
+    .replace(/\{\{charPostHistory\}\}/gi, () =>
+      resolveCharacterFieldValue(profile, "postHistoryInstructions", depth, baseContext),
+    );
 }
 
-export function resolveDeferredCharacterMacros(template: string, profile: CharacterMacroProfile): string {
-  if (!template.includes(DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX)) return template;
-  let result = template.split(DEFERRED_CHARACTER_MACRO_TOKENS.char).join(profile.name);
+export function resolveDeferredCharacterMacros(
+  template: string,
+  profile: CharacterMacroProfile,
+  baseContext?: MacroContext,
+): string {
+  if (!hasDeferredCharacterMacros(template)) return template;
+  const scopedContext = macroContextForCharacterProfile(profile, baseContext);
+  let result = resolveDeferredCharacterConditionals(template, scopedContext);
+  result = result.split(DEFERRED_CHARACTER_MACRO_TOKENS.char).join(profile.name);
   result = result
     .split(DEFERRED_CHARACTER_MACRO_TOKENS.description)
-    .join(resolveCharacterFieldValue(profile, "description", 0));
+    .join(resolveCharacterFieldValue(profile, "description", 0, baseContext));
   result = result
     .split(DEFERRED_CHARACTER_MACRO_TOKENS.personality)
-    .join(resolveCharacterFieldValue(profile, "personality", 0));
+    .join(resolveCharacterFieldValue(profile, "personality", 0, baseContext));
   result = result
     .split(DEFERRED_CHARACTER_MACRO_TOKENS.backstory)
-    .join(resolveCharacterFieldValue(profile, "backstory", 0));
+    .join(resolveCharacterFieldValue(profile, "backstory", 0, baseContext));
   result = result
     .split(DEFERRED_CHARACTER_MACRO_TOKENS.appearance)
-    .join(resolveCharacterFieldValue(profile, "appearance", 0));
+    .join(resolveCharacterFieldValue(profile, "appearance", 0, baseContext));
   result = result
     .split(DEFERRED_CHARACTER_MACRO_TOKENS.scenario)
-    .join(resolveCharacterFieldValue(profile, "scenario", 0));
+    .join(resolveCharacterFieldValue(profile, "scenario", 0, baseContext));
   result = result
     .split(DEFERRED_CHARACTER_MACRO_TOKENS.example)
-    .join(resolveCharacterFieldValue(profile, "example", 0));
+    .join(resolveCharacterFieldValue(profile, "example", 0, baseContext));
   result = result
     .split(DEFERRED_CHARACTER_MACRO_TOKENS.systemPrompt)
-    .join(resolveCharacterFieldValue(profile, "systemPrompt", 0));
+    .join(resolveCharacterFieldValue(profile, "systemPrompt", 0, baseContext));
   result = result
     .split(DEFERRED_CHARACTER_MACRO_TOKENS.postHistoryInstructions)
-    .join(resolveCharacterFieldValue(profile, "postHistoryInstructions", 0));
+    .join(resolveCharacterFieldValue(profile, "postHistoryInstructions", 0, baseContext));
   return result;
+}
+
+function parseDeferredConditionalPayload(encoded: string): ConditionalBlockPayload | null {
+  try {
+    const parsed = JSON.parse(decodeURIComponent(encoded)) as Partial<ConditionalBlockPayload>;
+    if (typeof parsed.condition !== "string" || typeof parsed.truthy !== "string" || typeof parsed.falsy !== "string") {
+      return null;
+    }
+    return { condition: parsed.condition, truthy: parsed.truthy, falsy: parsed.falsy };
+  } catch {
+    return null;
+  }
+}
+
+function resolveDeferredCharacterConditionals(template: string, ctx: MacroContext): string {
+  return template.replace(DEFERRED_CHARACTER_CONDITIONAL_TOKEN_RE, (match, encoded: string) => {
+    const payload = parseDeferredConditionalPayload(encoded);
+    if (!payload) return match;
+    const selected = evaluateCondition(payload.condition, ctx) ? payload.truthy : payload.falsy;
+    return resolveMacros(selected, ctx, { trimResult: false });
+  });
 }
 
 function expandBracketedCharacterBlocks(template: string, ctx: MacroContext): string {
@@ -260,7 +348,7 @@ function expandBracketedCharacterBlocks(template: string, ctx: MacroContext): st
     changed = true;
     expandedLines.push(
       ...profiles
-        .map((profile) => resolveCharacterScopedMacros(block, profile))
+        .map((profile) => resolveCharacterScopedMacros(block, profile, 0, ctx))
         .join("\n")
         .split("\n"),
     );
@@ -323,6 +411,212 @@ function replaceBalancedMacros(
       result += "{{";
       index = start + 2;
     }
+  }
+
+  return result;
+}
+
+function encodeDeferredConditional(payload: ConditionalBlockPayload): string {
+  return `${DEFERRED_CHARACTER_CONDITIONAL_TOKEN_PREFIX}${encodeURIComponent(JSON.stringify(payload))}\x1f`;
+}
+
+function quoteKind(value?: string): "single" | "double" | null {
+  if (!value) return null;
+  if (/["\u201c\u201d\u201e\u201f]/u.test(value)) return "double";
+  if (/['\u2018\u2019\u201a\u201b]/u.test(value)) return "single";
+  return null;
+}
+
+function stripOuterQuotes(value: string): string | null {
+  const trimmed = value.trim();
+  if (trimmed.length < 2) return null;
+  const openingKind = quoteKind(trimmed[0]);
+  if (!openingKind || quoteKind(trimmed.at(-1)) !== openingKind) return null;
+  return trimmed
+    .slice(1, -1)
+    .replace(/\\(["'\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u201f\\])/g, "$1")
+    .replace(/\\n/g, "\n");
+}
+
+function normalizeConditionKey(value: string): string {
+  return value.trim().replace(/^@/, "").toLowerCase();
+}
+
+function resolveConditionalOperand(raw: string, ctx: MacroContext): string {
+  const quoted = stripOuterQuotes(raw);
+  if (quoted !== null) return quoted;
+
+  const token = raw.trim();
+  const normalized = normalizeConditionKey(token);
+  switch (normalized) {
+    case "char":
+    case "charname":
+    case "character":
+    case "speaker":
+      return ctx.char;
+    case "user":
+    case "username":
+      return ctx.user;
+    case "characters":
+      return ctx.characters.join(", ");
+    case "input":
+      return ctx.lastInput ?? "";
+    case "model":
+      return ctx.model ?? "";
+    case "chatid":
+      return ctx.chatId ?? "";
+    case "description":
+      return ctx.characterFields?.description ?? "";
+    case "personality":
+      return ctx.characterFields?.personality ?? "";
+    case "backstory":
+      return ctx.characterFields?.backstory ?? "";
+    case "appearance":
+      return ctx.characterFields?.appearance ?? "";
+    case "scenario":
+      return ctx.characterFields?.scenario ?? "";
+    case "example":
+      return ctx.characterFields?.example ?? "";
+    case "charsysinfo":
+      return ctx.characterFields?.systemPrompt ?? "";
+    case "charposthistory":
+      return ctx.characterFields?.postHistoryInstructions ?? "";
+    default:
+      if (/^var[:.]/i.test(token)) {
+        const name = token.replace(/^var[:.]/i, "").trim();
+        return ctx.variables[name] ?? "";
+      }
+      return ctx.variables[token] ?? token;
+  }
+}
+
+function isCharacterConditionalOperand(raw: string): boolean {
+  const normalized = normalizeConditionKey(raw);
+  return /^(char|charname|character|speaker|description|personality|backstory|appearance|scenario|example|charsysinfo|charposthistory)$/.test(
+    normalized,
+  );
+}
+
+function parseConditionExpression(condition: string): { left: string; operator: string; right?: string } {
+  const match = condition.match(
+    /^(.+?)\s*(==|!=|=|is\s+not|is|not\s+contains|not\s+includes|contains|includes)\s*(.+)$/i,
+  );
+  if (!match) return { left: condition.trim(), operator: "truthy" };
+  return {
+    left: match[1]?.trim() ?? "",
+    operator: (match[2] ?? "").toLowerCase().replace(/\s+/g, " "),
+    right: match[3]?.trim() ?? "",
+  };
+}
+
+function conditionDependsOnCharacter(condition: string): boolean {
+  const parsed = parseConditionExpression(condition);
+  return (
+    isCharacterConditionalOperand(parsed.left) || (parsed.right ? isCharacterConditionalOperand(parsed.right) : false)
+  );
+}
+
+function compareConditionValues(left: string, operator: string, right: string): boolean {
+  const leftNormalized = left.trim().toLowerCase();
+  const rightNormalized = right.trim().toLowerCase();
+  switch (operator) {
+    case "=":
+    case "==":
+    case "is":
+      return leftNormalized === rightNormalized;
+    case "!=":
+    case "is not":
+      return leftNormalized !== rightNormalized;
+    case "contains":
+    case "includes":
+      return leftNormalized.includes(rightNormalized);
+    case "not contains":
+    case "not includes":
+      return !leftNormalized.includes(rightNormalized);
+    default:
+      return false;
+  }
+}
+
+function evaluateCondition(condition: string, ctx: MacroContext): boolean {
+  const parsed = parseConditionExpression(condition);
+  const left = resolveConditionalOperand(parsed.left, ctx);
+  if (parsed.operator === "truthy") return left.trim().length > 0 && !/^(false|0|no|off|null|undefined)$/i.test(left);
+  const right = resolveConditionalOperand(parsed.right ?? "", ctx);
+  return compareConditionValues(left, parsed.operator, right);
+}
+
+function findConditionalStart(input: string, fromIndex: number): RegExpExecArray | null {
+  const startRe = /\{\{\s*#if\s+([\s\S]*?)\s*\}\}/gi;
+  startRe.lastIndex = fromIndex;
+  return startRe.exec(input);
+}
+
+function findConditionalEnd(
+  input: string,
+  contentStart: number,
+): { elseStart: number | null; elseEnd: number | null; endStart: number; endEnd: number } | null {
+  const tagRe = /\{\{\s*(#if\b[\s\S]*?|else|\/if)\s*\}\}/gi;
+  tagRe.lastIndex = contentStart;
+  let depth = 1;
+  let elseStart: number | null = null;
+  let elseEnd: number | null = null;
+  let match: RegExpExecArray | null;
+
+  while ((match = tagRe.exec(input)) !== null) {
+    const body = (match[1] ?? "").trim().toLowerCase();
+    if (body.startsWith("#if")) {
+      depth += 1;
+      continue;
+    }
+    if (body === "/if") {
+      depth -= 1;
+      if (depth === 0) {
+        return { elseStart, elseEnd, endStart: match.index, endEnd: tagRe.lastIndex };
+      }
+      continue;
+    }
+    if (body === "else" && depth === 1 && elseStart === null) {
+      elseStart = match.index;
+      elseEnd = tagRe.lastIndex;
+    }
+  }
+
+  return null;
+}
+
+function resolveConditionalBlocks(input: string, ctx: MacroContext, options: ResolveMacroOptions): string {
+  let result = "";
+  let index = 0;
+
+  while (index < input.length) {
+    const startMatch = findConditionalStart(input, index);
+    if (!startMatch) {
+      result += input.slice(index);
+      break;
+    }
+
+    const blockStart = startMatch.index;
+    const condition = (startMatch[1] ?? "").trim();
+    const contentStart = startMatch.index + startMatch[0].length;
+    const blockEnd = findConditionalEnd(input, contentStart);
+    if (!blockEnd) {
+      result += input.slice(index);
+      break;
+    }
+
+    const truthy = input.slice(contentStart, blockEnd.elseStart ?? blockEnd.endStart);
+    const falsy =
+      blockEnd.elseStart === null ? "" : input.slice(blockEnd.elseEnd ?? blockEnd.endStart, blockEnd.endStart);
+
+    result += input.slice(index, blockStart);
+    if (options.deferCharacterMacros && conditionDependsOnCharacter(condition)) {
+      result += encodeDeferredConditional({ condition, truthy, falsy });
+    } else {
+      const selected = evaluateCondition(condition, ctx) ? truthy : falsy;
+      result += resolveConditionalBlocks(selected, ctx, options);
+    }
+    index = blockEnd.endEnd;
   }
 
   return result;
@@ -455,6 +749,7 @@ function pickWeightedRandomChoice(choices: string[]): string {
  *  - {{banned "text"}} — content filter (removed for now)
  *  - {{uppercase}}...{{/uppercase}} — convert to uppercase
  *  - {{lowercase}}...{{/lowercase}} — convert to lowercase
+ *  - {{#if char == "Name"}}...{{else}}...{{/if}} — conditional block
  */
 export function resolveMacros(template: string, ctx: MacroContext, options: ResolveMacroOptions = {}): string {
   let result = template;
@@ -465,6 +760,7 @@ export function resolveMacros(template: string, ctx: MacroContext, options: Reso
     ctx.personaFields?.appearance,
     ctx.personaFields?.scenario,
   ]
+    .map((part) => (typeof part === "string" ? stripMacroComments(part) : part))
     .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
     .join("\n");
   const deferCharacterMacros = options.deferCharacterMacros;
@@ -473,18 +769,21 @@ export function resolveMacros(template: string, ctx: MacroContext, options: Reso
       return DEFERRED_CHARACTER_MACRO_TOKENS[field];
     }
     if (field === "char") return ctx.char;
-    return ctx.characterFields?.[field] ?? "";
+    return stripMacroComments(ctx.characterFields?.[field] ?? "");
   };
 
   // ── Comments — strip first so they don't interfere ──
-  result = result.replace(/\{\{\/\/[^}]*\}\}/g, "");
+  result = stripMacroComments(result);
 
   // ── Multi-character bracket blocks — expand before global substitutions ──
   result = expandBracketedCharacterBlocks(result, ctx);
 
+  // ── Conditional blocks — choose a branch before resolving branch-local macros. ──
+  result = resolveConditionalBlocks(result, ctx, options);
+
   // ── No-op & banned ──
   result = result.replace(/\{\{noop\}\}/gi, "");
-  result = result.replace(/\{\{banned\s+"[^"]*"\}\}/gi, "");
+  result = replaceBalancedMacros(result, (body) => (/^banned(?:\s+[\s\S]*)?$/i.test(body.trim()) ? "" : undefined));
 
   // ── Static substitutions ──
   result = result.replace(/\{\{user(?:Name)?\}\}/gi, ctx.user);

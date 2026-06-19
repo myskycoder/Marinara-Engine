@@ -4,10 +4,20 @@
 import {
   APP_LANGUAGE_OPTIONS,
   TRACKER_DATA_PANEL_SECTIONS,
+  TRACKER_PANEL_DEFAULT_BACKGROUND_COLOR,
+  DEFAULT_ROLEPLAY_BACKGROUND_URL,
   useUIStore,
+  getDefaultAppAccentColor,
+  getDefaultChatChromeTextColor,
+  getDefaultChatTextColor,
+  getTrackerPanelWidthForProfile,
+  type ConversationMessageStyle,
   type GameDialogueDisplayMode,
   type RoleplayAvatarStyle,
   type TrackerDataPanelSection,
+  type TrackerPanelSizeProfile,
+  type TrackerTemperatureUnit,
+  type TrackerThoughtBubbleDisplay,
   type VisualTheme,
 } from "../../stores/ui.store";
 import { cn } from "../../lib/utils";
@@ -22,10 +32,25 @@ import { showConfirmDialog } from "../../lib/app-dialogs";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ADMIN_SECRET_STORAGE_KEY, ApiError, api, getAdminSecretHeader } from "../../lib/api-client";
 import { chatBackgroundUrlToMetadata } from "../../lib/backgrounds";
+import { normalizeThemeCss } from "../../lib/theme-css";
 import { forceRefreshSpa } from "@/lib/browser-runtime";
-import React, { useRef, useState, useCallback, useEffect } from "react";
+import React, { useRef, useState, useCallback, useEffect, useMemo } from "react";
 import { toast } from "sonner";
-import { APP_VERSION, type Theme } from "@marinara-engine/shared";
+import {
+  APP_VERSION,
+  DEFAULT_IMAGE_STYLE_PROFILES,
+  compileImagePrompt,
+  normalizeImageStyleProfileSettings,
+  createFolderEntry,
+  getFolderImportEntries,
+  getFolderManifestConfig,
+  type ImagePromptKind,
+  type ImagePromptMode,
+  type ImageStyleProfile,
+  type ImageStyleProfileSettings,
+  type QuoteFormat,
+  type Theme,
+} from "@marinara-engine/shared";
 import {
   findDuplicateTheme,
   useCreateTheme,
@@ -44,6 +69,8 @@ import {
   Check,
   ChevronDown,
   Loader2,
+  Search,
+  Star,
   Palette,
   Puzzle,
   CloudRain,
@@ -61,7 +88,9 @@ import {
   Eye,
   EyeOff,
   Download,
+  Dock,
   FolderOpen,
+  MessageCircle,
   RefreshCw,
   RotateCcw,
   ExternalLink,
@@ -74,11 +103,17 @@ import { useChatStore } from "../../stores/chat.store";
 import { useGameAssetStore } from "../../stores/game-asset.store";
 import { chatKeys } from "../../hooks/use-chats";
 import { HelpTooltip } from "../ui/HelpTooltip";
+import { ColorPicker } from "../ui/ColorPicker";
 import { TrackerPanelIcon } from "../ui/TrackerPanelIcon";
-import { ConversationSoundSetting, ToggleSetting } from "./settings/SettingControls";
+import { TrackerSizeTierIcon } from "../ui/TrackerSizeTierIcon";
+import { ImageUploadDropzone } from "../ui/ImageUploadDropzone";
+import { ConversationSoundSetting, SettingsIntro, SettingsSection, ToggleSetting } from "./settings/SettingControls";
+import { TrackerCardColorSettings } from "./settings/TrackerCardColorSettings";
+import { PromptOverridesEditor } from "./settings/PromptOverridesEditor";
 import { DraftNumberInput } from "../ui/DraftNumberInput";
 import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatDialog";
 import { inspectCharacterFilesForEmbeddedLorebooks } from "../../lib/character-import";
+import { downloadJsonFile, sanitizeExportFilenamePart } from "../../lib/download-json";
 
 type CustomFontFace = {
   filename: string;
@@ -106,6 +141,34 @@ const SETTINGS_COMPONENTS: Record<(typeof TABS)[number]["id"], React.FC> = {
   import: React.memo(ImportSettings),
   advanced: React.memo(AdvancedSettings),
 };
+
+type SettingsArtPreviewSize = { width: number; height: number };
+
+const SETTINGS_ART_PREVIEW_FRAME = {
+  width: 6,
+  height: 4,
+  gap: 0.75,
+} as const;
+
+function fitSettingsArtPreviewSizes(sizes: SettingsArtPreviewSize[]): SettingsArtPreviewSize[] {
+  const visibleSizes = sizes.filter((size) => size.width > 0 && size.height > 0);
+  if (!visibleSizes.length) return sizes;
+
+  const totalWidth =
+    visibleSizes.reduce((sum, size) => sum + size.width, 0) +
+    SETTINGS_ART_PREVIEW_FRAME.gap * Math.max(0, visibleSizes.length - 1);
+  const maxHeight = Math.max(...visibleSizes.map((size) => size.height));
+  const fit = Math.min(1, SETTINGS_ART_PREVIEW_FRAME.width / totalWidth, SETTINGS_ART_PREVIEW_FRAME.height / maxHeight);
+
+  return sizes.map((size) => ({
+    width: size.width * fit,
+    height: size.height * fit,
+  }));
+}
+
+function toPreviewRem(value: number) {
+  return `${Number(value.toFixed(3))}rem`;
+}
 
 const EXPUNGE_SCOPE_OPTIONS: Array<{ id: ExpungeScope; label: string; description: string }> = [
   {
@@ -153,6 +216,11 @@ async function readSettingsResponseError(res: Response, fallback: string) {
 
 const ROLEPLAY_AVATAR_STYLE_OPTIONS: Array<{ id: RoleplayAvatarStyle; label: string; desc: string }> = [
   {
+    id: "none",
+    label: "None",
+    desc: "Hide message avatars and let roleplay bubbles use the full row.",
+  },
+  {
     id: "circles",
     label: "Small Circles",
     desc: "Compact portrait bubbles beside each roleplay message.",
@@ -182,6 +250,45 @@ const GAME_DIALOGUE_DISPLAY_OPTIONS: Array<{ id: GameDialogueDisplayMode; label:
   },
 ];
 
+const TRACKER_THOUGHT_BUBBLE_DISPLAY_OPTIONS: Array<{
+  id: TrackerThoughtBubbleDisplay;
+  label: string;
+  desc: string;
+}> = [
+  {
+    id: "inline",
+    label: "Docked",
+    desc: "Thoughts open inside the character card for a stable panel shape.",
+  },
+  {
+    id: "floating",
+    label: "Floating",
+    desc: "Thoughts open as a bubble beside the portrait.",
+  },
+];
+
+const TRACKER_PANEL_SIZE_PROFILE_OPTIONS: Array<{
+  id: TrackerPanelSizeProfile;
+  label: string;
+  desc: string;
+}> = [
+  {
+    id: "compact",
+    label: "Compact",
+    desc: "A narrow reference rail for quick stats and one-column cards.",
+  },
+  {
+    id: "standard",
+    label: "Standard",
+    desc: "Balanced tracker cards with room for editing and thoughts.",
+  },
+  {
+    id: "expanded",
+    label: "Expanded",
+    desc: "A roomier board for featured cards, portraits, and full thoughts.",
+  },
+];
+
 const TRACKER_PANEL_CARD_OPTIONS: Record<TrackerDataPanelSection, { label: string; desc: string }> = {
   world: {
     label: "World State",
@@ -204,6 +311,11 @@ const TRACKER_PANEL_CARD_OPTIONS: Record<TrackerDataPanelSection, { label: strin
     desc: "Extra tracker fields from custom tracker agents.",
   },
 };
+
+const QUOTE_FORMAT_OPTIONS: Array<{ id: QuoteFormat; label: string; sample: string }> = [
+  { id: "straight", label: "Straight", sample: '"Hello", it\'s me.' },
+  { id: "typographic", label: "Typographic", sample: "\u201cHello,\u201d it\u2019s me." },
+];
 
 const GAME_ASSET_CATEGORIES = [
   {
@@ -238,11 +350,27 @@ const GAME_ASSET_CATEGORIES = [
   },
 ] as const;
 
+const GAME_IMAGE_PROMPT_TEMPLATE_KEYS = ["game.npcPortrait", "game.background", "game.sceneIllustration"] as const;
+
 type GameAssetCategoryId = (typeof GAME_ASSET_CATEGORIES)[number]["id"];
 const GAME_ASSET_CATEGORY_BY_ID = new Map(GAME_ASSET_CATEGORIES.map((category) => [category.id, category]));
 
 // Module-level set survives component remounts (e.g. mobile AnimatePresence unmount/remount)
 const mountedSettingsTabs = new Set<string>();
+const IMAGE_STYLE_SUBJECT_KINDS: ImagePromptKind[] = [
+  "avatar",
+  "portrait",
+  "selfie",
+  "background",
+  "illustration",
+  "sprite",
+];
+const IMAGE_PROMPT_MODE_OPTIONS: Array<{ value: ImagePromptMode; label: string }> = [
+  { value: "hybrid", label: "Hybrid" },
+  { value: "danbooru", label: "Danbooru tags" },
+  { value: "tagged", label: "Tags" },
+  { value: "natural", label: "Natural language" },
+];
 
 function ImageDimensionRow({
   label,
@@ -271,6 +399,7 @@ function ImageDimensionRow({
           value={width}
           min={64}
           max={4096}
+          commitOnValidChange
           onCommit={(nextWidth) => onCommit(nextWidth, height)}
           className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2 py-1 text-xs"
         />
@@ -279,10 +408,311 @@ function ImageDimensionRow({
           value={height}
           min={64}
           max={4096}
+          commitOnValidChange
           onCommit={(nextHeight) => onCommit(width, nextHeight)}
           className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2 py-1 text-xs"
         />
       </div>
+    </div>
+  );
+}
+
+function ImageStyleProfilesEditor({
+  value,
+  onChange,
+}: {
+  value: ImageStyleProfileSettings;
+  onChange: (settings: ImageStyleProfileSettings) => void;
+}) {
+  const settings = normalizeImageStyleProfileSettings(value);
+  const [selectedId, setSelectedId] = useState(settings.defaultProfileId);
+  const [previewKind, setPreviewKind] = useState<ImagePromptKind>("portrait");
+  const [previewPrompt, setPreviewPrompt] = useState(
+    "Create a portrait of Mira, anime style, best quality, high quality, detailed eyes. Avoid blurry, text, watermark. no extra fingers",
+  );
+  const selected = settings.profiles.find((profile) => profile.id === selectedId) ?? settings.profiles[0]!;
+  const preview = useMemo(
+    () =>
+      compileImagePrompt({
+        kind: previewKind,
+        prompt: previewPrompt,
+        styleProfiles: { ...settings, defaultProfileId: selected.id },
+        styleProfileId: selected.id,
+      }),
+    [previewKind, previewPrompt, selected.id, settings],
+  );
+  const cleanupCount =
+    preview.diagnostics.removedPositiveDuplicates.length +
+    preview.diagnostics.removedNegativeDuplicates.length +
+    preview.diagnostics.movedNegativeFragments.length;
+
+  useEffect(() => {
+    if (!settings.profiles.some((profile) => profile.id === selectedId)) {
+      setSelectedId(settings.defaultProfileId);
+    }
+  }, [selectedId, settings.defaultProfileId, settings.profiles]);
+
+  const commit = useCallback(
+    (next: ImageStyleProfileSettings) => {
+      onChange(normalizeImageStyleProfileSettings(next));
+    },
+    [onChange],
+  );
+
+  const updateSelected = useCallback(
+    (patch: Partial<ImageStyleProfile>) => {
+      commit({
+        ...settings,
+        profiles: settings.profiles.map((profile) =>
+          profile.id === selected.id ? { ...profile, ...patch, id: selected.id } : profile,
+        ),
+      });
+    },
+    [commit, selected.id, settings],
+  );
+
+  const updateSubjectTags = useCallback(
+    (kind: ImagePromptKind, tags: string) => {
+      updateSelected({ subjectTags: { ...selected.subjectTags, [kind]: tags } });
+    },
+    [selected.subjectTags, updateSelected],
+  );
+
+  const cloneSelected = useCallback(() => {
+    let suffix = 1;
+    let id = `${selected.id}-custom`;
+    while (settings.profiles.some((profile) => profile.id === id)) {
+      suffix += 1;
+      id = `${selected.id}-custom-${suffix}`;
+    }
+    const clone = { ...selected, id, name: `${selected.name} Custom`, builtIn: false };
+    commit({ ...settings, profiles: [...settings.profiles, clone], defaultProfileId: id });
+    setSelectedId(id);
+  }, [commit, selected, settings]);
+
+  const resetSelected = useCallback(() => {
+    const builtIn = DEFAULT_IMAGE_STYLE_PROFILES.find((profile) => profile.id === selected.id);
+    if (!builtIn) return;
+    commit({
+      ...settings,
+      profiles: settings.profiles.map((profile) => (profile.id === selected.id ? { ...builtIn } : profile)),
+    });
+  }, [commit, selected.id, settings]);
+
+  const deleteSelected = useCallback(() => {
+    if (selected.builtIn || settings.profiles.length <= 1) return;
+    const profiles = settings.profiles.filter((profile) => profile.id !== selected.id);
+    const defaultProfileId = settings.defaultProfileId === selected.id ? profiles[0]!.id : settings.defaultProfileId;
+    commit({ profiles, defaultProfileId });
+    setSelectedId(defaultProfileId);
+  }, [commit, selected.builtIn, selected.id, settings]);
+
+  const setDefaultProfileId = useCallback(
+    (defaultProfileId: string) => {
+      commit({ ...settings, defaultProfileId });
+    },
+    [commit, settings],
+  );
+
+  return (
+    <div className="rounded-lg bg-[var(--background)]/55 p-3 ring-1 ring-[var(--border)]">
+      <div className="space-y-3">
+        <div className="grid gap-2">
+          <label className="min-w-0">
+            <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+              Default style
+            </span>
+            <select
+              value={settings.defaultProfileId}
+              onChange={(event) => setDefaultProfileId(event.target.value)}
+              className="h-9 w-full rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2.5 text-xs"
+            >
+              {settings.profiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="min-w-0">
+            <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">Editing</span>
+            <select
+              value={selected.id}
+              onChange={(event) => setSelectedId(event.target.value)}
+              className="h-9 w-full rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2.5 text-xs"
+            >
+              {settings.profiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div className="flex flex-wrap gap-1.5">
+          <button
+            type="button"
+            onClick={cloneSelected}
+            className="inline-flex h-8 items-center gap-1 rounded-md bg-[var(--secondary)] px-2.5 text-xs ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)]"
+          >
+            <Plus size="0.75rem" />
+            Clone
+          </button>
+          <button
+            type="button"
+            onClick={resetSelected}
+            disabled={!selected.builtIn}
+            className="inline-flex h-8 items-center gap-1 rounded-md bg-[var(--secondary)] px-2.5 text-xs ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            <RotateCcw size="0.75rem" />
+            Reset
+          </button>
+          <button
+            type="button"
+            onClick={deleteSelected}
+            disabled={selected.builtIn || settings.profiles.length <= 1}
+            className="inline-flex h-8 items-center gap-1 rounded-md bg-[var(--secondary)] px-2.5 text-xs text-[var(--destructive)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            <Trash2 size="0.75rem" />
+            Delete
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3">
+        <label className="min-w-0">
+          <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">Name</span>
+          <input
+            value={selected.name}
+            onChange={(event) => updateSelected({ name: event.target.value })}
+            className="h-9 w-full rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2.5 text-xs"
+          />
+        </label>
+        <label className="min-w-0">
+          <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">Prompt grammar</span>
+          <select
+            value={selected.promptMode}
+            onChange={(event) => updateSelected({ promptMode: event.target.value as ImagePromptMode })}
+            className="h-9 w-full rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2.5 text-xs"
+          >
+            {IMAGE_PROMPT_MODE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <label className="mt-3 block">
+        <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">Style text</span>
+        <textarea
+          value={selected.styleText}
+          onChange={(event) => updateSelected({ styleText: event.target.value })}
+          className="min-h-20 w-full resize-y rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-2 text-xs leading-relaxed"
+        />
+      </label>
+
+      <div className="mt-3 grid gap-3">
+        <label className="block">
+          <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">Positive tags</span>
+          <textarea
+            value={selected.positiveTags}
+            onChange={(event) => updateSelected({ positiveTags: event.target.value })}
+            className="min-h-24 w-full resize-y rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-2 text-xs leading-relaxed"
+          />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">Negative tags</span>
+          <textarea
+            value={selected.negativeTags}
+            onChange={(event) => updateSelected({ negativeTags: event.target.value })}
+            className="min-h-24 w-full resize-y rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-2 text-xs leading-relaxed"
+          />
+        </label>
+      </div>
+
+      <details className="mt-3 rounded-md bg-[var(--secondary)]/55 p-2.5 ring-1 ring-[var(--border)]">
+        <summary className="cursor-pointer text-xs font-medium text-[var(--foreground)]">Per-image tags</summary>
+        <div className="mt-2 grid gap-2">
+          {IMAGE_STYLE_SUBJECT_KINDS.map((kind) => (
+            <label key={kind} className="block">
+              <span className="mb-1 block text-[0.625rem] font-medium capitalize text-[var(--muted-foreground)]">
+                {kind}
+              </span>
+              <textarea
+                value={selected.subjectTags[kind] ?? ""}
+                onChange={(event) => updateSubjectTags(kind, event.target.value)}
+                className="min-h-14 w-full resize-y rounded-md border border-[var(--border)] bg-[var(--background)] px-2.5 py-2 text-xs leading-relaxed"
+              />
+            </label>
+          ))}
+        </div>
+      </details>
+
+      <details className="mt-2 rounded-md bg-[var(--secondary)]/55 p-2 ring-1 ring-[var(--border)]" open>
+        <summary className="cursor-pointer text-xs font-medium text-[var(--foreground)]">Test bench</summary>
+        <div className="mt-2 grid gap-2 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+          <div className="space-y-2">
+            <label className="block">
+              <span className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">Image kind</span>
+              <select
+                value={previewKind}
+                onChange={(event) => setPreviewKind(event.target.value as ImagePromptKind)}
+                className="w-full rounded-md border border-[var(--border)] bg-[var(--background)] px-2 py-1.5 text-xs"
+              >
+                {IMAGE_STYLE_SUBJECT_KINDS.map((kind) => (
+                  <option key={kind} value={kind}>
+                    {kind}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                Sample input
+              </span>
+              <textarea
+                value={previewPrompt}
+                onChange={(event) => setPreviewPrompt(event.target.value)}
+                className="min-h-32 w-full resize-y rounded-md border border-[var(--border)] bg-[var(--background)] px-2 py-1.5 font-mono text-xs"
+                spellCheck={false}
+              />
+            </label>
+            <div className="text-[0.625rem] text-[var(--muted-foreground)]">
+              {cleanupCount > 0
+                ? `${cleanupCount} duplicate or misplaced fragment${cleanupCount === 1 ? "" : "s"} cleaned.`
+                : "No cleanup needed for this sample."}
+            </div>
+          </div>
+          <div className="grid gap-2">
+            <label className="block">
+              <span className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                Final positive prompt
+              </span>
+              <textarea
+                value={preview.prompt}
+                readOnly
+                className="min-h-32 w-full resize-y rounded-md border border-[var(--border)] bg-[var(--background)] px-2 py-1.5 font-mono text-xs"
+                spellCheck={false}
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                Final negative prompt
+              </span>
+              <textarea
+                value={preview.negativePrompt}
+                readOnly
+                className="min-h-20 w-full resize-y rounded-md border border-[var(--border)] bg-[var(--background)] px-2 py-1.5 font-mono text-xs"
+                spellCheck={false}
+              />
+            </label>
+          </div>
+        </div>
+      </details>
     </div>
   );
 }
@@ -295,6 +725,8 @@ function TrackerPanelCardOrderSetting() {
     ...TRACKER_DATA_PANEL_SECTIONS.filter((section) => !trackerPanelSectionOrder.includes(section)),
   ];
   const isDefaultOrder = orderedSections.every((section, index) => section === TRACKER_DATA_PANEL_SECTIONS[index]);
+  const [orderOpen, setOrderOpen] = useState(!isDefaultOrder);
+  const orderId = React.useId();
 
   const moveCard = (section: TrackerDataPanelSection, direction: -1 | 1) => {
     const index = orderedSections.indexOf(section);
@@ -309,10 +741,23 @@ function TrackerPanelCardOrderSetting() {
   return (
     <div className="mt-1.5 flex flex-col gap-1.5 rounded-lg bg-[var(--background)]/36 p-1.5 ring-1 ring-[var(--border)]">
       <div className="flex min-h-5 items-center justify-between gap-2 px-0.5">
-        <span className="inline-flex min-w-0 items-center gap-1 text-[0.625rem] font-medium text-[var(--foreground)]">
-          Card order
-          <HelpTooltip text="Controls the top-to-bottom order of tracker cards when their matching tracker agents are enabled for a chat." />
-        </span>
+        <button
+          type="button"
+          onClick={() => setOrderOpen((open) => !open)}
+          aria-expanded={orderOpen}
+          aria-controls={orderId}
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm text-left text-[0.625rem] font-medium text-[var(--foreground)] transition-colors hover:text-[var(--primary)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--primary)]"
+        >
+          <ChevronDown
+            size="0.6875rem"
+            className={cn("shrink-0 text-[var(--muted-foreground)] transition-transform", !orderOpen && "-rotate-90")}
+          />
+          <span className="truncate">Card order</span>
+          <span className="shrink-0 rounded-full bg-[var(--secondary)] px-1.5 py-0.5 text-[0.5625rem] font-normal text-[var(--muted-foreground)]">
+            {isDefaultOrder ? "Default" : "Custom"}
+          </span>
+        </button>
+        <HelpTooltip text="Controls the top-to-bottom order of tracker cards when their matching tracker agents are enabled for a chat." />
         <button
           type="button"
           onClick={() => setTrackerPanelSectionOrder([...TRACKER_DATA_PANEL_SECTIONS])}
@@ -324,47 +769,303 @@ function TrackerPanelCardOrderSetting() {
           <RotateCcw size="0.6875rem" />
         </button>
       </div>
-      <div className="grid gap-0.5">
-        {orderedSections.map((section, index) => {
-          const option = TRACKER_PANEL_CARD_OPTIONS[section];
-          return (
-            <div
-              key={section}
-              className="grid min-h-7 min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5 rounded-sm bg-[var(--secondary)]/42 px-1.5 py-1 ring-1 ring-[var(--border)]/60"
-              title={option.desc}
-            >
-              <div className="min-w-0">
-                <div className="truncate text-[0.6875rem] font-medium leading-4 text-[var(--foreground)]">
-                  {option.label}
+      {orderOpen && (
+        <div id={orderId} className="grid gap-0.5">
+          {orderedSections.map((section, index) => {
+            const option = TRACKER_PANEL_CARD_OPTIONS[section];
+            return (
+              <div
+                key={section}
+                className="grid min-h-7 min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5 rounded-sm bg-[var(--secondary)]/42 px-1.5 py-1 ring-1 ring-[var(--border)]/60"
+                title={option.desc}
+              >
+                <div className="min-w-0">
+                  <div className="truncate text-[0.6875rem] font-medium leading-4 text-[var(--foreground)]">
+                    {option.label}
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-0.5">
+                  <button
+                    type="button"
+                    onClick={() => moveCard(section, -1)}
+                    disabled={index === 0}
+                    title={`Move ${option.label} up`}
+                    aria-label={`Move ${option.label} up`}
+                    className="flex h-5 w-5 items-center justify-center rounded-sm text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--background)] hover:text-[var(--primary)] active:scale-95 disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--muted-foreground)]"
+                  >
+                    <ArrowUp size="0.6875rem" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveCard(section, 1)}
+                    disabled={index === orderedSections.length - 1}
+                    title={`Move ${option.label} down`}
+                    aria-label={`Move ${option.label} down`}
+                    className="flex h-5 w-5 items-center justify-center rounded-sm text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--background)] hover:text-[var(--primary)] active:scale-95 disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--muted-foreground)]"
+                  >
+                    <ArrowDown size="0.6875rem" />
+                  </button>
                 </div>
               </div>
-              <div className="flex shrink-0 items-center gap-0.5">
-                <button
-                  type="button"
-                  onClick={() => moveCard(section, -1)}
-                  disabled={index === 0}
-                  title={`Move ${option.label} up`}
-                  aria-label={`Move ${option.label} up`}
-                  className="flex h-5 w-5 items-center justify-center rounded-sm text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--background)] hover:text-[var(--primary)] active:scale-95 disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--muted-foreground)]"
-                >
-                  <ArrowUp size="0.6875rem" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => moveCard(section, 1)}
-                  disabled={index === orderedSections.length - 1}
-                  title={`Move ${option.label} down`}
-                  aria-label={`Move ${option.label} down`}
-                  className="flex h-5 w-5 items-center justify-center rounded-sm text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--background)] hover:text-[var(--primary)] active:scale-95 disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--muted-foreground)]"
-                >
-                  <ArrowDown size="0.6875rem" />
-                </button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
     </div>
+  );
+}
+
+function TrackerPanelAppearanceDrawer({
+  trackerPanelEnabled,
+  setTrackerPanelEnabled,
+  trackerPanelHideHudWidgets,
+  setTrackerPanelHideHudWidgets,
+  trackerPanelUseExpressionSprites,
+  setTrackerPanelUseExpressionSprites,
+  trackerPanelThoughtBubbleDisplay,
+  setTrackerPanelThoughtBubbleDisplay,
+  trackerPanelDockedThoughtsAlwaysVisible,
+  setTrackerPanelDockedThoughtsAlwaysVisible,
+  trackerPanelSizeProfile,
+  setTrackerPanelSizeProfile,
+  trackerPanelBackgroundColor,
+  setTrackerPanelBackgroundColor,
+  trackerTemperatureUnit,
+  setTrackerTemperatureUnit,
+}: {
+  trackerPanelEnabled: boolean;
+  setTrackerPanelEnabled: (enabled: boolean) => void;
+  trackerPanelHideHudWidgets: boolean;
+  setTrackerPanelHideHudWidgets: (hidden: boolean) => void;
+  trackerPanelUseExpressionSprites: boolean;
+  setTrackerPanelUseExpressionSprites: (enabled: boolean) => void;
+  trackerPanelThoughtBubbleDisplay: TrackerThoughtBubbleDisplay;
+  setTrackerPanelThoughtBubbleDisplay: (display: TrackerThoughtBubbleDisplay) => void;
+  trackerPanelDockedThoughtsAlwaysVisible: boolean;
+  setTrackerPanelDockedThoughtsAlwaysVisible: (visible: boolean) => void;
+  trackerPanelSizeProfile: TrackerPanelSizeProfile;
+  setTrackerPanelSizeProfile: (profile: TrackerPanelSizeProfile) => void;
+  trackerPanelBackgroundColor: string;
+  setTrackerPanelBackgroundColor: (color: string) => void;
+  trackerTemperatureUnit: TrackerTemperatureUnit;
+  setTrackerTemperatureUnit: (unit: TrackerTemperatureUnit) => void;
+}) {
+  const [drawerOpen, setDrawerOpen] = useState(true);
+  const drawerId = React.useId();
+
+  const toggleTrackerPanel = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    setTrackerPanelEnabled(!trackerPanelEnabled);
+    if (!trackerPanelEnabled) setDrawerOpen(true);
+  };
+
+  return (
+    <section className="overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--background)]/34 shadow-[inset_0_1px_0_color-mix(in_srgb,var(--foreground)_8%,transparent)]">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 px-3 py-2.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[var(--secondary)]/70 text-[var(--primary)] ring-1 ring-[var(--border)]">
+            <TrackerPanelIcon size="0.9rem" strokeWidth={1.95} />
+          </span>
+          <span className="min-w-0">
+            <span className="inline-flex items-center gap-1 text-xs font-semibold text-[var(--foreground)]">
+              Tracker Panel
+              <HelpTooltip text="Controls the Roleplay HUD side panel for the fixed tracker board." />
+            </span>
+            <span className="block truncate text-[0.625rem] text-[var(--muted-foreground)]">
+              {trackerPanelEnabled ? "Shown in the Roleplay HUD" : "Hidden from the Roleplay HUD"}
+            </span>
+          </span>
+        </div>
+
+        <button
+          type="button"
+          role="switch"
+          aria-checked={trackerPanelEnabled}
+          aria-label={trackerPanelEnabled ? "Disable Tracker Panel" : "Enable Tracker Panel"}
+          onClick={toggleTrackerPanel}
+          className={cn(
+            "inline-flex h-6 w-11 shrink-0 items-center rounded-full p-0.5 ring-1 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]",
+            trackerPanelEnabled
+              ? "bg-[var(--primary)]/80 ring-[var(--primary)]/45"
+              : "bg-[var(--secondary)] ring-[var(--border)]",
+          )}
+        >
+          <span
+            className={cn(
+              "h-5 w-5 rounded-full bg-[var(--background)] shadow-sm transition-transform",
+              trackerPanelEnabled ? "translate-x-5" : "translate-x-0",
+            )}
+          />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setDrawerOpen((open) => !open)}
+          aria-expanded={drawerOpen}
+          aria-controls={drawerId}
+          aria-label={drawerOpen ? "Collapse Tracker Panel settings" : "Expand Tracker Panel settings"}
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-all hover:bg-[var(--secondary)] hover:text-[var(--foreground)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--primary)] active:scale-95"
+        >
+          <ChevronDown
+            size="0.875rem"
+            className={cn("transition-transform duration-200", drawerOpen ? "rotate-180" : "rotate-0")}
+          />
+        </button>
+      </div>
+
+      {drawerOpen && (
+        <fieldset
+          id={drawerId}
+          disabled={!trackerPanelEnabled}
+          className={cn(
+            "border-t border-[var(--border)] px-3 pb-3 pt-2 transition-opacity",
+            trackerPanelEnabled ? "" : "opacity-45",
+          )}
+        >
+          <ToggleSetting
+            label="Replace tracker HUD icons"
+            checked={trackerPanelHideHudWidgets}
+            onChange={setTrackerPanelHideHudWidgets}
+            help="Hides the old world/player tracker icon strip so the Tracker panel can dock to the edge. The Agents button stays visible."
+          />
+          <ToggleSetting
+            label="Use expression sprites for tracker portraits"
+            checked={trackerPanelUseExpressionSprites}
+            onChange={setTrackerPanelUseExpressionSprites}
+            help="When on, tracker portraits can switch to Expression Engine sprites if that agent is enabled for the chat and the character has matching sprite images."
+          />
+          <div className="mt-2">
+            <ColorPicker
+              value={trackerPanelBackgroundColor}
+              onChange={setTrackerPanelBackgroundColor}
+              gradient
+              compact
+              label="Panel background"
+              helpText="Pick the Tracker panel and tracker section background. CSS colors and gradients are accepted."
+              emptyText={`Default ${TRACKER_PANEL_DEFAULT_BACKGROUND_COLOR}`}
+              clearLabel="Reset"
+            />
+          </div>
+          <div className="mt-2 grid gap-1.5">
+            <span className="inline-flex items-center gap-1 text-[0.6875rem] font-medium">
+              Desktop size
+              <HelpTooltip text="Choose the designed desktop width for the Tracker panel. Compact favors quick scanning, Standard balances density, and Expanded gives character cards more room." />
+            </span>
+            <div className="grid grid-cols-3 gap-0.5 rounded-lg border border-[var(--border)] bg-[var(--secondary)]/45 p-0.5">
+              {TRACKER_PANEL_SIZE_PROFILE_OPTIONS.map((opt) => {
+                const selected = trackerPanelSizeProfile === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setTrackerPanelSizeProfile(opt.id)}
+                    aria-pressed={selected}
+                    title={`${opt.label}: ${getTrackerPanelWidthForProfile(opt.id)}px. ${opt.desc}`}
+                    className={cn(
+                      "flex min-h-8 min-w-0 items-center justify-center rounded-md px-1.5 text-[0.6875rem] transition-all disabled:cursor-not-allowed",
+                      selected
+                        ? "bg-[var(--primary)]/12 text-[var(--foreground)] ring-1 ring-[var(--primary)]/45"
+                        : "text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]",
+                    )}
+                  >
+                    <span className="inline-flex items-center gap-1 font-semibold">
+                      <span className={cn("inline-flex", selected && "text-[var(--primary)]")}>
+                        <TrackerSizeTierIcon sizeProfile={opt.id} />
+                      </span>
+                      {opt.label}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div className="mt-2 grid gap-1.5">
+            <span className="inline-flex items-center gap-1 text-[0.6875rem] font-medium">
+              Thought display mode
+              <HelpTooltip text="Choose whether featured character thoughts open inside the tracker card or float beside the portrait. This no longer changes automatically when the panel width changes." />
+            </span>
+            <div className="grid grid-cols-2 gap-0.5 rounded-lg border border-[var(--border)] bg-[var(--secondary)]/45 p-0.5">
+              {TRACKER_THOUGHT_BUBBLE_DISPLAY_OPTIONS.map((opt) => {
+                const selected = trackerPanelThoughtBubbleDisplay === opt.id;
+                const Icon = opt.id === "inline" ? Dock : MessageCircle;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setTrackerPanelThoughtBubbleDisplay(opt.id)}
+                    aria-pressed={selected}
+                    title={opt.desc}
+                    className={cn(
+                      "flex min-h-8 min-w-0 items-center justify-center gap-1.5 rounded-md px-2 text-[0.6875rem] transition-all disabled:cursor-not-allowed",
+                      selected
+                        ? "bg-[var(--primary)]/12 text-[var(--foreground)] ring-1 ring-[var(--primary)]/45"
+                        : "text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]",
+                    )}
+                  >
+                    <span className="inline-flex items-center gap-1.5 font-semibold">
+                      <Icon size="0.75rem" className={selected ? "text-[var(--primary)]" : ""} />
+                      {opt.label}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <ToggleSetting
+            label="Always show Docked thoughts"
+            checked={trackerPanelDockedThoughtsAlwaysVisible}
+            onChange={setTrackerPanelDockedThoughtsAlwaysVisible}
+            help="When Thought display mode is Docked, every featured character's thought stays visible inside the tracker card instead of waiting for the per-card thought button."
+          />
+          <div className="mt-2 flex min-h-8 items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1 text-[0.6875rem] font-medium">
+              Temperature unit
+              <HelpTooltip text="Changes Tracker Panel and roleplay HUD temperature displays without rewriting the saved world-state temperature." />
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={trackerTemperatureUnit === "fahrenheit"}
+              aria-label={`Tracker temperature unit: ${trackerTemperatureUnit === "celsius" ? "Celsius" : "Fahrenheit"}`}
+              title={
+                trackerTemperatureUnit === "celsius"
+                  ? "Showing tracker temperatures as °C. Click for °F."
+                  : "Showing tracker temperatures as °F. Click for °C."
+              }
+              onClick={() => setTrackerTemperatureUnit(trackerTemperatureUnit === "celsius" ? "fahrenheit" : "celsius")}
+              className="relative grid h-7 w-[4.75rem] shrink-0 grid-cols-2 items-center rounded-full border border-[var(--border)] bg-[var(--secondary)]/55 p-0.5 text-[0.625rem] font-semibold transition-colors hover:bg-[var(--accent)]/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--primary)]"
+            >
+              <span
+                className={cn(
+                  "absolute inset-y-0.5 left-0.5 w-[calc(50%-0.125rem)] rounded-full bg-[var(--primary)]/16 ring-1 ring-[var(--primary)]/45 transition-transform",
+                  trackerTemperatureUnit === "fahrenheit" && "translate-x-full",
+                )}
+              />
+              <span
+                className={cn(
+                  "relative z-10 text-center transition-colors",
+                  trackerTemperatureUnit === "celsius" ? "text-[var(--foreground)]" : "text-[var(--muted-foreground)]",
+                )}
+              >
+                °C
+              </span>
+              <span
+                className={cn(
+                  "relative z-10 text-center transition-colors",
+                  trackerTemperatureUnit === "fahrenheit"
+                    ? "text-[var(--foreground)]"
+                    : "text-[var(--muted-foreground)]",
+                )}
+              >
+                °F
+              </span>
+            </button>
+          </div>
+          <TrackerPanelCardOrderSetting />
+          <TrackerCardColorSettings />
+        </fieldset>
+      )}
+    </section>
   );
 }
 
@@ -375,23 +1076,22 @@ export function SettingsPanel() {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Tab bar */}
-      <div className="flex flex-shrink-0 flex-wrap border-b border-[var(--sidebar-border)]">
+      <div role="tablist" className="grid flex-shrink-0 grid-cols-2 gap-2 p-3 pb-2 md:grid-cols-3">
         {TABS.map((tab) => (
           <button
             key={tab.id}
+            type="button"
+            role="tab"
+            aria-selected={settingsTab === tab.id}
             onClick={() => setSettingsTab(tab.id)}
             className={cn(
-              "relative px-3 py-2.5 text-xs font-medium transition-colors",
+              "flex min-w-0 items-center justify-center rounded-xl border px-2 py-2.5 text-[0.6875rem] font-medium leading-tight text-[var(--foreground)] transition-all active:scale-[0.98] sm:text-xs",
               settingsTab === tab.id
-                ? "text-[var(--foreground)]"
-                : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
+                ? "border-[var(--primary)]/35 bg-[var(--accent)]"
+                : "border-[var(--border)] bg-[var(--card)] hover:border-[var(--primary)]/35 hover:bg-[var(--accent)]",
             )}
           >
-            {tab.label}
-            {settingsTab === tab.id && (
-              <span className="absolute inset-x-1 bottom-0 h-0.5 rounded-full bg-[var(--primary)]" />
-            )}
+            <span className="max-w-full text-center">{tab.label}</span>
           </button>
         ))}
       </div>
@@ -430,17 +1130,6 @@ function GeneralSettings() {
   const setGameTextSpeed = useUIStore((s) => s.setGameTextSpeed);
   const gameAutoPlayDelay = useUIStore((s) => s.gameAutoPlayDelay);
   const setGameAutoPlayDelay = useUIStore((s) => s.setGameAutoPlayDelay);
-  const reviewImagePromptsBeforeSend = useUIStore((s) => s.reviewImagePromptsBeforeSend);
-  const setReviewImagePromptsBeforeSend = useUIStore((s) => s.setReviewImagePromptsBeforeSend);
-  const imageBackgroundWidth = useUIStore((s) => s.imageBackgroundWidth);
-  const imageBackgroundHeight = useUIStore((s) => s.imageBackgroundHeight);
-  const setImageBackgroundDimensions = useUIStore((s) => s.setImageBackgroundDimensions);
-  const imagePortraitWidth = useUIStore((s) => s.imagePortraitWidth);
-  const imagePortraitHeight = useUIStore((s) => s.imagePortraitHeight);
-  const setImagePortraitDimensions = useUIStore((s) => s.setImagePortraitDimensions);
-  const imageSelfieWidth = useUIStore((s) => s.imageSelfieWidth);
-  const imageSelfieHeight = useUIStore((s) => s.imageSelfieHeight);
-  const setImageSelfieDimensions = useUIStore((s) => s.setImageSelfieDimensions);
   const enterToSendRP = useUIStore((s) => s.enterToSendRP);
   const setEnterToSendRP = useUIStore((s) => s.setEnterToSendRP);
   const enterToSendConvo = useUIStore((s) => s.enterToSendConvo);
@@ -449,24 +1138,427 @@ function GeneralSettings() {
   const setEnterToSendGame = useUIStore((s) => s.setEnterToSendGame);
   const confirmBeforeDelete = useUIStore((s) => s.confirmBeforeDelete);
   const setConfirmBeforeDelete = useUIStore((s) => s.setConfirmBeforeDelete);
+  const achievementsEnabled = useUIStore((s) => s.achievementsEnabled);
+  const setAchievementsEnabled = useUIStore((s) => s.setAchievementsEnabled);
   const messagesPerPage = useUIStore((s) => s.messagesPerPage);
   const setMessagesPerPage = useUIStore((s) => s.setMessagesPerPage);
   const boldDialogue = useUIStore((s) => s.boldDialogue);
   const setBoldDialogue = useUIStore((s) => s.setBoldDialogue);
+  const quoteFormat = useUIStore((s) => s.quoteFormat);
+  const setQuoteFormat = useUIStore((s) => s.setQuoteFormat);
   const trimIncompleteModelOutput = useUIStore((s) => s.trimIncompleteModelOutput);
   const setTrimIncompleteModelOutput = useUIStore((s) => s.setTrimIncompleteModelOutput);
   const speechToTextEnabled = useUIStore((s) => s.speechToTextEnabled);
   const setSpeechToTextEnabled = useUIStore((s) => s.setSpeechToTextEnabled);
   const chibiProfessorMariEnabled = useUIStore((s) => s.chibiProfessorMariEnabled);
   const setChibiProfessorMariEnabled = useUIStore((s) => s.setChibiProfessorMariEnabled);
-  const spotifyPlayerEnabled = useUIStore((s) => s.spotifyPlayerEnabled);
-  const setSpotifyPlayerEnabled = useUIStore((s) => s.setSpotifyPlayerEnabled);
+  const musicPlayerEnabled = useUIStore((s) => s.musicPlayerEnabled);
+  const setMusicPlayerEnabled = useUIStore((s) => s.setMusicPlayerEnabled);
   const intuitiveSwipeNavigation = useUIStore((s) => s.intuitiveSwipeNavigation);
   const setIntuitiveSwipeNavigation = useUIStore((s) => s.setIntuitiveSwipeNavigation);
   const intuitiveSwipeRerollLatest = useUIStore((s) => s.intuitiveSwipeRerollLatest);
   const setIntuitiveSwipeRerollLatest = useUIStore((s) => s.setIntuitiveSwipeRerollLatest);
   const editLastMessageOnArrowUp = useUIStore((s) => s.editLastMessageOnArrowUp);
   const setEditLastMessageOnArrowUp = useUIStore((s) => s.setEditLastMessageOnArrowUp);
+  const editMessageOnDoubleClick = useUIStore((s) => s.editMessageOnDoubleClick);
+  const setEditMessageOnDoubleClick = useUIStore((s) => s.setEditMessageOnDoubleClick);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <SettingsIntro>Core app behavior, ordered from daily controls to mode-specific tuning.</SettingsIntro>
+
+      <SettingsSection
+        title="Application"
+        description="Global preferences that affect the whole app."
+        icon={<Power size="0.875rem" />}
+      >
+        <div className="flex flex-col gap-2.5">
+          <label className="flex flex-col gap-1">
+            <span className="inline-flex items-center gap-1 text-xs font-medium">
+              Language
+              <HelpTooltip text="Choose the app language. Only English is available right now, but this setting is persisted so future translation PRs can extend it cleanly." />
+            </span>
+            <select
+              value={language}
+              onChange={(e) => setLanguage(e.target.value as (typeof APP_LANGUAGE_OPTIONS)[number]["id"])}
+              className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]"
+            >
+              {APP_LANGUAGE_OPTIONS.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+              English is the only bundled language for now. Future translations can add more options here without
+              changing the settings shape.
+            </p>
+          </label>
+
+          <ToggleSetting
+            label="Confirm before deleting"
+            checked={confirmBeforeDelete}
+            onChange={setConfirmBeforeDelete}
+            help="Shows a confirmation dialog before permanently deleting chats, characters, or other items. Recommended to keep on."
+          />
+          <ToggleSetting
+            label="Achievements"
+            checked={achievementsEnabled}
+            onChange={setAchievementsEnabled}
+            help="Shows the Home achievements button and unlock notifications. Tracking stays silent in the current profile when this is off."
+          />
+          <ToggleSetting
+            label="Music Player"
+            checked={musicPlayerEnabled}
+            onChange={setMusicPlayerEnabled}
+            help="Shows the compact Music Player. Switch between Spotify and YouTube from the player itself or the Music DJ agent settings."
+          />
+          <ToggleSetting
+            label="Mini Mari surprise visits"
+            checked={chibiProfessorMariEnabled}
+            onChange={setChibiProfessorMariEnabled}
+            help="Allows the rare Chibi Professor Mari message to appear while scrolling. Turn this off if it gets in the way of settings or other workflows."
+          />
+          <ConversationSoundSetting />
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Responses"
+        description="How replies arrive, save, and paginate."
+        icon={<MessageCircle size="0.875rem" />}
+      >
+        <div className="flex flex-col gap-2.5">
+          <ToggleSetting
+            label="Enable streaming responses"
+            checked={enableStreaming}
+            onChange={setEnableStreaming}
+            help="When on, AI responses appear word-by-word as they're generated. When off, the full response appears at once after completion."
+          />
+
+          <label
+            className={cn(
+              "flex flex-col gap-1.5 rounded-lg p-1 transition-colors",
+              enableStreaming ? "hover:bg-[var(--secondary)]/50" : "opacity-40 pointer-events-none",
+            )}
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-xs">Streaming speed</span>
+              <span className="text-xs tabular-nums text-[var(--muted-foreground)]">{streamingSpeed}</span>
+              <HelpTooltip text="How fast streaming tokens appear on screen. Lower values give a slower typewriter effect so you can read along. Higher values show text almost instantly." />
+            </div>
+            <input
+              type="range"
+              min={1}
+              max={100}
+              step={1}
+              value={streamingSpeed}
+              onChange={(e) => setStreamingSpeed(Number(e.target.value))}
+              className="w-full accent-[var(--primary)]"
+            />
+            <div className="flex justify-between text-[0.625rem] text-[var(--muted-foreground)]">
+              <span>Slow</span>
+              <span>Fast</span>
+            </div>
+          </label>
+
+          <ToggleSetting
+            label="Trim incomplete model endings"
+            checked={trimIncompleteModelOutput}
+            onChange={setTrimIncompleteModelOutput}
+            help="When on, Marinara trims a trailing unfinished sentence from AI responses before saving the message. It leaves complete responses and command-only endings alone."
+          />
+
+          <label className="flex flex-wrap items-center gap-2.5 rounded-lg p-1 transition-colors hover:bg-[var(--secondary)]/50">
+            <span className="text-xs">Messages per page</span>
+            <DraftNumberInput
+              value={messagesPerPage}
+              min={0}
+              max={500}
+              commitOnValidChange
+              onCommit={(nextValue) => setMessagesPerPage(Math.max(0, Math.min(500, nextValue)))}
+              className="w-16 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2 py-1 text-xs"
+            />
+            <HelpTooltip text="How many messages to load at a time. Click 'Load More' in the chat to see older messages. Set to 0 to load all messages at once." />
+          </label>
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Input & Editing"
+        description="Message input behavior and fast edit controls."
+        icon={<UserCheck size="0.875rem" />}
+      >
+        <div className="flex flex-col gap-2.5">
+          <div className="flex flex-col gap-1.5 rounded-lg p-1 transition-colors hover:bg-[var(--secondary)]/50">
+            <div className="flex items-center gap-2">
+              <span className="text-xs">Send on Enter</span>
+              <HelpTooltip text="Choose which chat modes send on Enter. When off, Enter creates a new line and you have to press the send button manually." />
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                onClick={() => setEnterToSendRP(!enterToSendRP)}
+                className={cn(
+                  "rounded-md px-2 py-1 text-[0.625rem] font-medium transition-all",
+                  enterToSendRP
+                    ? "bg-[var(--primary)]/15 text-[var(--primary)] ring-1 ring-[var(--primary)]/30"
+                    : "bg-[var(--secondary)] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] hover:bg-[var(--accent)]",
+                )}
+              >
+                Roleplay
+              </button>
+              <button
+                onClick={() => setEnterToSendConvo(!enterToSendConvo)}
+                className={cn(
+                  "rounded-md px-2 py-1 text-[0.625rem] font-medium transition-all",
+                  enterToSendConvo
+                    ? "bg-[var(--primary)]/15 text-[var(--primary)] ring-1 ring-[var(--primary)]/30"
+                    : "bg-[var(--secondary)] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] hover:bg-[var(--accent)]",
+                )}
+              >
+                Conversations
+              </button>
+              <button
+                onClick={() => setEnterToSendGame(!enterToSendGame)}
+                className={cn(
+                  "rounded-md px-2 py-1 text-[0.625rem] font-medium transition-all",
+                  enterToSendGame
+                    ? "bg-[var(--primary)]/15 text-[var(--primary)] ring-1 ring-[var(--primary)]/30"
+                    : "bg-[var(--secondary)] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] hover:bg-[var(--accent)]",
+                )}
+              >
+                Game
+              </button>
+            </div>
+          </div>
+
+          <ToggleSetting
+            label="Speech-to-text microphone"
+            checked={speechToTextEnabled}
+            onChange={setSpeechToTextEnabled}
+            help="When on, chat input bars show a microphone button for browser dictation. Handy still works independently by pasting into the focused input field."
+          />
+          <ToggleSetting
+            label="Intuitive swipe navigation"
+            checked={intuitiveSwipeNavigation}
+            onChange={setIntuitiveSwipeNavigation}
+            help="In Conversation and Roleplay modes, use Left/Right Arrow on desktop or horizontal touch swipes on mobile to move between alternate generations on the latest assistant message."
+          />
+          <div
+            className={cn("pl-5 transition-opacity", intuitiveSwipeNavigation ? "" : "pointer-events-none opacity-45")}
+          >
+            <ToggleSetting
+              label="Reroll past the newest swipe"
+              checked={intuitiveSwipeRerollLatest}
+              onChange={setIntuitiveSwipeRerollLatest}
+              help="When intuitive swipes are enabled, pressing Right Arrow or swiping left on the newest swipe of the latest assistant message creates a new reroll."
+            />
+          </div>
+          <ToggleSetting
+            label="Up Arrow edits last message"
+            checked={editLastMessageOnArrowUp}
+            onChange={setEditLastMessageOnArrowUp}
+            help="In Conversation and Roleplay modes, press Up Arrow while the chat input is empty to open the most recent message in the chat for editing — whether it's yours or the AI's."
+          />
+          <ToggleSetting
+            label="Double-click edits messages"
+            checked={editMessageOnDoubleClick}
+            onChange={setEditMessageOnDoubleClick}
+            help="When on, double-click or double-tap a Roleplay message to open it for editing. Turn it off to avoid accidental edits; edit buttons and keyboard shortcuts still work."
+          />
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Text Rules"
+        description="Formatting applied to chat text."
+        icon={<FileText size="0.875rem" />}
+      >
+        <div className="flex flex-col gap-2.5">
+          <ToggleSetting
+            label="Bold dialogue in quotes"
+            checked={boldDialogue ?? true}
+            onChange={setBoldDialogue}
+            help={
+              'When on, text inside dialogue quotation marks ("like this", 「like this」, or 『like this』) is bolded in addition to its dialogue highlight color. Turn it off to keep the color without bold.'
+            }
+          />
+
+          <div className="flex flex-col gap-1.5 rounded-lg p-1 transition-colors hover:bg-[var(--secondary)]/50">
+            <div className="flex items-center gap-2">
+              <span className="text-xs">Quote style</span>
+              <HelpTooltip text="Choose how straight and smart quotation marks are unified in chat inputs and displayed AI output." />
+            </div>
+            <div className="grid grid-cols-2 gap-1.5">
+              {QUOTE_FORMAT_OPTIONS.map((option) => {
+                const active = quoteFormat === option.id;
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => setQuoteFormat(option.id)}
+                    className={cn(
+                      "flex min-w-0 flex-col items-start gap-0.5 rounded-lg px-2.5 py-2 text-left text-xs transition-all ring-1",
+                      active
+                        ? "bg-[var(--primary)]/15 text-[var(--primary)] ring-[var(--primary)]/35"
+                        : "bg-[var(--secondary)] text-[var(--muted-foreground)] ring-[var(--border)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]",
+                    )}
+                  >
+                    <span className="font-medium">{option.label}</span>
+                    <span className="max-w-full truncate text-[0.625rem] opacity-80">{option.sample}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Game Playback"
+        description="Game mode reading and navigation."
+        icon={<ScrollText size="0.875rem" />}
+      >
+        <div className="flex flex-col gap-2.5">
+          <ToggleSetting
+            label="Instantly reveal game text"
+            checked={gameInstantTextReveal}
+            onChange={setGameInstantTextReveal}
+            help="When enabled, Game mode narration segments appear fully as soon as you enter them. This skips the typewriter effect and hides the narration speed control."
+          />
+          <ToggleSetting
+            label="Mouse-wheel + click navigation"
+            checked={gameMiddleMouseNav}
+            onChange={setGameMiddleMouseNav}
+            help="In Game mode, scroll the mouse wheel up to step back through past assistant turns and down to step forward. Clicking the scene background acts like the Next button. While reviewing the past, Next becomes Return — clicking the background or pressing Return jumps you back to where you were reading."
+          />
+
+          {!gameInstantTextReveal && (
+            <label className="flex flex-col gap-1.5 rounded-lg p-1 transition-colors hover:bg-[var(--secondary)]/50">
+              <div className="flex items-center gap-2">
+                <span className="text-xs">Game narration speed</span>
+                <span className="text-xs tabular-nums text-[var(--muted-foreground)]">{gameTextSpeed}</span>
+                <HelpTooltip text="How fast the typewriter effect displays narration text in Game mode. Lower values give a slower cinematic reveal. Higher values show text almost instantly." />
+              </div>
+              <input
+                type="range"
+                min={1}
+                max={100}
+                step={1}
+                value={gameTextSpeed}
+                onChange={(e) => setGameTextSpeed(Number(e.target.value))}
+                className="w-full accent-[var(--primary)]"
+              />
+              <div className="flex justify-between text-[0.625rem] text-[var(--muted-foreground)]">
+                <span>Slow</span>
+                <span>Fast</span>
+              </div>
+            </label>
+          )}
+
+          <label className="flex flex-col gap-1.5 rounded-lg p-1 transition-colors hover:bg-[var(--secondary)]/50">
+            <div className="flex items-center gap-2">
+              <span className="text-xs">Game auto-play segment delay</span>
+              <span className="text-xs tabular-nums text-[var(--muted-foreground)]">
+                {(gameAutoPlayDelay / 1000).toFixed(1)}s
+              </span>
+              <HelpTooltip text="Pause between each narration segment when auto-play is enabled in Game mode. Enable auto-play via the ▶ button next to Next." />
+            </div>
+            <input
+              type="range"
+              min={200}
+              max={5000}
+              step={100}
+              value={gameAutoPlayDelay}
+              onChange={(e) => setGameAutoPlayDelay(Number(e.target.value))}
+              className="w-full accent-[var(--primary)]"
+            />
+            <div className="flex justify-between text-[0.625rem] text-[var(--muted-foreground)]">
+              <span>Short</span>
+              <span>Long</span>
+            </div>
+          </label>
+        </div>
+      </SettingsSection>
+    </div>
+  );
+}
+
+function ImageGenerationSettings() {
+  const reviewImagePromptsBeforeSend = useUIStore((s) => s.reviewImagePromptsBeforeSend);
+  const setReviewImagePromptsBeforeSend = useUIStore((s) => s.setReviewImagePromptsBeforeSend);
+  const imageBackgroundWidth = useUIStore((s) => s.imageBackgroundWidth);
+  const imageBackgroundHeight = useUIStore((s) => s.imageBackgroundHeight);
+  const setImageBackgroundDimensions = useUIStore((s) => s.setImageBackgroundDimensions);
+  const imageIllustrationWidth = useUIStore((s) => s.imageIllustrationWidth);
+  const imageIllustrationHeight = useUIStore((s) => s.imageIllustrationHeight);
+  const setImageIllustrationDimensions = useUIStore((s) => s.setImageIllustrationDimensions);
+  const imagePortraitWidth = useUIStore((s) => s.imagePortraitWidth);
+  const imagePortraitHeight = useUIStore((s) => s.imagePortraitHeight);
+  const setImagePortraitDimensions = useUIStore((s) => s.setImagePortraitDimensions);
+  const imageSelfieWidth = useUIStore((s) => s.imageSelfieWidth);
+  const imageSelfieHeight = useUIStore((s) => s.imageSelfieHeight);
+  const setImageSelfieDimensions = useUIStore((s) => s.setImageSelfieDimensions);
+  const imageStyleProfiles = useUIStore((s) => s.imageStyleProfiles);
+  const setImageStyleProfiles = useUIStore((s) => s.setImageStyleProfiles);
+
+  return (
+    <SettingsSection
+      title="Image Generation"
+      description="Review generated prompts, set image canvas defaults, and tune prompt style profiles."
+      icon={<Image size="0.875rem" />}
+    >
+      <div className="flex flex-col gap-2.5">
+        <ToggleSetting
+          label="Expose image prompts before sending"
+          checked={reviewImagePromptsBeforeSend}
+          onChange={setReviewImagePromptsBeforeSend}
+          help="Shows generated image prompts for review before sending Game assets, character or persona avatars, and sprite generations to the image provider."
+        />
+
+        <ImageDimensionRow
+          label="Backgrounds"
+          help="Used for Game mode generated backgrounds."
+          width={imageBackgroundWidth}
+          height={imageBackgroundHeight}
+          onCommit={setImageBackgroundDimensions}
+        />
+        <ImageDimensionRow
+          label="Illustrations"
+          help="Used for Illustrator agent images saved to chat galleries, including comic pages and scene illustrations."
+          width={imageIllustrationWidth}
+          height={imageIllustrationHeight}
+          onCommit={setImageIllustrationDimensions}
+        />
+        <ImageDimensionRow
+          label="Portraits"
+          help="Used for generated character and NPC portraits."
+          width={imagePortraitWidth}
+          height={imagePortraitHeight}
+          onCommit={setImagePortraitDimensions}
+        />
+        <ImageDimensionRow
+          label="Selfies"
+          help="Default selfie canvas for Roleplay and Conversation image commands when a chat does not override selfie resolution."
+          width={imageSelfieWidth}
+          height={imageSelfieHeight}
+          onCommit={setImageSelfieDimensions}
+        />
+
+        <div className="mt-1">
+          <div className="mb-2 flex items-center gap-1 text-xs font-medium text-[var(--foreground)]">
+            Style Profiles
+            <HelpTooltip text="Defines what Anime, Danbooru, Realistic, and custom styles mean when Marinara compiles image prompts. Profiles merge with per-chat and connection settings, then clean duplicate tags before sending." />
+          </div>
+          <ImageStyleProfilesEditor value={imageStyleProfiles} onChange={setImageStyleProfiles} />
+        </div>
+      </div>
+    </SettingsSection>
+  );
+}
+
+function GameAssetsSettings() {
   const rescanGameAssets = useGameAssetStore((s) => s.rescanAssets);
   const assetFileRef = useRef<HTMLInputElement>(null);
   const [assetCategory, setAssetCategory] = useState<GameAssetCategoryId>("backgrounds");
@@ -535,294 +1627,13 @@ function GeneralSettings() {
   };
 
   return (
-    <div className="flex flex-col gap-3">
-      <div className="text-xs text-[var(--muted-foreground)]">General application settings.</div>
-
-      <label className="flex flex-col gap-1">
-        <span className="inline-flex items-center gap-1 text-xs font-medium">
-          Language
-          <HelpTooltip text="Choose the app language. Only English is available right now, but this setting is persisted so future translation PRs can extend it cleanly." />
-        </span>
-        <select
-          value={language}
-          onChange={(e) => setLanguage(e.target.value as (typeof APP_LANGUAGE_OPTIONS)[number]["id"])}
-          className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]"
-        >
-          {APP_LANGUAGE_OPTIONS.map((option) => (
-            <option key={option.id} value={option.id}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-        <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-          English is the only bundled language for now. Future translations can add more options here without changing
-          the settings shape.
-        </p>
-      </label>
-
-      <ToggleSetting
-        label="Enable streaming responses"
-        checked={enableStreaming}
-        onChange={setEnableStreaming}
-        help="When on, AI responses appear word-by-word as they're generated. When off, the full response appears at once after completion."
-      />
-
-      <ToggleSetting
-        label="Spotify mini player"
-        checked={spotifyPlayerEnabled}
-        onChange={setSpotifyPlayerEnabled}
-        help="Shows a compact Spotify player in the top bar on desktop and as a draggable floating widget on mobile. Requires the Spotify DJ agent to be connected."
-      />
-
-      <ToggleSetting
-        label="Mini Mari surprise visits"
-        checked={chibiProfessorMariEnabled}
-        onChange={setChibiProfessorMariEnabled}
-        help="Allows the rare Chibi Professor Mari message to appear while scrolling. Turn this off if it gets in the way of settings or other workflows."
-      />
-
-      {/* Streaming Speed */}
-      <label
-        className={cn(
-          "flex flex-col gap-1.5 rounded-lg p-1 transition-colors",
-          enableStreaming ? "hover:bg-[var(--secondary)]/50" : "opacity-40 pointer-events-none",
-        )}
-      >
-        <div className="flex items-center gap-2">
-          <span className="text-xs">Streaming speed</span>
-          <span className="text-xs tabular-nums text-[var(--muted-foreground)]">{streamingSpeed}</span>
-          <HelpTooltip text="How fast streaming tokens appear on screen. Lower values give a slower typewriter effect so you can read along. Higher values show text almost instantly." />
-        </div>
-        <input
-          type="range"
-          min={1}
-          max={100}
-          step={1}
-          value={streamingSpeed}
-          onChange={(e) => setStreamingSpeed(Number(e.target.value))}
-          className="w-full accent-[var(--primary)]"
-        />
-        <div className="flex justify-between text-[0.625rem] text-[var(--muted-foreground)]">
-          <span>Slow</span>
-          <span>Fast</span>
-        </div>
-      </label>
-
-      <ToggleSetting
-        label="Instantly reveal game text"
-        checked={gameInstantTextReveal}
-        onChange={setGameInstantTextReveal}
-        help="When enabled, Game mode narration segments appear fully as soon as you enter them. This skips the typewriter effect and hides the narration speed control."
-      />
-
-      <ToggleSetting
-        label="Mouse-wheel + click navigation"
-        checked={gameMiddleMouseNav}
-        onChange={setGameMiddleMouseNav}
-        help="In Game mode, scroll the mouse wheel up to step back through past assistant turns and down to step forward. Clicking the scene background acts like the Next button. While reviewing the past, Next becomes Return — clicking the background or pressing Return jumps you back to where you were reading."
-      />
-
-      {/* Game Narration Text Speed */}
-      {!gameInstantTextReveal && (
-        <label className="flex flex-col gap-1.5 rounded-lg p-1 transition-colors hover:bg-[var(--secondary)]/50">
-          <div className="flex items-center gap-2">
-            <span className="text-xs">Game narration speed</span>
-            <span className="text-xs tabular-nums text-[var(--muted-foreground)]">{gameTextSpeed}</span>
-            <HelpTooltip text="How fast the typewriter effect displays narration text in Game mode. Lower values give a slower cinematic reveal. Higher values show text almost instantly." />
-          </div>
-          <input
-            type="range"
-            min={1}
-            max={100}
-            step={1}
-            value={gameTextSpeed}
-            onChange={(e) => setGameTextSpeed(Number(e.target.value))}
-            className="w-full accent-[var(--primary)]"
-          />
-          <div className="flex justify-between text-[0.625rem] text-[var(--muted-foreground)]">
-            <span>Slow</span>
-            <span>Fast</span>
-          </div>
-        </label>
-      )}
-
-      {/* Game Auto-Play Delay */}
-      <label className="flex flex-col gap-1.5 rounded-lg p-1 transition-colors hover:bg-[var(--secondary)]/50">
-        <div className="flex items-center gap-2">
-          <span className="text-xs">Game auto-play segment delay</span>
-          <span className="text-xs tabular-nums text-[var(--muted-foreground)]">
-            {(gameAutoPlayDelay / 1000).toFixed(1)}s
-          </span>
-          <HelpTooltip text="Pause between each narration segment when auto-play is enabled in Game mode. Enable auto-play via the ▶ button next to Next." />
-        </div>
-        <input
-          type="range"
-          min={200}
-          max={5000}
-          step={100}
-          value={gameAutoPlayDelay}
-          onChange={(e) => setGameAutoPlayDelay(Number(e.target.value))}
-          className="w-full accent-[var(--primary)]"
-        />
-        <div className="flex justify-between text-[0.625rem] text-[var(--muted-foreground)]">
-          <span>Short</span>
-          <span>Long</span>
-        </div>
-      </label>
-
-      {/* Send on Enter — inline toggles per mode */}
-      <div className="flex flex-col gap-1.5 rounded-lg p-1 transition-colors hover:bg-[var(--secondary)]/50">
-        <div className="flex items-center gap-2">
-          <span className="text-xs">Send on Enter</span>
-          <HelpTooltip text="Choose which chat modes send on Enter. When off, Enter creates a new line and you have to press the send button manually." />
-        </div>
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={() => setEnterToSendRP(!enterToSendRP)}
-            className={cn(
-              "rounded-md px-2 py-1 text-[0.625rem] font-medium transition-all",
-              enterToSendRP
-                ? "bg-[var(--primary)]/15 text-[var(--primary)] ring-1 ring-[var(--primary)]/30"
-                : "bg-[var(--secondary)] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] hover:bg-[var(--accent)]",
-            )}
-          >
-            Roleplay
-          </button>
-          <button
-            onClick={() => setEnterToSendConvo(!enterToSendConvo)}
-            className={cn(
-              "rounded-md px-2 py-1 text-[0.625rem] font-medium transition-all",
-              enterToSendConvo
-                ? "bg-[var(--primary)]/15 text-[var(--primary)] ring-1 ring-[var(--primary)]/30"
-                : "bg-[var(--secondary)] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] hover:bg-[var(--accent)]",
-            )}
-          >
-            Conversations
-          </button>
-          <button
-            onClick={() => setEnterToSendGame(!enterToSendGame)}
-            className={cn(
-              "rounded-md px-2 py-1 text-[0.625rem] font-medium transition-all",
-              enterToSendGame
-                ? "bg-[var(--primary)]/15 text-[var(--primary)] ring-1 ring-[var(--primary)]/30"
-                : "bg-[var(--secondary)] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] hover:bg-[var(--accent)]",
-            )}
-          >
-            Game
-          </button>
-        </div>
-      </div>
-
-      <ToggleSetting
-        label="Confirm before deleting"
-        checked={confirmBeforeDelete}
-        onChange={setConfirmBeforeDelete}
-        help="Shows a confirmation dialog before permanently deleting chats, characters, or other items. Recommended to keep on."
-      />
-
-      {/* Messages per page */}
-      <label className="flex items-center gap-2.5 rounded-lg p-1 transition-colors hover:bg-[var(--secondary)]/50">
-        <span className="text-xs">Messages per page</span>
-        <DraftNumberInput
-          value={messagesPerPage}
-          min={0}
-          max={500}
-          onCommit={(nextValue) => setMessagesPerPage(Math.max(0, Math.min(500, nextValue)))}
-          className="w-16 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2 py-1 text-xs"
-        />
-        <HelpTooltip text="How many messages to load at a time. Click 'Load More' in the chat to see older messages. Set to 0 to load all messages at once." />
-      </label>
-
-      <ToggleSetting
-        label="Bold dialogue in quotes"
-        checked={boldDialogue ?? true}
-        onChange={setBoldDialogue}
-        help={
-          'When on, text inside dialogue quotation marks ("like this", 「like this」, or 『like this』) is bolded in addition to its dialogue highlight color. Turn it off to keep the color without bold.'
-        }
-      />
-
-      <ToggleSetting
-        label="Trim incomplete model endings"
-        checked={trimIncompleteModelOutput}
-        onChange={setTrimIncompleteModelOutput}
-        help="When on, Marinara trims a trailing unfinished sentence from AI responses before saving the message. It leaves complete responses and command-only endings alone."
-      />
-
-      <ToggleSetting
-        label="Speech-to-text microphone"
-        checked={speechToTextEnabled}
-        onChange={setSpeechToTextEnabled}
-        help="When on, chat input bars show a microphone button for browser dictation. Handy still works independently by pasting into the focused input field."
-      />
-
-      <ToggleSetting
-        label="Intuitive swipe navigation"
-        checked={intuitiveSwipeNavigation}
-        onChange={setIntuitiveSwipeNavigation}
-        help="In Conversation and Roleplay modes, use Left/Right Arrow on desktop or horizontal touch swipes on mobile to move between alternate generations on the latest assistant message."
-      />
-
-      <div className={cn("pl-5 transition-opacity", intuitiveSwipeNavigation ? "" : "pointer-events-none opacity-45")}>
-        <ToggleSetting
-          label="Reroll past the newest swipe"
-          checked={intuitiveSwipeRerollLatest}
-          onChange={setIntuitiveSwipeRerollLatest}
-          help="When intuitive swipes are enabled, pressing Right Arrow or swiping left on the newest swipe of the latest assistant message creates a new reroll."
-        />
-      </div>
-
-      <ToggleSetting
-        label="Up Arrow edits last message"
-        checked={editLastMessageOnArrowUp}
-        onChange={setEditLastMessageOnArrowUp}
-        help="In Conversation and Roleplay modes, press Up Arrow while the chat input is empty to open the most recent message in the chat for editing — whether it's yours or the AI's."
-      />
-
-      <div className="rounded-xl bg-[var(--secondary)]/50 p-4 ring-1 ring-[var(--border)]">
-        <div className="mb-3 flex flex-col gap-1">
-          <div className="text-xs font-semibold text-[var(--foreground)]">Image Generation</div>
-          <p className="text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
-            Review generated prompts before Game mode sends them, and set default canvases for generated assets.
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-2.5">
-          <ToggleSetting
-            label="Expose image prompts before sending"
-            checked={reviewImagePromptsBeforeSend}
-            onChange={setReviewImagePromptsBeforeSend}
-            help="Shows generated image prompts for review before sending Game assets, character or persona avatars, and sprite generations to the image provider."
-          />
-
-          <ImageDimensionRow
-            label="Backgrounds"
-            help="Used for Game mode generated backgrounds and special scene illustrations."
-            width={imageBackgroundWidth}
-            height={imageBackgroundHeight}
-            onCommit={setImageBackgroundDimensions}
-          />
-          <ImageDimensionRow
-            label="Portraits"
-            help="Used for generated character and NPC portraits."
-            width={imagePortraitWidth}
-            height={imagePortraitHeight}
-            onCommit={setImagePortraitDimensions}
-          />
-          <ImageDimensionRow
-            label="Selfies"
-            help="Default selfie canvas for Roleplay and Conversation image commands when a chat does not override selfie resolution."
-            width={imageSelfieWidth}
-            height={imageSelfieHeight}
-            onCommit={setImageSelfieDimensions}
-          />
-        </div>
-      </div>
-
-      {/* Game Assets Folders */}
-      <div className="rounded-xl bg-[var(--secondary)]/50 p-4 ring-1 ring-[var(--border)]">
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <div className="text-xs font-semibold text-[var(--foreground)]">Game Assets</div>
+    <SettingsSection
+      title="Game Assets"
+      description="Open existing asset folders, import new files, and refresh the server manifest."
+      icon={<FolderOpen size="0.875rem" />}
+    >
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => {
               rescanGameAssets()
@@ -834,8 +1645,6 @@ function GeneralSettings() {
             <RefreshCw size="0.75rem" />
             Rescan
           </button>
-        </div>
-        <div className="flex flex-wrap gap-2">
           {GAME_ASSET_CATEGORIES.map((folder) => (
             <button
               key={folder.id}
@@ -848,7 +1657,7 @@ function GeneralSettings() {
           ))}
         </div>
 
-        <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           <label className="flex min-w-0 flex-col gap-1">
             <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Type</span>
             <select
@@ -874,7 +1683,7 @@ function GeneralSettings() {
           </label>
         </div>
 
-        <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           <input
             ref={assetFileRef}
             type="file"
@@ -910,28 +1719,40 @@ function GeneralSettings() {
           )}
         </div>
 
-        <p className="mt-2.5 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
-          On desktop, folder buttons open the server's asset folders. On mobile or a dedicated server, use upload here
-          so files from your phone are copied onto the server. Audio supports MP3, OGG, WAV, FLAC, M4A, AAC, and WebM;
-          images support PNG, JPG, GIF, WebP, AVIF, and SVG for sprites. Music folders use state/genre/intensity, such
-          as exploration/fantasy/calm.
+        <p className="text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+          Audio supports MP3, OGG, WAV, FLAC, M4A, AAC, and WebM. Images support PNG, JPG, GIF, WebP, AVIF, and SVG for
+          sprites. Music folders use state/genre/intensity, such as exploration/fantasy/calm.
         </p>
       </div>
-    </div>
+    </SettingsSection>
   );
 }
 
 function AppearanceSettings() {
   const theme = useUIStore((s) => s.theme);
   const setTheme = useUIStore((s) => s.setTheme);
+  const appAccentColor = useUIStore((s) => s.appAccentColor);
+  const setAppAccentColor = useUIStore((s) => s.setAppAccentColor);
+  const defaultAppAccentColor = getDefaultAppAccentColor(theme);
+  const displayedAppAccentColor =
+    appAccentColor.trim().toLowerCase() === defaultAppAccentColor.toLowerCase() ? "" : appAccentColor;
   const visualTheme = useUIStore((s) => s.visualTheme);
   const setVisualTheme = useUIStore((s) => s.setVisualTheme);
   const chatBackground = useUIStore((s) => s.chatBackground);
   const setChatBackgroundRaw = useUIStore((s) => s.setChatBackground);
+  const defaultRoleplayBackground = useUIStore((s) => s.defaultRoleplayBackground);
+  const setDefaultRoleplayBackground = useUIStore((s) => s.setDefaultRoleplayBackground);
   const chatBackgroundBlur = useUIStore((s) => s.chatBackgroundBlur);
   const setChatBackgroundBlur = useUIStore((s) => s.setChatBackgroundBlur);
   const activeChatId = useChatStore((s) => s.activeChatId);
   const updateMeta = useUpdateChatMetadata();
+  const handleAppAccentColorChange = useCallback(
+    (color: string) => {
+      const normalized = color.trim();
+      setAppAccentColor(normalized.toLowerCase() === defaultAppAccentColor.toLowerCase() ? "" : normalized);
+    },
+    [defaultAppAccentColor, setAppAccentColor],
+  );
   // Persist background changes to the active chat's metadata immediately so
   // a clear (or pick) survives chat switches and page reloads. The effect-based
   // persist in ChatArea covers other sources (agents/scene/slash commands), but
@@ -964,6 +1785,8 @@ function AppearanceSettings() {
   const setFontSize = useUIStore((s) => s.setFontSize);
   const chatFontSize = useUIStore((s) => s.chatFontSize);
   const setChatFontSize = useUIStore((s) => s.setChatFontSize);
+  const conversationMessageStyle = useUIStore((s) => s.conversationMessageStyle);
+  const setConversationMessageStyle = useUIStore((s) => s.setConversationMessageStyle);
   const weatherEffects = useUIStore((s) => s.weatherEffects);
   const setWeatherEffects = useUIStore((s) => s.setWeatherEffects);
   const trackerPanelEnabled = useUIStore((s) => s.trackerPanelEnabled);
@@ -972,10 +1795,22 @@ function AppearanceSettings() {
   const setTrackerPanelHideHudWidgets = useUIStore((s) => s.setTrackerPanelHideHudWidgets);
   const trackerPanelUseExpressionSprites = useUIStore((s) => s.trackerPanelUseExpressionSprites);
   const setTrackerPanelUseExpressionSprites = useUIStore((s) => s.setTrackerPanelUseExpressionSprites);
+  const trackerPanelThoughtBubbleDisplay = useUIStore((s) => s.trackerPanelThoughtBubbleDisplay);
+  const setTrackerPanelThoughtBubbleDisplay = useUIStore((s) => s.setTrackerPanelThoughtBubbleDisplay);
+  const trackerPanelDockedThoughtsAlwaysVisible = useUIStore((s) => s.trackerPanelDockedThoughtsAlwaysVisible);
+  const setTrackerPanelDockedThoughtsAlwaysVisible = useUIStore((s) => s.setTrackerPanelDockedThoughtsAlwaysVisible);
+  const trackerPanelSizeProfile = useUIStore((s) => s.trackerPanelSizeProfile);
+  const setTrackerPanelSizeProfile = useUIStore((s) => s.setTrackerPanelSizeProfile);
+  const trackerPanelBackgroundColor = useUIStore((s) => s.trackerPanelBackgroundColor);
+  const setTrackerPanelBackgroundColor = useUIStore((s) => s.setTrackerPanelBackgroundColor);
+  const trackerTemperatureUnit = useUIStore((s) => s.trackerTemperatureUnit);
+  const setTrackerTemperatureUnit = useUIStore((s) => s.setTrackerTemperatureUnit);
 
   // Text appearance
   const chatFontColor = useUIStore((s) => s.chatFontColor);
   const setChatFontColor = useUIStore((s) => s.setChatFontColor);
+  const chatChromeTextColor = useUIStore((s) => s.chatChromeTextColor);
+  const setChatChromeTextColor = useUIStore((s) => s.setChatChromeTextColor);
   const chatFontOpacity = useUIStore((s) => s.chatFontOpacity);
   const setChatFontOpacity = useUIStore((s) => s.setChatFontOpacity);
   const roleplayAvatarStyle = useUIStore((s) => s.roleplayAvatarStyle);
@@ -994,8 +1829,6 @@ function AppearanceSettings() {
   const setTextStrokeWidth = useUIStore((s) => s.setTextStrokeWidth);
   const textStrokeColor = useUIStore((s) => s.textStrokeColor);
   const setTextStrokeColor = useUIStore((s) => s.setTextStrokeColor);
-  const [draftChatFontColor, setDraftChatFontColor] = useState(chatFontColor || "#c3c2c2");
-  const [draftStrokeColor, setDraftStrokeColor] = useState(textStrokeColor);
 
   // Custom fonts — query is pre-warmed in App.tsx, no fetch here
   const { data: customFonts } = useQuery<CustomFontFace[]>({
@@ -1031,707 +1864,849 @@ function AppearanceSettings() {
     },
   });
 
+  const roleplayAvatarPreviewBase: SettingsArtPreviewSize =
+    roleplayAvatarStyle === "none"
+      ? { width: 5, height: 2.5 }
+      : roleplayAvatarStyle === "panel"
+        ? { width: 2.6 * roleplayAvatarScale, height: 2 * roleplayAvatarScale }
+        : {
+            width: (roleplayAvatarStyle === "rectangles" ? 2.15 : 2) * roleplayAvatarScale,
+            height: (roleplayAvatarStyle === "rectangles" ? 2.7 : 3.4) * roleplayAvatarScale,
+          };
+  const roleplaySpritePreviewBase: SettingsArtPreviewSize = {
+    width: 0.85 * roleplaySpriteScale,
+    height: 3.2 * roleplaySpriteScale,
+  };
+  const [roleplayAvatarPreviewSize, roleplaySpritePreviewSize] = fitSettingsArtPreviewSizes([
+    roleplayAvatarPreviewBase,
+    roleplaySpritePreviewBase,
+  ]);
+  const roleplayAvatarPreview = roleplayAvatarPreviewSize ?? roleplayAvatarPreviewBase;
+  const roleplaySpritePreview = roleplaySpritePreviewSize ?? roleplaySpritePreviewBase;
+  const gameAvatarPreviewBase: SettingsArtPreviewSize = {
+    width: 2.25 * gameAvatarScale,
+    height: 2.6 * gameAvatarScale,
+  };
+  const gameFullBodyPreviewBase: SettingsArtPreviewSize = {
+    width: 0.9 * gameFullBodySpriteScale,
+    height: 3.4 * gameFullBodySpriteScale,
+  };
+  const [gameAvatarPreviewSize, gameFullBodyPreviewSize] = fitSettingsArtPreviewSizes([
+    gameAvatarPreviewBase,
+    gameFullBodyPreviewBase,
+  ]);
+  const gameAvatarPreview = gameAvatarPreviewSize ?? gameAvatarPreviewBase;
+  const gameFullBodyPreview = gameFullBodyPreviewSize ?? gameFullBodyPreviewBase;
+
   return (
-    <div className="flex flex-col gap-4">
-      {/* ── Visual Style ── */}
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-1.5">
-          <Paintbrush size="0.75rem" className="text-[var(--muted-foreground)]" />
-          <span className="text-xs font-medium">Visual Style</span>
-          <HelpTooltip text="Choose how the entire app looks. 'Marinara' uses a retro Y2K aesthetic with glow effects. 'SillyTavern' uses a clean, minimal look inspired by the original SillyTavern." />
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          {(
-            [
-              {
-                id: "default" as VisualTheme,
-                label: "Default (Marinara)",
-                desc: "Y2K / retro aesthetic with glow effects",
-              },
-              {
-                id: "sillytavern" as VisualTheme,
-                label: "SillyTavern",
-                desc: "Classic SillyTavern look — clean & minimal",
-              },
-            ] as const
-          ).map((opt) => (
-            <button
-              key={opt.id}
-              onClick={() => setVisualTheme(opt.id)}
-              className={cn(
-                "flex flex-col items-start gap-1 rounded-lg border p-3 text-left text-xs transition-all",
-                visualTheme === opt.id
-                  ? "border-[var(--primary)] bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]"
-                  : "border-[var(--border)] hover:border-[var(--primary)]/40",
-              )}
-            >
-              <span className="font-semibold">{opt.label}</span>
-              <span className="text-[0.625rem] text-[var(--muted-foreground)] leading-tight">{opt.desc}</span>
-            </button>
-          ))}
-        </div>
-      </div>
+    <div className="flex flex-col gap-3">
+      <SettingsIntro>Visual preferences, grouped from global app chrome to chat-specific presentation.</SettingsIntro>
 
-      <label className="flex flex-col gap-1">
-        <span className="text-xs font-medium inline-flex items-center gap-1">
-          Color Scheme{" "}
-          <HelpTooltip text="Switch between dark and light mode. Dark mode is easier on the eyes in low-light environments." />
-        </span>
-        <select
-          value={theme}
-          onChange={(e) => setTheme(e.target.value as "dark" | "light")}
-          className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]"
-        >
-          <option value="dark">Dark</option>
-          <option value="light">Light</option>
-        </select>
-      </label>
-
-      <label className="flex flex-col gap-1">
-        <span className="text-xs font-medium inline-flex items-center gap-1">
-          Font{" "}
-          <HelpTooltip text="Choose the font used across the app. 'Default (Inter)' is optimized for screen readability. Drop .ttf, .otf, .woff, or .woff2 font files into the data/fonts/ folder to add custom fonts." />
-        </span>
-        <select
-          value={fontFamily}
-          onChange={(e) => setFontFamily(e.target.value)}
-          className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]"
-        >
-          <option value="">Default (Inter)</option>
-          {customFontOptions.map((f) => (
-            <option key={f.family} value={f.family}>
-              {f.family}
-            </option>
-          ))}
-        </select>
-        {(!customFonts || customFonts.length === 0) && (
-          <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-            Drop font files (.ttf, .otf, .woff, .woff2) into the <span className="font-medium">data/fonts/</span> folder
-            to add custom fonts.
-          </p>
-        )}
-        <button
-          onClick={() => api.post("/fonts/open-folder").catch(() => {})}
-          className="mt-1 inline-flex items-center gap-1.5 self-start rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-        >
-          <FolderOpen size="0.75rem" />
-          Open Fonts Folder
-        </button>
-      </label>
-
-      {/* ── Google Fonts ── */}
-      <div className="flex flex-col gap-1.5">
-        <span className="text-xs font-medium inline-flex items-center gap-1">
-          Google Fonts{" "}
-          <HelpTooltip text="Download a font directly from Google Fonts by name. Browse available fonts at fonts.google.com and type the exact name here." />
-        </span>
-        <div className="flex gap-1.5">
-          <input
-            type="text"
-            value={googleFontName}
-            onChange={(e) => setGoogleFontName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && googleFontName.trim() && !googleFontMutation.isPending) {
-                googleFontMutation.mutate(googleFontName.trim());
-              }
-            }}
-            placeholder="e.g. Fira Code, Lora, Poppins…"
-            className="flex-1 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-xs outline-none ring-1 ring-transparent transition-shadow placeholder:text-[var(--muted-foreground)]/50 focus:ring-[var(--primary)]"
-          />
-          <button
-            onClick={() => googleFontMutation.mutate(googleFontName.trim())}
-            disabled={!googleFontName.trim() || googleFontMutation.isPending}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-1.5 text-[0.6875rem] font-medium text-[var(--primary-foreground)] transition-all hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {googleFontMutation.isPending ? (
-              <Loader2 size="0.75rem" className="animate-spin" />
-            ) : (
-              <Download size="0.75rem" />
-            )}
-            {googleFontMutation.isPending ? "Downloading…" : "Add"}
-          </button>
-        </div>
-        <a
-          href="https://fonts.google.com"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-[0.625rem] text-[var(--muted-foreground)] hover:text-[var(--primary)] transition-colors inline-flex items-center gap-1"
-        >
-          Browse fonts at fonts.google.com →
-        </a>
-      </div>
-
-      <label className="flex flex-col gap-1">
-        <span className="text-xs font-medium inline-flex items-center gap-1">
-          Display Size{" "}
-          <HelpTooltip text="Adjusts the base font size across the whole app. Larger sizes improve readability. Default is 17px." />
-        </span>
-        <select
-          value={String(fontSize)}
-          onChange={(e) => setFontSize(Number(e.target.value) as 12 | 14 | 16 | 17 | 19 | 22)}
-          className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]"
-        >
-          <option value="12">Tiny</option>
-          <option value="14">Small</option>
-          <option value="16">Medium</option>
-          <option value="17">Default</option>
-          <option value="19">Large</option>
-          <option value="22">Huge</option>
-        </select>
-      </label>
-
-      <label className="flex flex-col gap-1">
-        <span className="text-xs font-medium inline-flex items-center gap-1">
-          Chat Font Size{" "}
-          <HelpTooltip text="Adjusts the font size of chat messages. Drag the slider to find your preferred reading size. Default is 16px." />
-        </span>
-        <div className="flex items-center gap-3">
-          <input
-            type="range"
-            min={12}
-            max={48}
-            step={1}
-            value={chatFontSize}
-            onChange={(e) => setChatFontSize(Number(e.target.value))}
-            className="flex-1 accent-[var(--primary)]"
-          />
-          <span className="text-xs tabular-nums text-[var(--muted-foreground)] w-8 text-right">{chatFontSize}px</span>
-        </div>
-      </label>
-
-      {/* ── Text Appearance ── */}
-      <div className="flex flex-col gap-3">
-        <div className="flex items-center gap-1.5">
-          <Paintbrush size="0.75rem" className="text-[var(--muted-foreground)]" />
-          <span className="text-xs font-medium">Text Appearance</span>
-          <HelpTooltip text="Customize the look of chat message text. Chat Text Color sets the default font color for all non-dialogue text. Background Opacity controls the transparency of roleplay message bubbles." />
-        </div>
-
-        {/* Chat Text Color */}
-        <div className="flex flex-col gap-1">
-          <span className="text-[0.6875rem] font-medium">Chat Text Color</span>
-          <div className="flex items-center gap-2">
-            <input
-              type="color"
-              value={draftChatFontColor}
-              onChange={(e) => {
-                setDraftChatFontColor(e.target.value);
-                setChatFontColor(e.target.value);
-              }}
-              className="h-8 w-8 flex-shrink-0 cursor-pointer rounded-md border border-[var(--border)] bg-transparent p-0.5"
-            />
-            <input
-              type="text"
-              value={draftChatFontColor}
-              onChange={(e) => {
-                setDraftChatFontColor(e.target.value);
-                if (/^#[0-9a-fA-F]{6}$/.test(e.target.value)) setChatFontColor(e.target.value);
-              }}
-              onBlur={() => setDraftChatFontColor(chatFontColor || "#c3c2c2")}
-              className="w-24 rounded-md bg-[var(--secondary)] px-2 py-1.5 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
-            />
+      <SettingsSection
+        title="App Style"
+        description="Theme family, color scheme, fonts, and reading scale."
+        icon={<Paintbrush size="0.875rem" />}
+      >
+        <div className="flex flex-col gap-3">
+          {/* ── Visual Style ── */}
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-1.5">
+              <Paintbrush size="0.75rem" className="text-[var(--muted-foreground)]" />
+              <span className="text-xs font-medium">Visual Style</span>
+              <HelpTooltip text="Choose how the entire app looks. 'Marinara' uses a retro Y2K aesthetic with glow effects. 'SillyTavern' uses a clean, minimal look inspired by the original SillyTavern." />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {(
+                [
+                  {
+                    id: "default" as VisualTheme,
+                    label: "Default (Marinara)",
+                    desc: "Y2K / retro aesthetic with glow effects",
+                  },
+                  {
+                    id: "sillytavern" as VisualTheme,
+                    label: "SillyTavern",
+                    desc: "Classic SillyTavern look — clean & minimal",
+                  },
+                ] as const
+              ).map((opt) => (
+                <button
+                  key={opt.id}
+                  onClick={() => setVisualTheme(opt.id)}
+                  className={cn(
+                    "flex flex-col items-start gap-1 rounded-lg border p-3 text-left text-xs transition-all",
+                    visualTheme === opt.id
+                      ? "border-[var(--primary)] bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]"
+                      : "border-[var(--border)] hover:border-[var(--primary)]/40",
+                  )}
+                >
+                  <span className="font-semibold">{opt.label}</span>
+                  <span className="text-[0.625rem] text-[var(--muted-foreground)] leading-tight">{opt.desc}</span>
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
 
-        {/* Roleplay Messages Background Opacity */}
-        <label className="flex flex-col gap-1">
-          <span className="text-[0.6875rem] font-medium">Roleplay Messages Background Opacity</span>
-          <div className="flex items-center gap-3">
-            <input
-              type="range"
-              min={0}
-              max={100}
-              step={5}
-              value={chatFontOpacity}
-              onChange={(e) => setChatFontOpacity(Number(e.target.value))}
-              className="flex-1 accent-[var(--primary)]"
-            />
-            <span className="text-xs tabular-nums text-[var(--muted-foreground)] w-8 text-right">
-              {chatFontOpacity}%
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium inline-flex items-center gap-1">
+              Color Scheme{" "}
+              <HelpTooltip text="Switch between dark and light mode. Dark mode is easier on the eyes in low-light environments." />
             </span>
-          </div>
-        </label>
-        <button
-          onClick={() => {
-            setChatFontColor("");
-            setDraftChatFontColor("#c3c2c2");
-            setChatFontOpacity(90);
-          }}
-          className="text-[0.625rem] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors self-start"
-        >
-          Reset to default
-        </button>
+            <select
+              value={theme}
+              onChange={(e) => setTheme(e.target.value as "dark" | "light")}
+              className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]"
+            >
+              <option value="dark">Dark</option>
+              <option value="light">Light</option>
+            </select>
+          </label>
 
-        {/* Text Stroke */}
-        <div className="flex flex-col gap-1.5">
-          <span className="text-[0.6875rem] font-medium inline-flex items-center gap-1">
-            Text Outline / Stroke
-            <HelpTooltip text="Adds an outline around chat text for better readability over backgrounds. Set width to 0 to disable." />
-          </span>
-          <div className="flex items-center gap-3">
-            <label className="flex flex-col gap-1 flex-1">
-              <span className="text-[0.625rem] text-[var(--muted-foreground)]">Width</span>
-              <div className="flex items-center gap-2">
+          <ColorPicker
+            value={displayedAppAccentColor}
+            onChange={handleAppAccentColorChange}
+            gradient
+            compact
+            label="Accent Color"
+            helpText="Colors the shared chat, roleplay, and game chrome: toolbar icons, button borders, focus rings, highlights, and panel outlines. Gradients unlock rainbow accents."
+            emptyText={`Default ${defaultAppAccentColor}`}
+            emptyPreviewValue={defaultAppAccentColor}
+            clearLabel="Reset to default"
+          />
+
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium inline-flex items-center gap-1">
+              Font{" "}
+              <HelpTooltip text="Choose the font used across the app. 'Default (Inter)' is optimized for screen readability. Drop .ttf, .otf, .woff, or .woff2 font files into the data/fonts/ folder to add custom fonts." />
+            </span>
+            <select
+              value={fontFamily}
+              onChange={(e) => setFontFamily(e.target.value)}
+              className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]"
+            >
+              <option value="">Default (Inter)</option>
+              {customFontOptions.map((f) => (
+                <option key={f.family} value={f.family}>
+                  {f.family}
+                </option>
+              ))}
+            </select>
+            {(!customFonts || customFonts.length === 0) && (
+              <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                Drop font files (.ttf, .otf, .woff, .woff2) into the <span className="font-medium">data/fonts/</span>{" "}
+                folder to add custom fonts.
+              </p>
+            )}
+            <button
+              onClick={() => api.post("/fonts/open-folder").catch(() => {})}
+              className="mt-1 inline-flex items-center gap-1.5 self-start rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+            >
+              <FolderOpen size="0.75rem" />
+              Open Fonts Folder
+            </button>
+          </label>
+
+          {/* ── Google Fonts ── */}
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs font-medium inline-flex items-center gap-1">
+              Google Fonts{" "}
+              <HelpTooltip text="Download a font directly from Google Fonts by name. Browse available fonts at fonts.google.com and type the exact name here." />
+            </span>
+            <div className="flex gap-1.5">
+              <input
+                type="text"
+                value={googleFontName}
+                onChange={(e) => setGoogleFontName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && googleFontName.trim() && !googleFontMutation.isPending) {
+                    googleFontMutation.mutate(googleFontName.trim());
+                  }
+                }}
+                placeholder="e.g. Fira Code, Lora, Poppins…"
+                className="flex-1 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-xs outline-none ring-1 ring-transparent transition-shadow placeholder:text-[var(--muted-foreground)]/50 focus:ring-[var(--primary)]"
+              />
+              <button
+                onClick={() => googleFontMutation.mutate(googleFontName.trim())}
+                disabled={!googleFontName.trim() || googleFontMutation.isPending}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-1.5 text-[0.6875rem] font-medium text-[var(--primary-foreground)] transition-all hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {googleFontMutation.isPending ? (
+                  <Loader2 size="0.75rem" className="animate-spin" />
+                ) : (
+                  <Download size="0.75rem" />
+                )}
+                {googleFontMutation.isPending ? "Downloading…" : "Add"}
+              </button>
+            </div>
+            <a
+              href="https://fonts.google.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[0.625rem] text-[var(--muted-foreground)] hover:text-[var(--primary)] transition-colors inline-flex items-center gap-1"
+            >
+              Browse fonts at fonts.google.com →
+            </a>
+          </div>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium inline-flex items-center gap-1">
+              Display Size{" "}
+              <HelpTooltip text="Adjusts the base font size across the whole app on this device. Larger sizes improve readability. Default is 17px." />
+            </span>
+            <select
+              value={String(fontSize)}
+              onChange={(e) => setFontSize(Number(e.target.value) as 12 | 14 | 16 | 17 | 19 | 22)}
+              className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]"
+            >
+              <option value="12">Tiny</option>
+              <option value="14">Small</option>
+              <option value="16">Medium</option>
+              <option value="17">Default</option>
+              <option value="19">Large</option>
+              <option value="22">Huge</option>
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium inline-flex items-center gap-1">
+              Chat Font Size{" "}
+              <HelpTooltip text="Adjusts the font size of chat messages on this device. Drag the slider to find your preferred reading size. Default is 16px." />
+            </span>
+            <div className="flex items-center gap-3">
+              <input
+                type="range"
+                min={12}
+                max={48}
+                step={1}
+                value={chatFontSize}
+                onChange={(e) => setChatFontSize(Number(e.target.value))}
+                className="flex-1 accent-[var(--primary)]"
+              />
+              <span className="text-xs tabular-nums text-[var(--muted-foreground)] w-8 text-right">
+                {chatFontSize}px
+              </span>
+            </div>
+          </label>
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Chat Display"
+        description="Conversation layout, message text styling, and chat gradients."
+        icon={<MessageCircle size="0.875rem" />}
+      >
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-2 rounded-lg border border-[var(--border)]/70 bg-[var(--secondary)]/25 p-3">
+            <div className="flex items-center gap-1.5">
+              <MessageCircle size="0.75rem" className="text-[var(--muted-foreground)]" />
+              <span className="text-xs font-medium">Chat Layout</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {(
+                [
+                  { id: "classic" as ConversationMessageStyle, label: "Linear", desc: "Chat-style rows" },
+                  { id: "bubble" as ConversationMessageStyle, label: "Bubbles", desc: "Messenger-style bubbles" },
+                ] as const
+              ).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setConversationMessageStyle(opt.id)}
+                  className={cn(
+                    "flex flex-col items-start gap-1 rounded-lg border p-3 text-left text-xs transition-all",
+                    conversationMessageStyle === opt.id
+                      ? "border-[var(--primary)] bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]"
+                      : "border-[var(--border)] bg-[var(--background)]/35 hover:border-[var(--primary)]/40",
+                  )}
+                  aria-pressed={conversationMessageStyle === opt.id}
+                >
+                  <span className="font-semibold">{opt.label}</span>
+                  <span className="text-[0.625rem] leading-tight text-[var(--muted-foreground)]">{opt.desc}</span>
+                </button>
+              ))}
+            </div>
+            <div className="rounded-lg border border-[var(--border)]/60 bg-[var(--background)]/35 p-2.5 text-[0.6875rem]">
+              {conversationMessageStyle === "bubble" ? (
+                <div className="space-y-1.5">
+                  <div className="flex justify-end">
+                    <div className="mari-message-bubble texting-bubble texting-bubble-user max-w-[78%] rounded-2xl px-3 py-1.5 text-xs shadow-sm">
+                      Hey, how's it going?
+                    </div>
+                  </div>
+                  <div className="flex items-end gap-1.5 justify-start">
+                    <div className="h-5 w-5 shrink-0 rounded-full bg-[var(--accent)]" />
+                    <div className="mari-message-bubble texting-bubble texting-bubble-other max-w-[78%] rounded-2xl px-3 py-1.5 text-xs shadow-sm">
+                      Pretty good, thanks!
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex gap-2 text-xs">
+                  <div className="h-6 w-6 shrink-0 rounded-full bg-[var(--accent)]" />
+                  <div className="min-w-0 flex-1">
+                    <div className="mb-0.5 flex items-baseline gap-2">
+                      <span className="font-semibold">Character</span>
+                      <span className="text-[0.625rem] text-[var(--muted-foreground)]">12:45</span>
+                    </div>
+                    <div className="space-y-0.5 text-[var(--foreground)]/90">
+                      <div>Messages appear as rows,</div>
+                      <div>grouped by sender.</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* ── Text Appearance ── */}
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center gap-1.5">
+              <Paintbrush size="0.75rem" className="text-[var(--muted-foreground)]" />
+              <span className="text-xs font-medium">Text Appearance</span>
+              <HelpTooltip text="Customize the look of chat message text. Chat Text Color sets the default font color for all non-dialogue text. Background Opacity controls the transparency of roleplay message bubbles." />
+            </div>
+
+            {/* Chat Text Color */}
+            <ColorPicker
+              value={chatFontColor}
+              onChange={setChatFontColor}
+              compact
+              label="Chat Text Color"
+              helpText="Controls the main chat message text color. Leave it on the scheme default to keep dark and light mode readable."
+              emptyText={`Scheme default ${getDefaultChatTextColor(theme)}`}
+              emptyPreviewValue={getDefaultChatTextColor(theme)}
+              clearLabel="Reset to default"
+            />
+
+            {/* Chat Chrome Text Color */}
+            <ColorPicker
+              value={chatChromeTextColor}
+              onChange={setChatChromeTextColor}
+              compact
+              label="Chat Chrome Text Color"
+              helpText="Controls text in tracker widgets, shared toolbar buttons, and windows opened from chat buttons. Leave it on the scheme default to swap automatically between dark and light mode."
+              emptyText={`Scheme default ${getDefaultChatChromeTextColor(theme)}`}
+              emptyPreviewValue={getDefaultChatChromeTextColor(theme)}
+              clearLabel="Reset to default"
+            />
+
+            {/* Roleplay Messages Background Opacity */}
+            <label className="flex flex-col gap-1">
+              <span className="text-[0.6875rem] font-medium">Roleplay Messages Background Opacity</span>
+              <div className="flex items-center gap-3">
                 <input
                   type="range"
                   min={0}
-                  max={5}
-                  step={0.5}
-                  value={textStrokeWidth}
-                  onChange={(e) => setTextStrokeWidth(Number(e.target.value))}
+                  max={100}
+                  step={5}
+                  value={chatFontOpacity}
+                  onChange={(e) => setChatFontOpacity(Number(e.target.value))}
                   className="flex-1 accent-[var(--primary)]"
                 />
-                <span className="text-xs tabular-nums text-[var(--muted-foreground)] w-10 text-right">
-                  {textStrokeWidth}px
+                <span className="text-xs tabular-nums text-[var(--muted-foreground)] w-8 text-right">
+                  {chatFontOpacity}%
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setChatFontOpacity(90)}
+                disabled={chatFontOpacity === 90}
+                className="self-start text-[0.625rem] text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-45"
+              >
+                Reset opacity to default
+              </button>
+            </label>
+
+            {/* Text Stroke */}
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[0.6875rem] font-medium inline-flex items-center gap-1">
+                Text Outline / Stroke
+                <HelpTooltip text="Adds an outline around chat text for better readability over backgrounds. Set width to 0 to disable." />
+              </span>
+              <ColorPicker
+                value={textStrokeColor || "#000000"}
+                onChange={(value) => setTextStrokeColor(value || "#000000")}
+                compact
+                label="Text Outline Color"
+                helpText="Controls the outline color used when text stroke width is above 0."
+                clearLabel="Reset to default"
+                clearValue="#000000"
+              />
+              <label className="flex flex-col gap-1">
+                <span className="text-[0.625rem] text-[var(--muted-foreground)]">Width</span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="range"
+                    min={0}
+                    max={5}
+                    step={0.5}
+                    value={textStrokeWidth}
+                    onChange={(e) => setTextStrokeWidth(Number(e.target.value))}
+                    className="flex-1 accent-[var(--primary)]"
+                  />
+                  <span className="w-10 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
+                    {textStrokeWidth}px
+                  </span>
+                </div>
+              </label>
+              <button
+                onClick={() => {
+                  setTextStrokeWidth(0.5);
+                  setTextStrokeColor("#000000");
+                }}
+                className="text-[0.625rem] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors self-start"
+              >
+                Reset to default
+              </button>
+            </div>
+          </div>
+        </div>
+      </SettingsSection>
+
+      <TrackerPanelAppearanceDrawer
+        trackerPanelEnabled={trackerPanelEnabled}
+        setTrackerPanelEnabled={setTrackerPanelEnabled}
+        trackerPanelHideHudWidgets={trackerPanelHideHudWidgets}
+        setTrackerPanelHideHudWidgets={setTrackerPanelHideHudWidgets}
+        trackerPanelUseExpressionSprites={trackerPanelUseExpressionSprites}
+        setTrackerPanelUseExpressionSprites={setTrackerPanelUseExpressionSprites}
+        trackerPanelThoughtBubbleDisplay={trackerPanelThoughtBubbleDisplay}
+        setTrackerPanelThoughtBubbleDisplay={setTrackerPanelThoughtBubbleDisplay}
+        trackerPanelDockedThoughtsAlwaysVisible={trackerPanelDockedThoughtsAlwaysVisible}
+        setTrackerPanelDockedThoughtsAlwaysVisible={setTrackerPanelDockedThoughtsAlwaysVisible}
+        trackerPanelSizeProfile={trackerPanelSizeProfile}
+        setTrackerPanelSizeProfile={setTrackerPanelSizeProfile}
+        trackerPanelBackgroundColor={trackerPanelBackgroundColor}
+        setTrackerPanelBackgroundColor={setTrackerPanelBackgroundColor}
+        trackerTemperatureUnit={trackerTemperatureUnit}
+        setTrackerTemperatureUnit={setTrackerTemperatureUnit}
+      />
+
+      <SettingsSection
+        title="Character Art"
+        description="Roleplay avatars, Game mode art scale, and VN dialogue presentation."
+        icon={<Image size="0.875rem" />}
+      >
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-1.5">
+              <Image size="0.75rem" className="text-[var(--muted-foreground)]" />
+              <span className="text-xs font-medium">Roleplay Avatars</span>
+              <HelpTooltip text="Choose how avatars sit next to roleplay messages. None hides message avatars. Small Circles keeps the current compact layout. Small Rectangles gives portraits a taller frame. Glued Side Panel embeds a larger portrait strip into the message bubble itself." />
+            </div>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {ROLEPLAY_AVATAR_STYLE_OPTIONS.map((opt) => (
+                <button
+                  key={opt.id}
+                  onClick={() => setRoleplayAvatarStyle(opt.id)}
+                  className={cn(
+                    "flex flex-col items-start gap-2 rounded-lg border p-3 text-left text-xs transition-all",
+                    roleplayAvatarStyle === opt.id
+                      ? "border-[var(--primary)] bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]"
+                      : "border-[var(--border)] hover:border-[var(--primary)]/40",
+                  )}
+                >
+                  <div className="w-full overflow-hidden rounded-md bg-[var(--secondary)]/80 ring-1 ring-[var(--border)]/70">
+                    {opt.id === "none" ? (
+                      <div className="flex h-14 items-center px-3">
+                        <div className="flex-1 rounded-2xl bg-black/25 px-3 py-2">
+                          <div className="h-1.5 w-16 rounded-full bg-white/20" />
+                          <div className="mt-1.5 h-1.5 w-24 rounded-full bg-white/12" />
+                        </div>
+                      </div>
+                    ) : opt.id === "circles" ? (
+                      <div className="flex h-14 items-center px-3">
+                        <div className="relative flex-1 rounded-2xl rounded-tl-sm bg-black/25 px-3 py-2">
+                          <div className="absolute left-2 top-2 h-2.5 w-2.5 rounded-full bg-gradient-to-br from-rose-400 to-orange-300 shadow-[0_0_0_2px_rgba(255,255,255,0.16)]" />
+                          <div className="ml-4 h-1.5 w-14 rounded-full bg-white/20" />
+                          <div className="mt-1.5 ml-4 h-1.5 w-20 rounded-full bg-white/12" />
+                        </div>
+                      </div>
+                    ) : opt.id === "rectangles" ? (
+                      <div className="flex h-14 items-center px-3">
+                        <div className="relative flex-1 rounded-2xl rounded-tl-sm bg-black/25 py-2 pl-8 pr-3">
+                          <div className="absolute left-2 top-2 h-4 w-4 overflow-hidden rounded bg-gradient-to-b from-rose-400/75 via-orange-300/55 to-zinc-600/80 ring-1 ring-white/20">
+                            <div className="h-full w-full bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.24),transparent_58%)]" />
+                          </div>
+                          <div className="h-1.5 w-14 rounded-full bg-white/20" />
+                          <div className="mt-1.5 h-1.5 w-20 rounded-full bg-white/12" />
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex h-14 items-stretch overflow-hidden">
+                        <div className="relative w-20 overflow-hidden border-r border-white/8 bg-gradient-to-b from-rose-400/60 via-orange-300/45 to-transparent">
+                          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-[32%] backdrop-blur-[4px] [mask-image:linear-gradient(to_bottom,transparent_0%,rgba(0,0,0,0.25)_28%,rgba(0,0,0,0.8)_100%)] [-webkit-mask-image:linear-gradient(to_bottom,transparent_0%,rgba(0,0,0,0.25)_28%,rgba(0,0,0,0.8)_100%)]" />
+                          <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_bottom,rgba(255,255,255,0)_0%,rgba(255,255,255,0)_72%,rgba(113,113,122,0.84)_92%,rgba(113,113,122,1)_100%)]" />
+                        </div>
+                        <div className="flex-1 px-3 py-2">
+                          <div className="h-1.5 w-14 rounded-full bg-white/20" />
+                          <div className="mt-1.5 h-1.5 w-20 rounded-full bg-white/12" />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <span className="font-semibold">{opt.label}</span>
+                  <span className="text-[0.625rem] leading-tight text-[var(--muted-foreground)]">{opt.desc}</span>
+                </button>
+              ))}
+            </div>
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/45 p-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <div className="flex h-20 w-full shrink-0 items-end justify-center gap-3 overflow-hidden rounded-md bg-black/30 p-2 ring-1 ring-[var(--border)]/70 sm:w-28">
+                  {roleplayAvatarStyle === "none" ? (
+                    <div
+                      className="flex shrink-0 items-center justify-center rounded-md border border-dashed border-white/20 px-2 text-[0.625rem] font-medium text-white/35"
+                      style={{
+                        width: toPreviewRem(roleplayAvatarPreview.width),
+                        height: toPreviewRem(roleplayAvatarPreview.height),
+                      }}
+                    >
+                      No avatars
+                    </div>
+                  ) : (
+                    <div
+                      className={cn(
+                        "shrink-0 border border-white/20 bg-gradient-to-b from-rose-300/85 via-fuchsia-300/65 to-slate-900/90 shadow-lg transition-all",
+                        roleplayAvatarStyle === "circles"
+                          ? "rounded-full"
+                          : roleplayAvatarStyle === "rectangles"
+                            ? "rounded-xl"
+                            : "rounded-md",
+                      )}
+                      style={{
+                        width: toPreviewRem(roleplayAvatarPreview.width),
+                        height: toPreviewRem(roleplayAvatarPreview.height),
+                      }}
+                    />
+                  )}
+                  <div
+                    className="shrink-0 rounded-full border border-white/20 bg-gradient-to-b from-violet-200/85 via-purple-200/70 to-slate-900/95 shadow-lg transition-all"
+                    style={{
+                      width: toPreviewRem(roleplaySpritePreview.width),
+                      height: toPreviewRem(roleplaySpritePreview.height),
+                    }}
+                  />
+                </div>
+                <div className="grid min-w-0 flex-1 gap-3">
+                  <label className="flex min-w-0 flex-col gap-1">
+                    <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">Message avatar scale</span>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="range"
+                        min={0.75}
+                        max={2.5}
+                        step={0.05}
+                        value={roleplayAvatarScale}
+                        onChange={(e) => setRoleplayAvatarScale(Number(e.target.value))}
+                        className="min-w-0 flex-1 accent-[var(--primary)]"
+                      />
+                      <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
+                        {Math.round(roleplayAvatarScale * 100)}%
+                      </span>
+                    </div>
+                  </label>
+                  <label className="flex min-w-0 flex-col gap-1">
+                    <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">Default sprite scale</span>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="range"
+                        min={0.5}
+                        max={1.75}
+                        step={0.05}
+                        value={roleplaySpriteScale}
+                        onChange={(e) => setRoleplaySpriteScale(Number(e.target.value))}
+                        className="min-w-0 flex-1 accent-[var(--primary)]"
+                      />
+                      <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
+                        {Math.round(roleplaySpriteScale * 100)}%
+                      </span>
+                    </div>
+                  </label>
+                </div>
+              </div>
+            </div>
+            <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+              Rectangles keep the compact side slot but give portraits a bit more vertical room. The larger panel crops
+              portraits from the top on short messages and fades them back into the bubble background on taller ones.
+              Per-chat sprite sizing still overrides the default sprite scale here.
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-1.5">
+              <Image size="0.75rem" className="text-[var(--muted-foreground)]" />
+              <span className="text-xs font-medium">Game VN Art</span>
+              <HelpTooltip text="Scales Game mode dialogue portraits separately from the center full-body sprites. Oversized art is still clamped per viewport." />
+            </div>
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/45 p-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <div className="flex h-20 w-full shrink-0 items-end justify-center gap-3 overflow-hidden rounded-md bg-black/30 p-2 ring-1 ring-[var(--border)]/70 sm:w-28">
+                  <div
+                    className="shrink-0 rounded-lg border border-white/20 bg-gradient-to-b from-sky-300/80 via-cyan-200/65 to-slate-800/90 shadow-lg transition-all"
+                    style={{
+                      width: toPreviewRem(gameAvatarPreview.width),
+                      height: toPreviewRem(gameAvatarPreview.height),
+                    }}
+                  />
+                  <div
+                    className="shrink-0 rounded-full border border-white/20 bg-gradient-to-b from-rose-200/85 via-fuchsia-200/70 to-slate-900/95 shadow-lg transition-all"
+                    style={{
+                      width: toPreviewRem(gameFullBodyPreview.width),
+                      height: toPreviewRem(gameFullBodyPreview.height),
+                    }}
+                  />
+                </div>
+                <div className="grid min-w-0 flex-1 gap-3">
+                  <label className="flex min-w-0 flex-col gap-1">
+                    <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">
+                      Dialogue portrait scale
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="range"
+                        min={0.75}
+                        max={1.75}
+                        step={0.05}
+                        value={gameAvatarScale}
+                        onChange={(e) => setGameAvatarScale(Number(e.target.value))}
+                        className="min-w-0 flex-1 accent-[var(--primary)]"
+                      />
+                      <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
+                        {Math.round(gameAvatarScale * 100)}%
+                      </span>
+                    </div>
+                  </label>
+                  <label className="flex min-w-0 flex-col gap-1">
+                    <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">
+                      Full-body sprite scale
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="range"
+                        min={0.75}
+                        max={2.75}
+                        step={0.05}
+                        value={gameFullBodySpriteScale}
+                        onChange={(e) => setGameFullBodySpriteScale(Number(e.target.value))}
+                        className="min-w-0 flex-1 accent-[var(--primary)]"
+                      />
+                      <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
+                        {Math.round(gameFullBodySpriteScale * 100)}%
+                      </span>
+                    </div>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-1.5">
+              <ScrollText size="0.75rem" className="text-[var(--muted-foreground)]" />
+              <span className="text-xs font-medium">Game Dialogue Display</span>
+              <HelpTooltip text="Choose whether Game mode uses the classic VN box or shows a scrollable segment history directly above it." />
+            </div>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {GAME_DIALOGUE_DISPLAY_OPTIONS.map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setGameDialogueDisplayMode(opt.id)}
+                  className={cn(
+                    "flex flex-col items-start gap-1 rounded-lg border p-3 text-left text-xs transition-all",
+                    gameDialogueDisplayMode === opt.id
+                      ? "border-[var(--primary)] bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]"
+                      : "border-[var(--border)] hover:border-[var(--primary)]/40",
+                  )}
+                >
+                  <span className="font-semibold">{opt.label}</span>
+                  <span className="text-[0.625rem] leading-tight text-[var(--muted-foreground)]">{opt.desc}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Motion & Backgrounds"
+        description="Atmospheric effects, Conversation gradients, and chat background images."
+        icon={<CloudRain size="0.875rem" />}
+      >
+        <div className="flex flex-col gap-3">
+          {/* ── Effects ── */}
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-1.5">
+              <CloudRain size="0.75rem" className="text-[var(--muted-foreground)]" />
+              <span className="text-xs font-medium">Effects</span>
+              <HelpTooltip text="Visual effects that enhance the roleplay atmosphere. Weather particles like rain, snow, and fog appear based on the story context." />
+            </div>
+            <ToggleSetting
+              label="Dynamic weather effects (rain, snow, fog, etc.)"
+              checked={weatherEffects}
+              onChange={setWeatherEffects}
+            />
+            <p className="text-[0.625rem] text-[var(--muted-foreground)] pl-6">
+              Shows animated weather particles based on in-story weather and time of day. Requires the{" "}
+              <span className="font-medium">World State</span> agent to be enabled so weather data is extracted from the
+              narrative.
+            </p>
+          </div>
+
+          {/* ── Conversation Gradient (per color-scheme) ── */}
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <Palette size="0.75rem" className="text-[var(--muted-foreground)]" />
+                <span className="text-xs font-medium">Conversation Theme</span>
+                <HelpTooltip text="Set a background gradient for all Conversation-mode chats, separately for dark and light color schemes." />
+              </div>
+              {/* Scheme tabs */}
+              <div className="flex rounded-lg bg-[var(--secondary)] p-0.5 text-[0.625rem]">
+                <button
+                  type="button"
+                  onClick={() => setActiveGradientScheme("dark")}
+                  className={cn(
+                    "rounded-md px-2 py-1 transition-colors",
+                    activeGradientScheme === "dark"
+                      ? "bg-[var(--primary)] text-[var(--primary-foreground)] shadow-sm"
+                      : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
+                  )}
+                >
+                  Dark
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveGradientScheme("light")}
+                  className={cn(
+                    "rounded-md px-2 py-1 transition-colors",
+                    activeGradientScheme === "light"
+                      ? "bg-[var(--primary)] text-[var(--primary-foreground)] shadow-sm"
+                      : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
+                  )}
+                >
+                  Light
+                </button>
+              </div>
+            </div>
+            {/* Preview */}
+            <div
+              className="h-16 rounded-lg ring-1 ring-[var(--border)]"
+              style={{ background: `linear-gradient(135deg, ${currentGradient.from}, ${currentGradient.to})` }}
+            />
+            <div className="grid grid-cols-2 gap-3">
+              <label className="flex flex-col gap-1">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="color"
+                    value={currentGradient.from}
+                    onChange={(e) => {
+                      setConvoGradientField(activeGradientScheme, "from", e.target.value);
+                      setDraftFrom(e.target.value);
+                    }}
+                    className="h-8 w-8 flex-shrink-0 cursor-pointer rounded-md border border-[var(--border)] bg-transparent p-0.5"
+                  />
+                  <input
+                    type="text"
+                    value={draftFrom}
+                    onChange={(e) => {
+                      setDraftFrom(e.target.value);
+                      if (/^#[0-9a-fA-F]{6}$/.test(e.target.value))
+                        setConvoGradientField(activeGradientScheme, "from", e.target.value);
+                    }}
+                    onBlur={() => setDraftFrom(currentGradient.from)}
+                    className="w-full rounded-md bg-[var(--secondary)] px-2 py-1.5 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+                  />
+                </div>
+              </label>
+              <label className="flex flex-col gap-1">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="color"
+                    value={currentGradient.to}
+                    onChange={(e) => {
+                      setConvoGradientField(activeGradientScheme, "to", e.target.value);
+                      setDraftTo(e.target.value);
+                    }}
+                    className="h-8 w-8 flex-shrink-0 cursor-pointer rounded-md border border-[var(--border)] bg-transparent p-0.5"
+                  />
+                  <input
+                    type="text"
+                    value={draftTo}
+                    onChange={(e) => {
+                      setDraftTo(e.target.value);
+                      if (/^#[0-9a-fA-F]{6}$/.test(e.target.value))
+                        setConvoGradientField(activeGradientScheme, "to", e.target.value);
+                    }}
+                    onBlur={() => setDraftTo(currentGradient.to)}
+                    className="w-full rounded-md bg-[var(--secondary)] px-2 py-1.5 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+                  />
+                </div>
+              </label>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const defaults =
+                  activeGradientScheme === "dark"
+                    ? { from: "#0a0a0e", to: "#1c2133" }
+                    : { from: "#f2eff7", to: "#eae6f0" };
+                setConvoGradientField(activeGradientScheme, "from", defaults.from);
+                setConvoGradientField(activeGradientScheme, "to", defaults.to);
+                setDraftFrom(defaults.from);
+                setDraftTo(defaults.to);
+              }}
+              className="text-[0.625rem] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors self-start"
+            >
+              Reset {activeGradientScheme === "dark" ? "Dark" : "Light"} to default
+            </button>
+          </div>
+
+          {/* ── Chat Background Picker ── */}
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium inline-flex items-center gap-1">
+                Chat Background{" "}
+                <HelpTooltip text="Import one or more custom images, or choose from your game asset backgrounds. Supports JPG, PNG, GIF, WebP, and AVIF. Remove to use the default background." />
+              </span>
+              {chatBackground && (
+                <button
+                  onClick={() => setChatBackground(null)}
+                  className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[0.625rem] text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/10"
+                >
+                  <X size="0.625rem" /> Remove
+                </button>
+              )}
+            </div>
+            <label className="flex flex-col gap-1 rounded-lg bg-[var(--secondary)]/45 p-3 ring-1 ring-[var(--border)]/70">
+              <span className="inline-flex items-center gap-1 text-[0.6875rem] font-medium">
+                Background Blur
+                <HelpTooltip text="Softens selected Roleplay and Game mode background images behind the chat UI. Set to 0px to keep backgrounds sharp." />
+              </span>
+              <div className="flex items-center gap-3">
+                <input
+                  type="range"
+                  min={0}
+                  max={24}
+                  step={1}
+                  value={chatBackgroundBlur}
+                  onChange={(e) => setChatBackgroundBlur(Number(e.target.value))}
+                  className="min-w-0 flex-1 accent-[var(--primary)]"
+                />
+                <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
+                  {chatBackgroundBlur === 0 ? "Off" : `${chatBackgroundBlur}px`}
                 </span>
               </div>
             </label>
-            <div className="flex flex-col gap-1">
-              <div className="flex items-center gap-1.5">
-                <input
-                  type="color"
-                  value={draftStrokeColor}
-                  onChange={(e) => {
-                    setDraftStrokeColor(e.target.value);
-                    setTextStrokeColor(e.target.value);
-                  }}
-                  className="h-8 w-8 flex-shrink-0 cursor-pointer rounded-md border border-[var(--border)] bg-transparent p-0.5"
-                />
-              </div>
-            </div>
-          </div>
-          <button
-            onClick={() => {
-              setTextStrokeWidth(0.5);
-              setTextStrokeColor("#000000");
-              setDraftStrokeColor("#000000");
-            }}
-            className="text-[0.625rem] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors self-start"
-          >
-            Reset to default
-          </button>
-        </div>
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-1.5">
-          <TrackerPanelIcon size="0.875rem" strokeWidth={1.95} className="text-[var(--muted-foreground)]" />
-          <span className="text-xs font-medium">Tracker Panel</span>
-          <HelpTooltip text="Adds a compact side panel button to the Roleplay HUD for the fixed tracker board." />
-        </div>
-        <ToggleSetting
-          label="Show tracker panel button"
-          checked={trackerPanelEnabled}
-          onChange={setTrackerPanelEnabled}
-          help="When on, Roleplay HUD shows a side-panel button for the fixed Tracker panel."
-        />
-        <div className={cn("pl-5 transition-opacity", trackerPanelEnabled ? "" : "pointer-events-none opacity-45")}>
-          <ToggleSetting
-            label="Replace tracker HUD icons"
-            checked={trackerPanelHideHudWidgets}
-            onChange={setTrackerPanelHideHudWidgets}
-            help="Hides the old world/player tracker icon strip so the Tracker panel can dock to the edge. The Agents button stays visible."
-          />
-          <ToggleSetting
-            label="Use expression sprites for tracker portraits"
-            checked={trackerPanelUseExpressionSprites}
-            onChange={setTrackerPanelUseExpressionSprites}
-            help="When on, tracker portraits can switch to Expression Engine sprites if that agent is enabled for the chat and the character has matching sprite images."
-          />
-          <TrackerPanelCardOrderSetting />
-        </div>
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-1.5">
-          <Image size="0.75rem" className="text-[var(--muted-foreground)]" />
-          <span className="text-xs font-medium">Roleplay Avatars</span>
-          <HelpTooltip text="Choose how avatars sit next to roleplay messages. Small Circles keeps the current compact layout. Small Rectangles keeps avatars beside the bubble but gives portraits a taller frame. Glued Side Panel embeds a larger portrait strip into the message bubble itself." />
-        </div>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {ROLEPLAY_AVATAR_STYLE_OPTIONS.map((opt) => (
-            <button
-              key={opt.id}
-              onClick={() => setRoleplayAvatarStyle(opt.id)}
-              className={cn(
-                "flex flex-col items-start gap-2 rounded-lg border p-3 text-left text-xs transition-all",
-                roleplayAvatarStyle === opt.id
-                  ? "border-[var(--primary)] bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]"
-                  : "border-[var(--border)] hover:border-[var(--primary)]/40",
-              )}
-            >
-              <div className="w-full overflow-hidden rounded-md bg-[var(--secondary)]/80 ring-1 ring-[var(--border)]/70">
-                {opt.id === "circles" ? (
-                  <div className="flex h-14 items-center px-3">
-                    <div className="relative flex-1 rounded-2xl rounded-tl-sm bg-black/25 px-3 py-2">
-                      <div className="absolute left-2 top-2 h-2.5 w-2.5 rounded-full bg-gradient-to-br from-rose-400 to-orange-300 shadow-[0_0_0_2px_rgba(255,255,255,0.16)]" />
-                      <div className="ml-4 h-1.5 w-14 rounded-full bg-white/20" />
-                      <div className="mt-1.5 ml-4 h-1.5 w-20 rounded-full bg-white/12" />
-                    </div>
-                  </div>
-                ) : opt.id === "rectangles" ? (
-                  <div className="flex h-14 items-center px-3">
-                    <div className="relative flex-1 rounded-2xl rounded-tl-sm bg-black/25 py-2 pl-8 pr-3">
-                      <div className="absolute left-2 top-2 h-4 w-4 overflow-hidden rounded bg-gradient-to-b from-rose-400/75 via-orange-300/55 to-zinc-600/80 ring-1 ring-white/20">
-                        <div className="h-full w-full bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.24),transparent_58%)]" />
-                      </div>
-                      <div className="h-1.5 w-14 rounded-full bg-white/20" />
-                      <div className="mt-1.5 h-1.5 w-20 rounded-full bg-white/12" />
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex h-14 items-stretch overflow-hidden">
-                    <div className="relative w-14 overflow-hidden border-r border-white/8 bg-gradient-to-b from-rose-400/60 via-orange-300/45 to-transparent">
-                      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-[32%] backdrop-blur-[4px] [mask-image:linear-gradient(to_bottom,transparent_0%,rgba(0,0,0,0.25)_28%,rgba(0,0,0,0.8)_100%)] [-webkit-mask-image:linear-gradient(to_bottom,transparent_0%,rgba(0,0,0,0.25)_28%,rgba(0,0,0,0.8)_100%)]" />
-                      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_bottom,rgba(255,255,255,0)_0%,rgba(255,255,255,0)_72%,rgba(113,113,122,0.84)_92%,rgba(113,113,122,1)_100%)]" />
-                    </div>
-                    <div className="flex-1 px-3 py-2">
-                      <div className="h-1.5 w-14 rounded-full bg-white/20" />
-                      <div className="mt-1.5 h-1.5 w-20 rounded-full bg-white/12" />
-                    </div>
-                  </div>
-                )}
-              </div>
-              <span className="font-semibold">{opt.label}</span>
-              <span className="text-[0.625rem] leading-tight text-[var(--muted-foreground)]">{opt.desc}</span>
-            </button>
-          ))}
-        </div>
-        <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/45 p-3">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            <div className="flex h-20 w-full shrink-0 items-end justify-center gap-3 overflow-hidden rounded-md bg-black/30 ring-1 ring-[var(--border)]/70 sm:w-28">
-              <div
-                className={cn(
-                  "mb-2 border border-white/20 bg-gradient-to-b from-rose-300/85 via-fuchsia-300/65 to-slate-900/90 shadow-lg transition-all",
-                  roleplayAvatarStyle === "circles"
-                    ? "rounded-full"
-                    : roleplayAvatarStyle === "rectangles"
-                      ? "rounded-xl"
-                      : "rounded-md",
-                )}
-                style={{
-                  width: `${
-                    roleplayAvatarStyle === "panel"
-                      ? Math.min(5.5, 2.2 * roleplayAvatarScale)
-                      : Math.min(5.5, (roleplayAvatarStyle === "rectangles" ? 2.15 : 2) * roleplayAvatarScale)
-                  }rem`,
-                  height: `${
-                    roleplayAvatarStyle === "circles"
-                      ? Math.min(5.5, 2 * roleplayAvatarScale)
-                      : Math.min(6, (roleplayAvatarStyle === "rectangles" ? 2.7 : 3.4) * roleplayAvatarScale)
-                  }rem`,
-                }}
-              />
-              <div
-                className="mb-1 rounded-full border border-white/20 bg-gradient-to-b from-violet-200/85 via-purple-200/70 to-slate-900/95 shadow-lg transition-all"
-                style={{
-                  width: `${Math.min(2.1, 0.85 * roleplaySpriteScale)}rem`,
-                  height: `${Math.min(4.7, 3.2 * roleplaySpriteScale)}rem`,
-                }}
-              />
-            </div>
-            <div className="grid min-w-0 flex-1 gap-3">
-              <label className="flex min-w-0 flex-col gap-1">
-                <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">Message avatar scale</span>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="range"
-                    min={0.75}
-                    max={2.5}
-                    step={0.05}
-                    value={roleplayAvatarScale}
-                    onChange={(e) => setRoleplayAvatarScale(Number(e.target.value))}
-                    className="min-w-0 flex-1 accent-[var(--primary)]"
-                  />
-                  <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
-                    {Math.round(roleplayAvatarScale * 100)}%
-                  </span>
-                </div>
-              </label>
-              <label className="flex min-w-0 flex-col gap-1">
-                <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">Default sprite scale</span>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="range"
-                    min={0.5}
-                    max={1.75}
-                    step={0.05}
-                    value={roleplaySpriteScale}
-                    onChange={(e) => setRoleplaySpriteScale(Number(e.target.value))}
-                    className="min-w-0 flex-1 accent-[var(--primary)]"
-                  />
-                  <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
-                    {Math.round(roleplaySpriteScale * 100)}%
-                  </span>
-                </div>
-              </label>
-            </div>
-          </div>
-        </div>
-        <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-          Rectangles keep the compact side slot but give portraits a bit more vertical room. The larger panel crops
-          portraits from the top on short messages and fades them back into the bubble background on taller ones.
-          Per-chat sprite sizing still overrides the default sprite scale here.
-        </p>
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-1.5">
-          <Image size="0.75rem" className="text-[var(--muted-foreground)]" />
-          <span className="text-xs font-medium">Game VN Art</span>
-          <HelpTooltip text="Scales Game mode dialogue portraits separately from the center full-body sprites. Oversized art is still clamped per viewport." />
-        </div>
-        <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/45 p-3">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            <div className="flex h-20 w-full shrink-0 items-end justify-center gap-3 overflow-hidden rounded-md bg-black/30 ring-1 ring-[var(--border)]/70 sm:w-28">
-              <div
-                className="mb-1 rounded-lg border border-white/20 bg-gradient-to-b from-sky-300/80 via-cyan-200/65 to-slate-800/90 shadow-lg transition-all"
-                style={{
-                  width: `${Math.min(3.5, 2.25 * gameAvatarScale)}rem`,
-                  height: `${Math.min(3.9, 2.6 * gameAvatarScale)}rem`,
-                }}
-              />
-              <div
-                className="mb-1 rounded-full border border-white/20 bg-gradient-to-b from-rose-200/85 via-fuchsia-200/70 to-slate-900/95 shadow-lg transition-all"
-                style={{
-                  width: `${Math.min(2.2, 0.9 * gameFullBodySpriteScale)}rem`,
-                  height: `${Math.min(4.8, 3.4 * gameFullBodySpriteScale)}rem`,
-                }}
-              />
-            </div>
-            <div className="grid min-w-0 flex-1 gap-3">
-              <label className="flex min-w-0 flex-col gap-1">
-                <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">Dialogue portrait scale</span>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="range"
-                    min={0.75}
-                    max={1.75}
-                    step={0.05}
-                    value={gameAvatarScale}
-                    onChange={(e) => setGameAvatarScale(Number(e.target.value))}
-                    className="min-w-0 flex-1 accent-[var(--primary)]"
-                  />
-                  <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
-                    {Math.round(gameAvatarScale * 100)}%
-                  </span>
-                </div>
-              </label>
-              <label className="flex min-w-0 flex-col gap-1">
-                <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">Full-body sprite scale</span>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="range"
-                    min={0.75}
-                    max={2.75}
-                    step={0.05}
-                    value={gameFullBodySpriteScale}
-                    onChange={(e) => setGameFullBodySpriteScale(Number(e.target.value))}
-                    className="min-w-0 flex-1 accent-[var(--primary)]"
-                  />
-                  <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
-                    {Math.round(gameFullBodySpriteScale * 100)}%
-                  </span>
-                </div>
-              </label>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-1.5">
-          <ScrollText size="0.75rem" className="text-[var(--muted-foreground)]" />
-          <span className="text-xs font-medium">Game Dialogue Display</span>
-          <HelpTooltip text="Choose whether Game mode uses the classic VN box or shows a scrollable segment history directly above it." />
-        </div>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {GAME_DIALOGUE_DISPLAY_OPTIONS.map((opt) => (
-            <button
-              key={opt.id}
-              type="button"
-              onClick={() => setGameDialogueDisplayMode(opt.id)}
-              className={cn(
-                "flex flex-col items-start gap-1 rounded-lg border p-3 text-left text-xs transition-all",
-                gameDialogueDisplayMode === opt.id
-                  ? "border-[var(--primary)] bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]"
-                  : "border-[var(--border)] hover:border-[var(--primary)]/40",
-              )}
-            >
-              <span className="font-semibold">{opt.label}</span>
-              <span className="text-[0.625rem] leading-tight text-[var(--muted-foreground)]">{opt.desc}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* ── Effects ── */}
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-1.5">
-          <CloudRain size="0.75rem" className="text-[var(--muted-foreground)]" />
-          <span className="text-xs font-medium">Effects</span>
-          <HelpTooltip text="Visual effects that enhance the roleplay atmosphere. Weather particles like rain, snow, and fog appear based on the story context." />
-        </div>
-        <ToggleSetting
-          label="Dynamic weather effects (rain, snow, fog, etc.)"
-          checked={weatherEffects}
-          onChange={setWeatherEffects}
-        />
-        <p className="text-[0.625rem] text-[var(--muted-foreground)] pl-6">
-          Shows animated weather particles based on in-story weather and time of day. Requires the{" "}
-          <span className="font-medium">World State</span> agent to be enabled so weather data is extracted from the
-          narrative.
-        </p>
-      </div>
-
-      {/* ── Conversation Gradient (per color-scheme) ── */}
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-1.5">
-            <Palette size="0.75rem" className="text-[var(--muted-foreground)]" />
-            <span className="text-xs font-medium">Conversation Theme</span>
-            <HelpTooltip text="Set a background gradient for all Conversation-mode chats, separately for dark and light color schemes." />
-          </div>
-          {/* Scheme tabs */}
-          <div className="flex rounded-lg bg-[var(--secondary)] p-0.5 text-[0.625rem]">
-            <button
-              type="button"
-              onClick={() => setActiveGradientScheme("dark")}
-              className={cn(
-                "rounded-md px-2 py-1 transition-colors",
-                activeGradientScheme === "dark"
-                  ? "bg-[var(--primary)] text-[var(--primary-foreground)] shadow-sm"
-                  : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
-              )}
-            >
-              Dark
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveGradientScheme("light")}
-              className={cn(
-                "rounded-md px-2 py-1 transition-colors",
-                activeGradientScheme === "light"
-                  ? "bg-[var(--primary)] text-[var(--primary-foreground)] shadow-sm"
-                  : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
-              )}
-            >
-              Light
-            </button>
-          </div>
-        </div>
-        {/* Preview */}
-        <div
-          className="h-16 rounded-lg ring-1 ring-[var(--border)]"
-          style={{ background: `linear-gradient(135deg, ${currentGradient.from}, ${currentGradient.to})` }}
-        />
-        <div className="grid grid-cols-2 gap-3">
-          <label className="flex flex-col gap-1">
-            <div className="flex items-center gap-2">
-              <input
-                type="color"
-                value={currentGradient.from}
-                onChange={(e) => {
-                  setConvoGradientField(activeGradientScheme, "from", e.target.value);
-                  setDraftFrom(e.target.value);
-                }}
-                className="h-8 w-8 flex-shrink-0 cursor-pointer rounded-md border border-[var(--border)] bg-transparent p-0.5"
-              />
-              <input
-                type="text"
-                value={draftFrom}
-                onChange={(e) => {
-                  setDraftFrom(e.target.value);
-                  if (/^#[0-9a-fA-F]{6}$/.test(e.target.value))
-                    setConvoGradientField(activeGradientScheme, "from", e.target.value);
-                }}
-                onBlur={() => setDraftFrom(currentGradient.from)}
-                className="w-full rounded-md bg-[var(--secondary)] px-2 py-1.5 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
-              />
-            </div>
-          </label>
-          <label className="flex flex-col gap-1">
-            <div className="flex items-center gap-2">
-              <input
-                type="color"
-                value={currentGradient.to}
-                onChange={(e) => {
-                  setConvoGradientField(activeGradientScheme, "to", e.target.value);
-                  setDraftTo(e.target.value);
-                }}
-                className="h-8 w-8 flex-shrink-0 cursor-pointer rounded-md border border-[var(--border)] bg-transparent p-0.5"
-              />
-              <input
-                type="text"
-                value={draftTo}
-                onChange={(e) => {
-                  setDraftTo(e.target.value);
-                  if (/^#[0-9a-fA-F]{6}$/.test(e.target.value))
-                    setConvoGradientField(activeGradientScheme, "to", e.target.value);
-                }}
-                onBlur={() => setDraftTo(currentGradient.to)}
-                className="w-full rounded-md bg-[var(--secondary)] px-2 py-1.5 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
-              />
-            </div>
-          </label>
-        </div>
-        <button
-          type="button"
-          onClick={() => {
-            const defaults =
-              activeGradientScheme === "dark" ? { from: "#0a0a0e", to: "#1c2133" } : { from: "#f2eff7", to: "#eae6f0" };
-            setConvoGradientField(activeGradientScheme, "from", defaults.from);
-            setConvoGradientField(activeGradientScheme, "to", defaults.to);
-            setDraftFrom(defaults.from);
-            setDraftTo(defaults.to);
-          }}
-          className="text-[0.625rem] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors self-start"
-        >
-          Reset {activeGradientScheme === "dark" ? "Dark" : "Light"} to default
-        </button>
-      </div>
-
-      {/* ── Conversation Sound ── */}
-      <ConversationSoundSetting />
-
-      {/* ── Chat Background Picker ── */}
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-medium inline-flex items-center gap-1">
-            Chat Background{" "}
-            <HelpTooltip text="Import one or more custom images, or choose from your game asset backgrounds. Supports JPG, PNG, GIF, WebP, and AVIF. Remove to use the default background." />
-          </span>
-          {chatBackground && (
-            <button
-              onClick={() => setChatBackground(null)}
-              className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[0.625rem] text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/10"
-            >
-              <X size="0.625rem" /> Remove
-            </button>
-          )}
-        </div>
-        <label className="flex flex-col gap-1 rounded-lg bg-[var(--secondary)]/45 p-3 ring-1 ring-[var(--border)]/70">
-          <span className="inline-flex items-center gap-1 text-[0.6875rem] font-medium">
-            Background Blur
-            <HelpTooltip text="Softens selected Roleplay and Game mode background images behind the chat UI. Set to 0px to keep backgrounds sharp." />
-          </span>
-          <div className="flex items-center gap-3">
-            <input
-              type="range"
-              min={0}
-              max={24}
-              step={1}
-              value={chatBackgroundBlur}
-              onChange={(e) => setChatBackgroundBlur(Number(e.target.value))}
-              className="min-w-0 flex-1 accent-[var(--primary)]"
+            <BackgroundPicker
+              selected={chatBackground}
+              onSelect={setChatBackground}
+              defaultRoleplayBackground={defaultRoleplayBackground}
+              onDefaultChange={setDefaultRoleplayBackground}
             />
-            <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
-              {chatBackgroundBlur === 0 ? "Off" : `${chatBackgroundBlur}px`}
-            </span>
           </div>
-        </label>
-        <BackgroundPicker selected={chatBackground} onSelect={setChatBackground} />
-      </div>
+        </div>
+      </SettingsSection>
     </div>
   );
 }
@@ -1757,13 +2732,23 @@ type BackgroundUploadResponse = {
   tags: string[];
 };
 
-function BackgroundPicker({ selected, onSelect }: { selected: string | null; onSelect: (url: string | null) => void }) {
-  const fileRef = useRef<HTMLInputElement>(null);
+function BackgroundPicker({
+  selected,
+  onSelect,
+  defaultRoleplayBackground,
+  onDefaultChange,
+}: {
+  selected: string | null;
+  onSelect: (url: string | null) => void;
+  defaultRoleplayBackground: string;
+  onDefaultChange: (url: string) => void;
+}) {
   const [uploading, setUploading] = useState(false);
   const [editingTags, setEditingTags] = useState<string | null>(null);
   const [tagInput, setTagInput] = useState("");
   const [renamingFile, setRenamingFile] = useState<string | null>(null);
   const [renameInput, setRenameInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const refreshGameAssetManifest = useGameAssetStore((s) => s.fetchManifest);
   const qc = useQueryClient();
 
@@ -1805,13 +2790,33 @@ function BackgroundPicker({ selected, onSelect }: { selected: string | null; onS
       if (selected === oldUrl) {
         onSelect(data.url);
       }
+      if (defaultRoleplayBackground === oldUrl) {
+        onDefaultChange(data.url);
+      }
       setRenamingFile(null);
       qc.invalidateQueries({ queryKey: ["backgrounds"] });
     },
   });
 
-  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files ?? []);
+  const filteredBackgrounds = useMemo(() => {
+    const items = backgrounds ?? [];
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return items;
+    return items.filter((bg) => {
+      const haystack = [
+        bg.filename,
+        bg.originalName ?? "",
+        bg.tag ?? "",
+        bg.source === "game_asset" ? "game asset" : "library",
+        ...bg.tags,
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [backgrounds, searchQuery]);
+
+  const handleUpload = async (files: File[]) => {
     if (files.length === 0) return;
     setUploading(true);
     try {
@@ -1848,7 +2853,6 @@ function BackgroundPicker({ selected, onSelect }: { selected: string | null; onS
       toast.error("Background import failed.");
     } finally {
       setUploading(false);
-      e.target.value = "";
     }
   };
 
@@ -1868,23 +2872,66 @@ function BackgroundPicker({ selected, onSelect }: { selected: string | null; onS
 
   return (
     <div className="flex flex-col gap-2">
-      {/* Upload button */}
-      <button
-        onClick={() => fileRef.current?.click()}
-        disabled={uploading}
-        className="flex items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-[var(--border)] p-3 text-xs text-[var(--muted-foreground)] transition-all hover:border-[var(--primary)]/40 hover:bg-[var(--secondary)]/50"
-      >
-        {uploading ? <Loader2 size="0.875rem" className="animate-spin" /> : <Upload size="0.875rem" />}
-        {uploading ? "Importing..." : "Import Backgrounds"}
-      </button>
-      <input ref={fileRef} type="file" accept="image/*" multiple className="hidden" onChange={handleUpload} />
+      <ImageUploadDropzone
+        label="Import Backgrounds"
+        pending={uploading}
+        pendingLabel="Importing..."
+        dragLabel="Drop backgrounds to import"
+        onFilesSelected={(files) => void handleUpload(files)}
+        icon={uploading ? <Loader2 size="0.875rem" className="animate-spin" /> : <Upload size="0.875rem" />}
+        className="rounded-lg py-3 hover:border-[var(--primary)]/40 hover:bg-[var(--secondary)]/50"
+      />
+
+      <div className="flex flex-col gap-1.5 rounded-lg bg-[var(--secondary)]/40 p-2.5 ring-1 ring-[var(--border)]/70">
+        <div className="flex items-center gap-2">
+          <div className="relative min-w-0 flex-1">
+            <Search
+              size="0.75rem"
+              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)]"
+            />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search backgrounds..."
+              className="w-full rounded-lg border border-[var(--border)] bg-[var(--background)] py-1.5 pl-7 pr-2 text-xs text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)]/60 focus:border-[var(--primary)]/50"
+            />
+          </div>
+          {searchQuery.trim() && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery("")}
+              className="shrink-0 rounded-md p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+              title="Clear search"
+            >
+              <X size="0.75rem" />
+            </button>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2 text-[0.625rem] text-[var(--muted-foreground)]">
+          <span>
+            {filteredBackgrounds.length} of {backgrounds?.length ?? 0} backgrounds
+          </span>
+          {defaultRoleplayBackground !== DEFAULT_ROLEPLAY_BACKGROUND_URL && (
+            <button
+              type="button"
+              onClick={() => onDefaultChange(DEFAULT_ROLEPLAY_BACKGROUND_URL)}
+              className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+            >
+              <Star size="0.625rem" />
+              Reset Roleplay default
+            </button>
+          )}
+        </div>
+      </div>
 
       {/* Background grid */}
-      {backgrounds && backgrounds.length > 0 && (
+      {backgrounds && backgrounds.length > 0 && filteredBackgrounds.length > 0 && (
         <div className="flex flex-col gap-2">
-          {backgrounds.map((bg) => {
+          {filteredBackgrounds.map((bg) => {
             const itemKey = bg.id ?? bg.url;
             const isSelected = selected === bg.url;
+            const isDefaultRoleplay = defaultRoleplayBackground === bg.url;
             const isUserBackground = bg.source !== "game_asset";
             const isEditable = bg.editable !== false && isUserBackground;
             const canRename = bg.renameable !== false && isUserBackground;
@@ -1957,6 +3004,12 @@ function BackgroundPicker({ selected, onSelect }: { selected: string | null; onS
                           >
                             {sourceLabel}
                           </span>
+                          {isDefaultRoleplay && (
+                            <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-[var(--primary)]/12 px-1.5 py-0 text-[0.5625rem] text-[var(--primary)] ring-1 ring-[var(--primary)]/25">
+                              <Star size="0.5rem" fill="currentColor" />
+                              Default
+                            </span>
+                          )}
                           {canRename && (
                             <button
                               onClick={() => {
@@ -1972,11 +3025,38 @@ function BackgroundPicker({ selected, onSelect }: { selected: string | null; onS
                           )}
                         </>
                       )}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDefaultChange(isDefaultRoleplay ? DEFAULT_ROLEPLAY_BACKGROUND_URL : bg.url);
+                        }}
+                        className={cn(
+                          "shrink-0 rounded-md p-0.5 transition-colors",
+                          isDefaultRoleplay
+                            ? "text-[var(--primary)]"
+                            : "text-[var(--muted-foreground)]/70 hover:bg-[var(--accent)] hover:text-[var(--foreground)]",
+                        )}
+                        title={
+                          isDefaultRoleplay
+                            ? "Default for new Roleplay chats"
+                            : "Set as default for new Roleplay chats"
+                        }
+                        aria-label={
+                          isDefaultRoleplay
+                            ? `${title} is the default Roleplay background`
+                            : `Set ${title} as the default Roleplay background`
+                        }
+                        aria-pressed={isDefaultRoleplay}
+                      >
+                        <Star size="0.75rem" fill={isDefaultRoleplay ? "currentColor" : "none"} />
+                      </button>
                       {canDelete && (
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
                             if (selected === bg.url) onSelect(null);
+                            if (defaultRoleplayBackground === bg.url) onDefaultChange(DEFAULT_ROLEPLAY_BACKGROUND_URL);
                             deleteBg.mutate(bg.filename);
                           }}
                           className="ml-auto shrink-0 rounded-md p-0.5 text-[var(--muted-foreground)] opacity-0 transition-opacity hover:text-[var(--destructive)] group-hover:opacity-100"
@@ -2070,6 +3150,12 @@ function BackgroundPicker({ selected, onSelect }: { selected: string | null; onS
           <p className="text-[0.625rem] text-[var(--muted-foreground)]">No backgrounds available yet</p>
         </div>
       )}
+      {backgrounds && backgrounds.length > 0 && filteredBackgrounds.length === 0 && (
+        <div className="flex flex-col items-center gap-1.5 py-4 text-center">
+          <Search size="1.25rem" className="text-[var(--muted-foreground)]/40" />
+          <p className="text-[0.625rem] text-[var(--muted-foreground)]">No backgrounds match that search</p>
+        </div>
+      )}
     </div>
   );
 }
@@ -2103,7 +3189,7 @@ function ThemesSettings() {
       style = document.createElement("style");
       style.id = "marinara-css-editor-preview";
     }
-    style.textContent = themeCss;
+    style.textContent = normalizeThemeCss(themeCss);
     // Always (re-)append so it's the last <style> in <head>,
     // overriding the active-theme injector's saved CSS.
     document.head.appendChild(style);
@@ -2122,20 +3208,21 @@ function ThemesSettings() {
   const openEditTheme = useCallback((theme: Theme) => {
     setEditingId(theme.id);
     setThemeName(theme.name);
-    setThemeCss(theme.css);
+    setThemeCss(normalizeThemeCss(theme.css));
     setEditorOpen(true);
   }, []);
 
   const handleSave = useCallback(async () => {
     try {
       const name = themeName.trim() || "Untitled Theme";
+      const css = normalizeThemeCss(themeCss);
       if (editingId) {
-        await updateTheme.mutateAsync({ id: editingId, name, css: themeCss });
+        await updateTheme.mutateAsync({ id: editingId, name, css });
         toast.success(`Theme "${name}" updated`);
       } else {
         const theme = await createTheme.mutateAsync({
           name,
-          css: themeCss,
+          css,
           installedAt: new Date().toISOString(),
         });
         await setActiveTheme.mutateAsync(theme.id);
@@ -2153,30 +3240,69 @@ function ThemesSettings() {
     if (!file) return;
     try {
       const text = await file.text();
-      let importedThemeName: string;
-      let importedThemeCss: string;
+      const latestThemes = await api.get<Theme[]>("/themes");
+      let workingThemes = [...latestThemes];
+      let imported = 0;
+      let skipped = 0;
+      let failed = 0;
 
       if (file.name.endsWith(".json")) {
         const parsed = JSON.parse(text);
-        importedThemeName =
-          typeof parsed.name === "string" && parsed.name.trim() ? parsed.name : file.name.replace(/\.json$/, "");
-        importedThemeCss = typeof parsed.css === "string" ? parsed.css : "";
+        const entries = getFolderImportEntries(parsed, ["themes"]);
+        for (const entry of entries) {
+          const source = getFolderManifestConfig(entry);
+          if (!source || typeof source !== "object" || Array.isArray(source)) continue;
+          const record = source as Record<string, unknown>;
+          const importedThemeName =
+            typeof record.name === "string" && record.name.trim() ? record.name : file.name.replace(/\.json$/, "");
+          const importedThemeCss = typeof record.css === "string" ? normalizeThemeCss(record.css) : "";
+          if (!importedThemeCss.trim()) continue;
+          const duplicate = findDuplicateTheme(workingThemes, importedThemeName, importedThemeCss);
+          if (duplicate) {
+            skipped++;
+            continue;
+          }
+          try {
+            const created = await createTheme.mutateAsync({
+              name: importedThemeName,
+              css: importedThemeCss,
+              installedAt: new Date().toISOString(),
+            });
+            workingThemes = [created, ...workingThemes];
+            imported++;
+          } catch (err) {
+            failed++;
+            console.warn("[ThemesSettings] Failed to import theme entry:", importedThemeName, err);
+          }
+        }
       } else {
-        importedThemeName = file.name.replace(/\.css$/, "");
-        importedThemeCss = text;
+        const importedThemeName = file.name.replace(/\.css$/, "");
+        const importedThemeCss = normalizeThemeCss(text);
+        const duplicate = findDuplicateTheme(workingThemes, importedThemeName, importedThemeCss);
+        if (duplicate) {
+          skipped++;
+        } else {
+          const created = await createTheme.mutateAsync({
+            name: importedThemeName,
+            css: importedThemeCss,
+            installedAt: new Date().toISOString(),
+          });
+          workingThemes = [created, ...workingThemes];
+          imported++;
+        }
       }
 
-      const latestThemes = await api.get<Theme[]>("/themes");
-      const duplicate = findDuplicateTheme(latestThemes, importedThemeName, importedThemeCss);
-      if (duplicate) {
-        toast.success(`Theme "${duplicate.name}" is already synced`);
+      if (imported > 0 || skipped > 0 || failed > 0) {
+        const summary = [
+          imported > 0 ? `${imported} imported` : null,
+          skipped > 0 ? `${skipped} already synced` : null,
+          failed > 0 ? `${failed} failed` : null,
+        ].filter(Boolean);
+        const message = `Theme import: ${summary.join(", ")}`;
+        if (failed > 0) toast.warning(message);
+        else toast.success(message);
       } else {
-        await createTheme.mutateAsync({
-          name: importedThemeName,
-          css: importedThemeCss,
-          installedAt: new Date().toISOString(),
-        });
-        toast.success(`Theme "${importedThemeName}" imported`);
+        toast.error("No valid themes found in file.");
       }
     } catch (err) {
       console.error("[ThemesSettings] Failed to import theme:", err);
@@ -2184,7 +3310,6 @@ function ThemesSettings() {
     }
     e.target.value = "";
   };
-
   // ── CSS Editor View ──
   if (editorOpen) {
     return (
@@ -2285,142 +3410,164 @@ function ThemesSettings() {
 
   // ── Theme List View ──
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-center gap-1.5 text-xs text-[var(--muted-foreground)]">
-        <Palette size="0.75rem" />
-        Create or import custom CSS themes. Themes sync across devices connected to this Marinara server, while
-        extensions stay local to this browser.
-      </div>
+    <div className="flex flex-col gap-3">
+      <SettingsIntro>
+        Create or import custom CSS themes. Themes sync across devices connected to this Marinara server.
+      </SettingsIntro>
 
-      {/* Action buttons */}
-      <div className="flex gap-2">
-        <button
-          onClick={openNewTheme}
-          className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-[var(--primary)]/30 bg-[var(--primary)]/5 p-3 text-xs text-[var(--primary)] transition-all hover:border-[var(--primary)]/50 hover:bg-[var(--primary)]/10"
-        >
-          <Plus size="0.875rem" /> Create Theme
-        </button>
-        <button
-          onClick={() => fileRef.current?.click()}
-          className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-[var(--border)] p-3 text-xs text-[var(--muted-foreground)] transition-all hover:border-[var(--primary)]/40 hover:bg-[var(--secondary)]/50"
-        >
-          <Download size="0.875rem" /> Import File
-        </button>
-      </div>
-      <input ref={fileRef} type="file" accept=".css,.json" className="hidden" onChange={handleImportTheme} />
+      <SettingsSection
+        title="Theme Library"
+        description="Create, import, activate, edit, export, or remove custom CSS themes."
+        icon={<Palette size="0.875rem" />}
+      >
+        <div className="flex flex-col gap-3">
+          {/* Action buttons */}
+          <div className="flex gap-2">
+            <button
+              onClick={openNewTheme}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-[var(--primary)]/30 bg-[var(--primary)]/5 p-3 text-xs text-[var(--primary)] transition-all hover:border-[var(--primary)]/50 hover:bg-[var(--primary)]/10"
+            >
+              <Plus size="0.875rem" /> Create Theme
+            </button>
+            <button
+              onClick={() => fileRef.current?.click()}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-[var(--border)] p-3 text-xs text-[var(--muted-foreground)] transition-all hover:border-[var(--primary)]/40 hover:bg-[var(--secondary)]/50"
+            >
+              <Download size="0.875rem" /> Import File
+            </button>
+          </div>
+          <input ref={fileRef} type="file" accept=".css,.json" className="hidden" onChange={handleImportTheme} />
 
-      {/* Active theme: None option */}
-      <div className="flex flex-col gap-1.5">
-        <span className="text-xs font-medium">Installed Themes</span>
-        <button
-          onClick={() =>
-            setActiveTheme.mutate(null, {
-              onError: (err) => {
-                console.error("[ThemesSettings] Failed to reset active theme:", err);
-                toast.error("Failed to reset the active theme.");
-              },
-            })
-          }
-          className={cn(
-            "flex items-center gap-2 rounded-lg px-3 py-2 text-xs transition-all",
-            activeCustomTheme === null
-              ? "bg-[var(--primary)]/15 text-[var(--primary)] ring-1 ring-[var(--primary)]/30"
-              : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:bg-[var(--accent)]",
-          )}
-        >
-          <Palette size="0.75rem" />
-          Default Theme
-          {activeCustomTheme === null && <Check size="0.75rem" className="ml-auto" />}
-        </button>
-
-        {/* Custom theme list */}
-        {syncedThemes.map((t) => (
-          <div
-            key={t.id}
-            className={cn(
-              "flex items-center gap-2 rounded-lg px-3 py-2 text-xs transition-all",
-              activeCustomTheme?.id === t.id
-                ? "bg-[var(--primary)]/15 text-[var(--primary)] ring-1 ring-[var(--primary)]/30"
-                : "bg-[var(--secondary)] text-[var(--secondary-foreground)] hover:bg-[var(--accent)]",
-            )}
-          >
+          {/* Active theme: None option */}
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs font-medium">Installed Themes</span>
             <button
               onClick={() =>
-                setActiveTheme.mutate(t.id, {
+                setActiveTheme.mutate(null, {
                   onError: (err) => {
-                    console.error("[ThemesSettings] Failed to activate theme:", err);
-                    toast.error("Failed to activate theme.");
+                    console.error("[ThemesSettings] Failed to reset active theme:", err);
+                    toast.error("Failed to reset the active theme.");
                   },
                 })
               }
-              className="flex flex-1 items-center gap-2 min-w-0"
+              className={cn(
+                "flex items-center gap-2 rounded-lg px-3 py-2 text-xs transition-all",
+                activeCustomTheme === null
+                  ? "bg-[var(--primary)]/15 text-[var(--primary)] ring-1 ring-[var(--primary)]/30"
+                  : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:bg-[var(--accent)]",
+              )}
             >
-              <FileCode2 size="0.75rem" className="shrink-0" />
-              <span className="truncate">{t.name}</span>
-              {activeCustomTheme?.id === t.id && <Check size="0.75rem" className="shrink-0" />}
+              <Palette size="0.75rem" />
+              Default Theme
+              {activeCustomTheme === null && <Check size="0.75rem" className="ml-auto" />}
             </button>
-            <button
-              onClick={() => openEditTheme(t)}
-              className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--primary)]/10 hover:text-[var(--primary)]"
-              title="Edit theme CSS"
-            >
-              <Code size="0.6875rem" />
-            </button>
-            <button
-              onClick={() => {
-                const json = JSON.stringify({ name: t.name, css: t.css }, null, 2);
-                const blob = new Blob([json], { type: "application/json" });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement("a");
-                a.href = url;
-                a.download = `${t.name.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`;
-                a.click();
-                URL.revokeObjectURL(url);
-              }}
-              className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-emerald-500/10 hover:text-emerald-400"
-              title="Export theme"
-            >
-              <Download size="0.6875rem" />
-            </button>
-            <button
-              onClick={() => {
-                void (async () => {
-                  try {
-                    await deleteTheme.mutateAsync(t.id);
-                    toast.success(`Theme "${t.name}" removed`);
-                  } catch (err) {
-                    console.error("[ThemesSettings] Failed to remove theme:", err);
-                    toast.error("Failed to remove theme.");
+
+            {/* Custom theme list */}
+            {syncedThemes.map((t) => (
+              <div
+                key={t.id}
+                className={cn(
+                  "flex items-center gap-2 rounded-lg px-3 py-2 text-xs transition-all",
+                  activeCustomTheme?.id === t.id
+                    ? "bg-[var(--primary)]/15 text-[var(--primary)] ring-1 ring-[var(--primary)]/30"
+                    : "bg-[var(--secondary)] text-[var(--secondary-foreground)] hover:bg-[var(--accent)]",
+                )}
+              >
+                <button
+                  onClick={() =>
+                    setActiveTheme.mutate(t.id, {
+                      onError: (err) => {
+                        console.error("[ThemesSettings] Failed to activate theme:", err);
+                        toast.error("Failed to activate theme.");
+                      },
+                    })
                   }
-                })();
-              }}
-              className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/10 hover:text-[var(--destructive)]"
-              title="Remove theme"
-            >
-              <Trash2 size="0.6875rem" />
-            </button>
+                  className="flex flex-1 items-center gap-2 min-w-0"
+                >
+                  <FileCode2 size="0.75rem" className="shrink-0" />
+                  <span className="truncate">{t.name}</span>
+                  {activeCustomTheme?.id === t.id && <Check size="0.75rem" className="shrink-0" />}
+                </button>
+                <button
+                  onClick={() => openEditTheme(t)}
+                  className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--primary)]/10 hover:text-[var(--primary)]"
+                  title="Edit theme CSS"
+                >
+                  <Code size="0.6875rem" />
+                </button>
+                <button
+                  onClick={() => {
+                    downloadJsonFile(
+                      {
+                        kind: "marinara.theme-folder",
+                        version: 1,
+                        exportedAt: new Date().toISOString(),
+                        folderName: "Themes",
+                        themes: [
+                          createFolderEntry({
+                            folderName: "Themes",
+                            itemName: t.name,
+                            itemKind: "marinara.theme",
+                            config: { name: t.name, css: t.css },
+                            fallbackName: "theme",
+                          }),
+                        ],
+                      },
+                      `${sanitizeExportFilenamePart(t.name, "theme")}.json`,
+                    );
+                  }}
+                  className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-emerald-500/10 hover:text-emerald-400"
+                  title="Export theme"
+                >
+                  <Upload size="0.6875rem" />
+                </button>
+                <button
+                  onClick={() => {
+                    void (async () => {
+                      try {
+                        await deleteTheme.mutateAsync(t.id);
+                        toast.success(`Theme "${t.name}" removed`);
+                      } catch (err) {
+                        console.error("[ThemesSettings] Failed to remove theme:", err);
+                        toast.error("Failed to remove theme.");
+                      }
+                    })();
+                  }}
+                  className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/10 hover:text-[var(--destructive)]"
+                  title="Remove theme"
+                >
+                  <Trash2 size="0.6875rem" />
+                </button>
+              </div>
+            ))}
+
+            {isLoading && syncedThemes.length === 0 && (
+              <p className="py-2 text-center text-[0.625rem] text-[var(--muted-foreground)]">
+                Loading synced themes...
+              </p>
+            )}
+
+            {!isLoading && syncedThemes.length === 0 && (
+              <p className="py-2 text-center text-[0.625rem] text-[var(--muted-foreground)]">
+                No synced custom themes yet. Create one or import a .css file above.
+              </p>
+            )}
           </div>
-        ))}
 
-        {isLoading && syncedThemes.length === 0 && (
-          <p className="py-2 text-center text-[0.625rem] text-[var(--muted-foreground)]">Loading synced themes...</p>
-        )}
-
-        {!isLoading && syncedThemes.length === 0 && (
-          <p className="py-2 text-center text-[0.625rem] text-[var(--muted-foreground)]">
-            No synced custom themes yet. Create one or import a .css file above.
-          </p>
-        )}
-      </div>
-
-      {/* Info box */}
-      <div className="rounded-lg bg-[var(--secondary)]/50 p-2.5 text-[0.625rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
-        <strong>Tip:</strong> CSS themes can override any CSS variable (e.g.{" "}
-        <code className="rounded bg-[var(--secondary)] px-1">--background</code>,{" "}
-        <code className="rounded bg-[var(--secondary)] px-1">--primary</code>) or add custom styles. JSON themes should
-        have <code className="rounded bg-[var(--secondary)] px-1">{`{ "name": "...", "css": "..." }`}</code> format.
-        Imported theme files sync to this Marinara server but do not auto-activate.
-      </div>
+          {/* Info box */}
+          <div className="rounded-lg bg-[var(--secondary)]/50 p-2.5 text-[0.625rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+            <strong>Tip:</strong> CSS themes can override any CSS variable (e.g.{" "}
+            <code className="rounded bg-[var(--secondary)] px-1">--background</code>,{" "}
+            <code className="rounded bg-[var(--secondary)] px-1">--primary</code>,{" "}
+            <code className="rounded bg-[var(--secondary)] px-1">--marinara-chat-chrome-accent</code>,{" "}
+            <code className="rounded bg-[var(--secondary)] px-1">--marinara-chat-chrome-accent-gradient</code>,{" "}
+            <code className="rounded bg-[var(--secondary)] px-1">--marinara-chat-chrome-surface-bg</code>) or add custom
+            styles. JSON themes should have{" "}
+            <code className="rounded bg-[var(--secondary)] px-1">{`{ "name": "...", "css": "..." }`}</code> format.
+            Imported theme files sync to this Marinara server but do not auto-activate.
+          </div>
+        </div>
+      </SettingsSection>
     </div>
   );
 }
@@ -2451,9 +3598,42 @@ const CSS_TEMPLATE = `/* ══════════════════�
 
   /* ── Sidebar ── */
   /* --sidebar: #0c0c12; */
+
+  /* ── Shared Chat / Roleplay / Game Chrome ── */
+  /* --marinara-chat-chrome-accent: var(--foreground); */
+  /* --marinara-chat-chrome-accent-gradient: linear-gradient(90deg, var(--marinara-chat-chrome-accent), var(--marinara-chat-chrome-accent)); */
+  /* --marinara-chat-chrome-text: var(--foreground); */
+  /* --marinara-chat-chrome-button-text-base: var(--marinara-chat-chrome-accent); */
+  /* --marinara-chat-chrome-highlight-text-base: var(--marinara-chat-chrome-accent); */
+  /* --marinara-chat-chrome-surface-bg: var(--card); */
+  /* --marinara-chat-chrome-surface-bg-hover: color-mix(in srgb, var(--marinara-chat-chrome-surface-bg) 92%, var(--foreground) 8%); */
+  /* --marinara-chat-chrome-surface-bg-active: color-mix(in srgb, var(--marinara-chat-chrome-surface-bg) 88%, var(--foreground) 12%); */
+  /* --marinara-chat-chrome-button-bg: var(--marinara-chat-chrome-surface-bg); */
+  /* --marinara-chat-chrome-button-bg-hover: color-mix(in srgb, var(--marinara-chat-chrome-surface-bg-hover) 90%, var(--marinara-chat-chrome-accent) 10%); */
+  /* --marinara-chat-chrome-button-bg-active: color-mix(in srgb, var(--marinara-chat-chrome-surface-bg-active) 84%, var(--marinara-chat-chrome-accent) 16%); */
+  /* --marinara-chat-chrome-button-border: color-mix(in srgb, var(--marinara-chat-chrome-accent) 12%, transparent); */
+  /* --marinara-chat-chrome-button-border-hover: color-mix(in srgb, var(--marinara-chat-chrome-accent) 20%, transparent); */
+  /* --marinara-chat-chrome-button-border-active: color-mix(in srgb, var(--marinara-chat-chrome-accent) 24%, transparent); */
+  /* --marinara-chat-chrome-button-text: color-mix(in srgb, var(--marinara-chat-chrome-button-text-base) 64%, transparent); */
+  /* --marinara-chat-chrome-button-text-hover: color-mix(in srgb, var(--marinara-chat-chrome-button-text-base) 92%, transparent); */
+  /* --marinara-chat-chrome-button-text-active: color-mix(in srgb, var(--marinara-chat-chrome-button-text-base) 96%, transparent); */
+  /* --marinara-chat-chrome-panel-bg: var(--marinara-chat-chrome-button-bg); */
+  /* --marinara-chat-chrome-panel-border: color-mix(in srgb, var(--marinara-chat-chrome-accent) 16%, transparent); */
+  /* --marinara-chat-chrome-panel-divider: color-mix(in srgb, var(--marinara-chat-chrome-accent) 13%, transparent); */
+  /* --marinara-chat-chrome-panel-text: color-mix(in srgb, var(--marinara-chat-chrome-text) 90%, transparent); */
+  /* --marinara-chat-chrome-panel-title: color-mix(in srgb, var(--marinara-chat-chrome-text) 96%, transparent); */
+  /* --marinara-chat-chrome-panel-muted: color-mix(in srgb, var(--marinara-chat-chrome-text) 58%, transparent); */
+  /* --marinara-chat-chrome-highlight-bg: color-mix(in srgb, var(--marinara-chat-chrome-accent) 9%, transparent); */
+  /* --marinara-chat-chrome-highlight-bg-hover: color-mix(in srgb, var(--marinara-chat-chrome-accent) 13%, transparent); */
+  /* --marinara-chat-chrome-highlight-text: color-mix(in srgb, var(--marinara-chat-chrome-highlight-text-base) 94%, transparent); */
+  /* --marinara-chat-chrome-input-bg: var(--marinara-chat-chrome-surface-bg); */
 }
 
 /* Uncomment and edit the variables above.
+   You can also target shared chrome directly:
+   .marinara-chat-toolbar-button { border-radius: 0.5rem; }
+   .marinara-chat-popover { box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.4); }
+
    You can also add any custom CSS below: */
 `;
 
@@ -2474,16 +3654,40 @@ function ExtensionsSettings() {
 
       if (file.name.endsWith(".json")) {
         const parsed = JSON.parse(text);
-        const name = parsed.name ?? file.name.replace(/\.json$/, "");
-        await createExtension.mutateAsync({
-          name,
-          description: parsed.description ?? "",
-          css: parsed.css ?? null,
-          js: parsed.js ?? null,
-          enabled: true,
-          installedAt,
-        });
-        toast.success(`Extension "${name}" installed`);
+        const entries = getFolderImportEntries(parsed, ["extensions"]);
+        let imported = 0;
+        let failed = 0;
+        for (const entry of entries) {
+          const source = getFolderManifestConfig(entry);
+          if (!source || typeof source !== "object" || Array.isArray(source)) continue;
+          const record = source as Record<string, unknown>;
+          const name =
+            typeof record.name === "string" && record.name.trim() ? record.name : file.name.replace(/\.json$/, "");
+          try {
+            await createExtension.mutateAsync({
+              name,
+              description: typeof record.description === "string" ? record.description : "",
+              css: typeof record.css === "string" ? record.css : null,
+              js: typeof record.js === "string" ? record.js : null,
+              enabled: typeof record.enabled === "boolean" ? record.enabled : true,
+              installedAt,
+            });
+            imported++;
+          } catch (err) {
+            failed++;
+            console.warn("[ExtensionsSettings] Failed to import extension entry:", name, err);
+          }
+        }
+        if (imported === 0 && failed === 0) throw new Error("No valid extensions found in file");
+        if (failed > 0) {
+          toast.warning(
+            imported > 0
+              ? `Installed ${imported} extension${imported === 1 ? "" : "s"} (${failed} failed).`
+              : `Failed to install ${failed} extension${failed === 1 ? "" : "s"}.`,
+          );
+        } else {
+          toast.success(`Installed ${imported} extension${imported === 1 ? "" : "s"}`);
+        }
       } else if (file.name.endsWith(".js")) {
         const name = file.name.replace(/\.js$/, "");
         await createExtension.mutateAsync({
@@ -2514,76 +3718,119 @@ function ExtensionsSettings() {
   };
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-center gap-1.5 text-xs text-[var(--muted-foreground)]">
-        <Puzzle size="0.75rem" />
-        Install custom extensions to add new features and styles.
-      </div>
+    <div className="flex flex-col gap-3">
+      <SettingsIntro>Install browser-local extensions to add custom behavior or styling.</SettingsIntro>
 
-      {/* Import button */}
-      <button
-        onClick={() => fileRef.current?.click()}
-        className="flex items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-[var(--border)] p-3 text-xs text-[var(--muted-foreground)] transition-all hover:border-[var(--primary)]/40 hover:bg-[var(--secondary)]/50"
+      <SettingsSection
+        title="Extension Library"
+        description="Import, enable, disable, or remove installed extensions."
+        icon={<Puzzle size="0.875rem" />}
       >
-        <Download size="0.875rem" /> Import Extension (.json, .css, or .js)
-      </button>
-      <input ref={fileRef} type="file" accept=".json,.css,.js" className="hidden" onChange={handleImportExtension} />
-
-      {/* Extension list */}
-      <div className="flex flex-col gap-1.5">
-        <span className="text-xs font-medium">Installed Extensions</span>
-
-        {extensionList.map((ext) => (
-          <div
-            key={ext.id}
-            className={cn(
-              "flex items-center gap-2 rounded-lg px-3 py-2 text-xs transition-all",
-              ext.enabled
-                ? "bg-[var(--secondary)] text-[var(--secondary-foreground)]"
-                : "bg-[var(--secondary)]/40 text-[var(--muted-foreground)]",
-            )}
+        <div className="flex flex-col gap-3">
+          {/* Import button */}
+          <button
+            onClick={() => fileRef.current?.click()}
+            className="flex items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-[var(--border)] p-3 text-xs text-[var(--muted-foreground)] transition-all hover:border-[var(--primary)]/40 hover:bg-[var(--secondary)]/50"
           >
-            <button
-              onClick={() => updateExtension.mutate({ id: ext.id, enabled: !ext.enabled })}
-              className={cn(
-                "rounded p-0.5 transition-colors",
-                ext.enabled
-                  ? "text-emerald-400 hover:text-emerald-300"
-                  : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
-              )}
-              title={ext.enabled ? "Disable extension" : "Enable extension"}
-            >
-              {ext.enabled ? <Power size="0.75rem" /> : <PowerOff size="0.75rem" />}
-            </button>
-            <div className="flex flex-1 flex-col min-w-0">
-              <span className="truncate font-medium">{ext.name}</span>
-              {ext.description && (
-                <span className="truncate text-[0.625rem] text-[var(--muted-foreground)]">{ext.description}</span>
-              )}
-            </div>
-            <button
-              onClick={() => deleteExtension.mutate(ext.id)}
-              className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/10 hover:text-[var(--destructive)]"
-              title="Remove extension"
-            >
-              <Trash2 size="0.6875rem" />
-            </button>
+            <Download size="0.875rem" /> Import Extension (.json, .css, or .js)
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".json,.css,.js"
+            className="hidden"
+            onChange={handleImportExtension}
+          />
+
+          {/* Extension list */}
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs font-medium">Installed Extensions</span>
+
+            {extensionList.map((ext) => (
+              <div
+                key={ext.id}
+                className={cn(
+                  "flex items-center gap-2 rounded-lg px-3 py-2 text-xs transition-all",
+                  ext.enabled
+                    ? "bg-[var(--secondary)] text-[var(--secondary-foreground)]"
+                    : "bg-[var(--secondary)]/40 text-[var(--muted-foreground)]",
+                )}
+              >
+                <button
+                  onClick={() => updateExtension.mutate({ id: ext.id, enabled: !ext.enabled })}
+                  className={cn(
+                    "rounded p-0.5 transition-colors",
+                    ext.enabled
+                      ? "text-emerald-400 hover:text-emerald-300"
+                      : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
+                  )}
+                  title={ext.enabled ? "Disable extension" : "Enable extension"}
+                >
+                  {ext.enabled ? <Power size="0.75rem" /> : <PowerOff size="0.75rem" />}
+                </button>
+                <div className="flex flex-1 flex-col min-w-0">
+                  <span className="truncate font-medium">{ext.name}</span>
+                  {ext.description && (
+                    <span className="truncate text-[0.625rem] text-[var(--muted-foreground)]">{ext.description}</span>
+                  )}
+                </div>
+                <button
+                  onClick={() => {
+                    downloadJsonFile(
+                      {
+                        kind: "marinara.extension-folder",
+                        version: 1,
+                        exportedAt: new Date().toISOString(),
+                        folderName: "Extensions",
+                        extensions: [
+                          createFolderEntry({
+                            folderName: "Extensions",
+                            itemName: ext.name,
+                            itemKind: "marinara.extension",
+                            config: {
+                              name: ext.name,
+                              description: ext.description ?? "",
+                              css: ext.css ?? null,
+                              js: ext.js ?? null,
+                              enabled: ext.enabled,
+                            },
+                            fallbackName: "extension",
+                          }),
+                        ],
+                      },
+                      `${sanitizeExportFilenamePart(ext.name, "extension")}.json`,
+                    );
+                  }}
+                  className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-emerald-500/10 hover:text-emerald-400"
+                  title="Export extension"
+                >
+                  <Upload size="0.6875rem" />
+                </button>
+                <button
+                  onClick={() => deleteExtension.mutate(ext.id)}
+                  className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/10 hover:text-[var(--destructive)]"
+                  title="Remove extension"
+                >
+                  <Trash2 size="0.6875rem" />
+                </button>
+              </div>
+            ))}
+
+            {!isLoading && extensionList.length === 0 && (
+              <p className="py-2 text-center text-[0.625rem] text-[var(--muted-foreground)]">
+                No extensions installed. Import a .json, .css, or .js extension file above.
+              </p>
+            )}
           </div>
-        ))}
 
-        {!isLoading && extensionList.length === 0 && (
-          <p className="py-2 text-center text-[0.625rem] text-[var(--muted-foreground)]">
-            No extensions installed. Import a .json, .css, or .js extension file above.
-          </p>
-        )}
-      </div>
-
-      {/* Info box */}
-      <div className="rounded-lg bg-[var(--secondary)]/50 p-2.5 text-[0.625rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
-        <strong>JSON format:</strong>{" "}
-        <code className="rounded bg-[var(--secondary)] px-1">{`{ "name": "...", "description": "...", "css": "..." }`}</code>
-        . Extensions can inject custom CSS and/or JavaScript to modify the UI.
-      </div>
+          {/* Info box */}
+          <div className="rounded-lg bg-[var(--secondary)]/50 p-2.5 text-[0.625rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+            <strong>JSON format:</strong>{" "}
+            <code className="rounded bg-[var(--secondary)] px-1">{`{ "name": "...", "description": "...", "css": "..." }`}</code>
+            . Extensions can inject custom CSS and/or JavaScript to modify the UI.
+          </div>
+        </div>
+      </SettingsSection>
     </div>
   );
 }
@@ -2601,6 +3848,12 @@ type ProfileImportStats = {
   files?: number;
 };
 
+type ProfileImportWarning = {
+  type?: string;
+  path?: string;
+  message?: string;
+};
+
 type ProfileImportProgressData = {
   phase: string;
   label: string;
@@ -2610,21 +3863,41 @@ type ProfileImportProgressData = {
 };
 
 type ProfileImportProgressState = {
-  status: "reading" | "starting" | "running" | "success" | "error";
+  status: "reading" | "preview" | "starting" | "running" | "success" | "error";
   label: string;
   completedItems: number;
   totalItems: number;
   startedAt: number;
   elapsedSeconds: number;
   imported?: ProfileImportStats;
+  warnings?: ProfileImportWarning[];
   error?: string;
 };
 
 type ProfileImportStreamEvent =
   | { type: "started"; data?: { label?: string; totalItems?: number } }
   | { type: "progress"; data?: ProfileImportProgressData }
-  | { type: "done"; data?: { success?: boolean; imported?: ProfileImportStats; error?: string; message?: string } }
+  | {
+      type: "done";
+      data?: {
+        success?: boolean;
+        imported?: ProfileImportStats;
+        warnings?: ProfileImportWarning[];
+        error?: string;
+        message?: string;
+      };
+    }
   | { type: "error"; data?: string | { error?: string; message?: string } };
+
+type ProfileImportPreviewResult = {
+  success?: boolean;
+  preview?: boolean;
+  imported?: ProfileImportStats;
+  warnings?: ProfileImportWarning[];
+  fileFingerprint?: string;
+  error?: string;
+  message?: string;
+};
 
 function formatProfileImportDuration(seconds: number) {
   const safeSeconds = Math.max(0, Math.round(seconds));
@@ -2644,6 +3917,7 @@ function estimateProfileImportRemainingSeconds(progress: ProfileImportProgressSt
 
 function getProfileImportPercent(progress: ProfileImportProgressState) {
   if (progress.status === "success") return 100;
+  if (progress.status === "preview") return 0;
   if (progress.totalItems <= 0) return progress.status === "running" ? 8 : 0;
   const percent = Math.round((progress.completedItems / progress.totalItems) * 100);
   return Math.min(99, Math.max(progress.status === "running" ? 8 : 0, percent));
@@ -2669,6 +3943,23 @@ function formatProfileImportStats(stats?: ProfileImportStats) {
     .join(", ");
 }
 
+function getProfileImportItemCount(stats?: ProfileImportStats) {
+  if (!stats) return 0;
+  const counts: Array<number | undefined> = [
+    stats.characters,
+    stats.personas,
+    stats.lorebooks,
+    stats.presets,
+    stats.agents,
+    stats.themes,
+    stats.chats,
+    stats.messages,
+    stats.connections,
+    stats.files,
+  ];
+  return counts.reduce<number>((total, count) => total + (typeof count === "number" && count > 0 ? count : 0), 0);
+}
+
 function getProfileImportErrorMessage(data: unknown) {
   if (typeof data === "string") return data;
   if (data && typeof data === "object") {
@@ -2677,6 +3968,95 @@ function getProfileImportErrorMessage(data: unknown) {
     if (typeof record.error === "string") return record.error;
   }
   return "Unknown error";
+}
+
+function normalizeProfileImportWarnings(warnings: unknown): ProfileImportWarning[] {
+  if (!Array.isArray(warnings)) return [];
+  return warnings.flatMap((warning) => {
+    if (!warning || typeof warning !== "object") return [];
+    const record = warning as { type?: unknown; path?: unknown; message?: unknown };
+    const path = typeof record.path === "string" ? record.path : undefined;
+    const message = typeof record.message === "string" ? record.message : undefined;
+    const type = typeof record.type === "string" ? record.type : undefined;
+    if (!path && !message) return [];
+    return [{ type, path, message }];
+  });
+}
+
+function formatProfileImportWarningSummary(warnings: ProfileImportWarning[]) {
+  const missingAssets = warnings.filter((warning) => warning.type === "missing_asset" || warning.path);
+  if (missingAssets.length > 0) {
+    return `${missingAssets.length} asset file${missingAssets.length === 1 ? "" : "s"} missing from the ZIP. Imported the rest.`;
+  }
+  return `${warnings.length} import warning${warnings.length === 1 ? "" : "s"}.`;
+}
+
+function formatProfileImportWarningDetails(warnings: ProfileImportWarning[]) {
+  const paths = warnings.map((warning) => warning.path).filter((path): path is string => !!path);
+  if (paths.length === 0) return warnings[0]?.message ?? "";
+  const visible = paths.slice(0, 3).join(", ");
+  const extra = paths.length > 3 ? `, +${paths.length - 3} more` : "";
+  return `Missing: ${visible}${extra}`;
+}
+
+function formatProfileImportConfirmationMessage(preview: ProfileImportPreviewResult) {
+  const warnings = normalizeProfileImportWarnings(preview.warnings);
+  const found = formatProfileImportStats(preview.imported) || "no counted records";
+  const warningDetail =
+    warnings.length > 0
+      ? `${formatProfileImportWarningSummary(warnings)} ${formatProfileImportWarningDetails(warnings)}`
+      : "";
+  return [
+    `Found: ${found}.`,
+    warningDetail,
+    "Importing writes profile data from this file and cannot be undone. Continue?",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function getDownloadFilename(res: Response, fallback: string) {
+  const disposition = res.headers.get("Content-Disposition");
+  const match = disposition?.match(/filename="?([^";\n]+)"?/);
+  return match?.[1] ? decodeURIComponent(match[1]) : fallback;
+}
+
+type ProfileExportFailure = {
+  code?: string;
+  message: string;
+  fallbackFormat?: string;
+};
+
+async function readProfileExportFailure(res: Response, fallback: string): Promise<ProfileExportFailure> {
+  const contentType = res.headers.get("content-type") ?? "";
+
+  try {
+    if (contentType.includes("application/json")) {
+      const payload = (await res.json()) as {
+        code?: unknown;
+        error?: unknown;
+        message?: unknown;
+        fallbackFormat?: unknown;
+      };
+      const message = typeof payload.message === "string" ? payload.message : payload.error;
+      return {
+        code: typeof payload.code === "string" ? payload.code : undefined,
+        fallbackFormat: typeof payload.fallbackFormat === "string" ? payload.fallbackFormat : undefined,
+        message: typeof message === "string" && message.trim() ? message : fallback,
+      };
+    }
+
+    const text = (await res.text()).trim();
+    return { message: text ? text.slice(0, 500) : fallback };
+  } catch {
+    return { message: fallback };
+  }
+}
+
+async function isZipFile(file: File) {
+  if (file.size < 2) return false;
+  const head = new Uint8Array(await file.slice(0, 2).arrayBuffer());
+  return head[0] === 0x50 && head[1] === 0x4b;
 }
 
 async function* readProfileImportStream(res: Response): AsyncGenerator<ProfileImportStreamEvent> {
@@ -2710,6 +4090,7 @@ function ImportSettings() {
   const [profileImportProgress, setProfileImportProgress] = useState<ProfileImportProgressState | null>(null);
   const profileImportBusy =
     profileImportProgress?.status === "reading" ||
+    profileImportProgress?.status === "preview" ||
     profileImportProgress?.status === "starting" ||
     profileImportProgress?.status === "running";
 
@@ -2717,7 +4098,11 @@ function ImportSettings() {
     if (!profileImportBusy) return;
     const timer = window.setInterval(() => {
       setProfileImportProgress((current) =>
-        current && (current.status === "reading" || current.status === "starting" || current.status === "running")
+        current &&
+        (current.status === "reading" ||
+          current.status === "preview" ||
+          current.status === "starting" ||
+          current.status === "running")
           ? { ...current, elapsedSeconds: Math.floor((Date.now() - current.startedAt) / 1000) }
           : current,
       );
@@ -2775,6 +4160,12 @@ function ImportSettings() {
     const file = e.target.files?.[0];
     if (!file) return;
     const startedAt = Date.now();
+    const makeImportBody = (isZip: boolean, text: string): BodyInit => {
+      if (!isZip) return text;
+      const form = new FormData();
+      form.append("file", file, file.name);
+      return form;
+    };
     setProfileImportProgress({
       status: "reading",
       label: "Reading profile file",
@@ -2784,44 +4175,118 @@ function ImportSettings() {
       elapsedSeconds: 0,
     });
     try {
-      const text = await file.text();
-      const envelope = JSON.parse(text) as { type?: string };
-      if (envelope.type !== "marinara_profile") {
-        setProfileImportProgress({
-          status: "error",
-          label: "Profile import failed",
-          completedItems: 0,
-          totalItems: 1,
-          startedAt,
-          elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000),
-          error: "Not a valid profile export file.",
-        });
-        toast.error("Not a valid profile export file.");
+      const isZip = await isZipFile(file);
+      let profileText = "";
+      if (!isZip) {
+        profileText = await file.text();
+        const envelope = JSON.parse(profileText) as { type?: string };
+        if (envelope.type !== "marinara_profile") {
+          setProfileImportProgress({
+            status: "error",
+            label: "Profile import failed",
+            completedItems: 0,
+            totalItems: 1,
+            startedAt,
+            elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000),
+            error: "Not a valid profile export file.",
+          });
+          toast.error("Not a valid profile export file.");
+          e.target.value = "";
+          return;
+        }
+      }
+
+      setProfileImportProgress((current) =>
+        current
+          ? {
+              ...current,
+              status: "preview",
+              label: isZip ? "Scanning profile archive" : "Scanning profile file",
+              elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000),
+            }
+          : current,
+      );
+      const previewRes = await api.raw("/backup/import-profile?preview=true", {
+        method: "POST",
+        headers: { Accept: "application/json" },
+        body: makeImportBody(isZip, profileText),
+      });
+      if (!previewRes.ok) {
+        const data = (await previewRes.json().catch(() => ({}))) as { error?: string; message?: string };
+        throw new Error(data.message ?? data.error ?? previewRes.statusText ?? "Unknown error");
+      }
+      const preview = (await previewRes.json()) as ProfileImportPreviewResult;
+      if (preview.success === false) {
+        throw new Error(preview.message ?? preview.error ?? "Unknown error");
+      }
+      const previewWarnings = normalizeProfileImportWarnings(preview.warnings);
+      const previewTotalItems = Math.max(1, getProfileImportItemCount(preview.imported));
+      setProfileImportProgress({
+        status: "preview",
+        label: "Review profile import",
+        completedItems: 0,
+        totalItems: previewTotalItems,
+        startedAt,
+        elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000),
+        imported: preview.imported,
+        warnings: previewWarnings,
+      });
+
+      const confirmed = await showConfirmDialog({
+        title: "Import Profile",
+        message: formatProfileImportConfirmationMessage(preview),
+        confirmLabel: "Import",
+        cancelLabel: "Cancel",
+        tone: "destructive",
+      });
+      if (!confirmed) {
+        setProfileImportProgress(null);
+        e.target.value = "";
         return;
+      }
+
+      if (!isZip) {
+        // Re-parse the cached text after the confirmation boundary so malformed
+        // JSON still reports as a profile-file error before we start streaming.
+        const envelope = JSON.parse(profileText) as { type?: string };
+        if (envelope.type !== "marinara_profile") {
+          setProfileImportProgress({
+            status: "error",
+            label: "Profile import failed",
+            completedItems: 0,
+            totalItems: 1,
+            startedAt,
+            elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000),
+            error: "Not a valid profile export file.",
+          });
+          toast.error("Not a valid profile export file.");
+          e.target.value = "";
+          return;
+        }
       }
       setProfileImportProgress((current) =>
         current
           ? {
               ...current,
               status: "starting",
-              label: "Starting profile import",
+              label: isZip ? "Uploading profile archive" : "Starting profile import",
               elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000),
             }
           : current,
       );
-      const res = await fetch("/api/backup/import-profile", {
+      const res = await api.raw("/backup/import-profile", {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
           Accept: "text/event-stream",
-          ...getAdminSecretHeader(),
+          ...(preview.fileFingerprint ? { "X-Profile-Preview-Fingerprint": preview.fileFingerprint } : {}),
         },
-        body: text,
+        body: makeImportBody(isZip, profileText),
       });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
         throw new Error(data.message ?? data.error ?? res.statusText ?? "Unknown error");
       }
+      let importCompleted = false;
       for await (const event of readProfileImportStream(res)) {
         if (event.type === "started") {
           setProfileImportProgress((current) => ({
@@ -2851,28 +4316,39 @@ function ImportSettings() {
         }
         if (event.type === "done") {
           if (event.data?.success === false) throw new Error(event.data.error ?? event.data.message ?? "Unknown error");
+          importCompleted = true;
           qc.invalidateQueries();
           const imported = event.data?.imported;
+          const warnings = normalizeProfileImportWarnings(event.data?.warnings);
           const summary = formatProfileImportStats(imported);
           setProfileImportProgress((current) => {
             const totalItems = Math.max(1, current?.totalItems ?? 1);
             return {
               status: "success",
-              label: "Profile import complete",
+              label: warnings.length > 0 ? "Profile import complete with missing assets" : "Profile import complete",
               completedItems: totalItems,
               totalItems,
               startedAt,
               elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000),
               imported,
+              warnings,
             };
           });
-          toast.success(summary ? `Imported: ${summary}` : "Profile imported.");
+          if (warnings.length > 0) {
+            const warningSummary = formatProfileImportWarningSummary(warnings);
+            toast.warning(summary ? `Imported: ${summary}. ${warningSummary}` : warningSummary);
+          } else {
+            toast.success(summary ? `Imported: ${summary}` : "Profile imported.");
+          }
         }
+      }
+      if (!importCompleted) {
+        throw new Error("Profile import stream closed before completion.");
       }
     } catch (err) {
       const message =
         err instanceof SyntaxError
-          ? "Import failed. Make sure this is a valid profile JSON file."
+          ? "Import failed. Make sure this is a valid profile JSON or ZIP file."
           : `Import failed: ${err instanceof Error ? err.message : "network/server error"}`;
       setProfileImportProgress({
         status: "error",
@@ -2890,148 +4366,170 @@ function ImportSettings() {
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="text-xs text-[var(--muted-foreground)]">
-        Import data from Marinara exports, SillyTavern, or other tools. Full profile imports also restore synced custom
-        themes.
-      </div>
+      <SettingsIntro>
+        Import data from Marinara exports, SillyTavern, or asset folders. Full profile imports also restore synced
+        custom themes and profile archive assets.
+      </SettingsIntro>
 
-      {/* Profile import */}
-      <label
-        className={cn(
-          "flex cursor-pointer items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500/20 to-teal-500/20 px-3 py-3 text-xs font-semibold ring-1 ring-emerald-500/30 transition-all hover:ring-emerald-500/50 active:scale-[0.98]",
-          profileImportBusy && "pointer-events-none opacity-75",
-        )}
+      <SettingsSection
+        title="Profile & Marinara"
+        description="Restore full profiles or import individual Marinara files."
+        icon={<Download size="0.875rem" />}
       >
-        {profileImportBusy ? <Loader2 size="1rem" className="animate-spin" /> : <Download size="1rem" />}
-        {profileImportBusy ? "Importing Profile..." : "Import Profile (JSON)"}
-        <input
-          type="file"
-          accept=".json"
-          onChange={handleProfileImport}
-          disabled={profileImportBusy}
-          className="hidden"
-        />
-      </label>
+        <div className="flex flex-col gap-2.5">
+          <label
+            className={cn(
+              "flex cursor-pointer items-center justify-center gap-2 rounded-lg bg-emerald-500/15 px-3 py-3 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-500/30 transition-all hover:bg-emerald-500/20 active:scale-[0.98] dark:text-emerald-300",
+              profileImportBusy && "pointer-events-none opacity-75",
+            )}
+          >
+            {profileImportBusy ? <Loader2 size="1rem" className="animate-spin" /> : <Download size="1rem" />}
+            {profileImportBusy
+              ? profileImportProgress?.status === "reading" || profileImportProgress?.status === "preview"
+                ? "Scanning Profile..."
+                : "Importing Profile..."
+              : "Import Profile (JSON/ZIP)"}
+            <input
+              type="file"
+              accept=".json,.zip,application/json,application/zip"
+              onChange={handleProfileImport}
+              disabled={profileImportBusy}
+              className="hidden"
+            />
+          </label>
 
-      {profileImportProgress && (
-        <div
-          role="status"
-          aria-live="polite"
-          className={cn(
-            "flex flex-col gap-2 rounded-lg border px-3 py-2 text-xs",
-            profileImportProgress.status === "error"
-              ? "border-[var(--destructive)]/40 bg-[var(--destructive)]/10 text-[var(--destructive)]"
-              : profileImportProgress.status === "success"
-                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300"
-                : "border-emerald-500/30 bg-emerald-500/10 text-[var(--foreground)]",
-          )}
-        >
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex min-w-0 items-center gap-2">
-              {profileImportProgress.status === "success" ? (
-                <Check size="0.875rem" className="shrink-0" />
-              ) : profileImportProgress.status === "error" ? (
-                <AlertTriangle size="0.875rem" className="shrink-0" />
-              ) : (
-                <Loader2 size="0.875rem" className="shrink-0 animate-spin text-emerald-500" />
+          {profileImportProgress && (
+            <div
+              role="status"
+              aria-live="polite"
+              className={cn(
+                "flex flex-col gap-2 rounded-lg border px-3 py-2 text-xs",
+                profileImportProgress.status === "error"
+                  ? "border-[var(--destructive)]/40 bg-[var(--destructive)]/10 text-[var(--destructive)]"
+                  : profileImportProgress.status === "success" && profileImportProgress.warnings?.length
+                    ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-200"
+                    : profileImportProgress.status === "success"
+                      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300"
+                      : "border-emerald-500/30 bg-emerald-500/10 text-[var(--foreground)]",
               )}
-              <span className="truncate font-medium">{profileImportProgress.label}</span>
-            </div>
-            <span className="shrink-0 text-[0.6875rem] text-[var(--muted-foreground)]">
-              {formatProfileImportDuration(profileImportProgress.elapsedSeconds)}
-            </span>
-          </div>
-
-          {profileImportProgress.status !== "error" && (
-            <>
-              <div className="h-1.5 overflow-hidden rounded-full bg-[var(--border)]">
-                <div
-                  className={cn(
-                    "h-full rounded-full transition-all duration-300",
-                    profileImportProgress.status === "success" ? "bg-emerald-500" : "bg-emerald-400",
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  {profileImportProgress.status === "success" && profileImportProgress.warnings?.length ? (
+                    <AlertTriangle size="0.875rem" className="shrink-0" />
+                  ) : profileImportProgress.status === "success" ? (
+                    <Check size="0.875rem" className="shrink-0" />
+                  ) : profileImportProgress.status === "error" ? (
+                    <AlertTriangle size="0.875rem" className="shrink-0" />
+                  ) : (
+                    <Loader2 size="0.875rem" className="shrink-0 animate-spin text-emerald-500" />
                   )}
-                  style={{ width: `${getProfileImportPercent(profileImportProgress)}%` }}
-                />
-              </div>
-              <div className="flex flex-wrap items-center justify-between gap-2 text-[0.6875rem] text-[var(--muted-foreground)]">
-                <span>
-                  {profileImportProgress.completedItems}/{profileImportProgress.totalItems} items
-                </span>
-                {estimateProfileImportRemainingSeconds(profileImportProgress) !== null && (
-                  <span>
-                    ETA {formatProfileImportDuration(estimateProfileImportRemainingSeconds(profileImportProgress) ?? 0)}
-                  </span>
-                )}
-              </div>
-              {formatProfileImportStats(profileImportProgress.imported) && (
-                <div className="text-[0.6875rem] text-[var(--muted-foreground)]">
-                  Imported so far: {formatProfileImportStats(profileImportProgress.imported)}
+                  <span className="truncate font-medium">{profileImportProgress.label}</span>
                 </div>
+                <span className="shrink-0 text-[0.6875rem] text-[var(--muted-foreground)]">
+                  {formatProfileImportDuration(profileImportProgress.elapsedSeconds)}
+                </span>
+              </div>
+
+              {profileImportProgress.status !== "error" && (
+                <>
+                  <div className="h-1.5 overflow-hidden rounded-full bg-[var(--border)]">
+                    <div
+                      className={cn(
+                        "h-full rounded-full transition-all duration-300",
+                        profileImportProgress.status === "success" && profileImportProgress.warnings?.length
+                          ? "bg-amber-500"
+                          : profileImportProgress.status === "success"
+                            ? "bg-emerald-500"
+                            : "bg-emerald-400",
+                      )}
+                      style={{ width: `${getProfileImportPercent(profileImportProgress)}%` }}
+                    />
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[0.6875rem] text-[var(--muted-foreground)]">
+                    <span>
+                      {profileImportProgress.completedItems}/{profileImportProgress.totalItems} items
+                    </span>
+                    {estimateProfileImportRemainingSeconds(profileImportProgress) !== null && (
+                      <span>
+                        ETA{" "}
+                        {formatProfileImportDuration(estimateProfileImportRemainingSeconds(profileImportProgress) ?? 0)}
+                      </span>
+                    )}
+                  </div>
+                  {formatProfileImportStats(profileImportProgress.imported) && (
+                    <div className="text-[0.6875rem] text-[var(--muted-foreground)]">
+                      {profileImportProgress.status === "preview" ? "Found" : "Imported so far"}:{" "}
+                      {formatProfileImportStats(profileImportProgress.imported)}
+                    </div>
+                  )}
+                  {profileImportProgress.warnings?.length ? (
+                    <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[0.6875rem] text-amber-700 dark:text-amber-200">
+                      <div className="font-medium">
+                        {formatProfileImportWarningSummary(profileImportProgress.warnings)}
+                      </div>
+                      {formatProfileImportWarningDetails(profileImportProgress.warnings) && (
+                        <div className="mt-0.5 break-words text-amber-700/80 dark:text-amber-100/80">
+                          {formatProfileImportWarningDetails(profileImportProgress.warnings)}
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
+                </>
               )}
-            </>
+
+              {profileImportProgress.status === "error" && profileImportProgress.error && (
+                <div className="text-[0.6875rem]">{profileImportProgress.error}</div>
+              )}
+            </div>
           )}
 
-          {profileImportProgress.status === "error" && profileImportProgress.error && (
-            <div className="text-[0.6875rem]">{profileImportProgress.error}</div>
-          )}
+          <label className="flex cursor-pointer items-center justify-center gap-2 rounded-lg bg-[var(--secondary)] px-3 py-3 text-xs font-semibold ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] active:scale-[0.98]">
+            <Download size="1rem" />
+            Import Marinara File (.marinara / .json)
+            <input type="file" accept=".json,.marinara" onChange={handleMarinaraImport} className="hidden" />
+          </label>
         </div>
-      )}
+      </SettingsSection>
 
-      {/* Marinara import */}
-      <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-pink-500/20 to-orange-500/20 px-3 py-3 text-xs font-semibold ring-1 ring-pink-500/30 transition-all hover:ring-pink-500/50 active:scale-[0.98]">
-        <Download size="1rem" />
-        Import Marinara File (.marinara / .json)
-        <input type="file" accept=".json,.marinara" onChange={handleMarinaraImport} className="hidden" />
-      </label>
-
-      <div className="retro-divider" />
-
-      {/* Bulk ST import */}
-      <span className="text-[0.625rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-        SillyTavern Import
-      </span>
-
-      <button
-        onClick={() => openModal("st-bulk-import")}
-        className="flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-violet-500/20 to-purple-500/20 px-3 py-3 text-xs font-semibold ring-1 ring-violet-500/30 transition-all hover:ring-violet-500/50 active:scale-[0.98]"
+      <SettingsSection
+        title="SillyTavern Import"
+        description="Bring over characters, chats, presets, and lorebooks from SillyTavern files."
+        icon={<FolderOpen size="0.875rem" />}
       >
-        <svg
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-          <polyline points="7 10 12 15 17 10" />
-          <line x1="12" y1="15" x2="12" y2="3" />
-        </svg>
-        Import from SillyTavern Folder
-      </button>
+        <div className="flex flex-col gap-2.5">
+          <button
+            onClick={() => openModal("st-bulk-import")}
+            className="flex items-center justify-center gap-2 rounded-lg bg-[var(--primary)]/12 px-3 py-3 text-xs font-semibold text-[var(--primary)] ring-1 ring-[var(--primary)]/30 transition-all hover:bg-[var(--primary)]/18 active:scale-[0.98]"
+          >
+            <Download size="1rem" />
+            Import from SillyTavern Folder
+          </button>
 
-      <div className="flex flex-col gap-2">
-        <ImportButton
-          label="Import Character (JSON/PNG)"
-          accept=".json,.png"
-          endpoint="/import/st-character"
-          mode="auto"
-        />
-        <ImportButton
-          label="Import Chat (JSONL)"
-          accept=".jsonl"
-          endpoint="/import/st-chat"
-          mode="file"
-          onImported={(data) => {
-            qc.invalidateQueries({ queryKey: chatKeys.list() });
-            if (data.chatId) setActiveChatId(data.chatId);
-          }}
-        />
-        <ImportButton label="Import Preset (JSON)" accept=".json" endpoint="/import/st-preset" mode="json" />
-        <ImportButton label="Import Lorebook (JSON)" accept=".json" endpoint="/import/st-lorebook" mode="json" />
-      </div>
+          <div className="flex flex-col gap-2">
+            <ImportButton
+              label="Import Character (JSON/PNG)"
+              accept=".json,.png"
+              endpoint="/import/st-character"
+              mode="auto"
+            />
+            <ImportButton
+              label="Import Chat (JSONL)"
+              accept=".jsonl"
+              endpoint="/import/st-chat"
+              mode="file"
+              onImported={(data) => {
+                qc.invalidateQueries({ queryKey: chatKeys.list() });
+                if (data.chatId) setActiveChatId(data.chatId);
+              }}
+            />
+            <ImportButton label="Import Preset (JSON)" accept=".json" endpoint="/import/st-preset" mode="json" />
+            <ImportButton label="Import Lorebook (JSON)" accept=".json" endpoint="/import/st-lorebook" mode="json" />
+          </div>
+        </div>
+      </SettingsSection>
+
+      <GameAssetsSettings />
     </div>
   );
 }
@@ -3351,27 +4849,61 @@ function AdvancedSettings() {
     if (enabled) setQuickRepliesDrawerOpen(true);
   };
 
-  const handleExportProfile = async (format: ExportFormatChoice) => {
+  type ProfileExportFormat = "native" | "compatible" | "zip";
+  const profileExportFallbackNames: Record<ProfileExportFormat, string> = {
+    native: "marinara-profile.json",
+    compatible: "marinara-compatible-export.zip",
+    zip: "marinara-profile.zip",
+  };
+  const profileExportSuccessMessages: Record<ProfileExportFormat, string> = {
+    native: "Profile exported!",
+    compatible: "Compatible export created!",
+    zip: "Profile ZIP exported!",
+  };
+
+  const handleExportProfile = async (format: ProfileExportFormat) => {
     setExportingProfile(true);
     setExportProfileDialogOpen(false);
     try {
-      const res = await fetch(`/api/backup/export-profile?format=${format}`, {
-        headers: getAdminSecretHeader(),
-      });
-      if (!res.ok) throw new Error(await readSettingsResponseError(res, "Export failed"));
+      const res = await api.raw(`/backup/export-profile?format=${format}`);
+      if (!res.ok) {
+        const failure = await readProfileExportFailure(res, "Export failed");
+        if (
+          format === "native" &&
+          failure.code === "PROFILE_EXPORT_JSON_TOO_LARGE" &&
+          failure.fallbackFormat === "zip"
+        ) {
+          const confirmed = await showConfirmDialog({
+            title: "Export profile as ZIP?",
+            message: failure.message,
+            confirmLabel: "Export ZIP",
+            cancelLabel: "Cancel",
+          });
+          if (confirmed) {
+            await handleExportProfile("zip");
+          }
+          return;
+        }
+        throw new Error(failure.message);
+      }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = format === "compatible" ? "marinara-compatible-export.zip" : "marinara-profile.json";
+      a.download = getDownloadFilename(res, profileExportFallbackNames[format]);
       a.click();
       URL.revokeObjectURL(url);
-      toast.success(format === "compatible" ? "Compatible export created!" : "Profile exported!");
+      toast.success(profileExportSuccessMessages[format]);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to export profile");
     } finally {
       setExportingProfile(false);
     }
+  };
+
+  const handleExportProfileChoice = (format: ExportFormatChoice) => {
+    if (format === "compatible-png") return;
+    void handleExportProfile(format);
   };
 
   const handleForceRefreshSpa = async () => {
@@ -3519,11 +5051,18 @@ function AdvancedSettings() {
     releaseUrl: string;
     releaseNotes: string;
     publishedAt: string;
-    installType: "git" | "standalone";
+    releaseTag?: string;
+    dockerImage?: string;
+    dockerImageTag?: string;
+    dockerLiteImageTag?: string;
+    installType: "git" | "docker" | "standalone";
+    serverPlatform?: "windows" | "macos" | "linux" | "android-termux" | "unknown";
+    clientPlatform?: "ios" | "android" | "desktop" | "unknown";
     applyAvailable?: boolean;
     updatesApplyEnabled?: boolean;
-    applyUnavailableReason?: "disabled" | "unsupported-install" | null;
+    applyUnavailableReason?: "disabled" | "unsupported-install" | "container-install" | null;
     manualUpdateCommand?: string | null;
+    manualUpdateHint?: string | null;
   }>({
     queryKey: ["update-check"],
     queryFn: () => api.get("/updates/check"),
@@ -3567,12 +5106,17 @@ function AdvancedSettings() {
   const currentCommit = health.data?.commit ?? updateCheck.data?.currentCommit ?? null;
   const currentBuildLabel = currentCommit ? `Build: ${currentCommit.slice(0, 7)}` : "Build: unavailable";
   const commitsBehind = updateCheck.data?.commitsBehind ?? 0;
+  const installType = updateCheck.data?.installType ?? "standalone";
+  const isIosClient = updateCheck.data?.clientPlatform === "ios";
   const applyUnavailableReason = updateCheck.data?.applyUnavailableReason ?? null;
   const manualUpdateCommand = updateCheck.data?.manualUpdateCommand ?? null;
+  const manualUpdateHint = updateCheck.data?.manualUpdateHint ?? null;
   const applyUnavailableCopy =
-    applyUnavailableReason === "disabled"
-      ? "This install can check for updates, but applying them from the browser is disabled. Update manually with the command below. Advanced git installs can enable server-side apply with UPDATES_APPLY_ENABLED=true."
-      : "This install can check for updates, but it cannot apply them from the browser. Relaunch the app if you use the launcher, or update manually for your install type.";
+    applyUnavailableReason === "container-install"
+      ? "Container installs cannot replace themselves from inside the browser. Pull the release image tag or latest image on the host, then restart the container."
+      : applyUnavailableReason === "disabled"
+        ? "This install can check for updates, but applying them from the browser is disabled. Update manually with the command below. Advanced git installs can enable server-side apply with UPDATES_APPLY_ENABLED=true."
+        : "This install can check for updates, but it cannot apply them from the browser. Relaunch the app if you use the launcher, or update manually for your install type.";
   const isClearing = clearAllData.isPending || expungeData.isPending;
   const isAllScopesSelected = selectedScopes.length === EXPUNGE_SCOPE_OPTIONS.length;
 
@@ -3604,543 +5148,593 @@ function AdvancedSettings() {
       <ExportFormatDialog
         open={exportProfileDialogOpen}
         title="Export Profile"
-        description="Native creates a Marinara profile JSON for restoring your data in Marinara. Compatible creates a ZIP of folderless JSON files for other platforms."
-        nativeDescription="Keeps Marinara fields, lorebook folders, character/persona metadata, presets, agents, and themes for re-import."
+        description="Native creates a Marinara profile JSON for restoring your data in Marinara. If the JSON would be too large, Marinara will offer a profile ZIP instead."
+        nativeDescription="Keeps Marinara fields, lorebook folders, character/persona metadata, presets, agents, themes, and inline assets for re-import."
         compatibleDescription="Exports direct character JSON, simple persona JSON, and folderless lorebooks for other roleplay tools."
         onClose={() => setExportProfileDialogOpen(false)}
-        onSelect={handleExportProfile}
+        onSelect={handleExportProfileChoice}
       />
 
-      <div className="text-xs text-[var(--muted-foreground)]">Advanced settings for power users.</div>
+      <SettingsIntro>
+        Server maintenance, generation tooling, message utilities, backups, and data removal.
+      </SettingsIntro>
 
-      <div className="flex flex-col gap-2 rounded-lg bg-[var(--secondary)]/40 p-2.5 ring-1 ring-[var(--border)]">
-        <div className="flex items-center gap-1.5">
-          <Power size="0.75rem" className="text-[var(--muted-foreground)]" />
-          <span className="text-xs font-medium">Admin Access</span>
-        </div>
-        <div className="flex gap-2 max-sm:flex-col">
+      <SettingsSection
+        title="Admin Access"
+        description="Save the browser-side admin secret for protected maintenance actions."
+        icon={<Power size="0.875rem" />}
+      >
+        <div className="flex min-w-0 flex-wrap gap-2">
           <input
             type="password"
             value={adminSecret}
             onChange={(e) => setAdminSecret(e.target.value)}
             placeholder="ADMIN_SECRET"
-            className="flex-1 rounded-lg bg-[var(--background)] px-3 py-2 text-xs outline-none ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)]/50 focus:ring-[var(--primary)]"
+            className="min-w-0 flex-[1_1_12rem] rounded-lg bg-[var(--background)] px-3 py-2 text-xs outline-none ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)]/50 focus:ring-[var(--primary)]"
           />
           <button
+            type="button"
             onClick={saveAdminSecret}
-            className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95"
+            className="max-w-full shrink-0 whitespace-nowrap rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95"
           >
-            <Save size="0.75rem" />
-            Save
+            <span className="flex min-w-0 items-center justify-center gap-1.5">
+              <Save size="0.75rem" className="shrink-0" />
+              Save
+            </span>
           </button>
         </div>
-      </div>
+      </SettingsSection>
 
       <AiAuditSettingsSection />
 
-      {/* ── Updates ── */}
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-1.5">
-          <RefreshCw size="0.75rem" className="text-[var(--muted-foreground)]" />
-          <span className="text-xs font-medium">Updates</span>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => updateCheck.refetch()}
-            disabled={updateCheck.isFetching}
-            className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95 disabled:opacity-50"
-          >
-            {updateCheck.isFetching ? (
-              <>
-                <Loader2 size="0.8125rem" className="animate-spin" />
-                Checking…
-              </>
-            ) : (
-              <>
-                <RefreshCw size="0.8125rem" />
-                Check for Updates
-              </>
-            )}
-          </button>
-          <div className="flex flex-col text-[0.6875rem] text-[var(--muted-foreground)]">
-            <span>Release: {currentReleaseLabel}</span>
-            <span>{currentBuildLabel}</span>
-          </div>
-        </div>
-
-        {updateCheck.data && !updateCheck.data.updateAvailable && (
-          <div className="flex items-center gap-1.5 rounded-lg bg-[var(--secondary)] px-2.5 py-2 ring-1 ring-[var(--border)]">
-            <Check size="0.8125rem" className="text-green-500 shrink-0" />
-            <div className="flex flex-col gap-0.5">
-              <span className="text-xs">You're on the latest release ({currentReleaseLabel})</span>
-              <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{currentBuildLabel}</span>
-            </div>
-          </div>
-        )}
-
-        {updateCheck.data?.updateAvailable && (
-          <div className="flex flex-col gap-2 rounded-lg bg-[var(--secondary)] p-2.5 ring-1 ring-[var(--border)]">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-medium">
-                {updateCheck.data.versionUpdate
-                  ? `v${updateCheck.data.latestVersion} available`
-                  : `${commitsBehind} commit${commitsBehind !== 1 ? "s" : ""} behind ${updateCheck.data.targetRef ?? "origin/main"}`}
-              </span>
-              {updateCheck.data.versionUpdate && (
-                <a
-                  href={updateCheck.data.releaseUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-1 text-[0.625rem] text-[var(--primary)] hover:underline"
-                >
-                  Release notes <ExternalLink size="0.625rem" />
-                </a>
+      <SettingsSection
+        title="Updates"
+        description="Check this install, apply supported updates, or force-refresh the web shell."
+        icon={<RefreshCw size="0.875rem" />}
+      >
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => updateCheck.refetch()}
+              disabled={updateCheck.isFetching}
+              className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95 disabled:opacity-50"
+            >
+              {updateCheck.isFetching ? (
+                <>
+                  <Loader2 size="0.8125rem" className="animate-spin" />
+                  Checking…
+                </>
+              ) : (
+                <>
+                  <RefreshCw size="0.8125rem" />
+                  Check for Updates
+                </>
               )}
+            </button>
+            <div className="flex flex-col text-[0.6875rem] text-[var(--muted-foreground)]">
+              <span>Release: {currentReleaseLabel}</span>
+              <span>{currentBuildLabel}</span>
             </div>
-            {updateCheck.data.versionUpdate && updateCheck.data.releaseNotes && (
-              <p className="text-[0.625rem] text-[var(--muted-foreground)] line-clamp-4 whitespace-pre-wrap">
-                {updateCheck.data.releaseNotes}
-              </p>
-            )}
-            {commitsBehind > 0 && (
-              <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-                Commit counts compare this build with {updateCheck.data.targetRef ?? "origin/main"} and may include
-                unreleased development commits, not just tagged releases.
-              </p>
-            )}
-            {updateCheck.data.applyAvailable ? (
-              <button
-                onClick={() => applyUpdate.mutate()}
-                disabled={applyUpdate.isPending}
-                className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95 disabled:opacity-50"
-              >
-                {applyUpdate.isPending ? (
-                  <>
-                    <Loader2 size="0.8125rem" className="animate-spin" />
-                    Updating…
-                  </>
-                ) : (
-                  <>
-                    <Download size="0.8125rem" />
-                    Apply Update
-                  </>
-                )}
-              </button>
-            ) : (
-              <div className="flex flex-col gap-1.5 rounded-lg bg-[var(--background)]/60 p-2 ring-1 ring-[var(--border)]">
-                <div className="flex items-start gap-1.5">
-                  <AlertTriangle size="0.8125rem" className="mt-0.5 shrink-0 text-amber-500" />
-                  <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{applyUnavailableCopy}</span>
-                </div>
+          </div>
+
+          {updateCheck.data && !updateCheck.data.updateAvailable && (
+            <div className="flex items-center gap-1.5 rounded-lg bg-[var(--secondary)] px-2.5 py-2 ring-1 ring-[var(--border)]">
+              <Check size="0.8125rem" className="text-green-500 shrink-0" />
+              <div className="flex flex-col gap-0.5">
+                <span className="text-xs">You're on the latest release ({currentReleaseLabel})</span>
+                <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{currentBuildLabel}</span>
+              </div>
+            </div>
+          )}
+
+          {updateCheck.data?.updateAvailable && (
+            <div className="flex flex-col gap-2 rounded-lg bg-[var(--secondary)] p-2.5 ring-1 ring-[var(--border)]">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-medium">
+                  {updateCheck.data.versionUpdate
+                    ? `v${updateCheck.data.latestVersion} available`
+                    : `${commitsBehind} commit${commitsBehind !== 1 ? "s" : ""} behind ${updateCheck.data.targetRef ?? "origin/main"}`}
+                </span>
                 {updateCheck.data.versionUpdate && (
                   <a
                     href={updateCheck.data.releaseUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95"
+                    className="flex items-center gap-1 text-[0.625rem] text-[var(--primary)] hover:underline"
                   >
-                    <Download size="0.8125rem" />
-                    Download v{updateCheck.data.latestVersion}
+                    Release notes <ExternalLink size="0.625rem" />
                   </a>
                 )}
-                {updateCheck.data.versionUpdate && (
-                  <span className="text-[0.625rem] text-[var(--muted-foreground)]">
-                    Android APK assets are WebView shells, not standalone apps. Start Marinara in Termux first.
-                  </span>
+              </div>
+              {updateCheck.data.versionUpdate && updateCheck.data.releaseNotes && (
+                <p className="text-[0.625rem] text-[var(--muted-foreground)] line-clamp-4 whitespace-pre-wrap">
+                  {updateCheck.data.releaseNotes}
+                </p>
+              )}
+              {commitsBehind > 0 && (
+                <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                  Commit counts compare this build with {updateCheck.data.targetRef ?? "origin/main"} and may include
+                  unreleased development commits, not just tagged releases.
+                </p>
+              )}
+              {isIosClient && (
+                <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                  On iPhone or iPad, this updates the Marinara server you are connected to. Reload the Home Screen app
+                  after the host finishes updating.
+                </p>
+              )}
+              {updateCheck.data.applyAvailable ? (
+                <button
+                  onClick={() => applyUpdate.mutate()}
+                  disabled={applyUpdate.isPending}
+                  className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95 disabled:opacity-50"
+                >
+                  {applyUpdate.isPending ? (
+                    <>
+                      <Loader2 size="0.8125rem" className="animate-spin" />
+                      Updating…
+                    </>
+                  ) : (
+                    <>
+                      <Download size="0.8125rem" />
+                      Apply Update
+                    </>
+                  )}
+                </button>
+              ) : (
+                <div className="flex flex-col gap-1.5 rounded-lg bg-[var(--background)]/60 p-2 ring-1 ring-[var(--border)]">
+                  <div className="flex items-start gap-1.5">
+                    <AlertTriangle size="0.8125rem" className="mt-0.5 shrink-0 text-amber-500" />
+                    <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{applyUnavailableCopy}</span>
+                  </div>
+                  {updateCheck.data.versionUpdate && (
+                    <a
+                      href={updateCheck.data.releaseUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95"
+                    >
+                      <Download size="0.8125rem" />
+                      Download v{updateCheck.data.latestVersion}
+                    </a>
+                  )}
+                  {updateCheck.data.versionUpdate && (
+                    <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+                      Android APK assets are WebView shells, not standalone apps. Start Marinara in Termux first.
+                    </span>
+                  )}
+                  {manualUpdateHint && (
+                    <span className="text-[0.625rem] text-[var(--muted-foreground)]">{manualUpdateHint}</span>
+                  )}
+                  {installType === "docker" && updateCheck.data.dockerImageTag && (
+                    <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+                      Container tag:{" "}
+                      <code className="break-all rounded bg-[var(--background)] px-1 py-0.5">
+                        {updateCheck.data.dockerImageTag}
+                      </code>
+                      {updateCheck.data.dockerLiteImageTag ? (
+                        <>
+                          {" "}
+                          Lite:{" "}
+                          <code className="break-all rounded bg-[var(--background)] px-1 py-0.5">
+                            {updateCheck.data.dockerLiteImageTag}
+                          </code>
+                        </>
+                      ) : null}
+                    </span>
+                  )}
+                  {manualUpdateCommand && (
+                    <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+                      Manual update:{" "}
+                      <code className="break-all rounded bg-[var(--background)] px-1 py-0.5">
+                        {manualUpdateCommand}
+                      </code>
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {updateCheck.isError && (
+            <div className="flex items-center gap-1.5 rounded-lg bg-[var(--destructive)]/10 px-2.5 py-2 text-xs text-[var(--destructive)]">
+              <AlertTriangle size="0.8125rem" className="shrink-0" />
+              Could not check for updates. Try again later.
+            </div>
+          )}
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => void handleForceRefreshSpa()}
+              disabled={refreshingSpa}
+              className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--background)]/70 px-3 py-2 text-xs font-medium text-[var(--foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {refreshingSpa ? (
+                <>
+                  <Loader2 size="0.8125rem" className="animate-spin" />
+                  Refreshing…
+                </>
+              ) : (
+                <>
+                  <RefreshCw size="0.8125rem" />
+                  Refresh App
+                </>
+              )}
+            </button>
+            <HelpTooltip
+              side="bottom"
+              text="Manual refresh unregisters the active service worker and clears browser caches before reloading. Marinara's stored chats, settings, and other local app data stay intact."
+            />
+          </div>
+        </div>
+      </SettingsSection>
+
+      <ImageGenerationSettings />
+      <PromptOverridesEditor
+        title="Game Image Prompt Templates"
+        description="Edit the reusable templates Game Mode uses for NPC portraits, backgrounds, and scene illustrations."
+        help="These templates render before Game Mode sends recurring image-generation requests. One-off prompt review edits still only affect the current request."
+        keys={GAME_IMAGE_PROMPT_TEMPLATE_KEYS}
+        preferredKey="game.npcPortrait"
+      />
+      <PromptOverridesEditor />
+
+      <SettingsSection
+        title="Message Tools"
+        description="Quick reply actions, message metadata, and debug visibility."
+        icon={<MessageCircle size="0.875rem" />}
+      >
+        <div className="flex flex-col gap-2.5">
+          <div
+            className={cn(
+              "overflow-hidden rounded-xl border transition-colors",
+              showQuickRepliesMenu
+                ? "border-[var(--primary)]/30 bg-[var(--secondary)]/15"
+                : "border-transparent bg-transparent hover:bg-[var(--secondary)]/30",
+            )}
+          >
+            <div className="flex min-h-9 items-stretch">
+              <div className="flex min-w-0 items-center gap-1.5 py-2 pl-1.5 pr-2">
+                <label className="flex min-w-0 cursor-pointer items-center gap-2.5">
+                  <input
+                    type="checkbox"
+                    checked={showQuickRepliesMenu}
+                    onChange={(e) => handleQuickRepliesMenuChange(e.target.checked)}
+                    className="h-3.5 w-3.5 shrink-0 rounded border-[var(--border)] accent-[var(--primary)]"
+                  />
+                  <span className="min-w-0 text-xs">Quick replies</span>
+                </label>
+                <span className="shrink-0" onClick={(e) => e.preventDefault()}>
+                  <HelpTooltip text="Adds alternate draft actions beside Send. One action appears directly; multiple actions open from the ellipsis." />
+                </span>
+              </div>
+              <button
+                type="button"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!showQuickRepliesMenu) return;
+                  setQuickRepliesDrawerOpen((open) => !open);
+                }}
+                aria-disabled={!showQuickRepliesMenu}
+                aria-controls="quick-replies-actions-drawer"
+                aria-expanded={showQuickRepliesMenu && quickRepliesDrawerOpen}
+                aria-label={
+                  !showQuickRepliesMenu
+                    ? "Quick replies options disabled"
+                    : quickRepliesDrawerOpen
+                      ? "Collapse Quick replies options"
+                      : "Expand Quick replies options"
+                }
+                title={
+                  !showQuickRepliesMenu
+                    ? "Enable Quick replies to configure options"
+                    : quickRepliesDrawerOpen
+                      ? "Collapse options"
+                      : "Expand options"
+                }
+                className={cn(
+                  "flex min-w-10 flex-1 items-center justify-end py-2 pl-2 pr-2 text-[var(--muted-foreground)] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]",
+                  showQuickRepliesMenu && quickRepliesDrawerOpen ? "rounded-tr-xl" : "rounded-r-xl",
+                  showQuickRepliesMenu
+                    ? "cursor-pointer hover:bg-[var(--secondary)]/35 hover:text-[var(--foreground)] active:scale-[0.99]"
+                    : "cursor-not-allowed opacity-35",
                 )}
-                {manualUpdateCommand && (
-                  <span className="text-[0.625rem] text-[var(--muted-foreground)]">
-                    Manual update:{" "}
-                    <code className="break-all rounded bg-[var(--background)] px-1 py-0.5">{manualUpdateCommand}</code>
-                  </span>
-                )}
+                tabIndex={showQuickRepliesMenu ? 0 : -1}
+              >
+                <span className="flex h-7 w-7 items-center justify-center rounded-lg">
+                  <ChevronDown
+                    size="0.875rem"
+                    aria-hidden="true"
+                    className={cn(
+                      "transition-transform",
+                      showQuickRepliesMenu && quickRepliesDrawerOpen ? "" : "-rotate-90",
+                    )}
+                  />
+                </span>
+              </button>
+            </div>
+            {showQuickRepliesMenu && quickRepliesDrawerOpen && (
+              <div
+                id="quick-replies-actions-drawer"
+                className="grid gap-1 border-t border-[var(--border)]/60 bg-[var(--background)]/25 p-1"
+                role="group"
+                aria-label="Quick replies actions to include"
+              >
+                {[
+                  {
+                    label: "Post only",
+                    checked: showQuickReplyPostOnly,
+                    onChange: setShowQuickReplyPostOnly,
+                    description: "Add persona message without triggering a reply.",
+                    icon: FileText,
+                  },
+                  {
+                    label: "Guide reply",
+                    checked: showQuickReplyGuide,
+                    onChange: setShowQuickReplyGuide,
+                    description: "Use draft as /guided direction.",
+                    icon: WandSparkles,
+                  },
+                  {
+                    label: "Impersonate",
+                    checked: showQuickReplyImpersonate,
+                    onChange: setShowQuickReplyImpersonate,
+                    description: "Generate a persona-side user reply.",
+                    icon: UserCheck,
+                  },
+                ].map((option) => {
+                  const Icon = option.icon;
+                  return (
+                    <button
+                      type="button"
+                      key={option.label}
+                      aria-pressed={option.checked}
+                      onClick={() => option.onChange(!option.checked)}
+                      className={cn(
+                        "group flex min-h-10 w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)] active:scale-[0.99]",
+                        option.checked
+                          ? "bg-[var(--primary)]/8 text-[var(--foreground)] ring-1 ring-[var(--primary)]/30"
+                          : "text-[var(--muted-foreground)] ring-1 ring-transparent hover:bg-[var(--secondary)]/45 hover:text-[var(--foreground)]",
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "flex h-7 w-7 shrink-0 items-center justify-center rounded-md ring-1 transition-colors",
+                          option.checked
+                            ? "bg-[var(--primary)]/12 text-[var(--primary)] ring-[var(--primary)]/30"
+                            : "bg-[var(--secondary)]/35 text-[var(--muted-foreground)] ring-[var(--border)]/60 group-hover:text-[var(--foreground)]",
+                        )}
+                      >
+                        <Icon size="0.8125rem" aria-hidden="true" />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-xs font-semibold">{option.label}</span>
+                        <span className="block text-[0.65rem] leading-tight text-[var(--muted-foreground)]">
+                          {option.description}
+                        </span>
+                      </span>
+                      <span
+                        className={cn(
+                          "flex h-4 w-4 shrink-0 items-center justify-center rounded-full ring-1 transition-colors",
+                          option.checked
+                            ? "bg-[var(--primary)] text-[var(--primary-foreground)] ring-[var(--primary)]"
+                            : "bg-[var(--background)]/45 text-transparent ring-[var(--border)]/70 group-hover:text-[var(--muted-foreground)]",
+                        )}
+                        aria-hidden="true"
+                      >
+                        <Check size="0.625rem" strokeWidth={3} />
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>
-        )}
+          <ToggleSetting
+            label="Group consecutive messages"
+            checked={messageGrouping}
+            onChange={setMessageGrouping}
+            help="Combines multiple messages from the same sender into a visual group, reducing clutter in the chat."
+          />
+          <ToggleSetting
+            label="Show message timestamps"
+            checked={showTimestamps}
+            onChange={setShowTimestamps}
+            help="Displays the date and time each message was sent next to it in the chat."
+          />
+          <ToggleSetting
+            label="Show model name on messages"
+            checked={showModelName}
+            onChange={setShowModelName}
+            help="Displays which AI model generated each response, shown as a small label on assistant messages."
+          />
+          <ToggleSetting
+            label="Show token usage on messages"
+            checked={showTokenUsage}
+            onChange={setShowTokenUsage}
+            help="Displays prompt and completion token counts on each AI message. Useful for monitoring context size and cost."
+          />
+          <ToggleSetting
+            label="Show message numbers"
+            checked={showMessageNumbers}
+            onChange={setShowMessageNumbers}
+            help="Displays message numbers in roleplay and conversation chats."
+          />
+          <ToggleSetting
+            label="Guide swipes/regens with chat input"
+            checked={guideGenerations}
+            onChange={setGuideGenerations}
+            help="Uses the current draft as direction when regenerating a message or manually triggering a character response."
+          />
+          <ToggleSetting
+            label="Debug mode"
+            checked={debugMode}
+            onChange={setDebugMode}
+            help="Logs the prompt and response payloads sent to the model in the server console for debugging."
+          />
+        </div>
+      </SettingsSection>
 
-        {updateCheck.isError && (
-          <div className="flex items-center gap-1.5 rounded-lg bg-[var(--destructive)]/10 px-2.5 py-2 text-xs text-[var(--destructive)]">
-            <AlertTriangle size="0.8125rem" className="shrink-0" />
-            Could not check for updates. Try again later.
-          </div>
-        )}
-
-        <div className="flex items-center gap-2">
+      <SettingsSection
+        title="Backup & Export"
+        description="Download profile exports or full backup archives for recovery and migration."
+        help="Download a full backup as a .zip archive (storage snapshots + avatars, sprites, backgrounds, gallery, fonts, knowledge sources). Import Profile can restore the zip directly. The raw folders are for manual recovery."
+        icon={<Download size="0.875rem" />}
+      >
+        <div className="flex flex-col gap-2">
           <button
-            onClick={() => void handleForceRefreshSpa()}
-            disabled={refreshingSpa}
-            className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--background)]/70 px-3 py-2 text-xs font-medium text-[var(--foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={handleCreateBackup}
+            disabled={creatingBackup}
+            className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95 disabled:opacity-50"
           >
-            {refreshingSpa ? (
+            {creatingBackup ? (
               <>
                 <Loader2 size="0.8125rem" className="animate-spin" />
-                Refreshing…
+                Creating backup…
               </>
             ) : (
               <>
-                <RefreshCw size="0.8125rem" />
-                Refresh App
+                <Download size="0.8125rem" />
+                Download Backup
               </>
             )}
           </button>
-          <HelpTooltip
-            side="bottom"
-            text="Manual refresh unregisters the active service worker and clears browser caches before reloading. Marinara's stored chats, settings, and other local app data stay intact."
-          />
-        </div>
-      </div>
-
-      <div className="retro-divider" />
-      <div
-        className={cn(
-          "overflow-hidden rounded-xl border transition-colors",
-          showQuickRepliesMenu
-            ? "border-[var(--primary)]/30 bg-[var(--secondary)]/15"
-            : "border-transparent bg-transparent hover:bg-[var(--secondary)]/30",
-        )}
-      >
-        <div className="flex min-h-9 items-stretch">
-          <div className="flex min-w-0 items-center gap-1.5 py-2 pl-1.5 pr-2">
-            <label className="flex min-w-0 cursor-pointer items-center gap-2.5">
-              <input
-                type="checkbox"
-                checked={showQuickRepliesMenu}
-                onChange={(e) => handleQuickRepliesMenuChange(e.target.checked)}
-                className="h-3.5 w-3.5 shrink-0 rounded border-[var(--border)] accent-[var(--primary)]"
-              />
-              <span className="min-w-0 text-xs">Quick replies</span>
-            </label>
-            <span className="shrink-0" onClick={(e) => e.preventDefault()}>
-              <HelpTooltip text="Adds alternate draft actions beside Send. One action appears directly; multiple actions open from the ellipsis." />
-            </span>
-          </div>
           <button
-            type="button"
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.stopPropagation();
-              if (!showQuickRepliesMenu) return;
-              setQuickRepliesDrawerOpen((open) => !open);
-            }}
-            aria-disabled={!showQuickRepliesMenu}
-            aria-controls="quick-replies-actions-drawer"
-            aria-expanded={showQuickRepliesMenu && quickRepliesDrawerOpen}
-            aria-label={
-              !showQuickRepliesMenu
-                ? "Quick replies options disabled"
-                : quickRepliesDrawerOpen
-                  ? "Collapse Quick replies options"
-                  : "Expand Quick replies options"
-            }
-            title={
-              !showQuickRepliesMenu
-                ? "Enable Quick replies to configure options"
-                : quickRepliesDrawerOpen
-                  ? "Collapse options"
-                  : "Expand options"
-            }
-            className={cn(
-              "flex min-w-10 flex-1 items-center justify-end py-2 pl-2 pr-2 text-[var(--muted-foreground)] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]",
-              showQuickRepliesMenu && quickRepliesDrawerOpen ? "rounded-tr-xl" : "rounded-r-xl",
-              showQuickRepliesMenu
-                ? "cursor-pointer hover:bg-[var(--secondary)]/35 hover:text-[var(--foreground)] active:scale-[0.99]"
-                : "cursor-not-allowed opacity-35",
+            onClick={() => setExportProfileDialogOpen(true)}
+            disabled={exportingProfile}
+            className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs font-medium ring-1 ring-[var(--border)] transition-all hover:bg-[var(--secondary)]/80 active:scale-95 disabled:opacity-50"
+          >
+            {exportingProfile ? (
+              <>
+                <Loader2 size="0.8125rem" className="animate-spin" />
+                Exporting…
+              </>
+            ) : (
+              <>
+                <Upload size="0.8125rem" />
+                Export Profile
+              </>
             )}
-            tabIndex={showQuickRepliesMenu ? 0 : -1}
-          >
-            <span className="flex h-7 w-7 items-center justify-center rounded-lg">
-              <ChevronDown
-                size="0.875rem"
-                aria-hidden="true"
-                className={cn(
-                  "transition-transform",
-                  showQuickRepliesMenu && quickRepliesDrawerOpen ? "" : "-rotate-90",
-                )}
-              />
-            </span>
           </button>
+          {backups && backups.length > 0 && (
+            <div className="flex flex-col gap-1 mt-1">
+              <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Existing backups</span>
+              {backups.map((b) => (
+                <div
+                  key={b.name}
+                  className="flex items-center justify-between rounded-lg bg-[var(--secondary)] px-2.5 py-1.5 ring-1 ring-[var(--border)]"
+                >
+                  <div className="flex flex-col min-w-0">
+                    <span className="text-[0.6875rem] font-medium truncate">{b.name}</span>
+                    <span className="text-[0.5625rem] text-[var(--muted-foreground)]">
+                      {new Date(b.createdAt).toLocaleString()}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => deleteBackupMutation.mutate(b.name)}
+                    className="ml-2 rounded p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/10 hover:text-[var(--destructive)]"
+                  >
+                    <Trash2 size="0.75rem" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
-        {showQuickRepliesMenu && quickRepliesDrawerOpen && (
-          <div
-            id="quick-replies-actions-drawer"
-            className="grid gap-1 border-t border-[var(--border)]/60 bg-[var(--background)]/25 p-1"
-            role="group"
-            aria-label="Quick replies actions to include"
-          >
-            {[
-              {
-                label: "Post only",
-                checked: showQuickReplyPostOnly,
-                onChange: setShowQuickReplyPostOnly,
-                description: "Add persona message without triggering a reply.",
-                icon: FileText,
-              },
-              {
-                label: "Guide reply",
-                checked: showQuickReplyGuide,
-                onChange: setShowQuickReplyGuide,
-                description: "Use draft as /guided direction.",
-                icon: WandSparkles,
-              },
-              {
-                label: "Impersonate",
-                checked: showQuickReplyImpersonate,
-                onChange: setShowQuickReplyImpersonate,
-                description: "Generate a persona-side user reply.",
-                icon: UserCheck,
-              },
-            ].map((option) => {
-              const Icon = option.icon;
+      </SettingsSection>
+
+      <SettingsSection
+        title="Danger Zone"
+        description="Permanently clear selected categories of local data. Professor Mari is always preserved."
+        icon={<AlertTriangle size="0.875rem" />}
+        tone="danger"
+      >
+        <div className="flex flex-col gap-2">
+          <div className="grid gap-2">
+            {EXPUNGE_SCOPE_OPTIONS.map((scope) => {
+              const checked = selectedScopes.includes(scope.id);
               return (
-                <button
-                  type="button"
-                  key={option.label}
-                  aria-pressed={option.checked}
-                  onClick={() => option.onChange(!option.checked)}
+                <label
+                  key={scope.id}
                   className={cn(
-                    "group flex min-h-10 w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)] active:scale-[0.99]",
-                    option.checked
-                      ? "bg-[var(--primary)]/8 text-[var(--foreground)] ring-1 ring-[var(--primary)]/30"
-                      : "text-[var(--muted-foreground)] ring-1 ring-transparent hover:bg-[var(--secondary)]/45 hover:text-[var(--foreground)]",
+                    "flex cursor-pointer items-start gap-2 rounded-lg px-2.5 py-2 ring-1 transition-colors",
+                    checked
+                      ? "bg-[var(--destructive)]/10 ring-[var(--destructive)]/25"
+                      : "bg-[var(--background)]/40 ring-[var(--border)] hover:bg-[var(--secondary)]/70",
                   )}
                 >
-                  <span
-                    className={cn(
-                      "flex h-7 w-7 shrink-0 items-center justify-center rounded-md ring-1 transition-colors",
-                      option.checked
-                        ? "bg-[var(--primary)]/12 text-[var(--primary)] ring-[var(--primary)]/30"
-                        : "bg-[var(--secondary)]/35 text-[var(--muted-foreground)] ring-[var(--border)]/60 group-hover:text-[var(--foreground)]",
-                    )}
-                  >
-                    <Icon size="0.8125rem" aria-hidden="true" />
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={isClearing}
+                    onChange={() => toggleScope(scope.id)}
+                    className="mt-0.5 h-3.5 w-3.5 rounded border-[var(--border)] accent-[var(--destructive)]"
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-xs font-medium text-[var(--foreground)]">{scope.label}</span>
+                    <span className="block text-[0.625rem] text-[var(--muted-foreground)]">{scope.description}</span>
                   </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-xs font-semibold">{option.label}</span>
-                    <span className="block text-[0.65rem] leading-tight text-[var(--muted-foreground)]">
-                      {option.description}
-                    </span>
-                  </span>
-                  <span
-                    className={cn(
-                      "flex h-4 w-4 shrink-0 items-center justify-center rounded-full ring-1 transition-colors",
-                      option.checked
-                        ? "bg-[var(--primary)] text-[var(--primary-foreground)] ring-[var(--primary)]"
-                        : "bg-[var(--background)]/45 text-transparent ring-[var(--border)]/70 group-hover:text-[var(--muted-foreground)]",
-                    )}
-                    aria-hidden="true"
-                  >
-                    <Check size="0.625rem" strokeWidth={3} />
-                  </span>
-                </button>
+                </label>
               );
             })}
           </div>
-        )}
-      </div>
-      <ToggleSetting
-        label="Group consecutive messages"
-        checked={messageGrouping}
-        onChange={setMessageGrouping}
-        help="Combines multiple messages from the same sender into a visual group, reducing clutter in the chat."
-      />
-      <ToggleSetting
-        label="Show message timestamps"
-        checked={showTimestamps}
-        onChange={setShowTimestamps}
-        help="Displays the date and time each message was sent next to it in the chat."
-      />
-      <ToggleSetting
-        label="Show model name on messages"
-        checked={showModelName}
-        onChange={setShowModelName}
-        help="Displays which AI model generated each response, shown as a small label on assistant messages."
-      />
-      <ToggleSetting
-        label="Show token usage on messages"
-        checked={showTokenUsage}
-        onChange={setShowTokenUsage}
-        help="Displays prompt and completion token counts on each AI message. Useful for monitoring context size and cost."
-      />
-      <ToggleSetting
-        label="Show message numbers"
-        checked={showMessageNumbers}
-        onChange={setShowMessageNumbers}
-        help="Displays message numbers in roleplay and conversation chats."
-      />
-      <ToggleSetting
-        label="Guide swipes/regens with chat input"
-        checked={guideGenerations}
-        onChange={setGuideGenerations}
-        help="Uses the current draft as direction when regenerating a message or manually triggering a character response."
-      />
-      <ToggleSetting
-        label="Debug mode"
-        checked={debugMode}
-        onChange={setDebugMode}
-        help="Logs the prompt and response payloads sent to the model in the server console for debugging."
-      />
-
-      {/* ── Backup ── */}
-      <div className="retro-divider" />
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-1.5">
-          <Download size="0.75rem" className="text-[var(--muted-foreground)]" />
-          <span className="text-xs font-medium">Backup & Export</span>
-          <HelpTooltip text="Download a full backup as a .zip archive (storage snapshots + avatars, sprites, backgrounds, gallery, fonts, knowledge sources). The zip also includes marinara-profile.json for one-click restore through Import Profile (JSON). The raw folders are for manual recovery." />
-        </div>
-        <button
-          onClick={handleCreateBackup}
-          disabled={creatingBackup}
-          className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95 disabled:opacity-50"
-        >
-          {creatingBackup ? (
-            <>
-              <Loader2 size="0.8125rem" className="animate-spin" />
-              Creating backup…
-            </>
-          ) : (
-            <>
-              <Download size="0.8125rem" />
-              Download Backup
-            </>
-          )}
-        </button>
-        <button
-          onClick={() => setExportProfileDialogOpen(true)}
-          disabled={exportingProfile}
-          className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs font-medium ring-1 ring-[var(--border)] transition-all hover:bg-[var(--secondary)]/80 active:scale-95 disabled:opacity-50"
-        >
-          {exportingProfile ? (
-            <>
-              <Loader2 size="0.8125rem" className="animate-spin" />
-              Exporting…
-            </>
-          ) : (
-            <>
-              <Download size="0.8125rem" />
-              Export Profile (JSON)
-            </>
-          )}
-        </button>
-        {backups && backups.length > 0 && (
-          <div className="flex flex-col gap-1 mt-1">
-            <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Existing backups</span>
-            {backups.map((b) => (
-              <div
-                key={b.name}
-                className="flex items-center justify-between rounded-lg bg-[var(--secondary)] px-2.5 py-1.5 ring-1 ring-[var(--border)]"
-              >
-                <div className="flex flex-col min-w-0">
-                  <span className="text-[0.6875rem] font-medium truncate">{b.name}</span>
-                  <span className="text-[0.5625rem] text-[var(--muted-foreground)]">
-                    {new Date(b.createdAt).toLocaleString()}
-                  </span>
-                </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() =>
+                setSelectedScopes(isAllScopesSelected ? [] : EXPUNGE_SCOPE_OPTIONS.map((scope) => scope.id))
+              }
+              disabled={isClearing}
+              className="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-medium transition-all hover:bg-[var(--secondary)] active:scale-95 disabled:opacity-50"
+            >
+              {isAllScopesSelected ? "Clear Selection" : "Select All"}
+            </button>
+            <button
+              onClick={() => setConfirmAction("selected")}
+              disabled={selectedScopes.length === 0 || isClearing}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[var(--destructive)]/85 px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Trash2 size="0.8125rem" />
+              Clear Selected Data
+            </button>
+            <button
+              onClick={() => setConfirmAction("all")}
+              disabled={isClearing}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[var(--destructive)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95 disabled:opacity-50"
+            >
+              <Trash2 size="0.8125rem" />
+              Clear All Data
+            </button>
+          </div>
+          {confirmAction && (
+            <div className="flex flex-col gap-2 rounded-lg bg-[var(--destructive)]/12 p-2.5">
+              <div className="flex items-start gap-2 text-[0.6875rem] font-medium text-[var(--destructive)]">
+                <AlertTriangle size="0.875rem" className="mt-0.5 shrink-0" />
+                {confirmAction === "all"
+                  ? "Delete all supported data categories except Professor Mari? There is no undo."
+                  : `Delete ${selectedScopes.length} selected data categor${selectedScopes.length === 1 ? "y" : "ies"}? There is no undo.`}
+              </div>
+              <div className="flex gap-2">
                 <button
-                  onClick={() => deleteBackupMutation.mutate(b.name)}
-                  className="ml-2 rounded p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/10 hover:text-[var(--destructive)]"
+                  onClick={() => setConfirmAction(null)}
+                  disabled={isClearing}
+                  className="flex-1 rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-medium transition-all hover:bg-[var(--secondary)] active:scale-95 disabled:opacity-50"
                 >
-                  <Trash2 size="0.75rem" />
+                  Cancel
+                </button>
+                <button
+                  onClick={() => runExpunge(confirmAction)}
+                  disabled={isClearing}
+                  className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[var(--destructive)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95 disabled:opacity-50"
+                >
+                  {isClearing ? <Loader2 size="0.75rem" className="animate-spin" /> : <Trash2 size="0.75rem" />}
+                  Confirm Delete
                 </button>
               </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* ── Danger Zone ── */}
-      <div className="retro-divider" />
-      <div className="rounded-xl border border-[var(--destructive)]/30 bg-[var(--destructive)]/5 p-3 flex flex-col gap-2">
-        <div className="flex items-center gap-2 text-xs font-semibold text-[var(--destructive)]">
-          <AlertTriangle size="0.875rem" />
-          Danger Zone
-        </div>
-        <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-          Permanently clear selected categories of local data. Professor Mari is always preserved, and Marinara resets
-          live caches immediately after a successful expunge so stale data does not linger on screen.
-        </p>
-        <div className="grid gap-2">
-          {EXPUNGE_SCOPE_OPTIONS.map((scope) => {
-            const checked = selectedScopes.includes(scope.id);
-            return (
-              <label
-                key={scope.id}
-                className={cn(
-                  "flex cursor-pointer items-start gap-2 rounded-lg px-2.5 py-2 ring-1 transition-colors",
-                  checked
-                    ? "bg-[var(--destructive)]/10 ring-[var(--destructive)]/25"
-                    : "bg-[var(--background)]/40 ring-[var(--border)] hover:bg-[var(--secondary)]/70",
-                )}
-              >
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  disabled={isClearing}
-                  onChange={() => toggleScope(scope.id)}
-                  className="mt-0.5 h-3.5 w-3.5 rounded border-[var(--border)] accent-[var(--destructive)]"
-                />
-                <span className="min-w-0">
-                  <span className="block text-xs font-medium text-[var(--foreground)]">{scope.label}</span>
-                  <span className="block text-[0.625rem] text-[var(--muted-foreground)]">{scope.description}</span>
-                </span>
-              </label>
-            );
-          })}
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <button
-            onClick={() => setSelectedScopes(isAllScopesSelected ? [] : EXPUNGE_SCOPE_OPTIONS.map((scope) => scope.id))}
-            disabled={isClearing}
-            className="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-medium transition-all hover:bg-[var(--secondary)] active:scale-95 disabled:opacity-50"
-          >
-            {isAllScopesSelected ? "Clear Selection" : "Select All"}
-          </button>
-          <button
-            onClick={() => setConfirmAction("selected")}
-            disabled={selectedScopes.length === 0 || isClearing}
-            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[var(--destructive)]/85 px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <Trash2 size="0.8125rem" />
-            Clear Selected Data
-          </button>
-          <button
-            onClick={() => setConfirmAction("all")}
-            disabled={isClearing}
-            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[var(--destructive)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95 disabled:opacity-50"
-          >
-            <Trash2 size="0.8125rem" />
-            Clear All Data
-          </button>
-        </div>
-        {confirmAction && (
-          <div className="flex flex-col gap-2 rounded-lg bg-[var(--destructive)]/12 p-2.5">
-            <div className="flex items-start gap-2 text-[0.6875rem] font-medium text-[var(--destructive)]">
-              <AlertTriangle size="0.875rem" className="mt-0.5 shrink-0" />
-              {confirmAction === "all"
-                ? "Delete all supported data categories except Professor Mari? There is no undo."
-                : `Delete ${selectedScopes.length} selected data categor${selectedScopes.length === 1 ? "y" : "ies"}? There is no undo.`}
             </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => setConfirmAction(null)}
-                disabled={isClearing}
-                className="flex-1 rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-medium transition-all hover:bg-[var(--secondary)] active:scale-95 disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => runExpunge(confirmAction)}
-                disabled={isClearing}
-                className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[var(--destructive)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95 disabled:opacity-50"
-              >
-                {isClearing ? <Loader2 size="0.75rem" className="animate-spin" /> : <Trash2 size="0.75rem" />}
-                Confirm Delete
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      </SettingsSection>
     </div>
   );
 }

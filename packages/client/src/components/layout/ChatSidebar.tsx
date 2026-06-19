@@ -2,8 +2,8 @@
 // Layout: Chat Sidebar (polished with rich buttons)
 // ──────────────────────────────────────────────
 import {
-  Plus,
   MessageSquare,
+  MessageSquareText,
   Search,
   Trash2,
   BookOpen,
@@ -14,7 +14,6 @@ import {
   Circle,
   Moon,
   MinusCircle,
-  FolderOpen,
   FolderPlus,
   ChevronDown,
   ChevronRight,
@@ -25,7 +24,7 @@ import {
   ArrowUpDown,
   Tag,
   Pencil,
-  Download,
+  Upload,
 } from "lucide-react";
 import { useBulkExportChats, useChats, useCreateChat, useDeleteChat, useDeleteChatGroup } from "../../hooks/use-chats";
 import { useChatPresets, useApplyChatPreset } from "../../hooks/use-chat-presets";
@@ -49,6 +48,7 @@ import type { Chat, ChatFolder, ChatMode } from "@marinara-engine/shared";
 import { Modal } from "../ui/Modal";
 import { Reorder, useDragControls } from "framer-motion";
 import { parseChatMetadata } from "../../lib/chat-display";
+import { getCurrentGameGroupRepresentative } from "../../lib/game-session-resolution";
 
 type ChatSortOption = "newest" | "oldest" | "name-asc" | "name-desc";
 
@@ -75,6 +75,14 @@ function normalizeChatCharacterIds(value: unknown): string[] {
   return Array.isArray(parsed)
     ? parsed.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim())
     : [];
+}
+
+function getNextUnnamedFolderName(existingFolders: Array<{ name: string }>): string {
+  const names = new Set(existingFolders.map((folder) => folder.name.trim().toLowerCase()).filter(Boolean));
+  if (!names.has("unnamed")) return "unnamed";
+  let index = 2;
+  while (names.has(`unnamed ${index}`)) index += 1;
+  return `unnamed ${index}`;
 }
 
 const MODE_CONFIG: Record<
@@ -112,6 +120,14 @@ const MODE_CONFIG: Record<
   },
 };
 
+function ChatSidebarTitleIcon() {
+  return (
+    <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-[linear-gradient(135deg,#4de5dd_0%,#eb8951_52%,#e15c8c_100%)] text-white shadow-sm">
+      <MessageSquareText size="0.875rem" strokeWidth={2.35} />
+    </div>
+  );
+}
+
 export function ChatSidebar() {
   const { data: chats, isError: chatsError, isLoading, isFetching, refetch: refetchChats } = useChats();
   const { data: connections } = useConnections();
@@ -130,6 +146,7 @@ export function ChatSidebar() {
   const editorDirty = useUIStore((s) => s.editorDirty);
   const closeAllDetails = useUIStore((s) => s.closeAllDetails);
   const setSidebarOpen = useUIStore((s) => s.setSidebarOpen);
+  const chatModeShortcutRequest = useUIStore((s) => s.chatModeShortcutRequest);
   const setPendingNewChatMode = useChatStore((s) => s.setPendingNewChatMode);
 
   // Folder hooks
@@ -186,10 +203,16 @@ export function ChatSidebar() {
     branchCount: number;
   } | null>(null);
 
-  // Folder UI state
-  const [creatingFolder, setCreatingFolder] = useState(false);
-  const [newFolderName, setNewFolderName] = useState("");
-  const [movingChatId, setMovingChatId] = useState<string | null>(null);
+  const [draggedChatId, setDraggedChatId] = useState<string | null>(null);
+  const [isRootDropTarget, setIsRootDropTarget] = useState(false);
+  const touchDragRef = useRef<{
+    chatId: string;
+    timer: number | null;
+    active: boolean;
+    lastX: number;
+    lastY: number;
+  } | null>(null);
+  const suppressTouchDragClickRef = useRef(false);
 
   // Multi-select state
   const [multiSelectMode, setMultiSelectMode] = useState(false);
@@ -208,6 +231,15 @@ export function ChatSidebar() {
     setMultiSelectMode(false);
     setSelectedChatIds(new Set());
   }, []);
+
+  useEffect(() => {
+    if (!chatModeShortcutRequest) return;
+    setActiveTab(chatModeShortcutRequest.mode);
+    setSearchQuery("");
+    setActiveTag(null);
+    setTagsExpanded(false);
+    exitMultiSelect();
+  }, [chatModeShortcutRequest, exitMultiSelect]);
 
   // Exit multi-select when switching tabs
   useEffect(() => {
@@ -293,7 +325,10 @@ export function ChatSidebar() {
       if (chat.groupId) {
         if (seenGroups.has(chat.groupId)) continue;
         seenGroups.add(chat.groupId);
-        result.push({ chat, branchCount: totalGroupSizes.get(chat.groupId) ?? 1 });
+        result.push({
+          chat: getCurrentGameGroupRepresentative(chat, chats ?? filtered),
+          branchCount: totalGroupSizes.get(chat.groupId) ?? 1,
+        });
       } else {
         result.push({ chat, branchCount: 1 });
       }
@@ -327,8 +362,9 @@ export function ChatSidebar() {
 
   const [localFolderOrder, setLocalFolderOrder] = useState<string[]>([]);
   useEffect(() => {
+    if (!folders) return;
     setLocalFolderOrder(modeFolders.map((f) => f.id));
-  }, [modeFolders]);
+  }, [folders, modeFolders]);
 
   // Detect if active chat belongs to a group (so its group row highlights)
   const activeChat = chats?.find((c) => c.id === activeChatId);
@@ -494,14 +530,13 @@ export function ChatSidebar() {
   const handleNewChatFromTab = useCallback(() => {
     handleNewChat(activeTab);
   }, [handleNewChat, activeTab]);
+  const activeModeConfig = MODE_CONFIG[activeTab] ?? MODE_CONFIG.conversation;
+  const activeModeHasChats = modeChats.length > 0;
 
   // ── Folder handlers ──
   const handleCreateFolder = useCallback(() => {
-    if (!newFolderName.trim()) return;
-    createFolderMut.mutate({ name: newFolderName.trim(), mode: activeTab });
-    setNewFolderName("");
-    setCreatingFolder(false);
-  }, [newFolderName, activeTab, createFolderMut]);
+    createFolderMut.mutate({ name: getNextUnnamedFolderName(modeFolders), mode: activeTab });
+  }, [activeTab, createFolderMut, modeFolders]);
 
   const handleToggleCollapse = useCallback(
     (folder: ChatFolder) => {
@@ -542,16 +577,77 @@ export function ChatSidebar() {
     [reorderFoldersMut],
   );
 
-  const handleMoveToFolder = useCallback(
-    (chatId: string, folderId: string | null) => {
-      moveChatMut.mutate({ chatId, folderId });
-      setMovingChatId(null);
+  const getDragChatIds = useCallback(
+    (chatId: string) => (multiSelectMode && selectedChatIds.has(chatId) ? Array.from(selectedChatIds) : [chatId]),
+    [multiSelectMode, selectedChatIds],
+  );
+
+  const handleDropChatsToFolder = useCallback(
+    (chatIds: string[], folderId: string | null) => {
+      const uniqueIds = Array.from(new Set(chatIds.filter(Boolean)));
+      for (const chatId of uniqueIds) {
+        moveChatMut.mutate({ chatId, folderId });
+      }
+      setDraggedChatId(null);
+      setIsRootDropTarget(false);
     },
     [moveChatMut],
   );
 
+  const startTouchDrag = useCallback((chatId: string, event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "mouse") return;
+    const drag = {
+      chatId,
+      timer: null as number | null,
+      active: false,
+      lastX: event.clientX,
+      lastY: event.clientY,
+    };
+    drag.timer = window.setTimeout(() => {
+      drag.active = true;
+      setDraggedChatId(chatId);
+    }, 420);
+    touchDragRef.current = drag;
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }, []);
+
+  const updateTouchDrag = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = touchDragRef.current;
+    if (!drag) return;
+    drag.lastX = event.clientX;
+    drag.lastY = event.clientY;
+    if (drag.active) event.preventDefault();
+  }, []);
+
+  const finishTouchDrag = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const drag = touchDragRef.current;
+      if (!drag) return;
+      if (drag.timer !== null) {
+        window.clearTimeout(drag.timer);
+      }
+      touchDragRef.current = null;
+
+      if (drag.active) {
+        const target = document.elementFromPoint(drag.lastX, drag.lastY);
+        const folderEl = target?.closest<HTMLElement>("[data-chat-folder-id]");
+        const rootEl = target?.closest<HTMLElement>("[data-chat-root-drop-zone]");
+        const folderId = folderEl?.dataset.chatFolderId ?? null;
+        if (folderId) {
+          handleDropChatsToFolder(getDragChatIds(drag.chatId), folderId);
+        } else if (rootEl) {
+          handleDropChatsToFolder(getDragChatIds(drag.chatId), null);
+        }
+        setDraggedChatId(null);
+        setIsRootDropTarget(false);
+        suppressTouchDragClickRef.current = true;
+        event.preventDefault();
+      }
+    },
+    [getDragChatIds, handleDropChatsToFolder],
+  );
+
   // ── Batch actions ──
-  const [batchMovingFolder, setBatchMovingFolder] = useState(false);
   const [batchExportOpen, setBatchExportOpen] = useState(false);
 
   const handleBatchDelete = useCallback(async () => {
@@ -591,17 +687,6 @@ export function ChatSidebar() {
     [selectedChatIds, bulkExportChats, exitMultiSelect],
   );
 
-  const handleBatchMoveToFolder = useCallback(
-    (folderId: string | null) => {
-      for (const id of selectedChatIds) {
-        moveChatMut.mutate({ chatId: id, folderId });
-      }
-      setBatchMovingFolder(false);
-      exitMultiSelect();
-    },
-    [selectedChatIds, moveChatMut, exitMultiSelect],
-  );
-
   // ── Chat row renderer (shared between unfiled + folder sections) ──
   const renderChatRow = ({ chat, branchCount }: (typeof displayChats)[number]) => {
     const cfg = MODE_CONFIG[chat.mode] ?? MODE_CONFIG.conversation;
@@ -613,7 +698,28 @@ export function ChatSidebar() {
         tabIndex={0}
         key={chat.groupId ?? chat.id}
         data-chat-id={chat.id}
+        draggable
+        onDragStart={(event) => {
+          const chatIds = getDragChatIds(chat.id);
+          setDraggedChatId(chat.id);
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("application/x-marinara-chat-ids", JSON.stringify(chatIds));
+          event.dataTransfer.setData("application/x-marinara-chat-id", chat.id);
+          event.dataTransfer.setData("text/plain", chat.id);
+        }}
+        onDragEnd={() => {
+          setDraggedChatId(null);
+          setIsRootDropTarget(false);
+        }}
+        onPointerDown={(event) => startTouchDrag(chat.id, event)}
+        onPointerMove={updateTouchDrag}
+        onPointerUp={finishTouchDrag}
+        onPointerCancel={finishTouchDrag}
         onClick={async () => {
+          if (suppressTouchDragClickRef.current) {
+            suppressTouchDragClickRef.current = false;
+            return;
+          }
           if (multiSelectMode) {
             toggleSelectChat(chat.id);
             return;
@@ -644,6 +750,7 @@ export function ChatSidebar() {
             : isActive
               ? "bg-[var(--sidebar-accent)] shadow-sm"
               : "hover:bg-[var(--sidebar-accent)]/60",
+          draggedChatId === chat.id && "opacity-50",
         )}
       >
         {/* Multi-select checkbox */}
@@ -803,27 +910,6 @@ export function ChatSidebar() {
           </span>
         )}
 
-        {/* Mode badge on hover */}
-        {!multiSelectMode && (
-          <span className="shrink-0 text-[0.625rem] text-[var(--muted-foreground)] opacity-0 transition-opacity group-hover:opacity-100 max-md:opacity-100">
-            {cfg.shortLabel}
-          </span>
-        )}
-
-        {/* Move to folder */}
-        {!multiSelectMode && modeFolders.length > 0 && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              setMovingChatId(chat.id);
-            }}
-            className="shrink-0 rounded-md p-1 opacity-0 transition-all hover:bg-[var(--accent)] group-hover:opacity-100 max-md:opacity-100"
-            title="Move to folder"
-          >
-            <FolderOpen size="0.75rem" className="text-[var(--muted-foreground)]" />
-          </button>
-        )}
-
         {/* Delete button */}
         {!multiSelectMode && (
           <button
@@ -859,15 +945,11 @@ export function ChatSidebar() {
       {/* Header */}
       <div className="mari-sidebar-header relative flex h-12 items-center justify-between bg-[var(--card)]/80 px-4 backdrop-blur-sm">
         <div className="absolute inset-x-0 bottom-0 h-px bg-[var(--border)]/30" />
-        <h2 className="retro-glow-text text-sm font-bold tracking-tight">✧ Chats</h2>
+        <div className="flex items-center gap-2.5">
+          <ChatSidebarTitleIcon />
+          <h2 className="text-sm font-semibold text-[var(--foreground)]">Chats</h2>
+        </div>
         <div className="flex items-center gap-1">
-          <button
-            onClick={handleNewChatFromTab}
-            className="rounded-lg p-1.5 text-[var(--muted-foreground)] transition-all hover:bg-[var(--sidebar-accent)] hover:text-[var(--primary)] active:scale-90"
-            title={`New ${activeTab === "conversation" ? "Conversation" : activeTab === "game" ? "Game" : "Roleplay"}`}
-          >
-            <Plus size="1rem" />
-          </button>
           <button
             onClick={() => setSidebarOpen(false)}
             className="rounded-lg p-1.5 text-[var(--muted-foreground)] transition-all hover:bg-[var(--sidebar-accent)] hover:text-[var(--primary)] active:scale-90 md:hidden"
@@ -889,6 +971,9 @@ export function ChatSidebar() {
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
+              aria-pressed={isActive}
+              data-chat-mode-tab={tab}
+              data-tour={`chat-mode-${tab}`}
               className={cn(
                 "relative flex min-h-[2.125rem] flex-1 items-center justify-center gap-1.5 overflow-visible rounded-lg px-2 py-2 text-xs leading-normal font-medium transition-all",
                 isActive
@@ -910,98 +995,149 @@ export function ChatSidebar() {
         })}
       </div>
 
+      <div className="px-3 pt-2">
+        <button
+          onClick={handleNewChatFromTab}
+          className="flex w-full items-center justify-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--card)] px-3 py-2.5 text-xs font-medium text-white transition-all hover:border-[var(--primary)]/35 hover:bg-[var(--accent)] active:scale-[0.98]"
+          title={`New ${activeModeConfig.label}`}
+        >
+          <span className="text-white">{activeModeConfig.icon}</span>
+          New {activeModeConfig.label}
+        </button>
+      </div>
+
       {/* Search + filters */}
       <div className="space-y-1.5 px-3 py-2">
-        <div className="flex min-w-0 items-center gap-2 rounded-lg bg-[var(--secondary)] px-3 py-2 ring-1 ring-transparent transition-all focus-within:ring-[var(--primary)]/40">
-          <Search size="0.8125rem" className="shrink-0 text-[var(--muted-foreground)]" />
-          <input
-            type="text"
-            placeholder={`Search ${activeTab === "conversation" ? "conversations" : activeTab === "game" ? "games" : "roleplays"}...`}
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="min-w-0 flex-1 bg-transparent text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] outline-none"
-          />
-        </div>
-
-        <div className="space-y-1.5">
+        <div className="flex gap-1.5">
+          <div className="relative min-w-0 flex-1">
+            <Search
+              size="0.8125rem"
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)]"
+            />
+            <input
+              type="text"
+              placeholder={`Search ${activeTab === "conversation" ? "conversations" : activeTab === "game" ? "games" : "roleplays"}...`}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full rounded-xl border border-[var(--border)] bg-[var(--secondary)] py-2 pl-8 pr-3 text-xs outline-none transition-colors placeholder:text-[var(--muted-foreground)]/50 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
+            />
+          </div>
           <div className="relative">
             <select
               value={sort}
               onChange={(e) => setSort(e.target.value as ChatSortOption)}
-              className="w-full appearance-none rounded-lg bg-[var(--secondary)] py-2 pl-2.5 pr-7 text-[0.6875rem] text-[var(--foreground)] outline-none ring-1 ring-transparent transition-all focus:ring-[var(--primary)]/40"
+              className="h-full w-[6.5rem] appearance-none rounded-xl border border-[var(--border)] bg-[var(--secondary)] py-2 pl-2.5 pr-7 text-[0.6875rem] outline-none transition-colors focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
               title="Sort chats"
             >
-              <option value="newest">Sort: Newest</option>
-              <option value="oldest">Sort: Oldest</option>
-              <option value="name-asc">Sort: A-Z</option>
-              <option value="name-desc">Sort: Z-A</option>
+              <option value="newest">Newest</option>
+              <option value="oldest">Oldest</option>
+              <option value="name-asc">A-Z</option>
+              <option value="name-desc">Z-A</option>
             </select>
             <ArrowUpDown
               size="0.625rem"
               className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)]"
             />
           </div>
-
-          {allTags.length > 0 && (
-            <div className="flex max-w-full flex-wrap items-center gap-1">
-              <button
-                onClick={() => setTagsExpanded((prev) => !prev)}
-                className={cn(
-                  "flex max-w-full items-center gap-1 rounded-lg px-1.5 py-1 text-[0.625rem] transition-colors",
-                  activeTag
-                    ? "bg-[var(--primary)]/15 text-[var(--primary)]"
-                    : "text-[var(--muted-foreground)] hover:bg-[var(--sidebar-accent)]/40 hover:text-[var(--foreground)]",
-                )}
-                title={tagsExpanded ? "Collapse tags" : "Expand tags"}
-              >
-                <Tag size="0.6875rem" className="shrink-0" />
-                <span className="max-w-full truncate">
-                  {activeTag ? `Tag: ${activeTag}` : `Tags (${allTags.length})`}
-                </span>
-                {tagsExpanded ? (
-                  <ChevronUp size="0.625rem" className="shrink-0" />
-                ) : (
-                  <ChevronDown size="0.625rem" className="shrink-0" />
-                )}
-              </button>
-              {activeTag && (
-                <button
-                  onClick={() => setActiveTag(null)}
-                  className="rounded-lg px-2 py-1 text-[0.625rem] text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/10"
-                >
-                  Clear
-                </button>
-              )}
-              {(tagsExpanded ? allTags : allTags.slice(0, 4)).map((tag) => (
-                <button
-                  key={tag}
-                  onClick={() => setActiveTag((prev) => (prev === tag ? null : tag))}
-                  className={cn(
-                    "max-w-full truncate rounded-lg px-2 py-1 text-[0.625rem] font-medium transition-all",
-                    activeTag === tag
-                      ? "bg-[var(--primary)]/15 text-[var(--primary)] ring-1 ring-[var(--primary)]/30"
-                      : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:bg-[var(--sidebar-accent)]/40 hover:text-[var(--foreground)]",
-                  )}
-                  title={tag}
-                >
-                  {tag}
-                </button>
-              ))}
-              {!tagsExpanded && allTags.length > 4 && (
-                <button
-                  onClick={() => setTagsExpanded(true)}
-                  className="rounded-lg px-2 py-1 text-[0.625rem] text-[var(--muted-foreground)] transition-colors hover:bg-[var(--sidebar-accent)]/40 hover:text-[var(--foreground)]"
-                >
-                  +{allTags.length - 4} more
-                </button>
-              )}
-            </div>
-          )}
         </div>
+
+        {allTags.length > 0 && (
+          <div className="flex max-w-full flex-wrap items-center gap-1">
+            <button
+              onClick={() => setTagsExpanded((prev) => !prev)}
+              className={cn(
+                "flex max-w-full items-center gap-1 rounded-lg px-1.5 py-1 text-[0.625rem] transition-colors",
+                activeTag
+                  ? "bg-[var(--primary)]/15 text-[var(--primary)]"
+                  : "text-[var(--muted-foreground)] hover:bg-[var(--sidebar-accent)]/40 hover:text-[var(--foreground)]",
+              )}
+              title={tagsExpanded ? "Collapse tags" : "Expand tags"}
+            >
+              <Tag size="0.6875rem" className="shrink-0" />
+              <span className="max-w-full truncate">
+                {activeTag ? `Tag: ${activeTag}` : `Tags (${allTags.length})`}
+              </span>
+              {tagsExpanded ? (
+                <ChevronUp size="0.625rem" className="shrink-0" />
+              ) : (
+                <ChevronDown size="0.625rem" className="shrink-0" />
+              )}
+            </button>
+            {activeTag && (
+              <button
+                onClick={() => setActiveTag(null)}
+                className="rounded-lg px-2 py-1 text-[0.625rem] text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/10"
+              >
+                Clear
+              </button>
+            )}
+            {(tagsExpanded ? allTags : allTags.slice(0, 4)).map((tag) => (
+              <button
+                key={tag}
+                onClick={() => setActiveTag((prev) => (prev === tag ? null : tag))}
+                className={cn(
+                  "max-w-full truncate rounded-lg px-2 py-1 text-[0.625rem] font-medium transition-all",
+                  activeTag === tag
+                    ? "bg-[var(--primary)]/15 text-[var(--primary)] ring-1 ring-[var(--primary)]/30"
+                    : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:bg-[var(--sidebar-accent)]/40 hover:text-[var(--foreground)]",
+                )}
+                title={tag}
+              >
+                {tag}
+              </button>
+            ))}
+            {!tagsExpanded && allTags.length > 4 && (
+              <button
+                onClick={() => setTagsExpanded(true)}
+                className="rounded-lg px-2 py-1 text-[0.625rem] text-[var(--muted-foreground)] transition-colors hover:bg-[var(--sidebar-accent)]/40 hover:text-[var(--foreground)]"
+              >
+                +{allTags.length - 4} more
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Chat list */}
-      <div className="flex-1 overflow-y-auto px-2 py-1">
+      <div
+        data-chat-root-drop-zone
+        className={cn(
+          "flex-1 overflow-y-auto px-2 py-1 transition-colors",
+          isRootDropTarget && "bg-[var(--primary)]/5",
+        )}
+        onDragEnter={(event) => {
+          if (!draggedChatId) return;
+          event.preventDefault();
+          setIsRootDropTarget(true);
+        }}
+        onDragOver={(event) => {
+          if (!draggedChatId) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+        }}
+        onDragLeave={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            setIsRootDropTarget(false);
+          }
+        }}
+        onDrop={(event) => {
+          if (!draggedChatId) return;
+          event.preventDefault();
+          const target = event.target as Element | null;
+          if (target?.closest("[data-chat-folder-id]")) {
+            setIsRootDropTarget(false);
+            return;
+          }
+          const chatId =
+            event.dataTransfer.getData("application/x-marinara-chat-id") ||
+            event.dataTransfer.getData("text/plain") ||
+            draggedChatId;
+          const chatIdsPayload = event.dataTransfer.getData("application/x-marinara-chat-ids");
+          const chatIds = chatIdsPayload ? (JSON.parse(chatIdsPayload) as string[]) : [chatId];
+          if (chatIds.length > 0) handleDropChatsToFolder(chatIds, null);
+          setIsRootDropTarget(false);
+        }}
+      >
         {isLoading && (
           <div className="flex flex-col gap-2 px-2 py-4">
             {[1, 2, 3].map((i) => (
@@ -1054,36 +1190,10 @@ export function ChatSidebar() {
         )}
 
         <div className="stagger-children flex flex-col gap-0.5">
-          {/* New folder */}
-          {creatingFolder ? (
-            <div className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5">
-              <FolderPlus size="0.75rem" className="text-[var(--muted-foreground)]" />
-              <input
-                autoFocus
-                placeholder="Folder name..."
-                value={newFolderName}
-                onChange={(e) => setNewFolderName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleCreateFolder();
-                  if (e.key === "Escape") {
-                    setCreatingFolder(false);
-                    setNewFolderName("");
-                  }
-                }}
-                onBlur={() => {
-                  if (newFolderName.trim()) handleCreateFolder();
-                  else {
-                    setCreatingFolder(false);
-                    setNewFolderName("");
-                  }
-                }}
-                className="flex-1 bg-transparent text-xs text-[var(--foreground)] outline-none placeholder:text-[var(--muted-foreground)]"
-              />
-            </div>
-          ) : (
+          {activeModeHasChats && (
             <div className="flex items-center gap-1">
               <button
-                onClick={() => setCreatingFolder(true)}
+                onClick={handleCreateFolder}
                 className="flex flex-1 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[0.6875rem] text-[var(--muted-foreground)] transition-all hover:bg-[var(--sidebar-accent)]/40 hover:text-[var(--foreground)]"
               >
                 <FolderPlus size="0.75rem" />
@@ -1104,6 +1214,12 @@ export function ChatSidebar() {
                 </button>
               )}
             </div>
+          )}
+
+          {modeFolders.length > 0 && activeModeHasChats && (
+            <p className="px-2.5 pb-1 text-[0.625rem] leading-snug text-[var(--muted-foreground)]/70">
+              Drag and drop chats to folders
+            </p>
           )}
 
           {/* Folders (drag-to-reorder) */}
@@ -1128,6 +1244,8 @@ export function ChatSidebar() {
                     onToggleCollapse={handleToggleCollapse}
                     onRename={handleRenameFolder}
                     onDelete={handleDeleteFolder}
+                    draggedChatId={draggedChatId}
+                    onDropChat={handleDropChatsToFolder}
                   />
                 );
               })}
@@ -1146,22 +1264,12 @@ export function ChatSidebar() {
             {selectedChatIds.size} selected
           </div>
           <div className="flex gap-2">
-            {modeFolders.length > 0 && (
-              <button
-                onClick={() => setBatchMovingFolder(true)}
-                disabled={selectedChatIds.size === 0}
-                className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs font-medium transition-all hover:bg-[var(--accent)] disabled:opacity-40"
-              >
-                <FolderOpen size="0.75rem" />
-                Move
-              </button>
-            )}
             <button
               onClick={() => setBatchExportOpen(true)}
               disabled={selectedChatIds.size === 0 || bulkExportChats.isPending}
               className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs font-medium transition-all hover:bg-[var(--accent)] disabled:opacity-40"
             >
-              <Download size="0.75rem" />
+              <Upload size="0.75rem" />
               Export
             </button>
             <button
@@ -1223,65 +1331,6 @@ export function ChatSidebar() {
         )}
       </Modal>
 
-      {/* ── Move to Folder Modal ── */}
-      <Modal open={movingChatId !== null} onClose={() => setMovingChatId(null)} title="Move to Folder" width="max-w-xs">
-        {movingChatId && (
-          <div className="flex flex-col gap-1">
-            <button
-              onClick={() => handleMoveToFolder(movingChatId, null)}
-              className={cn(
-                "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs transition-all hover:bg-[var(--accent)]",
-                !chats?.find((c) => c.id === movingChatId)?.folderId && "bg-[var(--accent)] font-medium",
-              )}
-            >
-              <MessageSquare size="0.75rem" className="text-[var(--muted-foreground)]" />
-              Unfiled
-            </button>
-            {modeFolders.map((f) => (
-              <button
-                key={f.id}
-                onClick={() => handleMoveToFolder(movingChatId, f.id)}
-                className={cn(
-                  "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs transition-all hover:bg-[var(--accent)]",
-                  chats?.find((c) => c.id === movingChatId)?.folderId === f.id && "bg-[var(--accent)] font-medium",
-                )}
-              >
-                <div className="h-2 w-2 rounded-full flex-shrink-0" style={{ backgroundColor: f.color || "#6b7280" }} />
-                {f.name}
-              </button>
-            ))}
-          </div>
-        )}
-      </Modal>
-
-      {/* ── Batch Move to Folder Modal ── */}
-      <Modal
-        open={batchMovingFolder}
-        onClose={() => setBatchMovingFolder(false)}
-        title={`Move ${selectedChatIds.size} Chat${selectedChatIds.size !== 1 ? "s" : ""} to Folder`}
-        width="max-w-xs"
-      >
-        <div className="flex flex-col gap-1">
-          <button
-            onClick={() => handleBatchMoveToFolder(null)}
-            className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs transition-all hover:bg-[var(--accent)]"
-          >
-            <MessageSquare size="0.75rem" className="text-[var(--muted-foreground)]" />
-            Unfiled
-          </button>
-          {modeFolders.map((f) => (
-            <button
-              key={f.id}
-              onClick={() => handleBatchMoveToFolder(f.id)}
-              className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs transition-all hover:bg-[var(--accent)]"
-            >
-              <div className="h-2 w-2 rounded-full flex-shrink-0" style={{ backgroundColor: f.color || "#6b7280" }} />
-              {f.name}
-            </button>
-          ))}
-        </div>
-      </Modal>
-
       {/* ── Batch Export Modal ── */}
       <Modal
         open={batchExportOpen}
@@ -1299,7 +1348,7 @@ export function ChatSidebar() {
             disabled={bulkExportChats.isPending}
             className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs transition-all hover:bg-[var(--accent)] disabled:opacity-40"
           >
-            <Download size="0.75rem" className="text-[var(--muted-foreground)]" />
+            <Upload size="0.75rem" className="text-[var(--muted-foreground)]" />
             JSONL zip
           </button>
           <button
@@ -1308,7 +1357,7 @@ export function ChatSidebar() {
             disabled={bulkExportChats.isPending}
             className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs transition-all hover:bg-[var(--accent)] disabled:opacity-40"
           >
-            <Download size="0.75rem" className="text-[var(--muted-foreground)]" />
+            <Upload size="0.75rem" className="text-[var(--muted-foreground)]" />
             Text zip
           </button>
           <p className="px-1 pt-2 text-[0.625rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]/60">
@@ -1320,7 +1369,7 @@ export function ChatSidebar() {
             disabled={bulkExportChats.isPending}
             className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs transition-all hover:bg-[var(--accent)] disabled:opacity-40"
           >
-            <Download size="0.75rem" className="text-[var(--muted-foreground)]" />
+            <Upload size="0.75rem" className="text-[var(--muted-foreground)]" />
             All chats as JSONL zip
           </button>
           <button
@@ -1329,7 +1378,7 @@ export function ChatSidebar() {
             disabled={bulkExportChats.isPending}
             className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs transition-all hover:bg-[var(--accent)] disabled:opacity-40"
           >
-            <Download size="0.75rem" className="text-[var(--muted-foreground)]" />
+            <Upload size="0.75rem" className="text-[var(--muted-foreground)]" />
             All chats as text zip
           </button>
         </div>
@@ -1346,6 +1395,8 @@ function FolderRow({
   onToggleCollapse,
   onRename,
   onDelete,
+  draggedChatId,
+  onDropChat,
 }: {
   folder: ChatFolder;
   entries: { chat: any; branchCount: number }[];
@@ -1353,13 +1404,54 @@ function FolderRow({
   onToggleCollapse: (folder: ChatFolder) => void;
   onRename: (id: string, name: string) => void;
   onDelete: (id: string) => void;
+  draggedChatId: string | null;
+  onDropChat: (chatIds: string[], folderId: string | null) => void;
 }) {
   const dragControls = useDragControls();
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(folder.name);
+  const [isDropTarget, setIsDropTarget] = useState(false);
 
   return (
-    <Reorder.Item value={folder.id} dragListener={false} dragControls={dragControls} as="div" className="flex flex-col">
+    <Reorder.Item
+      value={folder.id}
+      data-chat-folder-id={folder.id}
+      dragListener={false}
+      dragControls={dragControls}
+      as="div"
+      onDragEnter={(event) => {
+        if (!draggedChatId) return;
+        event.preventDefault();
+        setIsDropTarget(true);
+      }}
+      onDragOver={(event) => {
+        if (!draggedChatId) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setIsDropTarget(false);
+        }
+      }}
+      onDrop={(event) => {
+        if (!draggedChatId) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const chatId =
+          event.dataTransfer.getData("application/x-marinara-chat-id") ||
+          event.dataTransfer.getData("text/plain") ||
+          draggedChatId;
+        const chatIdsPayload = event.dataTransfer.getData("application/x-marinara-chat-ids");
+        const chatIds = chatIdsPayload ? (JSON.parse(chatIdsPayload) as string[]) : [chatId];
+        if (chatIds.length > 0) onDropChat(chatIds, folder.id);
+        setIsDropTarget(false);
+      }}
+      className={cn(
+        "flex flex-col rounded-lg transition-colors",
+        isDropTarget && "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30",
+      )}
+    >
       {/* Folder header */}
       <div className="group relative flex items-center gap-1.5 rounded-lg px-2 py-1.5 hover:bg-[var(--sidebar-accent)]/40">
         <div
@@ -1395,11 +1487,6 @@ function FolderRow({
               "text-[var(--muted-foreground)] transition-transform shrink-0",
               !folder.collapsed && "rotate-90",
             )}
-          />
-          <div
-            className="h-2 w-2 rounded-full flex-shrink-0 cursor-pointer"
-            style={{ backgroundColor: folder.color || "#6b7280" }}
-            title={folder.name}
           />
           {renaming ? (
             <input
@@ -1499,9 +1586,12 @@ const STATUS_OPTIONS: Array<{
 function UserStatusFooter() {
   const userStatus = useUIStore((s) => s.userStatus);
   const userActivity = useUIStore((s) => s.userActivity);
+  const recentUserActivities = useUIStore((s) => s.recentUserActivities);
   const setUserStatusManual = useUIStore((s) => s.setUserStatusManual);
   const setUserActivity = useUIStore((s) => s.setUserActivity);
+  const rememberUserActivity = useUIStore((s) => s.rememberUserActivity);
   const [open, setOpen] = useState(false);
+  const [activityFocused, setActivityFocused] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   // Close on click outside
@@ -1515,6 +1605,27 @@ function UserStatusFooter() {
   }, [open]);
 
   const current = STATUS_OPTIONS.find((s) => s.value === userStatus) ?? STATUS_OPTIONS[0]!;
+  const recentActivitySuggestions = useMemo(() => {
+    const currentActivity = userActivity.replace(/\s+/g, " ").trim().toLowerCase();
+    return recentUserActivities
+      .filter((activity) => activity.trim() && activity.trim().toLowerCase() !== currentActivity)
+      .slice(0, 3);
+  }, [recentUserActivities, userActivity]);
+
+  const commitCurrentActivity = useCallback(() => {
+    const normalized = userActivity.replace(/\s+/g, " ").trim().slice(0, 120);
+    if (normalized !== userActivity) setUserActivity(normalized);
+    if (normalized) rememberUserActivity(normalized);
+  }, [rememberUserActivity, setUserActivity, userActivity]);
+
+  const applyRecentActivity = useCallback(
+    (activity: string) => {
+      setUserActivity(activity);
+      rememberUserActivity(activity);
+      setActivityFocused(false);
+    },
+    [rememberUserActivity, setUserActivity],
+  );
 
   return (
     <div ref={ref} className="relative border-t border-[var(--border)]/30 px-3 py-2">
@@ -1542,6 +1653,24 @@ function UserStatusFooter() {
           ))}
         </div>
       )}
+      {activityFocused && !open && recentActivitySuggestions.length > 0 && (
+        <div className="absolute bottom-full left-2 right-2 mb-1 rounded-xl bg-[var(--popover)] p-1.5 shadow-xl ring-1 ring-[var(--border)]/40">
+          <div className="px-2 pb-1 pt-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
+            Recent status
+          </div>
+          {recentActivitySuggestions.map((activity) => (
+            <button
+              key={activity}
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => applyRecentActivity(activity)}
+              className="flex w-full min-w-0 items-center rounded-lg px-2 py-1.5 text-left text-xs text-[var(--sidebar-foreground)] transition-colors hover:bg-[var(--accent)]"
+            >
+              <span className="truncate">{activity}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="flex min-w-0 items-center gap-1.5">
         <button
@@ -1556,6 +1685,19 @@ function UserStatusFooter() {
         <input
           value={userActivity}
           onChange={(event) => setUserActivity(event.target.value)}
+          onFocus={() => setActivityFocused(true)}
+          onBlur={() => {
+            commitCurrentActivity();
+            setActivityFocused(false);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.currentTarget.blur();
+            } else if (event.key === "Escape") {
+              setActivityFocused(false);
+              event.currentTarget.blur();
+            }
+          }}
           maxLength={120}
           placeholder="What are you doing?"
           aria-label="Custom activity"

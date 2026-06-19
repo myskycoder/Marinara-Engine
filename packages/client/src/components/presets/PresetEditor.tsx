@@ -1,6 +1,6 @@
 // ──────────────────────────────────────────────
 // Full-Page Preset Editor
-// Tabs: Overview · Sections · Parameters · Review
+// Tabs: Overview · Sections
 // ──────────────────────────────────────────────
 import { useState, useCallback, useEffect, useMemo, useRef, type FC, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -51,7 +51,6 @@ import {
   X,
   AlertTriangle,
   Maximize2,
-  BookOpen,
   ListChecks,
   Shuffle,
   ToggleLeft,
@@ -60,18 +59,26 @@ import {
 import { cn } from "../../lib/utils";
 import { HelpTooltip } from "../ui/HelpTooltip";
 import { DraftNumberInput } from "../ui/DraftNumberInput";
+import { MacroTextarea } from "../ui/MacroTextarea";
 import { api } from "../../lib/api-client";
 import { useAgentConfigs, type AgentConfigRow } from "../../hooks/use-agents";
-import { SUPPORTED_MACROS, type WrapFormat, type MarkerType } from "@marinara-engine/shared";
+import { type WrapFormat, type MarkerType } from "@marinara-engine/shared";
+import { useQuoteFormatter } from "../../hooks/use-quote-formatter";
+import { EditorTabRail } from "../ui/EditorTabRail";
 
 /** Intercept Tab in a textarea to insert 2 spaces instead of changing focus. */
-function handleTextareaTab(e: React.KeyboardEvent<HTMLTextAreaElement>, value: string, setValue: (v: string) => void) {
+function handleTextareaTab(
+  e: React.KeyboardEvent<HTMLTextAreaElement>,
+  value: string,
+  setValue: (v: string) => void,
+  formatValue: (v: string) => string = (v) => v,
+) {
   if (e.key !== "Tab") return;
   e.preventDefault();
   const ta = e.currentTarget;
   const start = ta.selectionStart;
   const end = ta.selectionEnd;
-  const newValue = value.substring(0, start) + "  " + value.substring(end);
+  const newValue = formatValue(value.substring(0, start) + "  " + value.substring(end));
   setValue(newValue);
   // Restore cursor position after React re-renders
   requestAnimationFrame(() => {
@@ -84,7 +91,6 @@ function handleTextareaTab(e: React.KeyboardEvent<HTMLTextAreaElement>, value: s
 const TABS = [
   { id: "overview", label: "Overview", icon: FileText },
   { id: "sections", label: "Sections", icon: Layers },
-  { id: "review", label: "AI Review", icon: Sparkles },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
 
@@ -180,6 +186,7 @@ export function PresetEditor() {
   const [localWrapFormat, setLocalWrapFormat] = useState<WrapFormat>("xml");
   const [localAuthor, setLocalAuthor] = useState("");
   const [localParams, setLocalParams] = useState<Record<string, unknown>>({});
+  const formatQuotes = useQuoteFormatter();
 
   // Populate local state when data loads
   useEffect(() => {
@@ -320,7 +327,7 @@ export function PresetEditor() {
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
       {/* ── Header ── */}
-      <div className="flex flex-wrap items-center gap-3 border-b border-[var(--border)] bg-[var(--card)] px-4 py-3 max-md:gap-2 max-md:px-3">
+      <div className="flex flex-wrap items-center gap-3 border-b border-[var(--border)] px-4 py-3 max-md:gap-2 max-md:px-3">
         <button
           onClick={handleClose}
           className="rounded-xl p-2 transition-all hover:bg-[var(--accent)] active:scale-95"
@@ -418,27 +425,7 @@ export function PresetEditor() {
 
       {/* ── Body: Tab rail + Content ── */}
       <div className="flex flex-1 overflow-hidden @max-5xl:flex-col">
-        {/* Tab rail */}
-        <nav className="flex w-44 shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-[var(--border)] bg-[var(--card)] p-2 @max-5xl:w-full @max-5xl:flex-row @max-5xl:overflow-x-auto @max-5xl:border-r-0 @max-5xl:border-b @max-5xl:p-1.5">
-          {TABS.map((tab) => {
-            const Icon = tab.icon;
-            return (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={cn(
-                  "flex items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-medium transition-all @max-5xl:whitespace-nowrap @max-5xl:px-2.5 @max-5xl:py-1.5",
-                  activeTab === tab.id
-                    ? "bg-gradient-to-r from-purple-400/15 to-violet-500/15 text-[var(--primary)] ring-1 ring-[var(--primary)]/20"
-                    : "text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]",
-                )}
-              >
-                <Icon size="0.875rem" />
-                {tab.label}
-              </button>
-            );
-          })}
-        </nav>
+        <EditorTabRail tabs={TABS} activeId={activeTab} onChange={setActiveTab} />
 
         {/* Content area */}
         <div className="flex-1 overflow-y-auto p-6 @max-5xl:p-4">
@@ -453,7 +440,7 @@ export function PresetEditor() {
                 }}
                 description={localDescription}
                 onDescriptionChange={(v) => {
-                  setLocalDescription(v);
+                  setLocalDescription(formatQuotes(v));
                   markDirty();
                 }}
                 wrapFormat={localWrapFormat}
@@ -463,7 +450,7 @@ export function PresetEditor() {
                 }}
                 author={localAuthor}
                 onAuthorChange={(v) => {
-                  setLocalAuthor(v);
+                  setLocalAuthor(formatQuotes(v));
                   markDirty();
                 }}
                 sectionCount={orderedSections.length}
@@ -494,9 +481,6 @@ export function PresetEditor() {
                 parentChatHasLorebook={parentChatHasLorebook}
               />
             )}
-
-            {/* ── Review Tab ── */}
-            {activeTab === "review" && <ReviewTab presetId={presetDetailId} />}
           </div>
         </div>
       </div>
@@ -1912,6 +1896,7 @@ function OptionFieldInput({
   const [local, setLocal] = useState(value);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const focusedRef = useRef(false);
+  const formatQuotes = useQuoteFormatter();
   useEffect(() => {
     if (!focusedRef.current) setLocal(value);
   }, [value]);
@@ -1929,10 +1914,11 @@ function OptionFieldInput({
         e.target.select();
       }}
       onChange={(e) => {
-        setLocal(e.target.value);
+        const nextValue = formatQuotes(e.target.value);
+        setLocal(nextValue);
         if (timeoutRef.current) clearTimeout(timeoutRef.current);
         timeoutRef.current = setTimeout(() => {
-          onCommit(e.target.value);
+          onCommit(nextValue);
         }, 600);
       }}
       onBlur={() => {
@@ -1957,6 +1943,7 @@ function OptionFieldInput({
 // ── Variable Question Input (local state, commits on blur/Enter) ──
 function VariableQuestionInput({ value, onCommit }: { value: string; onCommit: (v: string) => void }) {
   const [local, setLocal] = useState(value);
+  const formatQuotes = useQuoteFormatter();
   useEffect(() => {
     setLocal(value);
   }, [value]);
@@ -1964,7 +1951,7 @@ function VariableQuestionInput({ value, onCommit }: { value: string; onCommit: (
     <input
       value={local}
       onFocus={(e) => e.target.select()}
-      onChange={(e) => setLocal(e.target.value)}
+      onChange={(e) => setLocal(formatQuotes(e.target.value))}
       onBlur={() => {
         if (local !== value) onCommit(local);
       }}
@@ -1990,10 +1977,9 @@ function SectionContentTextarea({
   onCommit: (v: string) => void;
 }) {
   const [local, setLocal] = useState(value);
-  const [expanded, setExpanded] = useState(false);
-  const [showMacroRef, setShowMacroRef] = useState(false);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const focusedRef = useRef(false);
+  const formatQuotes = useQuoteFormatter();
 
   // Only sync from parent when not actively editing
   useEffect(() => {
@@ -2001,26 +1987,26 @@ function SectionContentTextarea({
   }, [value]);
 
   const commit = useCallback(() => {
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
     if (local !== value) onCommit(local);
   }, [local, value, onCommit]);
 
   // Debounced auto-save while typing (800ms)
-  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setLocal(e.target.value);
+  const handleChange = (nextRawValue: string) => {
+    const nextValue = formatQuotes(nextRawValue);
+    setLocal(nextValue);
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
     timeoutRef.current = setTimeout(() => {
-      const val = e.target.value;
-      if (val !== value) onCommit(val);
+      if (nextValue !== value) onCommit(nextValue);
     }, 800);
   };
 
   // Commit on blur immediately
   const handleBlur = () => {
     focusedRef.current = false;
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    }
     commit();
   };
 
@@ -2037,65 +2023,16 @@ function SectionContentTextarea({
   );
 
   return (
-    <>
-      <div className="relative">
-        <textarea
-          value={local}
-          onChange={handleChange}
-          onBlur={handleBlur}
-          onFocus={handleFocus}
-          onKeyDown={(e) =>
-            handleTextareaTab(e, local, (v) => {
-              setLocal(v);
-              if (timeoutRef.current) clearTimeout(timeoutRef.current);
-              timeoutRef.current = setTimeout(() => {
-                if (v !== value) onCommit(v);
-              }, 800);
-            })
-          }
-          className="min-h-[7.5rem] w-full rounded-lg bg-[var(--secondary)] p-2.5 pr-8 font-mono text-xs text-[var(--foreground)] ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
-          placeholder="Prompt content… (supports {{user}}, {{char}}, {{// comment}}, {{trim}} macros)"
-        />
-        <div className="absolute right-1.5 top-1.5 flex flex-col gap-0.5">
-          <button
-            onClick={() => setExpanded(true)}
-            className="rounded p-1 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-            title="Expand editor"
-          >
-            <Maximize2 size="0.75rem" />
-          </button>
-          <button
-            onClick={() => setShowMacroRef(true)}
-            className="rounded p-1 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-            title="Macros reference"
-          >
-            <BookOpen size="0.75rem" />
-          </button>
-        </div>
-      </div>
-
-      {/* Macros reference modal */}
-      {showMacroRef && <MacrosReferenceModal onClose={() => setShowMacroRef(false)} />}
-
-      {/* Expanded editor modal */}
-      {expanded && (
-        <ExpandedEditorModal
-          title={sectionName ? `Edit: ${sectionName}` : "Edit Prompt"}
-          value={local}
-          onChange={(v) => {
-            setLocal(v);
-            if (timeoutRef.current) clearTimeout(timeoutRef.current);
-            timeoutRef.current = setTimeout(() => {
-              if (v !== value) onCommit(v);
-            }, 800);
-          }}
-          onClose={() => {
-            setExpanded(false);
-            if (local !== value) onCommit(local);
-          }}
-        />
-      )}
-    </>
+    <MacroTextarea
+      value={local}
+      onChange={handleChange}
+      onBlur={handleBlur}
+      onFocus={handleFocus}
+      onExpandedClose={commit}
+      title={sectionName ? `Edit: ${sectionName}` : "Edit Prompt"}
+      className="min-h-[7.5rem] w-full rounded-lg bg-[var(--secondary)] p-2.5 font-mono text-xs text-[var(--foreground)] ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+      placeholder="Prompt content… (supports {{user}}, {{char}}, {{// comment}}, {{trim}} macros)"
+    />
   );
 }
 
@@ -2119,6 +2056,7 @@ function ExpandedEditorModal({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [local, setLocal] = useState(value);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const formatQuotes = useQuoteFormatter();
 
   // Sync from parent only on initial mount (not on every re-render)
   useEffect(() => {
@@ -2151,7 +2089,7 @@ function ExpandedEditorModal({
   );
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const v = e.target.value;
+    const v = formatQuotes(e.target.value);
     setLocal(v);
     // Debounced commit so the parent stays in sync without cursor jumps
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
@@ -2188,13 +2126,19 @@ function ExpandedEditorModal({
               value={local}
               onChange={handleChange}
               onKeyDown={(e) =>
-                handleTextareaTab(e, local, (v) => {
-                  setLocal(v);
-                  if (timeoutRef.current) clearTimeout(timeoutRef.current);
-                  timeoutRef.current = setTimeout(() => {
-                    onChange(v);
-                  }, 600);
-                })
+                handleTextareaTab(
+                  e,
+                  local,
+                  (v) => {
+                    const nextValue = formatQuotes(v);
+                    setLocal(nextValue);
+                    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+                    timeoutRef.current = setTimeout(() => {
+                      onChange(nextValue);
+                    }, 600);
+                  },
+                  formatQuotes,
+                )
               }
               className="h-full w-full resize-none rounded-lg bg-[var(--secondary)] p-4 font-mono text-sm text-[var(--foreground)] ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
               placeholder="Prompt content… (supports macros like {{user}}, {{char}}, etc.)"
@@ -2208,85 +2152,6 @@ function ExpandedEditorModal({
               className="rounded-xl bg-gradient-to-r from-purple-400 to-violet-500 px-4 py-1.5 text-xs font-medium text-white shadow-md hover:shadow-lg active:scale-[0.98]"
             >
               Done
-            </button>
-          </div>
-        </div>
-      </div>
-    </PresetModalPortal>
-  );
-}
-
-// ── Macros reference data ──
-const MACRO_REFERENCE = Array.from(
-  SUPPORTED_MACROS.reduce((categories, macro) => {
-    const macros = categories.get(macro.category) ?? [];
-    macros.push({ macro: macro.syntax, desc: macro.description });
-    categories.set(macro.category, macros);
-    return categories;
-  }, new Map<string, Array<{ macro: string; desc: string }>>()),
-  ([category, macros]) => ({ category, macros }),
-);
-
-// ── Macros Reference Modal ──
-function MacrosReferenceModal({ onClose }: { onClose: () => void }) {
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [onClose]);
-
-  return (
-    <PresetModalPortal>
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-6 max-md:pt-[max(1.5rem,env(safe-area-inset-top))]">
-        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-        <div className="relative flex max-h-[80vh] w-full max-w-lg flex-col rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl shadow-black/50">
-          {/* Header */}
-          <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
-            <div className="flex items-center gap-2">
-              <BookOpen size="1rem" className="text-purple-400" />
-              <h3 className="text-sm font-semibold">Macros Reference</h3>
-            </div>
-            <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-[var(--accent)]">
-              <X size="1rem" />
-            </button>
-          </div>
-          {/* Content */}
-          <div className="flex-1 space-y-4 overflow-y-auto p-4">
-            <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
-              Use these macros in your prompt sections. They will be replaced with actual values at generation time.
-            </p>
-            <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
-              In group chats, a bracketed block containing character macros like <code>{"{{char}}"}</code> and{" "}
-              <code>{"{{description}}"}</code> repeats once per character.
-            </p>
-            {MACRO_REFERENCE.map((cat) => (
-              <div key={cat.category}>
-                <h4 className="mb-1.5 text-[0.6875rem] font-semibold text-purple-400">{cat.category}</h4>
-                <div className="space-y-1">
-                  {cat.macros.map((m) => (
-                    <div
-                      key={m.macro}
-                      className="flex items-start gap-2 rounded-lg px-2 py-1.5 hover:bg-[var(--accent)]"
-                    >
-                      <code className="shrink-0 rounded bg-[var(--secondary)] px-1.5 py-0.5 text-[0.625rem] font-medium text-amber-400">
-                        {m.macro}
-                      </code>
-                      <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{m.desc}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-          {/* Footer */}
-          <div className="border-t border-[var(--border)] px-4 py-2.5 text-center">
-            <button
-              onClick={onClose}
-              className="rounded-xl px-4 py-1.5 text-xs font-medium text-[var(--muted-foreground)] hover:bg-[var(--accent)]"
-            >
-              Close
             </button>
           </div>
         </div>
@@ -2329,91 +2194,6 @@ function SectionNameInput({ value, onCommit }: { value: string; onCommit: (v: st
 }
 
 // ═══════════════════════════════════════════════
-//  Review Tab (placeholder — wires to prompt reviewer)
-// ═══════════════════════════════════════════════
-
-function ReviewTab({ presetId }: { presetId: string }) {
-  const [reviewing, setReviewing] = useState(false);
-  const [reviewOutput, setReviewOutput] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const enableStreaming = useUIStore((s) => s.enableStreaming);
-
-  const startReview = async (connectionId: string) => {
-    setReviewing(true);
-    setReviewOutput("");
-    setError(null);
-
-    try {
-      const res = await fetch("/api/prompt-reviewer/review", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          presetId,
-          connectionId,
-          streaming: enableStreaming,
-          focusAreas: ["clarity", "consistency", "coverage", "token_efficiency"],
-        }),
-      });
-
-      if (!res.ok) throw new Error("Failed to start review");
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error("No stream");
-
-      const decoder = new TextDecoder();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const text = decoder.decode(value, { stream: true });
-        const lines = text.split("\n");
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const event = JSON.parse(line.slice(6));
-            if (event.type === "token") {
-              setReviewOutput((prev) => prev + event.data);
-            } else if (event.type === "error") {
-              setError(event.data);
-            }
-          } catch {
-            /* skip */
-          }
-        }
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Review failed");
-    } finally {
-      setReviewing(false);
-    }
-  };
-
-  return (
-    <>
-      <FieldGroup label="AI Prompt Review">
-        <p className="mb-3 text-xs text-[var(--muted-foreground)]">
-          Have an AI analyze your prompt preset for clarity, consistency, coverage, and efficiency. This requires an
-          active API connection.
-        </p>
-        <ConnectionSelector
-          onSelect={(connId) => startReview(connId)}
-          disabled={reviewing}
-          label={reviewing ? "Reviewing…" : "Start Review"}
-        />
-      </FieldGroup>
-
-      {error && (
-        <div className="rounded-xl bg-[var(--destructive)]/10 p-3 text-xs text-[var(--destructive)]">{error}</div>
-      )}
-
-      {reviewOutput && (
-        <div className="rounded-xl bg-[var(--secondary)] p-4 ring-1 ring-[var(--border)]">
-          <pre className="whitespace-pre-wrap text-xs text-[var(--foreground)]">{reviewOutput}</pre>
-        </div>
-      )}
-    </>
-  );
-}
-
-// ═══════════════════════════════════════════════
 //  Shared UI Components
 // ═══════════════════════════════════════════════
 
@@ -2434,52 +2214,6 @@ function StatCard({ label, value }: { label: string; value: number }) {
     <div className="flex flex-1 flex-col items-center rounded-xl bg-[var(--secondary)] p-3 ring-1 ring-[var(--border)]">
       <span className="text-xl font-bold text-[var(--foreground)]">{value}</span>
       <span className="text-[0.625rem] text-[var(--muted-foreground)]">{label}</span>
-    </div>
-  );
-}
-
-/** Simple connection selector — queries the connections API */
-function ConnectionSelector({
-  onSelect,
-  disabled,
-  label,
-}: {
-  onSelect: (connectionId: string) => void;
-  disabled: boolean;
-  label: string;
-}) {
-  const [connId, setConnId] = useState("");
-
-  // Quick inline fetch of connections
-  const [connections, setConnections] = useState<Array<{ id: string; name: string }>>([]);
-  useEffect(() => {
-    fetch("/api/connections")
-      .then((r) => r.json())
-      .then((data) => setConnections(data))
-      .catch(() => {});
-  }, []);
-
-  return (
-    <div className="flex gap-2">
-      <select
-        value={connId}
-        onChange={(e) => setConnId(e.target.value)}
-        className="flex-1 rounded-xl bg-[var(--secondary)] px-2.5 py-2 text-xs ring-1 ring-[var(--border)] focus:outline-none"
-      >
-        <option value="">Select connection…</option>
-        {connections.map((c) => (
-          <option key={c.id} value={c.id}>
-            {c.name}
-          </option>
-        ))}
-      </select>
-      <button
-        disabled={disabled || !connId}
-        onClick={() => onSelect(connId)}
-        className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-purple-400 to-violet-500 px-4 py-2 text-xs font-medium text-white shadow-md transition-all hover:shadow-lg active:scale-[0.98] disabled:opacity-50"
-      >
-        <Sparkles size="0.8125rem" /> {label}
-      </button>
     </div>
   );
 }

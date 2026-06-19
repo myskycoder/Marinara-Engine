@@ -25,10 +25,7 @@ export function GameNpcTracker({ npcs }: GameNpcTrackerProps) {
 
   if (npcs.length === 0) return null;
 
-  const metNpcs = npcs.filter((n) => n.met);
-  if (metNpcs.length === 0) return null;
-
-  const display = expanded ? metNpcs : metNpcs.slice(0, 5);
+  const display = expanded ? npcs : npcs.slice(0, 5);
 
   return (
     <div className="w-44 rounded-lg border border-[var(--border)] bg-[var(--card)]/92 p-2 shadow-lg backdrop-blur-sm">
@@ -37,8 +34,8 @@ export function GameNpcTracker({ npcs }: GameNpcTrackerProps) {
         className="mb-1.5 flex w-full items-center gap-1.5 text-xs font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
       >
         <Users size={12} />
-        <span className="flex-1 text-left">NPCs ({metNpcs.length})</span>
-        {metNpcs.length > 5 && (expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}
+        <span className="flex-1 text-left">NPCs ({npcs.length})</span>
+        {npcs.length > 5 && (expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}
       </button>
 
       <div className="flex flex-col gap-1">
@@ -60,8 +57,8 @@ export function GameNpcTracker({ npcs }: GameNpcTrackerProps) {
             </div>
           );
         })}
-        {!expanded && metNpcs.length > 5 && (
-          <span className="text-center text-[0.625rem] text-[var(--muted-foreground)]">+{metNpcs.length - 5} more</span>
+        {!expanded && npcs.length > 5 && (
+          <span className="text-center text-[0.625rem] text-[var(--muted-foreground)]">+{npcs.length - 5} more</span>
         )}
       </div>
     </div>

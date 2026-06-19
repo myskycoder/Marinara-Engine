@@ -6,6 +6,7 @@
 import type { DaySummaryEntry, WeekSummaryEntry } from "@marinara-engine/shared";
 import type { BaseLLMProvider } from "../llm/base-provider.js";
 import { stripConversationPromptTimestamps } from "./transcript-sanitize.js";
+import { formatZonedConversationDate, toZonedWallClockDate } from "./timezone.js";
 
 export interface ConversationSummaryMessage {
   id?: string;
@@ -41,6 +42,7 @@ interface GenerateMissingConversationSummariesOptions {
   charIdToName: Map<string, string>;
   now?: Date;
   rolloverHour?: number;
+  timeZone?: string;
   timeoutMs?: number;
   maxMissingDays?: number;
 }
@@ -98,12 +100,12 @@ export function getConversationWeekMonday(date: Date): Date {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate() + diff);
 }
 
-function logicalDate(date: Date, rolloverHour: number): Date {
-  return new Date(date.getTime() - rolloverHour * 3_600_000);
+function logicalDate(date: Date, rolloverHour: number, timeZone?: string): Date {
+  return toZonedWallClockDate(new Date(date.getTime() - rolloverHour * 3_600_000), timeZone);
 }
 
-function logicalDateKey(date: Date, rolloverHour: number): string {
-  return formatConversationDateKey(logicalDate(date, rolloverHour));
+function logicalDateKey(date: Date, rolloverHour: number, timeZone?: string): string {
+  return formatZonedConversationDate(date, timeZone, rolloverHour);
 }
 
 function getMessageAuthor(
@@ -123,6 +125,7 @@ function buildDayBuckets(
   personaName: string,
   charIdToName: Map<string, string>,
   rolloverHour: number,
+  timeZone?: string,
 ): ConversationSummaryDayBucket[] {
   const buckets = new Map<string, ConversationSummaryDayBucket>();
   for (const message of messages) {
@@ -132,7 +135,7 @@ function buildDayBuckets(
     const content = stripConversationPromptTimestamps((message.content ?? "").trim());
     if (!content) continue;
 
-    const date = logicalDateKey(createdAt, rolloverHour);
+    const date = logicalDateKey(createdAt, rolloverHour, timeZone);
     const bucket = buckets.get(date) ?? { date, msgs: [] };
     bucket.msgs.push({
       role: message.role,
@@ -334,11 +337,17 @@ export async function generateMissingConversationSummaries(
   const rolloverHour = Math.max(0, Math.min(11, Math.floor(options.rolloverHour ?? 4)));
   const timeoutMs = options.timeoutMs ?? DEFAULT_SUMMARY_TIMEOUT_MS;
   const now = options.now ?? new Date();
-  const todayDateKey = logicalDateKey(now, rolloverHour);
+  const todayDateKey = logicalDateKey(now, rolloverHour, options.timeZone);
   const daySummaries = normalizeDaySummaries(options.metadata.daySummaries);
   const weekSummaries = normalizeWeekSummaries(options.metadata.weekSummaries);
 
-  const buckets = buildDayBuckets(options.messages, options.personaName, options.charIdToName, rolloverHour);
+  const buckets = buildDayBuckets(
+    options.messages,
+    options.personaName,
+    options.charIdToName,
+    rolloverHour,
+    options.timeZone,
+  );
   const pastBuckets = buckets.filter((bucket) => bucket.date !== todayDateKey);
   const missingBuckets = pastBuckets.filter((bucket) => !daySummaries[bucket.date]);
   const maxMissingDays =
@@ -384,7 +393,7 @@ export async function generateMissingConversationSummaries(
     if (weekSummaries[weekKey]) continue;
     const monday = parseConversationDateKey(weekKey);
     const nextMonday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 7);
-    if (logicalDate(now, rolloverHour).getTime() < nextMonday.getTime()) continue;
+    if (logicalDate(now, rolloverHour, options.timeZone).getTime() < nextMonday.getTime()) continue;
 
     const messageDays = messageDaysByWeek.get(weekKey);
     if (messageDays && [...messageDays].some((dateKey) => !daySummaries[dateKey])) continue;

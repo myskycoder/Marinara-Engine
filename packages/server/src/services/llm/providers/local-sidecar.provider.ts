@@ -4,6 +4,7 @@ import { OpenAIProvider } from "./openai.provider.js";
 import { sidecarModelService } from "../../sidecar/sidecar-model.service.js";
 import { sidecarProcessService } from "../../sidecar/sidecar-process.service.js";
 import { resolveSidecarRequestModel } from "../../sidecar/sidecar-request-model.js";
+import { getEmbeddingRequestTimeoutMs } from "../../../config/runtime-config.js";
 
 function isNotFoundError(error: unknown): boolean {
   return error instanceof Error && /\(404\)|\b404\b/.test(error.message);
@@ -28,6 +29,7 @@ export class LocalSidecarProvider extends BaseLLMProvider {
   }
 
   private applyRuntimeSettings(options: ChatOptions): ChatOptions {
+    if (options.suppressModelParameters) return options;
     const config = sidecarModelService.getConfig();
     const requestedMaxTokens =
       typeof options.maxTokens === "number" && Number.isFinite(options.maxTokens)
@@ -75,11 +77,13 @@ export class LocalSidecarProvider extends BaseLLMProvider {
   }
 
   private async requestOpenAIEmbeddings(baseUrl: string, texts: string[], model: string): Promise<number[][]> {
+    const timeoutMs = getEmbeddingRequestTimeoutMs();
     const response = await llmFetch(`${baseUrl}/v1/embeddings`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ input: texts, model }),
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(timeoutMs),
+      agentOptions: { bodyTimeout: 0, headersTimeout: timeoutMs },
       bufferResponse: true,
     });
     if (!response.ok) {
@@ -90,13 +94,15 @@ export class LocalSidecarProvider extends BaseLLMProvider {
   }
 
   private async requestLegacyEmbeddings(baseUrl: string, texts: string[]): Promise<number[][]> {
+    const timeoutMs = getEmbeddingRequestTimeoutMs();
     const embeddings: number[][] = [];
     for (const text of texts) {
       const response = await llmFetch(`${baseUrl}/embedding`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: text }),
-        signal: AbortSignal.timeout(60_000),
+        signal: AbortSignal.timeout(timeoutMs),
+        agentOptions: { bodyTimeout: 0, headersTimeout: timeoutMs },
         bufferResponse: true,
       });
       if (!response.ok) {

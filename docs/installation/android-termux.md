@@ -74,6 +74,8 @@ If an update is temporarily broken or you need to stay on the current local copy
 
 You can also go to **Settings → Advanced → Updates** and click **Check for Updates** to see whether a new release exists. The in-app **Apply Update** button is disabled by default; to enable it, set `UPDATES_APPLY_ENABLED=true`, set `ADMIN_SECRET`, and save that same secret in **Settings → Advanced → Admin Access**. Otherwise, run `./start-termux.sh` again to let the launcher update and relaunch the app.
 
+If you use the optional Android WebView APK or PWA, **Apply Update** updates the Termux server behind it. Remote browser sessions also need `UPDATES_ALLOW_REMOTE_APPLY=true`; otherwise, stop the Termux launcher and run `./start-termux.sh` again.
+
 ---
 
 ## See Also

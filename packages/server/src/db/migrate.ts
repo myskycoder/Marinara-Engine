@@ -64,6 +64,9 @@ const CREATE_TABLES: string[] = [
     id TEXT PRIMARY KEY NOT NULL,
     name TEXT NOT NULL,
     comment TEXT NOT NULL DEFAULT '',
+    creator TEXT NOT NULL DEFAULT '',
+    persona_version TEXT NOT NULL DEFAULT '1.0',
+    creator_notes TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
     personality TEXT NOT NULL DEFAULT '',
     scenario TEXT NOT NULL DEFAULT '',
@@ -77,11 +80,21 @@ const CREATE_TABLES: string[] = [
     box_color TEXT NOT NULL DEFAULT '',
     tracker_card_colors TEXT NOT NULL DEFAULT '{"mode":"chat"}',
     persona_stats TEXT NOT NULL DEFAULT '',
-    alt_descriptions TEXT NOT NULL DEFAULT '[]',
     tags TEXT NOT NULL DEFAULT '[]',
     saved_status_options TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS persona_card_versions (
+    id TEXT PRIMARY KEY NOT NULL,
+    persona_id TEXT NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+    data TEXT NOT NULL,
+    comment TEXT NOT NULL DEFAULT '',
+    avatar_path TEXT,
+    version TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'manual',
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS character_groups (
     id TEXT PRIMARY KEY NOT NULL,
@@ -110,11 +123,13 @@ const CREATE_TABLES: string[] = [
     token_budget INTEGER NOT NULL DEFAULT 2048,
     recursive_scanning TEXT NOT NULL DEFAULT 'false',
     max_recursion_depth INTEGER NOT NULL DEFAULT 3,
+    exclude_from_vectorization TEXT NOT NULL DEFAULT 'false',
     character_id TEXT,
     persona_id TEXT,
     chat_id TEXT,
     is_global TEXT NOT NULL DEFAULT 'false',
     enabled TEXT NOT NULL DEFAULT 'true',
+    scope TEXT NOT NULL DEFAULT '{"mode":"all","chatIds":[]}',
     tags TEXT NOT NULL DEFAULT '[]',
     generated_by TEXT,
     source_agent_id TEXT,
@@ -254,6 +269,7 @@ const CREATE_TABLES: string[] = [
     base_url TEXT NOT NULL DEFAULT '',
     api_key_encrypted TEXT NOT NULL DEFAULT '',
     model TEXT NOT NULL DEFAULT '',
+    image_path TEXT,
     max_context INTEGER NOT NULL DEFAULT 128000,
     max_parallel_jobs INTEGER NOT NULL DEFAULT 1,
     is_default TEXT NOT NULL DEFAULT 'false',
@@ -281,6 +297,7 @@ const CREATE_TABLES: string[] = [
     phase TEXT NOT NULL,
     enabled TEXT NOT NULL DEFAULT 'true',
     connection_id TEXT,
+    image_path TEXT,
     prompt_template TEXT NOT NULL DEFAULT '',
     settings TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
@@ -334,6 +351,7 @@ const CREATE_TABLES: string[] = [
     recent_events TEXT NOT NULL DEFAULT '[]',
     player_stats TEXT,
     persona_stats TEXT,
+    field_locks TEXT,
     committed INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
   )`,
@@ -361,6 +379,7 @@ const CREATE_TABLES: string[] = [
     placement TEXT NOT NULL DEFAULT '["ai_output"]',
     flags TEXT NOT NULL DEFAULT 'gi',
     prompt_only TEXT NOT NULL DEFAULT 'false',
+    target_character_ids TEXT NOT NULL DEFAULT '[]',
     "order" INTEGER NOT NULL DEFAULT 0,
     min_depth INTEGER,
     max_depth INTEGER,
@@ -387,6 +406,39 @@ const CREATE_TABLES: string[] = [
     model TEXT NOT NULL DEFAULT '',
     width INTEGER,
     height INTEGER,
+    custom_kind TEXT,
+    custom_name TEXT,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS persona_images (
+    id TEXT PRIMARY KEY NOT NULL,
+    persona_id TEXT NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+    file_path TEXT NOT NULL,
+    prompt TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    width INTEGER,
+    height INTEGER,
+    custom_kind TEXT,
+    custom_name TEXT,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS gallery_folders (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS global_images (
+    id TEXT PRIMARY KEY NOT NULL,
+    folder_id TEXT REFERENCES gallery_folders(id) ON DELETE SET NULL,
+    file_path TEXT NOT NULL,
+    prompt TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    width INTEGER,
+    height INTEGER,
+    custom_kind TEXT,
+    custom_name TEXT,
     created_at TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS ooc_influences (
@@ -448,6 +500,11 @@ const CREATE_TABLES: string[] = [
   `CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY NOT NULL,
     value TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS achievement_unlocks (
+    id TEXT PRIMARY KEY NOT NULL,
+    unlocked_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS installed_extensions (
@@ -513,6 +570,16 @@ interface ColumnMigration {
 const COLUMN_MIGRATIONS: ColumnMigration[] = [
   {
     table: "api_connections",
+    column: "image_path",
+    definition: "TEXT",
+  },
+  {
+    table: "agent_configs",
+    column: "image_path",
+    definition: "TEXT",
+  },
+  {
+    table: "api_connections",
     column: "enable_caching",
     definition: "TEXT NOT NULL DEFAULT 'false'",
   },
@@ -542,9 +609,19 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
     definition: "TEXT",
   },
   {
+    table: "game_state_snapshots",
+    column: "field_locks",
+    definition: "TEXT",
+  },
+  {
     table: "lorebooks",
     column: "max_recursion_depth",
     definition: "INTEGER NOT NULL DEFAULT 3",
+  },
+  {
+    table: "lorebooks",
+    column: "exclude_from_vectorization",
+    definition: "TEXT NOT NULL DEFAULT 'false'",
   },
   {
     table: "lorebooks",
@@ -555,11 +632,6 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
     table: "lorebook_entries",
     column: "prevent_recursion",
     definition: "TEXT NOT NULL DEFAULT 'false'",
-  },
-  {
-    table: "personas",
-    column: "alt_descriptions",
-    definition: "TEXT NOT NULL DEFAULT '[]'",
   },
   {
     table: "lorebook_entries",
@@ -584,6 +656,21 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
   {
     table: "personas",
     column: "comment",
+    definition: "TEXT NOT NULL DEFAULT ''",
+  },
+  {
+    table: "personas",
+    column: "creator",
+    definition: "TEXT NOT NULL DEFAULT ''",
+  },
+  {
+    table: "personas",
+    column: "persona_version",
+    definition: "TEXT NOT NULL DEFAULT '1.0'",
+  },
+  {
+    table: "personas",
+    column: "creator_notes",
     definition: "TEXT NOT NULL DEFAULT ''",
   },
   {
@@ -620,6 +707,11 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
     table: "api_connections",
     column: "image_generation_source",
     definition: "TEXT",
+  },
+  {
+    table: "regex_scripts",
+    column: "target_character_ids",
+    definition: "TEXT NOT NULL DEFAULT '[]'",
   },
   {
     table: "api_connections",
@@ -670,6 +762,11 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
     table: "lorebooks",
     column: "image_path",
     definition: "TEXT",
+  },
+  {
+    table: "lorebooks",
+    column: "scope",
+    definition: 'TEXT NOT NULL DEFAULT \'{"mode":"all","chatIds":[]}\'',
   },
   {
     table: "api_connections",
@@ -774,6 +871,36 @@ const COLUMN_MIGRATIONS: ColumnMigration[] = [
   {
     table: "memory_chunks",
     column: "source_chat_id",
+    definition: "TEXT",
+  },
+  {
+    table: "character_images",
+    column: "custom_kind",
+    definition: "TEXT",
+  },
+  {
+    table: "character_images",
+    column: "custom_name",
+    definition: "TEXT",
+  },
+  {
+    table: "persona_images",
+    column: "custom_kind",
+    definition: "TEXT",
+  },
+  {
+    table: "persona_images",
+    column: "custom_name",
+    definition: "TEXT",
+  },
+  {
+    table: "global_images",
+    column: "custom_kind",
+    definition: "TEXT",
+  },
+  {
+    table: "global_images",
+    column: "custom_name",
     definition: "TEXT",
   },
 ];
@@ -896,6 +1023,9 @@ export async function runMigrations(db: DB) {
       `CREATE INDEX IF NOT EXISTS idx_character_card_versions ON character_card_versions(character_id, created_at DESC)`,
     ),
   );
+  await db.run(
+    sql.raw(`CREATE INDEX IF NOT EXISTS idx_persona_card_versions ON persona_card_versions(persona_id, created_at DESC)`),
+  );
   await db.run(sql.raw(`CREATE INDEX IF NOT EXISTS idx_custom_themes_active ON custom_themes(is_active)`));
   await db.run(sql.raw(`CREATE INDEX IF NOT EXISTS idx_chat_presets_mode_active ON chat_presets(mode, is_active)`));
   await db.run(
@@ -907,4 +1037,11 @@ export async function runMigrations(db: DB) {
     sql.raw(`CREATE INDEX IF NOT EXISTS idx_ai_request_logs_agent ON ai_request_logs(agent_config_id)`),
   );
   await db.run(sql.raw(`CREATE INDEX IF NOT EXISTS idx_ai_request_logs_chat ON ai_request_logs(chat_id)`));
+  await db.run(
+    sql.raw(`CREATE INDEX IF NOT EXISTS idx_persona_images_persona ON persona_images(persona_id, created_at DESC)`),
+  );
+  await db.run(
+    sql.raw(`CREATE INDEX IF NOT EXISTS idx_global_images_folder ON global_images(folder_id, created_at DESC)`),
+  );
+  await db.run(sql.raw(`CREATE INDEX IF NOT EXISTS idx_global_images_created ON global_images(created_at DESC)`));
 }

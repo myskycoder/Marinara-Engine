@@ -38,8 +38,12 @@ interface AnalyzeSceneInput {
     currentSpotifyTrack?: string | null;
     recentSpotifyTracks?: string[];
     currentAmbient: string | null;
+    currentLocation?: string | null;
     currentWeather: string | null;
     currentTimeOfDay: string | null;
+    genre?: string | null;
+    setting?: string | null;
+    worldOverview?: string | null;
     canGenerateBackgrounds?: boolean;
     canGenerateIllustrations?: boolean;
     cgFrequency?: GameCgFrequencyPreset;

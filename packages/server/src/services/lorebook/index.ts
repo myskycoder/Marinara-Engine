@@ -33,7 +33,7 @@ export interface LorebookScanResult {
   totalTokensEstimate: number;
   activatedEntryIds: string[];
   activatedEntries: Array<{ id: string; content: string; matchedKeys: string[] }>;
-  budgetSkippedEntries: Array<{ id: string; matchedKeys: string[] }>;
+  budgetSkippedEntries: LorebookBudgetSkippedEntry[];
   /** Updated per-chat entry state overrides (ephemeral countdown). Caller should persist to chat metadata. */
   updatedEntryStateOverrides?: Record<string, { ephemeral?: number | null; enabled?: boolean }>;
   /** Updated per-chat timing states for sticky/cooldown/delay. Caller should persist to chat metadata. */
@@ -80,6 +80,7 @@ type RelevantLorebook = Pick<
   | "personaId"
   | "personaIds"
   | "chatId"
+  | "scope"
   | "sourceAgentId"
 >;
 
@@ -112,6 +113,27 @@ function safeJsonParse<T>(value: unknown, fallback: T): T {
 function readStringArray(value: unknown): string[] {
   if (Array.isArray(value)) return uniqueStrings(value.map(String));
   return uniqueStrings(safeJsonParse<string[]>(value, []));
+}
+
+function resolveLorebookCharacterIds(book: Pick<RelevantLorebook, "characterId" | "characterIds">): string[] {
+  return uniqueStrings([...(book.characterIds ?? []), book.characterId]);
+}
+
+function resolveLorebookPersonaIds(book: Pick<RelevantLorebook, "personaId" | "personaIds">): string[] {
+  return uniqueStrings([...(book.personaIds ?? []), book.personaId]);
+}
+
+function activeLorebookMatchesFilters(book: RelevantLorebook, filters: LorebookFilters): boolean {
+  if (!filters.activeLorebookIds?.includes(book.id)) return false;
+
+  const characterIds = resolveLorebookCharacterIds(book);
+  if (characterIds.length > 0) return characterIds.some((id) => filters.characterIds?.includes(id));
+
+  const personaIds = resolveLorebookPersonaIds(book);
+  if (personaIds.length > 0) return !!filters.personaId && personaIds.includes(filters.personaId);
+
+  if (book.chatId) return book.chatId === filters.chatId;
+  return true;
 }
 
 function pushSourceText(
@@ -176,7 +198,9 @@ async function buildLorebookMatchingContext(
 }
 
 export function filterRelevantLorebooks(lorebooks: RelevantLorebook[], filters?: LorebookFilters): RelevantLorebook[] {
-  const enabledBooks = lorebooks.filter((book) => book.enabled);
+  const enabledBooks = lorebooks.filter(
+    (book) => book.enabled && isLorebookScopeActiveForChat(book.scope, filters?.chatId),
+  );
   if (!filters) return enabledBooks;
 
   const excludedLorebookIds = new Set(filters.excludedLorebookIds ?? []);
@@ -186,7 +210,7 @@ export function filterRelevantLorebooks(lorebooks: RelevantLorebook[], filters?:
     if (excludedLorebookIds.has(book.id)) return false;
     if (book.sourceAgentId && excludedSourceAgentIds.has(book.sourceAgentId)) return false;
     if (book.isGlobal) return true;
-    if (filters.activeLorebookIds?.includes(book.id)) return true;
+    if (activeLorebookMatchesFilters(book, filters)) return true;
     if ((book.characterIds ?? []).some((id) => filters.characterIds?.includes(id))) return true;
     if (book.characterId && filters.characterIds?.includes(book.characterId)) return true;
     if (filters.personaId && (book.personaIds ?? []).includes(filters.personaId)) return true;
@@ -194,6 +218,24 @@ export function filterRelevantLorebooks(lorebooks: RelevantLorebook[], filters?:
     if (book.chatId && book.chatId === filters.chatId) return true;
     return false;
   });
+}
+
+function readLorebookScope(value: unknown): { mode: "all" | "disabled" | "specific"; chatIds: string[] } {
+  if (value && typeof value === "object") {
+    const raw = value as Record<string, unknown>;
+    return {
+      mode: raw.mode === "disabled" || raw.mode === "specific" ? raw.mode : "all",
+      chatIds: uniqueStrings(Array.isArray(raw.chatIds) ? raw.chatIds.map(String) : []),
+    };
+  }
+  return { mode: "all", chatIds: [] };
+}
+
+function isLorebookScopeActiveForChat(value: unknown, chatId?: string | null): boolean {
+  const scope = readLorebookScope(value);
+  if (scope.mode === "disabled") return false;
+  if (scope.mode === "specific") return !!chatId && scope.chatIds.includes(chatId);
+  return true;
 }
 
 function toTimingStateMap(states?: Record<string, LorebookEntryTimingState>): Map<string, EntryTimingState> {
@@ -319,6 +361,8 @@ function resolveFinalLorebookContent(
 function lorebookSelectionOrder(a: ActivatedEntry, b: ActivatedEntry): number {
   if (a.entry.constant && !b.entry.constant) return -1;
   if (!a.entry.constant && b.entry.constant) return 1;
+  if (a.matchedLatestUserMessage && !b.matchedLatestUserMessage) return -1;
+  if (!a.matchedLatestUserMessage && b.matchedLatestUserMessage) return 1;
   return a.injectionOrder - b.injectionOrder;
 }
 
@@ -817,9 +861,13 @@ export async function processLorebooks(
     gameState ?? null,
   );
 
-  // Scan for activated entries
+  // Scan for activated entries.
+  // Bound the default global scan window so a lorebook/entry that leaves
+  // scanDepth unset doesn't re-scan the full chat history every turn. An
+  // explicit per-entry/per-lorebook scanDepth 0 ("scan all") is still honored
+  // in keyword-scanner.ts.
   const scanOpts: ScanOptions = {
-    scanDepth: 0, // Scan all messages
+    scanDepth: LIMITS.LOREBOOK_DEFAULT_SCAN_DEPTH,
     gameState: gameState ?? null,
     chatEmbedding: options?.chatEmbedding ?? null,
     semanticThreshold: options?.semanticThreshold,
@@ -921,7 +969,16 @@ export async function processLorebooks(
     })),
     budgetSkippedEntries: budgetResult.budgetSkippedEntries.map((entry) => ({
       id: entry.id,
+      name: entry.name,
+      lorebookId: entry.lorebookId,
+      lorebookName: entry.lorebookName,
       matchedKeys: entry.matchedKeys,
+      estimatedTokens: entry.estimatedTokens,
+      lorebookBudget: entry.lorebookBudget,
+      lorebookUsedTokens: entry.lorebookUsedTokens,
+      chatBudget: entry.chatBudget,
+      chatUsedTokens: entry.chatUsedTokens,
+      blockedBy: entry.blockedBy,
     })),
     ...(updatedOverrides ? { updatedEntryStateOverrides: updatedOverrides } : {}),
     ...(updatedEntryTimingStates ? { updatedEntryTimingStates } : {}),

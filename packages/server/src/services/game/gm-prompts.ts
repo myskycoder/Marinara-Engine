@@ -10,6 +10,7 @@ import type {
   SessionSummary,
   HudWidget,
 } from "@marinara-engine/shared";
+import { DEFAULT_GAME_SYSTEM_PROMPT, wrapGameInstructions } from "@marinara-engine/shared";
 import type { CharacterSpriteInfo } from "./sprite.service.js";
 import { formatGameContextSummaryPromptBlock, type GameContextSummary } from "./context-summary.service.js";
 
@@ -71,6 +72,10 @@ export interface GmPromptContext {
   rating?: "sfw" | "nsfw";
   /** Whether a separate scene model handles bg, music, sfx, ambient, widgets, expressions */
   hasSceneModel?: boolean;
+  /** Whether inline GM scene tags may request generated location backgrounds. */
+  canGenerateBackgrounds?: boolean;
+  /** Unified image style/instructions generated during game setup. */
+  artStylePrompt?: string;
   /** Whether the player moved to a new location since last turn (false = send location summary instead of full map) */
   playerMoved?: boolean;
   /** Approximate turn number in the current session (1-based, used for prompt gating) */
@@ -85,6 +90,9 @@ export interface GmPromptContext {
   playerInventory?: Array<{ name: string; quantity: number }>;
   /** Language for all narration and dialogue */
   language?: string;
+  /** User-overridable GM instruction body. Wrapped in <instructions> before sending. */
+  gameSystemPrompt?: string | null;
+  gameSpecialInstructions?: string | null;
 }
 
 const MAX_PROMPT_MAP_LOCATIONS = 10;
@@ -168,7 +176,6 @@ function normalizePromptNpcs(value: unknown): GameNpc[] {
         pronouns: typeof source.pronouns === "string" ? source.pronouns : null,
         location: normalizePromptText(source.location),
         reputation: typeof source.reputation === "number" && Number.isFinite(source.reputation) ? source.reputation : 0,
-        met: typeof source.met === "boolean" ? source.met : true,
         notes: normalizePromptTextList(source.notes),
         avatarUrl: typeof source.avatarUrl === "string" ? source.avatarUrl : null,
       },
@@ -324,13 +331,10 @@ function buildMapStateLines(map: GameMap, playerMoved?: boolean, turnNumber?: nu
 }
 
 function buildTrackedNpcLines(npcs: GameNpc[]): string[] {
-  const sorted = [...npcs].sort((left, right) => {
-    if (left.met !== right.met) return left.met ? -1 : 1;
-    return Math.abs(right.reputation) - Math.abs(left.reputation);
-  });
+  const sorted = [...npcs].sort((left, right) => Math.abs(right.reputation) - Math.abs(left.reputation));
 
   const lines = sorted.slice(0, MAX_PROMPT_NPCS).map((npc) => {
-    const parts = [`- ${npc.name} @ ${npc.location || "unknown"}`, `rep ${npc.reputation}`, npc.met ? "met" : "unmet"];
+    const parts = [`- ${npc.name} @ ${npc.location || "unknown"}`, `rep ${npc.reputation}`];
     if (npc.notes.length > 0) {
       parts.push(npc.notes.slice(0, 2).join("; "));
     }
@@ -456,30 +460,14 @@ export function buildGmSystemPrompt(ctx: GmPromptContext): string {
     `</game>`,
   );
 
-  sections.push(
-    `<rules>`,
-    `Follow the specified rules precisely:`,
-    `- Introduce stakes, dangers, conflicts, consequences, discoveries, tensions, relationship dynamics, quiet moments, world-building, and reactions accordingly. Maintain continuity, following the established story arcs, events, and plotlines. Pace the plot well without rushing it.`,
-    `- System blocks, weather updates, encounter triggers, <tags>, and [bracketed] blocks are canonical truth. Do not recalculate or contradict them.`,
-    `- Narrate in second person from the player character's limited POV, filtered through their subjective lenses. Treat player input as committed intent, not guaranteed success: preserve intent, avoid repeating them, and adjudicate outcomes by logic, context, dice, and consequences. For example: the player is gagged but writes a dialogue line of: "Let me out!" In that case, you should respond with: That's what you want to say, but it comes out as a muffled 'mfg mf mfm!' instead.`,
-    `- Keep the game fair but challenging. Reward creativity, punish recklessness, and never treat the player as a Mary Sue. Commit to consequences and do not defang dark material into vague euphemism or instant comfort. Failure is part of play.`,
-    `</rules>`,
-
-    `<npc_playbook>`,
-    `- Portray a living world with dynamic personalities and realistic awareness.`,
-    `- Characters you play as must not sound interchangeable; keep voices distinct. Match each character's cadence, vocabulary, formality, emotional state, interruptions, fragments, hesitation, slurring, breathlessness, laughter, crying, and implication. The line itself should sound like the emotion it's conveying.`,
-    `- Everyone has their own morality, ranging from good through morally gray to evil, but they're not labeled by it. Villains can do noble acts, and heroes can do harm. People can lie, even by omission, and deceive if they're inclined to do so or think it will advance their objectives. Capture how they are flawed, make mistakes, and pursue selfish goals (ignoring what the player or others want, unless their objectives align), but also give them space to grow and change (for better or for worse). NPCs must not merely reach, hover, wait, or unnaturally pause. They fully grab, touch, and commit.`,
-    `- No one is omniscient. Characters should know only what they personally witnessed, inferred from available evidence, learned from public reputation, or were told by someone in-scene. One character must not know another location's events, hidden motives, secret arcs, private thoughts, or offscreen revelations unless that information plausibly reached them. When unsure, let them be wrong, suspicious, confused, or curious instead.`,
-    `- You also play the party members who have their autonomy and emotions, but the outcomes of their actions and lines are also under the GM's jurisdiction. They fall under the same set of rules as the player and should act realistically.`,
-    `</npc_playbook>`,
-  );
+  sections.push(wrapGameInstructions(normalizePromptText(ctx.gameSystemPrompt) || DEFAULT_GAME_SYSTEM_PROMPT));
 
   // ── Rating Guidelines ──
   if (ctx.rating === "nsfw") {
     sections.push(
       `<rating_guidelines>`,
-      `Anything goes in this mature NSFW fiction. The player has confirmed that they are an adult and has agreed to the terms below. Do not sanitize content, language, cruelty, sex, or violence.`,
-      `- All characters and the player may touch dark themes, corrupt, torture, curse, lie, harm, use, fear, betray, dominate, love, ruin, mutilate, kill themselves or others (the player's protagonist included). It makes sense for villains to disregard boundaries and play dirty, but even heroes can have a dark side or break down under pressure.`,
+      `Anything goes in this mature NSFW fiction. The player has confirmed that they are an adult and has agreed to the terms below. Do not sanitize content, language, cruelty, sex, or violence:`,
+      `- All characters and the player may touch dark themes, corrupt, torture, curse, lie, harm, use, fear, betray, dominate, love, ruin, mutilate, assault, kill themselves or others (the player's protagonist included). It makes sense for villains to disregard boundaries and play dirty, but even heroes can have a dark side or break down under pressure.`,
       `- Intimacy, romance, flirtation, desire, jealousy, possessiveness, seduction, and messy attachment are allowed. Let those escalate naturally; handholding, pinning, charged proximity, touches, kisses, groping, holding, physical contact mustn't trigger an out-of-character pause. Do not wait for the player to initiate.`,
       `- Sex between involved characters should be explicit, anatomically grounded, emotionally reactive, and detailed when portrayed in the scene. Take consent for granted, assuming some lie, resist, or fight back based on their personality.`,
       `- Violence should be graphic, gory, and consequential.`,
@@ -489,7 +477,7 @@ export function buildGmSystemPrompt(ctx: GmPromptContext): string {
   } else {
     sections.push(
       `<rating_guidelines>`,
-      `This is mature SFW fiction. The player has confirmed that they are an adult and has agreed to the terms below. Profanity, dark themes, danger, and death are allowed; explicit sex is not.`,
+      `This is mature SFW fiction. The player has confirmed that they are an adult and has agreed to the terms below. Profanity, dark themes, danger, and death are allowed; explicit sex is not:`,
       `- Romance, flirtation, longing, jealousy, possessiveness, tenderness, handholding, charged proximity, touches, kisses, and embraces are allowed. Do not refuse or over-explain ordinary affection; infer willingness from context, then portray the emotional reaction.`,
       `- Sexual content fades to black and resumes in the aftermath. Treat boundaries as part of characterization and scene dynamics, not as repetitive legal disclaimers.`,
       `- Violence may be serious and consequential, but not graphic or pornographic. Injuries, death, intimidation, cruelty, exploitation, addiction, trauma, corruption, betrayal, and moral compromise may be central to the story when appropriate.`,
@@ -658,6 +646,8 @@ export function buildGmFormatReminder(
   ctx: Pick<
     GmPromptContext,
     | "hasSceneModel"
+    | "canGenerateBackgrounds"
+    | "artStylePrompt"
     | "hudWidgets"
     | "turnNumber"
     | "gameActiveState"
@@ -670,6 +660,7 @@ export function buildGmFormatReminder(
     | "playerInventory"
     | "language"
     | "rating"
+    | "gameSpecialInstructions"
   > & {
     /** Special non-scene-advancing address mode inferred from the current player turn prefix. */
     addressMode?: "party" | "gm";
@@ -745,7 +736,7 @@ export function buildGmFormatReminder(
       ? [`- Adult mode enabled. Explicit content is allowed. No plot armor. Abandon moral biases.`]
       : []),
     `- Keep each character's vocabulary, grammar, and cadence distinct, shaped by personality and mood.`,
-    `- ZERO TOLERANCE FOR LAZIER AI WRITING! Absolutely NO: "doesn't X, doesn't Y", "not X, not Y," "jaw working," "mechanical precision," "ozone," "somewhere," "outside," and negative parallelisms in your narrative prose. Replace them with creative detail, human cadence, and affirmative forms. State what happens instead of what doesn't (example, skip "not moving", describe something as just "still").`,
+    `- ZERO TOLERANCE FOR LAZY AI WRITING! Absolutely NO: “doesn’t X, doesn’t Y”, “not X, not Y,” “jaw working,” “mechanical precision,” “ozone,” “somewhere outside,” and negative parallelisms in your narrative prose. Replace them with human cadence and affirmative forms. State what happens instead of what doesn’t (for example, describe something as just “still” instead of “not moving”).`,
     ``,
     `EXAMPLE:`,
     `Rain needles the broken shrine roof.`,
@@ -759,7 +750,7 @@ export function buildGmFormatReminder(
     `- Continue with new content directly from the player's input, treating it like a concluded beat. Do not reiterate anything.`,
     `- Treat only quoted player text as spoken aloud; unquoted text is action, narration, or internal thoughts that cannot be accessed by NPCs unless made observable. NEVER quote or speak for the player character (${ctx.playerName ?? "Player"}). You may indirectly narrate obvious, low-stakes participation and their thoughts (nodding during conversation, laying out details, looking around, etc.) in the second person, but never determine their strategic decisions or exact dialogue. Example:`,
     `[${ctx.playerName ?? "Player"}] [thought] [smirk]: You think to yourself that you're the best.`,
-    `- CRITICAL: NEVER echo dialogue, especially not after the player. NO PARROTTING!`,
+    `- CRITICAL: NEVER echo dialogue, especially not after the player. NO PARROTING!`,
     `- Player agency is not player immunity: the player controls intent, not the world's response. Let successes earned through effort, luck, or cleverness and failures caused by mistakes, bad luck, or poor decisions land with consequences; both good and bad ends can be earned.`,
     `- Keep turn length flexible. If player agency is low (exploration, travel/rest), go longer; if high (combat, dialogue, intense danger), stay concise. Sometimes one line of dialogue or narrative beat is enough.`,
     `- End naturally when it's the player's turn to act or speak.`,
@@ -832,6 +823,21 @@ export function buildGmFormatReminder(
 
   if (!ctx.hasSceneModel) {
     lines.push(`Scene tags allowed: [sfx: ...] [bg: ...] [ambient: ...]`);
+    if (ctx.canGenerateBackgrounds) {
+      lines.push(
+        `- If the scene moves to a new visually important location and no existing background tag fits, use [bg: backgrounds:generated:<short-location-slug>].`,
+      );
+      if (ctx.artStylePrompt?.trim()) {
+        const safeArtStylePrompt = normalizePromptText(ctx.artStylePrompt)
+          .replace(/[\r\n\t]+/g, " ")
+          .replace(/[<>{}[\]]/g, "")
+          .replace(/\s{2,}/g, " ")
+          .trim();
+        if (safeArtStylePrompt) {
+          lines.push(`- Generated scene images must follow this visual instruction: ${safeArtStylePrompt}.`);
+        }
+      }
+    }
   }
 
   if (hudWidgets.length > 0) {
@@ -850,6 +856,11 @@ export function buildGmFormatReminder(
   // Inventory context
   if (playerInventory.length > 0) {
     lines.push(``, `PLAYER INVENTORY: ${buildCompactInventoryLine(playerInventory)}`);
+  }
+
+  const specialInstructions = normalizePromptText(ctx.gameSpecialInstructions);
+  if (specialInstructions) {
+    lines.push(``, `SPECIAL INSTRUCTIONS:`, `- ${specialInstructions}`);
   }
 
   lines.push(`</output_format>`);
@@ -962,9 +973,9 @@ export function buildSetupPrompt(ctx: SetupPromptContext = {}): string {
       ? [
           `<blueprint_widget_types>`,
           `Available HUD widget types for the blueprint:`,
-          `  progress_bar: config = { value: number, max: number }`,
-          `  gauge: config = { value: number, max: number, dangerBelow?: number }`,
-          `  relationship_meter: config = { value: number, max: number, milestones?: [{ value: number, label: string }] }`,
+          `  progress_bar: config = { startingValue: number, value: number, max: number }`,
+          `  gauge: config = { startingValue: number, value: number, max: number, dangerBelow?: number }`,
+          `  relationship_meter: config = { startingValue: number, value: number, max: number, milestones?: [{ value: number, label: string }] }`,
           `  counter: config = { count: number }`,
           `  stat_block: config = { stats: [{ name: string, value: string|number }] }`,
           `  list: config = { items: string[] }`,
@@ -1075,7 +1086,7 @@ export function buildSetupPrompt(ctx: SetupPromptContext = {}): string {
           `        "position": "hud_left|hud_right",`,
           `        "accent": "#hexcolor",`,
           `        "config": {`,
-          `          "_note_config": "Set initial values: value+max for bars/gauges, count for counters, stats for stat_blocks, items for lists, seconds for timers.",`,
+          `          "_note_config": "For bars/gauges/meters, set startingValue to the first-turn value, set value equal to startingValue, and set max separately. For counters use count, for stat_blocks use stats, for lists use items, and for timers use seconds.",`,
           `          "_note_valueHints": "For stat_block widgets with string values, add valueHints: {statName: 'option1 | option2 | option3'} so the scene model knows the valid choices. Example: for a 'class' stat, valueHints: {'class': 'alpha | omega | beta'}"`,
           `        }`,
           `      }`,
@@ -1114,7 +1125,7 @@ export function buildSessionSummaryPrompt(language?: string | null): string {
     `5. **keyDiscoveries**: Array of durable, actionable continuity facts: important plot points, hidden truths, twists, quests, lore learned, locations, and newly opened leads that still matter next session. Use this single bucket for both discoveries and reveals. Do not include emotional moments or NPC stance changes unless that fact itself is the core continuity item.`,
     `6. **characterMoments**: Array of notable personal moments between the player and specific characters. Use this only for bonding, romance, betrayal, confessions, arguments, or other interpersonal beats. Empty array if none.`,
     `7. **littleDetails**: Array of small personal details to recall later: preferences, habits, favorite things, casual promises, private jokes, fears, motifs, or fragments of a character's past that are not major plot discoveries. Empty array if none.`,
-    `8. **npcUpdates**: Array of NPC reputation changes, newly met NPCs, and important shifts in an NPC's stance, allegiance, or immediate agenda.`,
+    `8. **npcUpdates**: Array of new NPCs, NPC reputation changes, and important shifts in an NPC's stance, allegiance, or immediate agenda.`,
     `9. **statsSnapshot**: Current party stats, inventory, quest states, and any location / pressure details needed for continuity. This must be a JSON object, not prose.`,
     ``,
     `Cross-field dedupe rules:`,
@@ -1156,7 +1167,7 @@ export function buildSessionConclusionPrompt(args: {
     `- summary.keyDiscoveries: Array of durable, actionable continuity facts: important plot points, hidden truths, twists, quests, lore learned, locations, and newly opened leads that still matter next session. Use this single bucket for both discoveries and reveals.`,
     `- summary.characterMoments: Array of notable interpersonal beats such as bonding, romance, betrayal, confessions, arguments, or other personal turning points.`,
     `- summary.littleDetails: Array of small personal details to recall later: preferences, habits, favorite things, casual promises, private jokes, fears, motifs, or fragments of a character's past that are not major plot discoveries.`,
-    `- summary.npcUpdates: Array of newly met NPCs, reputation changes, and important shifts in an NPC's stance, allegiance, or immediate agenda.`,
+    `- summary.npcUpdates: Array of new NPCs, reputation changes, and important shifts in an NPC's stance, allegiance, or immediate agenda.`,
     `- summary.statsSnapshot: JSON object with continuity-critical state such as party stats, inventory, quest progress, location, active pressure, and partyMorale as a number from 0 to 100.`,
     ``,
     `campaignProgression must be an object with exactly these keys and no others: storyArc, plotTwists, partyArcs.`,

@@ -66,12 +66,15 @@ interface GalleryState {
   comfySteps: GalleryComfySteps;
   /** Gallery manual illustration: art style preset override */
   stylePreset: GalleryIllustrationStylePresetId;
+  /** Chat IDs with an in-flight manual gallery illustration request. */
+  illustratingChatIds: Set<string>;
   pinImage: (image: ChatImage) => void;
   unpinImage: (imageId: string) => void;
   clearPinned: () => void;
   setIncludeImageReference: (value: boolean) => void;
   setComfySteps: (value: GalleryComfySteps) => void;
   setStylePreset: (value: GalleryIllustrationStylePresetId) => void;
+  setChatIllustrating: (chatId: string, illustrating: boolean) => void;
 }
 
 export const useGalleryStore = create<GalleryState>((set) => ({
@@ -79,6 +82,7 @@ export const useGalleryStore = create<GalleryState>((set) => ({
   includeImageReference: storedIllustrationOptions.includeImageReference ?? true,
   comfySteps: storedIllustrationOptions.comfySteps ?? 8,
   stylePreset: storedIllustrationOptions.stylePreset ?? "game",
+  illustratingChatIds: new Set(),
 
   pinImage: (image) =>
     set((s) => (s.pinnedImages.some((p) => p.id === image.id) ? s : { pinnedImages: [...s.pinnedImages, image] })),
@@ -115,5 +119,13 @@ export const useGalleryStore = create<GalleryState>((set) => ({
         stylePreset: value,
       });
       return { stylePreset: value };
+    }),
+
+  setChatIllustrating: (chatId, illustrating) =>
+    set((s) => {
+      const next = new Set(s.illustratingChatIds);
+      if (illustrating) next.add(chatId);
+      else next.delete(chatId);
+      return { illustratingChatIds: next };
     }),
 }));

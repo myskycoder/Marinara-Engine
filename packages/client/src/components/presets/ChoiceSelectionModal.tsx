@@ -8,7 +8,7 @@ import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { Modal } from "../ui/Modal";
 import { usePresetFull, useUpdatePreset } from "../../hooks/use-presets";
 import { useUpdateChatMetadata } from "../../hooks/use-chats";
-import { CheckCircle2, Circle, CheckSquare2, Square, Sparkles, ListChecks, Shuffle, Save } from "lucide-react";
+import { CheckCircle2, Circle, CheckSquare2, Square, ListChecks, Shuffle, Save } from "lucide-react";
 import { cn } from "../../lib/utils";
 
 interface ChoiceSelectionModalProps {
@@ -180,7 +180,7 @@ export function ChoiceSelectionModal({
       {variables.length === 0 ? (
         isLoading ? (
           <div className="flex items-center justify-center p-8">
-            <div className="h-5 w-5 animate-spin rounded-full border-2 border-purple-400 border-t-transparent" />
+            <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--primary)] border-t-transparent" />
           </div>
         ) : null
       ) : (
@@ -194,15 +194,15 @@ export function ChoiceSelectionModal({
               <h4 className="mb-1 text-xs font-semibold text-[var(--foreground)]">{v.question}</h4>
               <div className="mb-2 flex items-center gap-2">
                 <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-                  Variable: <code className="text-amber-400">{`{{${v.variableName}}}`}</code>
+                  Variable: <code className="text-[var(--foreground)]">{`{{${v.variableName}}}`}</code>
                 </p>
                 {v.options.length === 1 && !v.multiSelect && (
-                  <span className="flex items-center gap-0.5 rounded bg-purple-400/15 px-1.5 py-0.5 text-[0.5625rem] font-medium text-purple-400">
+                  <span className="flex items-center gap-0.5 rounded bg-[var(--accent)] px-1.5 py-0.5 text-[0.5625rem] font-medium text-[var(--foreground)]">
                     Boolean toggle
                   </span>
                 )}
                 {v.multiSelect && (
-                  <span className="flex items-center gap-0.5 rounded bg-purple-400/15 px-1.5 py-0.5 text-[0.5625rem] font-medium text-purple-400">
+                  <span className="flex items-center gap-0.5 rounded bg-[var(--accent)] px-1.5 py-0.5 text-[0.5625rem] font-medium text-[var(--foreground)]">
                     {v.randomPick ? (
                       <>
                         <Shuffle size="0.5625rem" /> Random pick
@@ -229,16 +229,18 @@ export function ChoiceSelectionModal({
                           onClick={() => toggleMulti(v.variableName, opt.value)}
                           className={cn(
                             "flex w-full items-start gap-2.5 rounded-lg p-2.5 text-left transition-all",
-                            isSelected ? "bg-purple-400/10 ring-1 ring-purple-400/30" : "hover:bg-[var(--accent)]",
+                            isSelected
+                              ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
+                              : "hover:bg-[var(--accent)]",
                           )}
                         >
                           {isSelected ? (
-                            <CheckSquare2 size="0.875rem" className="mt-0.5 shrink-0 text-purple-400" />
+                            <CheckSquare2 size="0.875rem" className="mt-0.5 shrink-0 text-[var(--primary)]" />
                           ) : (
                             <Square size="0.875rem" className="mt-0.5 shrink-0 text-[var(--muted-foreground)]" />
                           )}
                           <div className="min-w-0 flex-1">
-                            <span className={cn("text-xs font-medium", isSelected && "text-purple-400")}>
+                            <span className={cn("text-xs font-medium", isSelected && "text-[var(--primary)]")}>
                               {opt.label}
                             </span>
                             {opt.value && (
@@ -266,11 +268,15 @@ export function ChoiceSelectionModal({
                             }
                             className={cn(
                               "flex w-full items-center justify-between gap-2.5 rounded-lg p-2.5 text-left transition-all",
-                              isOn ? "bg-purple-400/10 ring-1 ring-purple-400/30" : "hover:bg-[var(--accent)]",
+                              isOn
+                                ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
+                                : "hover:bg-[var(--accent)]",
                             )}
                           >
                             <div className="min-w-0 flex-1">
-                              <span className={cn("text-xs font-medium", isOn && "text-purple-400")}>{opt.label}</span>
+                              <span className={cn("text-xs font-medium", isOn && "text-[var(--primary)]")}>
+                                {opt.label}
+                              </span>
                               {opt.value && (
                                 <p className="mt-0.5 line-clamp-2 text-[0.625rem] text-[var(--muted-foreground)]">
                                   {opt.value.slice(0, 150)}
@@ -281,7 +287,7 @@ export function ChoiceSelectionModal({
                             <div
                               className={cn(
                                 "relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors",
-                                isOn ? "bg-purple-400" : "bg-[var(--border)]",
+                                isOn ? "bg-[var(--primary)]" : "bg-[var(--border)]",
                               )}
                             >
                               <span
@@ -303,16 +309,18 @@ export function ChoiceSelectionModal({
                             onClick={() => setOverrides((prev) => ({ ...prev, [v.variableName]: opt.value }))}
                             className={cn(
                               "flex w-full items-start gap-2.5 rounded-lg p-2.5 text-left transition-all",
-                              isSelected ? "bg-purple-400/10 ring-1 ring-purple-400/30" : "hover:bg-[var(--accent)]",
+                              isSelected
+                                ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
+                                : "hover:bg-[var(--accent)]",
                             )}
                           >
                             {isSelected ? (
-                              <CheckCircle2 size="0.875rem" className="mt-0.5 shrink-0 text-purple-400" />
+                              <CheckCircle2 size="0.875rem" className="mt-0.5 shrink-0 text-[var(--primary)]" />
                             ) : (
                               <Circle size="0.875rem" className="mt-0.5 shrink-0 text-[var(--muted-foreground)]" />
                             )}
                             <div className="min-w-0 flex-1">
-                              <span className={cn("text-xs font-medium", isSelected && "text-purple-400")}>
+                              <span className={cn("text-xs font-medium", isSelected && "text-[var(--primary)]")}>
                                 {opt.label}
                               </span>
                               {opt.value && (
@@ -336,7 +344,7 @@ export function ChoiceSelectionModal({
                 role="switch"
                 aria-checked={saveAsDefault}
                 onClick={() => setSaveAsDefault((v) => !v)}
-                className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${saveAsDefault ? "bg-purple-500" : "bg-[var(--border)]"}`}
+                className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${saveAsDefault ? "bg-[var(--primary)]" : "bg-[var(--border)]"}`}
               >
                 <span
                   className={`inline-block h-3 w-3 rounded-full bg-white shadow transition-transform ${saveAsDefault ? "translate-x-3.5" : "translate-x-0.5"}`}
@@ -355,9 +363,8 @@ export function ChoiceSelectionModal({
               <button
                 onClick={handleConfirm}
                 disabled={!allSelected || updateMetadata.isPending}
-                className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-purple-400 to-violet-500 px-4 py-2 text-xs font-medium text-white shadow-md transition-all hover:shadow-lg active:scale-[0.98] disabled:opacity-50"
+                className="rounded-xl bg-[var(--primary)] px-4 py-2 text-xs font-medium text-[var(--primary-foreground)] shadow-md transition-all hover:opacity-90 active:scale-[0.98] disabled:opacity-50"
               >
-                <Sparkles size="0.8125rem" />
                 {updateMetadata.isPending ? "Saving…" : "Confirm Choices"}
               </button>
             </div>

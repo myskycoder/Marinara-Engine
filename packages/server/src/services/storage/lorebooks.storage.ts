@@ -43,6 +43,62 @@ function resolveLinkIds(arrayValue: unknown, singleValue: unknown): string[] {
   return uniqueStrings(typeof singleValue === "string" ? [singleValue] : []);
 }
 
+function parseLorebookScope(value: unknown): { mode: "all" | "disabled" | "specific"; chatIds: string[] } {
+  const raw = (() => {
+    if (value && typeof value === "object") return value as Record<string, unknown>;
+    if (typeof value === "string" && value.trim()) {
+      try {
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+      } catch {
+        return {};
+      }
+    }
+    return {};
+  })();
+  const mode = raw.mode === "disabled" || raw.mode === "specific" ? raw.mode : "all";
+  return {
+    mode,
+    chatIds: uniqueStrings(Array.isArray(raw.chatIds) ? raw.chatIds : []),
+  };
+}
+
+function isLorebookScopeActiveForChat(value: unknown, chatId?: string | null): boolean {
+  const scope = parseLorebookScope(value);
+  if (scope.mode === "disabled") return false;
+  if (scope.mode === "specific") return !!chatId && scope.chatIds.includes(chatId);
+  return true;
+}
+
+type LorebookScopeFilters = {
+  activeLorebookIds?: string[];
+  characterIds?: string[];
+  personaId?: string | null;
+  chatId?: string;
+};
+
+type LinkedLorebook = {
+  id: string;
+  characterId?: string | null;
+  characterIds?: string[];
+  personaId?: string | null;
+  personaIds?: string[];
+  chatId?: string | null;
+};
+
+function activeLorebookMatchesFilters(book: LinkedLorebook, filters: LorebookScopeFilters): boolean {
+  if (!filters.activeLorebookIds?.includes(book.id)) return false;
+
+  const characterIds = resolveLinkIds(book.characterIds, book.characterId);
+  if (characterIds.length > 0) return characterIds.some((id) => filters.characterIds?.includes(id));
+
+  const personaIds = resolveLinkIds(book.personaIds, book.personaId);
+  if (personaIds.length > 0) return !!filters.personaId && personaIds.includes(filters.personaId);
+
+  if (book.chatId) return book.chatId === filters.chatId;
+  return true;
+}
+
 /** Parse DB row booleans ("true"/"false") → real booleans and JSON strings → objects. */
 function parseLorebookRow(row: Record<string, unknown>) {
   const characterIds = resolveLinkIds(row.characterIds, row.characterId);
@@ -51,8 +107,10 @@ function parseLorebookRow(row: Record<string, unknown>) {
     ...row,
     recursiveScanning: row.recursiveScanning === "true",
     maxRecursionDepth: typeof row.maxRecursionDepth === "number" ? row.maxRecursionDepth : 3,
+    excludeFromVectorization: row.excludeFromVectorization === "true",
     isGlobal: row.isGlobal === "true",
     enabled: row.enabled === "true",
+    scope: parseLorebookScope(row.scope),
     imagePath: row.imagePath || null,
     generatedBy: row.generatedBy || null,
     sourceAgentId: row.sourceAgentId || null,
@@ -241,11 +299,13 @@ export function createLorebooksStorage(db: DB) {
           tokenBudget: input.tokenBudget ?? 2048,
           recursiveScanning: String(input.recursiveScanning ?? false),
           maxRecursionDepth: input.maxRecursionDepth ?? 3,
+          excludeFromVectorization: String(input.excludeFromVectorization ?? false),
           characterId: characterIds[0] ?? null,
           personaId: personaIds[0] ?? null,
           chatId: input.chatId ?? null,
           isGlobal: String(input.isGlobal ?? false),
           enabled: String(input.enabled ?? true),
+          scope: JSON.stringify(parseLorebookScope(input.scope)),
           tags: input.tags ? JSON.stringify(input.tags) : "[]",
           generatedBy: input.generatedBy ?? null,
           sourceAgentId: input.sourceAgentId ?? null,
@@ -267,6 +327,8 @@ export function createLorebooksStorage(db: DB) {
       if (input.tokenBudget !== undefined) updates.tokenBudget = input.tokenBudget;
       if (input.recursiveScanning !== undefined) updates.recursiveScanning = String(input.recursiveScanning);
       if (input.maxRecursionDepth !== undefined) updates.maxRecursionDepth = input.maxRecursionDepth;
+      if (input.excludeFromVectorization !== undefined)
+        updates.excludeFromVectorization = String(input.excludeFromVectorization);
       const shouldUpdateCharacterLinks = input.characterIds !== undefined || input.characterId !== undefined;
       const shouldUpdatePersonaLinks = input.personaIds !== undefined || input.personaId !== undefined;
       const current = shouldUpdateCharacterLinks || shouldUpdatePersonaLinks ? ((await this.getById(id)) as any) : null;
@@ -282,6 +344,7 @@ export function createLorebooksStorage(db: DB) {
       if (input.chatId !== undefined) updates.chatId = input.chatId;
       if (input.isGlobal !== undefined) updates.isGlobal = String(input.isGlobal);
       if (input.enabled !== undefined) updates.enabled = String(input.enabled);
+      if (input.scope !== undefined) updates.scope = JSON.stringify(parseLorebookScope(input.scope));
       if (input.tags !== undefined) updates.tags = JSON.stringify(input.tags);
       if (input.generatedBy !== undefined) updates.generatedBy = input.generatedBy;
       if (input.sourceAgentId !== undefined) updates.sourceAgentId = input.sourceAgentId;
@@ -329,7 +392,7 @@ export function createLorebooksStorage(db: DB) {
      * Get all enabled entries from lorebooks that are relevant for a given context.
      * A lorebook is relevant if it's enabled AND one of:
      *  - `isGlobal` is true
-     *  - Its ID is in `activeLorebookIds` (user explicitly added it to this chat)
+     *  - Its ID is in `activeLorebookIds`, while any character/persona/chat owner link still matches this context
      *  - Its `characterId` matches one of the chat's active characters
      *  - Its `personaId` matches the chat's active persona
      *  - Its `chatId` matches the current chat
@@ -358,20 +421,22 @@ export function createLorebooksStorage(db: DB) {
         personaId?: string | null;
         personaIds?: string[];
         chatId?: string | null;
+        scope?: unknown;
         sourceAgentId?: string | null;
+        excludeFromVectorization?: boolean;
       }>;
 
-      let relevantBooks = enabledBooks;
+      let relevantBooks = enabledBooks.filter((b) => isLorebookScopeActiveForChat(b.scope, filters?.chatId));
       if (filters) {
         const excludedLorebookIds = new Set(filters.excludedLorebookIds ?? []);
         const excludedSourceAgentIds = new Set(filters.excludedSourceAgentIds ?? []);
-        relevantBooks = enabledBooks.filter((b) => {
+        relevantBooks = relevantBooks.filter((b) => {
           if (excludedLorebookIds.has(b.id)) return false;
           if (b.sourceAgentId && excludedSourceAgentIds.has(b.sourceAgentId)) return false;
           // Globally active lorebooks bypass all scope filters
           if (b.isGlobal) return true;
-          // Explicitly added to this chat
-          if (filters.activeLorebookIds?.includes(b.id)) return true;
+          // Explicitly added to this chat, while still respecting owner links.
+          if (activeLorebookMatchesFilters(b, filters)) return true;
           // Belongs to one of the active characters
           if ((b.characterIds ?? []).some((id) => filters.characterIds?.includes(id))) return true;
           if (b.characterId && filters.characterIds?.includes(b.characterId)) return true;
@@ -386,6 +451,9 @@ export function createLorebooksStorage(db: DB) {
 
       const bookIds = relevantBooks.map((b) => b.id);
       if (bookIds.length === 0) return [];
+      const excludedVectorBookIds = new Set(
+        relevantBooks.filter((book) => book.excludeFromVectorization).map((book) => book.id),
+      );
 
       // Build the disabled-folder ID set for the relevant lorebooks. Done as
       // an in-memory filter (rather than a SQL anti-join) because folder
@@ -401,7 +469,11 @@ export function createLorebooksStorage(db: DB) {
         .from(lorebookEntries)
         .where(and(inArray(lorebookEntries.lorebookId, bookIds), eq(lorebookEntries.enabled, "true")))
         .orderBy(lorebookEntries.order);
-      const parsed = rows.map((r) => parseEntryRow(r as Record<string, unknown>));
+      const parsed = rows.map((r) => {
+        const entry = parseEntryRow(r as Record<string, unknown>);
+        const lorebookId = String((entry as Record<string, unknown>).lorebookId ?? "");
+        return excludedVectorBookIds.has(lorebookId) ? { ...entry, excludeFromVectorization: true } : entry;
+      });
       if (disabledFolderIds.size === 0) return parsed;
       return parsed.filter((e) => !e.folderId || !disabledFolderIds.has(e.folderId as string));
     },

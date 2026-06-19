@@ -14,6 +14,7 @@ export const createRegexScriptSchema = z.object({
   placement: z.array(regexPlacementSchema).min(1),
   flags: z.string().default("gi"),
   promptOnly: z.boolean().default(false),
+  targetCharacterIds: z.array(z.string().min(1)).default([]),
   order: z.number().int().default(0),
   minDepth: z.number().int().nullable().default(null),
   maxDepth: z.number().int().nullable().default(null),

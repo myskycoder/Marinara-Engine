@@ -13,11 +13,14 @@ export const lorebooks = sqliteTable("lorebooks", {
   tokenBudget: integer("token_budget").notNull().default(2048),
   recursiveScanning: text("recursive_scanning").notNull().default("false"),
   maxRecursionDepth: integer("max_recursion_depth").notNull().default(3),
+  excludeFromVectorization: text("exclude_from_vectorization").notNull().default("false"),
   characterId: text("character_id"),
   personaId: text("persona_id"),
   chatId: text("chat_id"),
   isGlobal: text("is_global").notNull().default("false"),
   enabled: text("enabled").notNull().default("true"),
+  /** JSON object: { mode: "all" | "disabled" | "specific", chatIds: string[] } */
+  scope: text("scope").notNull().default('{"mode":"all","chatIds":[]}'),
   /** Tags for organizing/filtering lorebooks (JSON array of strings) */
   tags: text("tags").notNull().default("[]"),
   generatedBy: text("generated_by"),

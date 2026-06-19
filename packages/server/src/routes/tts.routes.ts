@@ -370,6 +370,15 @@ export function isAllowedTTSAudioContentType(contentType: string | null): boolea
   return normalized.includes("audio/") || normalized.includes("application/octet-stream");
 }
 
+function audioFormatMimeType(format: string): string {
+  switch (format) {
+    case "wav":
+      return "audio/wav";
+    default:
+      return "audio/mpeg";
+  }
+}
+
 function buildSpeechInstructions(input: { speaker?: string; tone?: string; includeSpeaker?: boolean }) {
   const parts: string[] = [];
   if (input.includeSpeaker !== false && input.speaker?.trim()) {
@@ -635,6 +644,7 @@ export async function ttsRoutes(app: FastifyInstance) {
       });
     }
 
+    const audioFormat = cfg.audioFormat ?? "mp3";
     const url = useNanoGptSpeech
       ? `${nanoGptV1BaseUrl(base)}/audio/speech`
       : usePocketTtsSpeech
@@ -657,6 +667,7 @@ export async function ttsRoutes(app: FastifyInstance) {
       if (pocketTtsForm) {
         pocketTtsForm.set("text", providerText);
         if (requestVoice.trim()) pocketTtsForm.set("voice_url", requestVoice.trim());
+        if (audioFormat !== "mp3") pocketTtsForm.set("output_format", audioFormat);
       }
 
       providerRes = await safeFetch(url, {
@@ -676,7 +687,7 @@ export async function ttsRoutes(app: FastifyInstance) {
                 input: providerText,
                 voice: requestVoice || "alloy",
                 speed: cfg.speed,
-                response_format: "mp3",
+                response_format: audioFormat,
                 ...(speechInstructions ? { instructions: speechInstructions } : {}),
               })
             : cfg.source === "elevenlabs"
@@ -694,7 +705,7 @@ export async function ttsRoutes(app: FastifyInstance) {
                   input: providerText,
                   voice: requestVoice,
                   speed: cfg.speed,
-                  response_format: "mp3",
+                  response_format: audioFormat,
                   ...(speechInstructions ? { instructions: speechInstructions } : {}),
                 }),
         signal: AbortSignal.timeout(60_000),
@@ -741,7 +752,7 @@ export async function ttsRoutes(app: FastifyInstance) {
     const audioBuffer = await providerRes.arrayBuffer();
     auditBytes = audioBuffer.byteLength;
     reportAudit();
-    reply.header("Content-Type", contentType?.startsWith("audio/") ? contentType : "audio/mpeg");
+    reply.header("Content-Type", contentType?.startsWith("audio/") ? contentType : audioFormatMimeType(audioFormat));
     reply.header("Content-Length", String(audioBuffer.byteLength));
     return reply.send(Buffer.from(audioBuffer));
   });

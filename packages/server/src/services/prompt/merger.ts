@@ -28,6 +28,7 @@ export function mergeAdjacentMessages(messages: ChatMLMessage[]): ChatMLMessage[
 
   const canMerge = (a: ChatMLMessage, b: ChatMLMessage) => {
     if (a.role !== b.role) return false;
+    if ((a.characterId ?? null) !== (b.characterId ?? null)) return false;
     if (!a.contextKind || !b.contextKind) return true;
     return a.contextKind === b.contextKind;
   };
@@ -48,6 +49,7 @@ export function mergeAdjacentMessages(messages: ChatMLMessage[]): ChatMLMessage[
         content: current.content + "\n\n" + msg.content,
         ...(mergedContextKind ? { contextKind: mergedContextKind } : {}),
         name: current.name,
+        ...(current.characterId ? { characterId: current.characterId } : {}),
         ...(mergedImages ? { images: mergedImages } : {}),
         ...(mergedMeta ? { providerMetadata: mergedMeta } : {}),
       };

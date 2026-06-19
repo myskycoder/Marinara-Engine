@@ -42,6 +42,8 @@ export interface ActivatedEntry {
   rawContent?: string;
   /** Which key(s) matched */
   matchedKeys: string[];
+  /** True when a primary key matched the latest user message directly. */
+  matchedLatestUserMessage?: boolean;
   /** Priority order for injection */
   injectionOrder: number;
   /** True when sticky state kept this entry active without a fresh keyword match */
@@ -407,6 +409,8 @@ export function scanForActivatedEntries(
   // Build the text to scan from recent messages
   const messagesToScan = scanDepth > 0 ? messages.slice(-scanDepth) : messages;
   const combinedText = messagesToScan.map((m) => m.content).join("\n");
+  const latestUserMessage = [...messages].reverse().find((message) => message.role === "user");
+  const latestUserText = latestUserMessage?.content ?? "";
 
   const activated: ActivatedEntry[] = [];
   const activatedIds = new Set<string>();
@@ -449,14 +453,19 @@ export function scanForActivatedEntries(
       continue;
     }
 
-    // Per-entry scan depth override
+    // Per-entry scan depth:
+    //   0    = explicit "scan all" (deliberate user choice) — scan full history
+    //   > 0  = scan that many recent messages
+    //   null = inherit the bounded global default (combinedText)
     const baseEntryScanText =
-      entry.scanDepth !== null && entry.scanDepth > 0
-        ? messages
-            .slice(-entry.scanDepth)
-            .map((m) => m.content)
-            .join("\n")
-        : combinedText;
+      entry.scanDepth === 0
+        ? messages.map((m) => m.content).join("\n")
+        : entry.scanDepth !== null && entry.scanDepth > 0
+          ? messages
+              .slice(-entry.scanDepth)
+              .map((m) => m.content)
+              .join("\n")
+          : combinedText;
     const extraMatchingText = getAdditionalMatchingText(entry, additionalMatchingSourceText);
     const entryScanText = extraMatchingText ? `${baseEntryScanText}\n${extraMatchingText}` : baseEntryScanText;
 
@@ -470,6 +479,8 @@ export function scanForActivatedEntries(
     // Test primary keys
     const { matched, matchedKeys } = testPrimaryKeys(entry.keys, entryScanText, matchOptions);
     if (!matched) continue;
+    const matchedLatestUserMessage =
+      latestUserText.length > 0 ? testPrimaryKeys(entry.keys, latestUserText, matchOptions).matched : false;
 
     // Test secondary keys (selective mode)
     if (entry.selective && entry.secondaryKeys.length > 0) {
@@ -483,6 +494,7 @@ export function scanForActivatedEntries(
     activated.push({
       entry,
       matchedKeys,
+      matchedLatestUserMessage,
       injectionOrder: entry.order,
     });
     activatedIds.add(entry.id);

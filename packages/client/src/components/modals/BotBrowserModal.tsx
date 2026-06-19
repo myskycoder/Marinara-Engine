@@ -20,6 +20,7 @@ import { characterKeys } from "../../hooks/use-characters";
 import { lorebookKeys } from "../../hooks/use-lorebooks";
 import { parsePngCharacterCard } from "../../lib/png-parser";
 import { confirmEmbeddedLorebookImport, readEmbeddedLorebookFromCharacterPayload } from "../../lib/character-import";
+import { mergeChubDetailIntoCharacterJson } from "../../lib/chub-character-card";
 import { toast } from "sonner";
 
 interface Props {
@@ -58,6 +59,11 @@ interface ChubDefinition {
   example_dialogs: string;
   alternate_greetings: string[];
   embedded_lorebook?: unknown;
+  tavern_personality?: string;
+  system_prompt?: string;
+  post_history_instructions?: string;
+  character_version?: string;
+  extensions?: Record<string, unknown>;
 }
 
 interface ChubDetailNode extends ChubCard {
@@ -200,9 +206,33 @@ export function BotBrowserModal({ open, onClose }: Props) {
           cardDetail = rawDetail?.data?.node ?? rawDetail?.node ?? null;
         }
       }
-      const importJson = attachEmbeddedLorebookToCharacterJson(
+      const importJsonWithLorebook = attachEmbeddedLorebookToCharacterJson(
         json as Record<string, unknown>,
         cardDetail?.definition?.embedded_lorebook,
+      );
+      const importJson = mergeChubDetailIntoCharacterJson(
+        importJsonWithLorebook,
+        {
+          name: cardDetail?.name,
+          creator: fullPath.split("/")[0] ?? "",
+          tags: cardDetail?.topics ?? [],
+        },
+        cardDetail
+          ? {
+              description: cardDetail.definition?.personality,
+              personality: cardDetail.definition?.tavern_personality,
+              scenario: cardDetail.definition?.scenario,
+              firstMessage: cardDetail.definition?.first_message,
+              exampleDialogs: cardDetail.definition?.example_dialogs,
+              alternateGreetings: cardDetail.definition?.alternate_greetings ?? [],
+              creatorNotes: cardDetail.definition?.description,
+              systemPrompt: cardDetail.definition?.system_prompt,
+              postHistoryInstructions: cardDetail.definition?.post_history_instructions,
+              characterVersion: cardDetail.definition?.character_version,
+              embeddedLorebook: cardDetail.definition?.embedded_lorebook,
+              extensions: cardDetail.definition?.extensions,
+            }
+          : null,
       );
       const importEmbeddedLorebook = confirmEmbeddedLorebookImport(
         cardDetail?.name ?? "This character",

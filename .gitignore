@@ -39,6 +39,9 @@ packages/server/data/
 *.log
 logs/
 
+# Temporary tests
+*.test.ts
+
 # Custom agents (personal)
 .github/agents/qa.agent.md
 
@@ -50,3 +53,7 @@ release-artifacts/
 installer/*.exe
 win/installer/*.exe
 libs
+
+# Local docker compose overrides (per-machine dev config)
+docker-compose.override.yml
+docker-compose.override.yaml

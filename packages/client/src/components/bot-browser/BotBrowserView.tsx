@@ -35,6 +35,7 @@ import { useUIStore } from "../../stores/ui.store";
 import { toast } from "sonner";
 import { cn } from "../../lib/utils";
 import { confirmEmbeddedLorebookImport, readEmbeddedLorebookFromCharacterPayload } from "../../lib/character-import";
+import { mergeChubDetailIntoCharacterJson } from "../../lib/chub-character-card";
 
 // ════════════════════════════════════════════════
 // Types
@@ -126,8 +127,12 @@ interface CardDetail {
   exampleDialogs?: string;
   alternateGreetings?: string[];
   creatorNotes?: string;
+  systemPrompt?: string;
+  postHistoryInstructions?: string;
+  characterVersion?: string;
   hasLorebook?: boolean;
   embeddedLorebook?: unknown;
+  extensions?: Record<string, unknown>;
   extra?: { title: string; content: string }[];
 }
 
@@ -177,6 +182,18 @@ function attachEmbeddedLorebookToCharacterJson(raw: Record<string, unknown>, emb
   }
 
   return cloned;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function optionalStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+function optionalRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
 }
 
 // ════════════════════════════════════════════════
@@ -416,15 +433,19 @@ const chubProvider: ProviderConfig = {
     if (!node) return null;
     const def = node.definition || {};
     return {
-      description: def.personality || undefined,
-      personality: def.tavern_personality || undefined,
-      scenario: def.scenario || undefined,
-      firstMessage: def.first_message || undefined,
-      exampleDialogs: def.example_dialogs || undefined,
-      alternateGreetings: def.alternate_greetings || [],
-      creatorNotes: def.description || undefined,
+      description: optionalString(def.personality),
+      personality: optionalString(def.tavern_personality),
+      scenario: optionalString(def.scenario),
+      firstMessage: optionalString(def.first_message),
+      exampleDialogs: optionalString(def.example_dialogs),
+      alternateGreetings: optionalStringArray(def.alternate_greetings),
+      creatorNotes: optionalString(def.description),
+      systemPrompt: optionalString(def.system_prompt),
+      postHistoryInstructions: optionalString(def.post_history_instructions),
+      characterVersion: optionalString(def.character_version),
       hasLorebook: !!def.embedded_lorebook,
       embeddedLorebook: def.embedded_lorebook,
+      extensions: optionalRecord(def.extensions),
     };
   },
   importCard: async () => {},
@@ -620,6 +641,7 @@ const jannyProvider: ProviderConfig = {
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-|-$/g, "");
     const pageUrl = `https://jannyai.com/characters/${charId}_character-${slug}`;
+    const apiPageUrl = `https://api.jannyai.com/characters/${charId}_character-${slug}`;
 
     // Helper to decode Astro's [type, data] serialization
     function decodeAstro(value: unknown): unknown {
@@ -642,7 +664,14 @@ const jannyProvider: ProviderConfig = {
 
     // Helper to parse character from HTML
     function parseCharFromHtml(html: string): Record<string, unknown> | null {
-      if (!html || html.includes("Just a moment") || html.includes("cf-challenge")) return null;
+      if (
+        !html ||
+        html.includes("Just a moment") ||
+        html.includes("cf-challenge") ||
+        html.includes("challenge-platform")
+      ) {
+        return null;
+      }
       let astroMatch = html.match(/astro-island[^>]*component-export="CharacterButtons"[^>]*props="([^"]+)"/);
       if (!astroMatch) astroMatch = html.match(/astro-island[^>]*props="([^"]*character[^"]*)"/);
       if (!astroMatch?.[1]) return null;
@@ -660,29 +689,39 @@ const jannyProvider: ProviderConfig = {
       }
     }
 
-    // Strategy 1: corsproxy.io from browser (preferred — bypasses Cloudflare via the
-    // user's browser TLS fingerprint + any cf_clearance cookie they have for jannyai.com)
+    const detailFromCharacter = (char: Record<string, unknown> | null | undefined): CardDetail | null => {
+      if (!char || !(char.personality || char.firstMessage)) return null;
+      return {
+        description: (char.personality as string) || undefined,
+        scenario: (char.scenario as string) || undefined,
+        firstMessage: (char.firstMessage as string) || undefined,
+        exampleDialogs: (char.exampleDialogs as string) || undefined,
+        creatorNotes: char.description
+          ? typeof char.description === "string"
+            ? char.description.replace(/<[^>]*>/g, "").trim()
+            : undefined
+          : undefined,
+      };
+    };
+
+    const fetchHtmlDetail = async (url: string): Promise<CardDetail | null> => {
+      const res = await fetch(url, { headers: { Accept: "text/html,application/xhtml+xml,*/*" } });
+      if (!res.ok) return null;
+      return detailFromCharacter(parseCharFromHtml(await res.text()));
+    };
+
+    // JannyAI's public API mirror serves the same Astro payload with permissive CORS.
     try {
-      const proxyRes = await fetch(`https://corsproxy.io/?url=${encodeURIComponent(pageUrl)}`, {
-        headers: { Accept: "text/html,application/xhtml+xml,*/*" },
-      });
-      if (proxyRes.ok) {
-        const html = await proxyRes.text();
-        const char = parseCharFromHtml(html);
-        if (char && (char.personality || char.firstMessage)) {
-          return {
-            description: (char.personality as string) || undefined,
-            scenario: (char.scenario as string) || undefined,
-            firstMessage: (char.firstMessage as string) || undefined,
-            exampleDialogs: (char.exampleDialogs as string) || undefined,
-            creatorNotes: char.description
-              ? typeof char.description === "string"
-                ? char.description.replace(/<[^>]*>/g, "").trim()
-                : undefined
-              : undefined,
-          };
-        }
-      }
+      const apiDetail = await fetchHtmlDetail(apiPageUrl);
+      if (apiDetail) return apiDetail;
+    } catch {
+      /* fall through */
+    }
+
+    // Fall back to corsproxy.io via the user's browser TLS fingerprint and cookies.
+    try {
+      const proxyDetail = await fetchHtmlDetail(`https://corsproxy.io/?url=${encodeURIComponent(pageUrl)}`);
+      if (proxyDetail) return proxyDetail;
     } catch {
       /* fall through */
     }
@@ -692,20 +731,8 @@ const jannyProvider: ProviderConfig = {
       const res = await fetch(`/api/bot-browser/janny/character/${charId}?slug=character-${slug}`);
       if (res.ok) {
         const data = await res.json();
-        const char = data?.character;
-        if (char && (char.personality || char.firstMessage)) {
-          return {
-            description: char.personality || undefined,
-            scenario: char.scenario || undefined,
-            firstMessage: char.firstMessage || undefined,
-            exampleDialogs: char.exampleDialogs || undefined,
-            creatorNotes: char.description
-              ? typeof char.description === "string"
-                ? char.description.replace(/<[^>]*>/g, "").trim()
-                : undefined
-              : undefined,
-          };
-        }
+        const serverDetail = detailFromCharacter(data?.character);
+        if (serverDetail) return serverDetail;
       }
     } catch {
       /* fall through */
@@ -1514,10 +1541,18 @@ export function BotBrowserView() {
         const file = new File([blob], "character.png", { type: "image/png" });
         const { json, imageDataUrl } = await parsePngCharacterCard(file);
         const cardDetail = sourceId === "chub" ? (detail ?? (await provider.fetchDetail(card))) : detail;
-        const importJson = attachEmbeddedLorebookToCharacterJson(
+        const importJsonWithLorebook = attachEmbeddedLorebookToCharacterJson(
           json as Record<string, unknown>,
           cardDetail?.embeddedLorebook,
         );
+        const importJson =
+          sourceId === "chub"
+            ? mergeChubDetailIntoCharacterJson(
+                importJsonWithLorebook,
+                { name: card.name, creator: card.creator, tags: card.tags },
+                cardDetail,
+              )
+            : importJsonWithLorebook;
         const importEmbeddedLorebook = confirmEmbeddedLorebookImport(
           card.name,
           cardDetail?.embeddedLorebook ?? readEmbeddedLorebookFromCharacterPayload(importJson),
@@ -2672,7 +2707,6 @@ function DetailView({
   onImport,
   tagImportMode,
   onTagImportModeChange,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   onDetailUpdate,
 }: {
   card: BrowseCard;
@@ -2692,7 +2726,11 @@ function DetailView({
   const handleDownloadPng = async () => {
     setDownloading(true);
     try {
-      const d = displayDetail;
+      let d = displayDetail;
+      if (!d && !loading) {
+        d = await provider.fetchDetail(card);
+        if (d) onDetailUpdate?.(d);
+      }
       const descriptionText = d?.description || "";
       const personalityText = d?.personality || "";
       const charData: Record<string, unknown> = {

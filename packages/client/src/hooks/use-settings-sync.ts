@@ -2,17 +2,27 @@
 // Hook: Cross-device UI settings sync
 // ──────────────────────────────────────────────
 // On mount: fetches the server's saved settings blob and overlays it onto the
-// UI store so every browser/device sees the same preferences. If the server
-// has no blob yet, the current local state is pushed as the initial seed
-// (one-time migration for users upgrading from browser-only storage).
+// UI store so every browser/device sees the same shared preferences. Device-
+// local preferences such as interface and chat text size stay in browser
+// storage and are ignored when older server blobs still contain them. If the
+// server has no blob yet, the current local shared state is pushed as the
+// initial seed (one-time migration for users upgrading from browser-only
+// storage).
 //
 // While the app runs: subscribes to UI store changes, debounces serialization,
 // and pushes the synced subset to the server. Only user-facing preference
 // edits trigger a push — transient UI state (modal open, detail panels, etc.)
 // is filtered out via `pickSyncedSettings`.
 import { useEffect } from "react";
+import { normalizeImageStyleProfileSettings, normalizeQuoteFormat } from "@marinara-engine/shared";
 import { api } from "../lib/api-client";
-import { pickSyncedSettings, useUIStore } from "../stores/ui.store";
+import {
+  normalizeTrackerPanelSizeProfile,
+  normalizeTrackerTemperatureUnit,
+  normalizeTrackerThoughtBubbleDisplay,
+  pickSyncedSettings,
+  useUIStore,
+} from "../stores/ui.store";
 
 type SettingsResponse = { value: string | null };
 
@@ -24,6 +34,17 @@ const DEBOUNCE_MS = 1000;
 
 type SyncedSettingsObject = ReturnType<typeof pickSyncedSettings>;
 type ServerSettingsPayload = SyncedSettingsObject & { __updatedAt?: number };
+type ParsedSettings = Partial<SyncedSettingsObject> & Record<string, unknown>;
+
+const DEVICE_LOCAL_SETTING_KEYS = ["fontSize", "chatFontSize"] as const;
+
+export function omitDeviceLocalSettings(settings: ParsedSettings): ParsedSettings {
+  const sanitized = { ...settings };
+  for (const key of DEVICE_LOCAL_SETTING_KEYS) {
+    delete sanitized[key];
+  }
+  return sanitized;
+}
 
 function readLocalUpdatedAt(): number | null {
   const value = window.localStorage.getItem(LOCAL_UPDATED_AT_KEY);
@@ -49,7 +70,7 @@ function buildServerSettingsValue(settings: SyncedSettingsObject, updatedAt: num
 }
 
 function parseServerSettingsValue(value: string): {
-  settings: Partial<SyncedSettingsObject> & Record<string, unknown>;
+  settings: ParsedSettings;
   updatedAt: number | null;
 } {
   const parsed = JSON.parse(value) as unknown;
@@ -141,6 +162,9 @@ export function useSettingsSync() {
           try {
             const parsed = parseServerSettingsValue(data.value);
             if (parsed.settings && typeof parsed.settings === "object") {
+              const hadDeviceLocalSettings = DEVICE_LOCAL_SETTING_KEYS.some((key) => key in parsed.settings);
+              parsed.settings = omitDeviceLocalSettings(parsed.settings);
+
               // Migrate old flat gradient fields → per-scheme nested (v10 → v11).
               if ("convoGradientFrom" in parsed.settings || "convoGradientTo" in parsed.settings) {
                 const legacyGradientFrom =
@@ -157,6 +181,23 @@ export function useSettingsSync() {
                 delete parsed.settings.convoGradientFrom;
                 delete parsed.settings.convoGradientTo;
               }
+              parsed.settings.trackerPanelSizeProfile = normalizeTrackerPanelSizeProfile(
+                parsed.settings.trackerPanelSizeProfile,
+                parsed.settings.trackerPanelWidth,
+              );
+              delete parsed.settings.trackerPanelWidth;
+              parsed.settings.trackerPanelThoughtBubbleDisplay = normalizeTrackerThoughtBubbleDisplay(
+                parsed.settings.trackerPanelThoughtBubbleDisplay,
+              );
+              parsed.settings.trackerPanelDockedThoughtsAlwaysVisible =
+                parsed.settings.trackerPanelDockedThoughtsAlwaysVisible === true;
+              parsed.settings.trackerTemperatureUnit = normalizeTrackerTemperatureUnit(
+                parsed.settings.trackerTemperatureUnit,
+              );
+              parsed.settings.quoteFormat = normalizeQuoteFormat(parsed.settings.quoteFormat);
+              parsed.settings.imageStyleProfiles = normalizeImageStyleProfileSettings(
+                parsed.settings.imageStyleProfiles,
+              );
 
               const serverUpdatedAt = parsed.updatedAt;
               const localIsNewer =
@@ -170,6 +211,19 @@ export function useSettingsSync() {
                 useUIStore.setState(parsed.settings);
                 lastPushed = serialize();
                 if (serverUpdatedAt !== null) writeLocalUpdatedAt(serverUpdatedAt);
+                if (hadDeviceLocalSettings) {
+                  try {
+                    await api.put(SETTINGS_PATH, {
+                      value: buildServerSettingsValue(
+                        pickSyncedSettings(useUIStore.getState()),
+                        serverUpdatedAt ?? Date.now(),
+                      ),
+                    });
+                  } catch {
+                    // Cleanup is best-effort; this browser still ignores
+                    // legacy size values from the server blob.
+                  }
+                }
               }
             }
           } catch {

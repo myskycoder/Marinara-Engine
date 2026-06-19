@@ -5,6 +5,14 @@
 /** Top-level lorebook categories. */
 export type LorebookCategory = "world" | "character" | "npc" | "spellbook" | "uncategorized";
 
+/** Chat-level assignment behavior for a lorebook. */
+export type LorebookScopeMode = "all" | "disabled" | "specific";
+
+export interface LorebookScope {
+  mode: LorebookScopeMode;
+  chatIds: string[];
+}
+
 /** Selective logic operators. */
 export type SelectiveLogic = "and" | "or" | "not";
 
@@ -40,6 +48,8 @@ export interface Lorebook {
   recursiveScanning: boolean;
   /** Maximum recursion depth for recursive scanning (default 3) */
   maxRecursionDepth: number;
+  /** When true, bulk vectorization skips every entry in this lorebook and semantic matching ignores stored vectors */
+  excludeFromVectorization: boolean;
   /** ID of the character this lorebook is linked to (character books) */
   characterId: string | null;
   /** IDs of characters this lorebook is linked to */
@@ -54,6 +64,8 @@ export interface Lorebook {
   isGlobal: boolean;
   /** Master on/off switch for this lorebook */
   enabled: boolean;
+  /** Optional runtime scope for character/persona-linked lorebooks */
+  scope: LorebookScope;
   /** Tags for organizing/filtering lorebooks */
   tags: string[];
   /** Agent/generation origin tracking */

@@ -3,6 +3,8 @@
 // ──────────────────────────────────────────────
 
 /** Complete game state snapshot, linked to a message. */
+export type TrackerFieldLocks = Record<string, boolean>;
+
 export interface GameState {
   id: string;
   chatId: string;
@@ -36,6 +38,9 @@ export interface GameState {
   /** JSON object of manually-edited field names → values. Carried forward across agent snapshots. */
   manualOverrides?: Record<string, string> | null;
 
+  /** JSON object of tracker field lock keys → enabled. Carried forward across agent snapshots. */
+  fieldLocks?: TrackerFieldLocks | null;
+
   createdAt: string;
 }
 
@@ -55,8 +60,10 @@ export interface PresentCharacter {
   avatarPath?: string | null;
   /** Featured tracker portrait focus, 0 = left, 100 = right. */
   portraitFocusX?: number;
-  /** Featured tracker portrait focus, 0 = top, 100 = bottom. */
+  /** Featured tracker portrait focus, 0 = top, 100 = bottom; expression sprites may exceed 100 to dip below the frame. */
   portraitFocusY?: number;
+  /** Featured tracker portrait zoom multiplier. */
+  portraitZoom?: number;
   /** Per-character custom fields */
   customFields: Record<string, string>;
   /** Per-character stats (HP, etc.) */
@@ -81,6 +88,8 @@ export interface CharacterStat {
 export interface CustomTrackerField {
   name: string;
   value: string;
+  /** @deprecated Use GameState.fieldLocks for persisted per-cell tracker locks. */
+  locked?: boolean;
 }
 
 /** Player-specific stats and inventory. */

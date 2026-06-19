@@ -50,6 +50,8 @@ export interface SceneAnalyzerContext {
   recentSpotifyTracks?: string[];
   /** Current ambient tag. */
   currentAmbient?: string | null;
+  /** Current tracked in-world location. */
+  currentLocation?: string | null;
   /** Current weather. */
   currentWeather: string | null;
   /** Current time of day. */
@@ -64,6 +66,12 @@ export interface SceneAnalyzerContext {
    * known place instead of inventing a new one.
    */
   knownLocationIds?: string[];
+  /** Game setup genre, e.g. fantasy, sci-fi, modern. */
+  genre?: string | null;
+  /** Game setup setting, e.g. medieval kingdom, cyberpunk city. */
+  setting?: string | null;
+  /** Short world overview, when available from game setup metadata. */
+  worldOverview?: string | null;
   /** Whether image generation is configured and this turn is allowed to request a rare CG illustration. */
   canGenerateIllustrations?: boolean;
   /** Player-selected auto CG frequency preset (drives illustration prompt strictness). */
@@ -304,12 +312,20 @@ export function buildSceneAnalyzerUserPrompt(
   if (ctx) {
     parts.push(
       ``,
-      `Current: state=${ctx.currentState}, bg=${ctx.currentBackground ?? "none"}, locationId=${ctx.currentLocationId ?? "none"}, weather=${ctx.currentWeather ?? "unset"}, time=${ctx.currentTimeOfDay ?? "unset"}, season=${ctx.currentSeason ?? "unset"}`,
+      `Current: state=${ctx.currentState}, location=${ctx.currentLocation ?? "unset"}, bg=${ctx.currentBackground ?? "none"}, locationId=${ctx.currentLocationId ?? "none"}, weather=${ctx.currentWeather ?? "unset"}, time=${ctx.currentTimeOfDay ?? "unset"}, season=${ctx.currentSeason ?? "unset"}`,
     );
     if (ctx.knownLocationIds?.length) {
       parts.push(
         `Known locationIds (REUSE these when narration returns to one of these places): ${ctx.knownLocationIds.join(", ")}`,
       );
+    }
+    const worldContext = [
+      ctx.genre ? `genre=${compactPromptLabel(ctx.genre)}` : "",
+      ctx.setting ? `setting=${compactPromptLabel(ctx.setting)}` : "",
+      ctx.worldOverview ? `world=${compactPromptLabel(ctx.worldOverview)}` : "",
+    ].filter(Boolean);
+    if (worldContext.length > 0) {
+      parts.push(`World context: ${worldContext.join(", ")}`);
     }
   }
 
@@ -352,7 +368,7 @@ export function buildSceneAnalyzerUserPrompt(
     `   Only include segments that HAVE at least one effect — omit empty segments.`,
     ...(canGenerateBackgrounds
       ? [
-          `7. GENERATED LOCATION BACKGROUNDS — If the narration enters a new location and none of the listed background tags fit, use backgrounds:generated:<short-location-slug>. This requests a normal reusable location background image.`,
+          `7. GENERATED LOCATION BACKGROUNDS — If the narration enters a new location and none of the listed background tags fit, use backgrounds:generated:<short-location-slug>. This requests a normal reusable location background image. The generated prompt MUST include concrete scenery plus any provided world context (genre, setting, current location, and time/weather when relevant). For example, a field in a medieval fantasy game should be a medieval fantasy field, not a modern farm.`,
         ]
       : []),
     ...((ctx?.turnNumber ?? 1) > 1
@@ -391,6 +407,7 @@ export function buildSceneAnalyzerUserPrompt(
     `- Use directions for real visual beats: a door slamming, a blade impact, thunder, a memory fracture, a kiss/reveal close-up, a panic spike, a scene transition, or a major emotional turn. Do not attach directions to every line.`,
     `- The background should stay the SAME as long as the characters remain in the same location. Only change it in a segment when characters physically move to a different place.`,
     `- If the first narration lines are still in the PREVIOUS location and the first location change is at segment N>0, that is valid: put the first new plate on segment N only; do not duplicate the old plate on segment 0 unless you also need sfx/directions there.`,
+    `- Generated reusable background prompts must be world-grounded scenery. Include concrete place details and any provided setting era/genre context; exclude characters, UI, text, and modern objects unless the world context supports them.`,
     ...(canGenerateIllustrations
       ? buildIllustrationPromptGuidance(
           cgFrequency,
@@ -477,7 +494,7 @@ export function buildSceneAnalyzerUserPrompt(
       : []),
     ...(canGenerateIllustrations
       ? [
-          `,  "illustration": null OR {"segment":<0-${lines.length - 1}>,"prompt":"<CG from player POV — same room/props as narration + backgroundPrompt; no new location>","characters":["<every visible named character>"],"reason":"<why this is CG-worthy>","slug":"<short-safe-slug>"}`,
+          `,  "illustration": null OR {"segment":<0-${lines.length - 1}>,"title":"<short concrete visual title>","prompt":"<CG from player POV — same room/props as narration + backgroundPrompt; no new location>","characters":["<every visible named character>"],"reason":"<why this is CG-worthy>","slug":"<short-safe-slug>"}`,
         ]
       : []),
     `}`,

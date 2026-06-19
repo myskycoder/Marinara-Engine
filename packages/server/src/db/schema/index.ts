@@ -20,3 +20,4 @@ export * from "./extensions.js";
 export * from "./app-settings.js";
 export * from "./prompt-overrides.js";
 export * from "./ai-audit.js";
+export * from "./achievements.js";

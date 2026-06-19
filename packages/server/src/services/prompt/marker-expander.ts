@@ -3,7 +3,11 @@
 // sections into actual content at assembly time.
 // ──────────────────────────────────────────────
 import type { DB } from "../../db/connection.js";
-import { resolveCharacterScopedMacros } from "@marinara-engine/shared";
+import {
+  formatCustomTrackerFieldForPrompt,
+  resolveCharacterScopedMacros,
+  stripMacroComments,
+} from "@marinara-engine/shared";
 import type {
   CharacterMacroProfile,
   MarkerConfig,
@@ -17,7 +21,6 @@ import { createCharactersStorage } from "../storage/characters.storage.js";
 import { createAgentsStorage } from "../storage/agents.storage.js";
 import { processLorebooks, type LorebookFinalContentResolver, type LorebookScanResult } from "../lorebook/index.js";
 import { wrapContent } from "./format-engine.js";
-import { getCharacterDescriptionWithExtensions } from "./character-description-extensions.js";
 import { agentRuns } from "../../db/schema/index.js";
 import { gameStateSnapshots } from "../../db/schema/index.js";
 import { eq, and, desc } from "drizzle-orm";
@@ -52,7 +55,7 @@ export interface MarkerContext {
   wrapFormat: WrapFormat;
   /** When false, agent_data markers expand to empty strings */
   enableAgents: boolean;
-  /** Per-chat list of active agent type IDs (empty = use global enabled state) */
+  /** Per-chat list of active agent type IDs (empty = no active agents, marker expansion suppressed) */
   activeAgentIds: string[];
   /** Per-chat list of manually activated lorebook IDs from chat settings */
   activeLorebookIds: string[];
@@ -98,6 +101,10 @@ export interface ExpandedMarker {
   content: string;
   /** If the marker produces multiple messages (e.g. chat_history), they go here */
   messages?: ChatMLMessage[];
+}
+
+function cardPromptText(value: unknown): string {
+  return typeof value === "string" ? stripMacroComments(value).trim() : "";
 }
 
 /**
@@ -154,7 +161,7 @@ async function expandCharacter(config: MarkerConfig, ctx: MarkerContext): Promis
       if (field === "name") continue; // Name is used as the parent tag, not a child field
       // Skip per-character scenario when a group scenario override is active
       if (field === "scenario" && ctx.groupScenarioOverrideText) continue;
-      const value = getCharacterField(data, field);
+      const value = cardPromptText(getCharacterField(data, field));
       if (value) {
         const resolvedValue =
           resolveCharacterMacros && value.includes("{{")
@@ -180,8 +187,9 @@ async function expandCharacter(config: MarkerConfig, ctx: MarkerContext): Promis
   }
 
   // Append group scenario override (replaces individual character scenarios)
-  if (ctx.groupScenarioOverrideText) {
-    parts.push(wrapContent(ctx.groupScenarioOverrideText, "scenario", ctx.wrapFormat, 1));
+  const groupScenarioOverrideText = cardPromptText(ctx.groupScenarioOverrideText);
+  if (groupScenarioOverrideText) {
+    parts.push(wrapContent(groupScenarioOverrideText, "scenario", ctx.wrapFormat, 1));
   }
 
   return { content: parts.join("\n") };
@@ -190,7 +198,7 @@ async function expandCharacter(config: MarkerConfig, ctx: MarkerContext): Promis
 function characterMacroProfileFromData(data: CharacterData): CharacterMacroProfile {
   return {
     name: data.name ?? "Character",
-    description: getCharacterDescriptionWithExtensions(data),
+    description: data.description ?? "",
     personality: data.personality ?? "",
     backstory: data.extensions?.backstory ?? "",
     appearance: data.extensions?.appearance ?? "",
@@ -206,7 +214,7 @@ function getCharacterField(data: CharacterData, field: string): string {
     case "name":
       return data.name;
     case "description":
-      return getCharacterDescriptionWithExtensions(data);
+      return data.description;
     case "personality":
       return data.personality;
     case "scenario":
@@ -250,20 +258,26 @@ async function expandPersona(_config: MarkerConfig, ctx: MarkerContext): Promise
   const parts: string[] = [];
   const pName = ctx.personaName || "User";
 
-  if (ctx.personaDescription) {
-    parts.push(wrapContent(ctx.personaDescription, "description", ctx.wrapFormat, 2));
+  const personaDescription = cardPromptText(ctx.personaDescription);
+  const personaPersonality = cardPromptText(ctx.personaFields?.personality);
+  const personaBackstory = cardPromptText(ctx.personaFields?.backstory);
+  const personaAppearance = cardPromptText(ctx.personaFields?.appearance);
+  const personaScenario = cardPromptText(ctx.personaFields?.scenario);
+
+  if (personaDescription) {
+    parts.push(wrapContent(personaDescription, "description", ctx.wrapFormat, 2));
   }
-  if (ctx.personaFields?.personality) {
-    parts.push(wrapContent(ctx.personaFields.personality, "personality", ctx.wrapFormat, 2));
+  if (personaPersonality) {
+    parts.push(wrapContent(personaPersonality, "personality", ctx.wrapFormat, 2));
   }
-  if (ctx.personaFields?.backstory) {
-    parts.push(wrapContent(ctx.personaFields.backstory, "backstory", ctx.wrapFormat, 2));
+  if (personaBackstory) {
+    parts.push(wrapContent(personaBackstory, "backstory", ctx.wrapFormat, 2));
   }
-  if (ctx.personaFields?.appearance) {
-    parts.push(wrapContent(ctx.personaFields.appearance, "appearance", ctx.wrapFormat, 2));
+  if (personaAppearance) {
+    parts.push(wrapContent(personaAppearance, "appearance", ctx.wrapFormat, 2));
   }
-  if (ctx.personaFields?.scenario) {
-    parts.push(wrapContent(ctx.personaFields.scenario, "scenario", ctx.wrapFormat, 2));
+  if (personaScenario) {
+    parts.push(wrapContent(personaScenario, "scenario", ctx.wrapFormat, 2));
   }
 
   // Include RPG attributes if enabled
@@ -364,18 +378,10 @@ async function expandChatHistory(config: MarkerConfig, ctx: MarkerContext): Prom
 
   // Add chat_history / last_message wrapping based on format
   if (messages.length > 0 && ctx.wrapFormat !== "none") {
-    // Find the last user message index — this becomes <last_message>
-    let lastUserIdx = -1;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]!.role === "user") {
-        lastUserIdx = i;
-        break;
-      }
-    }
-
-    // Everything before the last user message is "chat history",
-    // the last user message gets "last_message" wrapping
-    const historyEnd = lastUserIdx >= 0 ? lastUserIdx : messages.length;
+    // Everything before the final chat turn is "chat history"; the final turn gets
+    // "last_message" wrapping, regardless of whether it is user or assistant.
+    const lastMessageIdx = messages.length - 1;
+    const historyEnd = lastMessageIdx;
 
     if (ctx.wrapFormat === "xml") {
       if (historyEnd > 0) {
@@ -385,22 +391,18 @@ async function expandChatHistory(config: MarkerConfig, ctx: MarkerContext): Prom
           content: `${messages[historyEnd - 1]!.content}\n</chat_history>`,
         };
       }
-      if (lastUserIdx >= 0) {
-        messages[lastUserIdx] = {
-          ...messages[lastUserIdx]!,
-          content: `<last_message>\n${messages[lastUserIdx]!.content}\n</last_message>`,
-        };
-      }
+      messages[lastMessageIdx] = {
+        ...messages[lastMessageIdx]!,
+        content: `<last_message>\n${messages[lastMessageIdx]!.content}\n</last_message>`,
+      };
     } else if (ctx.wrapFormat === "markdown") {
       if (historyEnd > 0) {
         messages[0] = { ...messages[0]!, content: `## Chat History\n${messages[0]!.content}` };
       }
-      if (lastUserIdx >= 0) {
-        messages[lastUserIdx] = {
-          ...messages[lastUserIdx]!,
-          content: `## Last Message\n${messages[lastUserIdx]!.content}`,
-        };
-      }
+      messages[lastMessageIdx] = {
+        ...messages[lastMessageIdx]!,
+        content: `## Last Message\n${messages[lastMessageIdx]!.content}`,
+      };
     }
   }
 
@@ -421,11 +423,12 @@ async function expandDialogueExamples(_config: MarkerConfig, ctx: MarkerContext)
     if (!row) continue;
     const data = JSON.parse(row.data) as CharacterData;
 
-    if (data.mes_example) {
+    const example = cardPromptText(data.mes_example);
+    if (example) {
       const resolvedExample =
-        resolveCharacterMacros && data.mes_example.includes("{{")
-          ? resolveCharacterScopedMacros(data.mes_example, characterMacroProfileFromData(data))
-          : data.mes_example;
+        resolveCharacterMacros && example.includes("{{")
+          ? resolveCharacterScopedMacros(example, characterMacroProfileFromData(data))
+          : example;
       parts.push(resolvedExample);
     }
   }
@@ -458,8 +461,9 @@ async function expandAgentData(config: MarkerConfig, ctx: MarkerContext): Promis
   ]);
   if (AUTO_INJECTED_TRACKERS.has(agentType)) return { content: "" };
 
-  // Per-chat active agent filter: if a per-chat list is set, only include agents in that list
-  if (ctx.activeAgentIds.length > 0 && !ctx.activeAgentIds.includes(agentType)) {
+  // Generation only runs agents explicitly added to the chat. If none are active,
+  // prompt sections must not keep replaying the last saved output forever.
+  if (ctx.activeAgentIds.length === 0 || !ctx.activeAgentIds.includes(agentType)) {
     return { content: "" };
   }
 
@@ -583,7 +587,7 @@ async function expandWorldStateAgent(ctx: MarkerContext): Promise<ExpandedMarker
       statParts.push(`Stats:\n${statLines.join("\n")}`);
     }
     if (hasCustomTracker && Array.isArray(stats.customTrackerFields) && stats.customTrackerFields.length > 0) {
-      const customLines = stats.customTrackerFields.map((f: any) => `- ${f.name}: ${f.value}`);
+      const customLines = stats.customTrackerFields.map(formatCustomTrackerFieldForPrompt);
       statParts.push(`Custom:\n${customLines.join("\n")}`);
     }
     if (statParts.length > 0) parts.push(statParts.join("\n"));

@@ -6,20 +6,8 @@
 // DATA_DIR/storage. SQLite is only opened during one-time legacy import when a
 // previous marinara-engine.db exists; the live runtime uses this in-memory
 // file-native table store and persists dirty tables back to JSON.
-import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  closeSync,
-  fsyncSync,
-  readFileSync,
-  readSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, openSync, closeSync, readFileSync, readSync, statSync } from "node:fs";
+import { copyFile, open, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { logger } from "../lib/logger.js";
 import { getFileStorageDir } from "../config/runtime-config.js";
@@ -156,6 +144,7 @@ export const FILE_BACKED_TABLES = [
   "characters",
   "character_card_versions",
   "personas",
+  "persona_card_versions",
   "character_groups",
   "persona_groups",
   "lorebooks",
@@ -178,6 +167,9 @@ export const FILE_BACKED_TABLES = [
   "regex_scripts",
   "chat_images",
   "character_images",
+  "persona_images",
+  "gallery_folders",
+  "global_images",
   "ooc_influences",
   "conversation_notes",
   "memory_chunks",
@@ -185,6 +177,7 @@ export const FILE_BACKED_TABLES = [
   "api_connection_folders",
   "custom_themes",
   "app_settings",
+  "achievement_unlocks",
   "chat_presets",
   "prompt_overrides",
   "installed_extensions",
@@ -207,6 +200,8 @@ const CASCADES: Array<{ parent: FileBackedTable; child: FileBackedTable; parentK
   { parent: "messages", child: "message_swipes", parentKey: "id", childKey: "messageId" },
   { parent: "characters", child: "character_card_versions", parentKey: "id", childKey: "characterId" },
   { parent: "characters", child: "character_images", parentKey: "id", childKey: "characterId" },
+  { parent: "personas", child: "persona_images", parentKey: "id", childKey: "personaId" },
+  { parent: "personas", child: "persona_card_versions", parentKey: "id", childKey: "personaId" },
   { parent: "lorebooks", child: "lorebook_character_links", parentKey: "id", childKey: "lorebookId" },
   { parent: "lorebooks", child: "lorebook_persona_links", parentKey: "id", childKey: "lorebookId" },
   { parent: "lorebooks", child: "lorebook_folders", parentKey: "id", childKey: "lorebookId" },
@@ -284,17 +279,17 @@ function quoteIdentifier(value: string) {
   return `"${value.replace(/"/g, '""')}"`;
 }
 
-function flushFile(path: string) {
-  let fd: number | null = null;
+async function flushFile(path: string) {
+  let handle: import("node:fs/promises").FileHandle | null = null;
   try {
-    fd = openSync(path, "r");
-    fsyncSync(fd);
+    handle = await open(path, "r");
+    await handle.sync();
   } catch {
     // Best effort only. Some mobile filesystems reject fsync for app data.
   } finally {
-    if (fd !== null) {
+    if (handle !== null) {
       try {
-        closeSync(fd);
+        await handle.close();
       } catch {
         /* ignore */
       }
@@ -327,7 +322,7 @@ function looksNulFilled(path: string): boolean {
   }
 }
 
-function atomicWriteFile(path: string, content: string, options: { refreshBackup?: boolean } = {}) {
+async function atomicWriteFile(path: string, content: string, options: { refreshBackup?: boolean } = {}) {
   mkdirSync(dirname(path), { recursive: true });
   const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
   const refreshBackup = options.refreshBackup ?? true;
@@ -346,12 +341,12 @@ function atomicWriteFile(path: string, content: string, options: { refreshBackup
       const bakPath = `${path}.bak`;
       const bakTmpPath = `${bakPath}.tmp-${process.pid}-${Date.now()}`;
       try {
-        copyFileSync(path, bakTmpPath);
-        flushFile(bakTmpPath);
-        renameSync(bakTmpPath, bakPath);
+        await copyFile(path, bakTmpPath);
+        await flushFile(bakTmpPath);
+        await rename(bakTmpPath, bakPath);
       } catch (err) {
         try {
-          if (existsSync(bakTmpPath)) unlinkSync(bakTmpPath);
+          if (existsSync(bakTmpPath)) await unlink(bakTmpPath);
         } catch {
           /* ignore */
         }
@@ -362,13 +357,13 @@ function atomicWriteFile(path: string, content: string, options: { refreshBackup
         );
       }
     }
-    writeFileSync(tmpPath, content);
-    flushFile(tmpPath);
-    renameSync(tmpPath, path);
-    flushFile(dirname(path));
+    await writeFile(tmpPath, content);
+    await flushFile(tmpPath);
+    await rename(tmpPath, path);
+    await flushFile(dirname(path));
   } catch (err) {
     try {
-      if (existsSync(tmpPath)) unlinkSync(tmpPath);
+      if (existsSync(tmpPath)) await unlink(tmpPath);
     } catch {
       /* ignore */
     }
@@ -376,7 +371,7 @@ function atomicWriteFile(path: string, content: string, options: { refreshBackup
   }
 }
 
-type ParseResult<T> = { value: T; recoveredFromBackup: boolean };
+type ParseResult<T> = { value: T; recoveredFromBackup: boolean; recoveredFromFallback: boolean };
 
 function describeStaleness(mainPath: string, backupPath: string): string {
   try {
@@ -398,26 +393,50 @@ function describeStaleness(mainPath: string, backupPath: string): string {
 }
 
 function parseJsonFile<T>(path: string, fallback: T): ParseResult<T> {
-  if (!existsSync(path)) return { value: fallback, recoveredFromBackup: false };
+  if (!existsSync(path)) return { value: fallback, recoveredFromBackup: false, recoveredFromFallback: false };
   try {
-    return { value: JSON.parse(readFileSync(path, "utf8")) as T, recoveredFromBackup: false };
+    return { value: JSON.parse(readFileSync(path, "utf8")) as T, recoveredFromBackup: false, recoveredFromFallback: false };
   } catch (err) {
     const backupPath = `${path}.bak`;
     if (existsSync(backupPath)) {
       const staleness = describeStaleness(path, backupPath);
-      logger.error(
-        err,
-        "[file-storage] %s is corrupt; recovering from %s (backup is %s older). Edits made since the backup are unrecoverable.",
-        path,
-        backupPath,
-        staleness,
-      );
-      return {
-        value: JSON.parse(readFileSync(backupPath, "utf8")) as T,
-        recoveredFromBackup: true,
-      };
+      try {
+        const value = JSON.parse(readFileSync(backupPath, "utf8")) as T;
+        logger.error(
+          err,
+          "[file-storage] %s is corrupt; recovering from %s (backup is %s older). Edits made since the backup are unrecoverable.",
+          path,
+          backupPath,
+          staleness,
+        );
+        return {
+          value,
+          recoveredFromBackup: true,
+          recoveredFromFallback: false,
+        };
+      } catch (backupErr) {
+        logger.error(
+          err,
+          "[file-storage] %s is corrupt and backup %s could not be used (backup is %s older); continuing with fallback data. Data in the primary and backup files is unrecoverable.",
+          path,
+          backupPath,
+          staleness,
+        );
+        logger.error(
+          backupErr,
+          "[file-storage] Backup %s parse failure while recovering %s.",
+          backupPath,
+          path,
+        );
+        return { value: fallback, recoveredFromBackup: false, recoveredFromFallback: true };
+      }
     }
-    throw err;
+    logger.error(
+      err,
+      "[file-storage] %s is corrupt and no usable backup exists; continuing with fallback data. Data in this file is unrecoverable.",
+      path,
+    );
+    return { value: fallback, recoveredFromBackup: false, recoveredFromFallback: true };
   }
 }
 
@@ -942,11 +961,19 @@ class FileTableStore {
     if (!force && !this.dirty && this.dirtyTables.size === 0) return;
     this.saving = true;
     this.dirty = false;
+    // Snapshot the dirty set and reset it BEFORE the async write. saveFileSnapshots
+    // now yields the event loop, so a markDirty() that interleaves during the I/O
+    // must be recorded for the NEXT flush instead of being erased by a post-await
+    // clear() — the synchronous version had a zero-width window here.
+    const dirtyTables = this.dirtyTables;
+    this.dirtyTables = new Set();
     try {
-      this.saveFileSnapshots();
-      this.dirtyTables.clear();
+      await this.saveFileSnapshots(dirtyTables);
     } catch (err) {
       this.dirty = true;
+      // Re-mark the tables we failed to persist so they retry on the next flush
+      // (without clobbering any tables marked dirty during the failed write).
+      for (const table of dirtyTables) this.dirtyTables.add(table);
       logger.error(err, "[file-storage] Failed to persist file-native storage");
     } finally {
       this.saving = false;
@@ -1031,8 +1058,8 @@ class FileTableStore {
       const path = manifestPath(this.rootDir);
       const result = parseJsonFile<TableSnapshotManifest | null>(path, null);
       loadedManifest = result.value;
-      needsManifestRewrite = result.recoveredFromBackup;
-      if (result.recoveredFromBackup) {
+      needsManifestRewrite = result.recoveredFromBackup || result.recoveredFromFallback;
+      if (result.recoveredFromBackup || result.recoveredFromFallback) {
         this.backupRecoveredPaths.add(path);
       }
     } catch (err) {
@@ -1056,16 +1083,15 @@ class FileTableStore {
     for (const table of FILE_BACKED_TABLES) {
       const meta = getMeta(table);
       const path = tableFilePath(this.rootDir, table);
-      const { value: rows, recoveredFromBackup } = parseJsonFile<Row[]>(path, []);
+      const { value: rows, recoveredFromBackup, recoveredFromFallback } = parseJsonFile<Row[]>(path, []);
       const normalized = (Array.isArray(rows) ? rows : []).map((row) => normalizeRow(meta, row));
       this.tables.set(table, normalized);
       counts[table] = normalized.length;
-      if (recoveredFromBackup) {
+      if (recoveredFromBackup || recoveredFromFallback) {
         this.backupRecoveredPaths.add(path);
-        // Same self-heal: rewrite the corrupt main file from in-memory data
-        // (which now matches the recovered backup) on the next flush, while
-        // suppressing .bak refresh for that write so the recovery source is
-        // preserved until the primary is repaired.
+        // Same self-heal: rewrite the corrupt main file from in-memory data on
+        // the next flush, while suppressing .bak refresh for that write so a
+        // corrupt primary is never copied over the recovery source.
         this.dirtyTables.add(table);
         this.dirty = true;
       }
@@ -1215,7 +1241,7 @@ class FileTableStore {
     return Object.values(this.legacyRepair.tables ?? {}).some((count) => count > 0);
   }
 
-  private saveFileSnapshots() {
+  private async saveFileSnapshots(dirtyTables: Set<string>) {
     mkdirSync(join(this.rootDir, "tables"), { recursive: true });
     const tables: Record<string, number> = {};
 
@@ -1223,8 +1249,8 @@ class FileTableStore {
       const rows = this.rows(table);
       tables[table] = rows.length;
       const path = tableFilePath(this.rootDir, table);
-      if (this.dirtyTables.has(table) || !existsSync(path)) {
-        atomicWriteFile(path, JSON.stringify(rows), { refreshBackup: !this.backupRecoveredPaths.has(path) });
+      if (dirtyTables.has(table) || !existsSync(path)) {
+        await atomicWriteFile(path, JSON.stringify(rows), { refreshBackup: !this.backupRecoveredPaths.has(path) });
       }
     }
 
@@ -1237,7 +1263,7 @@ class FileTableStore {
       tables,
     };
     const path = manifestPath(this.rootDir);
-    atomicWriteFile(path, JSON.stringify(manifest, null, 2), { refreshBackup: !this.backupRecoveredPaths.has(path) });
+    await atomicWriteFile(path, JSON.stringify(manifest, null, 2), { refreshBackup: !this.backupRecoveredPaths.has(path) });
     this.backupRecoveredPaths.clear();
   }
 

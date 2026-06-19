@@ -32,6 +32,7 @@ export const DEFAULT_COMFYUI_DEFAULTS: ComfyUiDefaults = {
   cfgScale: 7,
   denoisingStrength: 1,
   clipSkip: null,
+  uploadPlaceholderOnMissingReference: false,
 };
 
 export const DEFAULT_NOVELAI_DEFAULTS: NovelAiDefaults = {
@@ -47,19 +48,37 @@ export const DEFAULT_NOVELAI_DEFAULTS: NovelAiDefaults = {
 
 export const SD_WEBUI_SAMPLER_OPTIONS = [
   { value: "", label: "Automatic / backend default" },
+  // Common to A1111/Forge and Draw Things
   { value: "Euler a", label: "Euler a" },
-  { value: "Euler", label: "Euler" },
-  { value: "DPM++ 2M", label: "DPM++ 2M" },
   { value: "DPM++ 2M Karras", label: "DPM++ 2M Karras" },
-  { value: "DPM++ SDE", label: "DPM++ SDE" },
   { value: "DPM++ SDE Karras", label: "DPM++ SDE Karras" },
-  { value: "DPM++ 2M SDE", label: "DPM++ 2M SDE" },
   { value: "UniPC", label: "UniPC" },
   { value: "DDIM", label: "DDIM" },
+  // A1111/Forge only
+  { value: "Euler", label: "Euler" },
+  { value: "DPM++ 2M", label: "DPM++ 2M" },
+  { value: "DPM++ SDE", label: "DPM++ SDE" },
+  { value: "DPM++ 2M SDE", label: "DPM++ 2M SDE" },
   { value: "LMS", label: "LMS" },
   { value: "Heun", label: "Heun" },
   { value: "DPM2", label: "DPM2" },
   { value: "DPM2 a", label: "DPM2 a" },
+  // Draw Things-specific samplers (AYS / Substep / Trailing / LCM / TCD / PLMS)
+  { value: "PLMS", label: "PLMS (Draw Things)" },
+  { value: "LCM", label: "LCM (Draw Things)" },
+  { value: "TCD", label: "TCD (Draw Things)" },
+  { value: "TCD Trailing", label: "TCD Trailing (Draw Things)" },
+  { value: "Euler A Substep", label: "Euler A Substep (Draw Things)" },
+  { value: "DPM++ SDE Substep", label: "DPM++ SDE Substep (Draw Things)" },
+  { value: "Euler A Trailing", label: "Euler A Trailing (Draw Things)" },
+  { value: "DPM++ SDE Trailing", label: "DPM++ SDE Trailing (Draw Things)" },
+  { value: "DPM++ 2M Trailing", label: "DPM++ 2M Trailing (Draw Things)" },
+  { value: "DDIM Trailing", label: "DDIM Trailing (Draw Things)" },
+  { value: "UniPC Trailing", label: "UniPC Trailing (Draw Things)" },
+  { value: "Euler A AYS", label: "Euler A AYS (Draw Things)" },
+  { value: "DPM++ 2M AYS", label: "DPM++ 2M AYS (Draw Things)" },
+  { value: "DPM++ SDE AYS", label: "DPM++ SDE AYS (Draw Things)" },
+  { value: "UniPC AYS", label: "UniPC AYS (Draw Things)" },
 ] as const;
 
 export const SD_WEBUI_SCHEDULER_OPTIONS = [
@@ -132,6 +151,7 @@ export function createDefaultImageGenerationProfile(service: ImageDefaultsServic
     version: IMAGE_GENERATION_DEFAULTS_VERSION,
     service,
     seed: -1,
+    styleProfileId: null,
   };
   if (service === "automatic1111") profile.automatic1111 = { ...DEFAULT_AUTOMATIC1111_DEFAULTS };
   if (service === "comfyui") profile.comfyui = { ...DEFAULT_COMFYUI_DEFAULTS };
@@ -149,6 +169,7 @@ export function normalizeImageGenerationProfile(
 
   const profile = createDefaultImageGenerationProfile(service);
   profile.seed = readInteger(rawProfile.seed, -1, -1, 4_294_967_295);
+  profile.styleProfileId = readNullableString(rawProfile.styleProfileId, null);
 
   if (service === "automatic1111") {
     profile.automatic1111 = normalizeAutomatic1111Defaults(rawProfile.automatic1111);
@@ -174,6 +195,7 @@ export function mergePromptPrefix(prefix: string, prompt: string): string {
   const trimmedPrompt = prompt.trim();
   if (!trimmedPrefix) return trimmedPrompt;
   if (!trimmedPrompt) return trimmedPrefix;
+  if (trimmedPrompt === trimmedPrefix || trimmedPrompt.startsWith(`${trimmedPrefix},`)) return trimmedPrompt;
   return `${trimmedPrefix}, ${trimmedPrompt}`;
 }
 
@@ -182,6 +204,15 @@ export function mergeNegativePrompt(prefix: string, prompt?: string): string {
   const trimmedPrompt = (prompt ?? "").trim();
   if (!trimmedPrefix) return trimmedPrompt;
   if (!trimmedPrompt) return trimmedPrefix;
+  if (
+    trimmedPrompt === trimmedPrefix ||
+    trimmedPrompt.startsWith(`${trimmedPrefix},`) ||
+    trimmedPrompt.startsWith(`${trimmedPrefix}.`) ||
+    trimmedPrompt.startsWith(`${trimmedPrefix};`) ||
+    trimmedPrompt.startsWith(`${trimmedPrefix}\n`)
+  ) {
+    return trimmedPrompt;
+  }
   return `${trimmedPrefix}, ${trimmedPrompt}`;
 }
 
@@ -211,6 +242,10 @@ function normalizeComfyUiDefaults(rawDefaults: unknown): ComfyUiDefaults {
     cfgScale: readNumber(raw.cfgScale, DEFAULT_COMFYUI_DEFAULTS.cfgScale, 0, 30),
     denoisingStrength: readNumber(raw.denoisingStrength, DEFAULT_COMFYUI_DEFAULTS.denoisingStrength, 0, 1),
     clipSkip: readNullableInteger(raw.clipSkip, DEFAULT_COMFYUI_DEFAULTS.clipSkip, 1, 12),
+    uploadPlaceholderOnMissingReference: readBoolean(
+      raw.uploadPlaceholderOnMissingReference,
+      DEFAULT_COMFYUI_DEFAULTS.uploadPlaceholderOnMissingReference,
+    ),
   };
 }
 
@@ -238,6 +273,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function readString(value: unknown, fallback: string): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function readNullableString(value: unknown, fallback: string | null): string | null {
+  if (value === null || value === undefined) return fallback;
   return typeof value === "string" ? value : fallback;
 }
 

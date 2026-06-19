@@ -5,6 +5,13 @@ import { z } from "zod";
 
 export const lorebookCategorySchema = z.enum(["world", "character", "npc", "spellbook", "uncategorized"]);
 
+export const lorebookScopeModeSchema = z.enum(["all", "disabled", "specific"]);
+
+export const lorebookScopeSchema = z.object({
+  mode: lorebookScopeModeSchema.default("all"),
+  chatIds: z.array(z.string()).default([]),
+});
+
 export const selectiveLogicSchema = z.enum(["and", "or", "not"]);
 
 export const lorebookFilterModeSchema = z.enum(["any", "include", "exclude"]);
@@ -30,6 +37,11 @@ export const lorebookScheduleSchema = z.object({
   activeDates: z.array(z.string()).default([]),
   activeLocations: z.array(z.string()).default([]),
 });
+
+const lorebookGeneratedBySchema = z
+  .enum(["user", "agent", "import", "lorebook-maker"])
+  .nullable()
+  .transform((value) => (value === "lorebook-maker" ? "agent" : value));
 
 // ──────────────────────────────────────────────
 // Folders — collapsible containers for entries
@@ -60,6 +72,7 @@ export const createLorebookSchema = z.object({
   tokenBudget: z.number().int().min(0).default(2048),
   recursiveScanning: z.boolean().default(false),
   maxRecursionDepth: z.number().int().min(1).max(10).default(3),
+  excludeFromVectorization: z.boolean().default(false),
   characterId: z.string().nullable().default(null),
   characterIds: z.array(z.string()).default([]),
   personaId: z.string().nullable().default(null),
@@ -67,8 +80,9 @@ export const createLorebookSchema = z.object({
   chatId: z.string().nullable().default(null),
   isGlobal: z.boolean().default(false),
   enabled: z.boolean().default(true),
+  scope: lorebookScopeSchema.default({ mode: "all", chatIds: [] }),
   tags: z.array(z.string()).default([]),
-  generatedBy: z.enum(["user", "agent", "import", "lorebook-maker"]).nullable().default(null),
+  generatedBy: lorebookGeneratedBySchema.default(null),
   sourceAgentId: z.string().nullable().default(null),
 });
 
@@ -82,6 +96,7 @@ export const updateLorebookSchema = z
     tokenBudget: z.number().int().min(0).optional(),
     recursiveScanning: z.boolean().optional(),
     maxRecursionDepth: z.number().int().min(1).max(10).optional(),
+    excludeFromVectorization: z.boolean().optional(),
     characterId: z.string().nullable().optional(),
     characterIds: z.array(z.string()).optional(),
     personaId: z.string().nullable().optional(),
@@ -89,8 +104,9 @@ export const updateLorebookSchema = z
     chatId: z.string().nullable().optional(),
     isGlobal: z.boolean().optional(),
     enabled: z.boolean().optional(),
+    scope: lorebookScopeSchema.optional(),
     tags: z.array(z.string()).optional(),
-    generatedBy: z.enum(["user", "agent", "import", "lorebook-maker"]).nullable().optional(),
+    generatedBy: lorebookGeneratedBySchema.optional(),
     sourceAgentId: z.string().nullable().optional(),
   })
   .superRefine((value, ctx) => {

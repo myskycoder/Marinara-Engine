@@ -10,6 +10,7 @@ import { eq } from "drizzle-orm";
 import type { DB } from "../../db/connection.js";
 import { chats, messages } from "../../db/schema/index.js";
 import { createCharactersStorage } from "../storage/characters.storage.js";
+import { formatZonedConversationDate, formatZonedConversationTime, isSameZonedLogicalDay } from "./timezone.js";
 
 // ── Temporal keyword patterns ──
 // Maps regex patterns in the user's message to time windows to pull from.
@@ -113,17 +114,15 @@ interface MessageRow {
 /**
  * Format a timestamp as HH:MM.
  */
-function fmtTime(iso: string): string {
-  const d = new Date(iso);
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+function fmtTime(iso: string, timeZone?: string): string {
+  return formatZonedConversationTime(new Date(iso), timeZone);
 }
 
 /**
  * Format a date as DD.MM.YYYY.
  */
-function fmtDate(iso: string): string {
-  const d = new Date(iso);
-  return `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}.${d.getFullYear()}`;
+function fmtDate(iso: string, timeZone?: string): string {
+  return formatZonedConversationDate(new Date(iso), timeZone);
 }
 
 /**
@@ -166,6 +165,7 @@ export async function buildAwarenessBlock(
   userName: string,
   userMessage: string,
   maxTokenEstimate = 1500,
+  timeZone?: string,
 ): Promise<string | null> {
   if (characterIds.length === 0) return null;
 
@@ -269,17 +269,14 @@ export async function buildAwarenessBlock(
 
     for (const burst of bursts) {
       // Check if this burst from a different day than the previous needs a date header
-      const burstDate = fmtDate(burst[0]!.createdAt);
+      const burstDate = fmtDate(burst[0]!.createdAt, timeZone);
       const dateHeader = `[${burstDate}]\n`;
       if (charCount + dateHeader.length > maxChars) break;
 
       // Only add date header if the burst is not from today
       const today = new Date();
       const burstDay = new Date(burst[0]!.createdAt);
-      const isToday =
-        burstDay.getFullYear() === today.getFullYear() &&
-        burstDay.getMonth() === today.getMonth() &&
-        burstDay.getDate() === today.getDate();
+      const isToday = isSameZonedLogicalDay(burstDay, today, timeZone);
 
       if (!isToday) {
         block += dateHeader;
@@ -293,7 +290,7 @@ export async function buildAwarenessBlock(
             : msg.characterId
               ? (characterNames.get(msg.characterId) ?? "Unknown")
               : "Unknown";
-        const line = `[${fmtTime(msg.createdAt)}] ${senderName}: ${msg.content}\n`;
+        const line = `[${fmtTime(msg.createdAt, timeZone)}] ${senderName}: ${msg.content}\n`;
 
         if (charCount + line.length > maxChars) break;
         block += line;

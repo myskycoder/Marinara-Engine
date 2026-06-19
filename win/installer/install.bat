@@ -11,14 +11,14 @@ set "NODE_DOWNLOAD_URL=https://nodejs.org/dist/v24.15.0/node-v24.15.0-x64.msi"
 set "NODE_SHA256=feffb8e5cb5ac47f793666636d496ef3e975be82c84c4da5d20e6aa8fa4eb806"
 set "GIT_DOWNLOAD_URL=https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/Git-2.54.0-64-bit.exe"
 set "GIT_SHA256=2b96e7854f0520f0f6b709c21041d9801b1be44d5e1a0d9fa621b2fbc40f1983"
-set "RELEASE_TAG=v1.6.0"
+set "RELEASE_TAG=v2.0.0"
 if not defined MARINARA_RELEASE_COMMIT set "MARINARA_RELEASE_COMMIT="
 set "RELEASE_COMMIT=%MARINARA_RELEASE_COMMIT%"
 
 echo.
 echo  +==========================================+
 echo  ^|   Marinara Engine - Windows Installer     ^|
-echo  ^|   v1.6.0                                  ^|
+echo  ^|   v2.0.0                                  ^|
 
 echo  +==========================================+
 echo.
@@ -28,22 +28,41 @@ echo  [OK] Installer started successfully
 echo.
 
 :: -- Choose install location --
-set "INSTALL_DIR=%USERPROFILE%\Marinara-Engine"
+set "DEFAULT_INSTALL_DIR=%LOCALAPPDATA%\Marinara-Engine"
+set "LEGACY_LOCALAPPDATA_INSTALL_DIR=%LOCALAPPDATA%\MarinaraEngine"
+set "LEGACY_PROFILE_INSTALL_DIR=%USERPROFILE%\Marinara-Engine"
+set "INSTALL_DIR=%DEFAULT_INSTALL_DIR%"
+call :has_marinara_user_data "%DEFAULT_INSTALL_DIR%"
+if errorlevel 1 (
+    call :has_marinara_user_data "%LEGACY_LOCALAPPDATA_INSTALL_DIR%"
+    if not errorlevel 1 (
+        set "INSTALL_DIR=%LEGACY_LOCALAPPDATA_INSTALL_DIR%"
+    ) else (
+        call :has_marinara_user_data "%LEGACY_PROFILE_INSTALL_DIR%"
+        if not errorlevel 1 set "INSTALL_DIR=%LEGACY_PROFILE_INSTALL_DIR%"
+    )
+)
 set "USER_INPUT="
 set /p "USER_INPUT=  Install location [%INSTALL_DIR%]: "
 if not "%USER_INPUT%"=="" set "INSTALL_DIR=%USER_INPUT%"
-if exist "%INSTALL_DIR%\data\" goto :warn_same_install_dir
-if exist "%INSTALL_DIR%\.git\" goto :warn_same_install_dir
-if exist "%INSTALL_DIR%\start.bat" goto :warn_same_install_dir
+call :is_existing_marinara_install "%INSTALL_DIR%"
+if not errorlevel 1 goto :warn_same_install_dir
 goto :after_same_install_dir_warning
 
 :warn_same_install_dir
 echo.
-echo  [WARN] yo this'll delete your user data
-echo         You are reinstalling Marinara Engine into:
+echo  [WARN] You are reinstalling Marinara Engine into:
 echo         %INSTALL_DIR%
 echo.
-echo         Back up %INSTALL_DIR%\data first if you want to keep it.
+echo         Before continuing, copy the Marinara data folder(s) below to
+echo         a backup location outside this install folder if you want to
+echo         keep chats, characters, images, and settings:
+if exist "%INSTALL_DIR%\packages\server\data\" echo           %INSTALL_DIR%\packages\server\data
+if exist "%INSTALL_DIR%\data\" echo           %INSTALL_DIR%\data
+if not exist "%INSTALL_DIR%\packages\server\data\" if not exist "%INSTALL_DIR%\data\" echo           %INSTALL_DIR%\packages\server\data ^(if you have existing data^)
+echo.
+echo         If a data folder contains marinara-engine.db, copy it together
+echo         with marinara-engine.db-wal and marinara-engine.db-shm if present.
 echo.
 choice /C YN /N /M "  Continue anyway? [Y/N]: "
 if errorlevel 2 (
@@ -237,6 +256,21 @@ if defined RELEASE_COMMIT if /I not "!TARGET_HEAD!"=="%RELEASE_COMMIT%" (
     echo  [WARN] Release %RELEASE_TAG% resolved to !TARGET_HEAD!, not the installer-expected %RELEASE_COMMIT%.
     echo         Continuing with the fetched release tag because hotfix tags may move.
 )
+git cat-file -e "!TARGET_HEAD!" >nul 2>&1
+if errorlevel 1 (
+    echo  [..] Release commit is missing locally, fetching main history...
+    git fetch --quiet --force origin "+refs/heads/main:refs/remotes/origin/main"
+    git cat-file -e "!TARGET_HEAD!" >nul 2>&1
+    if errorlevel 1 (
+        echo  [..] Fetching the release commit directly...
+        git fetch --quiet --force origin "!TARGET_HEAD!"
+    )
+    git cat-file -e "!TARGET_HEAD!" >nul 2>&1
+    if errorlevel 1 (
+        set "INSTALL_ERROR=Fetched release %RELEASE_TAG%, but the target commit was not available locally."
+        goto :fatal
+    )
+)
 if /I "!OLD_HEAD!"=="!TARGET_HEAD!" (
     echo  [OK] Repository already up to date
     goto :deps
@@ -254,7 +288,7 @@ if "!DIRTY!"=="1" (
     if "!STASHED!"=="1" for /f "tokens=*" %%i in ('git stash list -1 --format^=%%gd 2^>nul') do set "STASH_REF=%%i"
 )
 
-git checkout --detach "!TARGET_HEAD!"
+git checkout "!TARGET_HEAD!"
 if errorlevel 1 (
     if "!STASHED!"=="1" call :restore_stashed_changes
     set "INSTALL_ERROR=Failed to check out release %RELEASE_TAG%."
@@ -341,6 +375,19 @@ if /I "%PNPM_RUNNER%"=="corepack" (
     call pnpm %*
 )
 exit /b %errorlevel%
+
+:has_marinara_user_data
+set "CHECK_DIR=%~1"
+if exist "%CHECK_DIR%\packages\server\data\" exit /b 0
+if exist "%CHECK_DIR%\data\" exit /b 0
+exit /b 1
+
+:is_existing_marinara_install
+set "CHECK_DIR=%~1"
+call :has_marinara_user_data "%CHECK_DIR%"
+if not errorlevel 1 exit /b 0
+if exist "%CHECK_DIR%\package.json" if exist "%CHECK_DIR%\packages\server\package.json" if exist "%CHECK_DIR%\start.bat" exit /b 0
+exit /b 1
 
 :verify_file_hash
 set "HASH_PATH=%~1"

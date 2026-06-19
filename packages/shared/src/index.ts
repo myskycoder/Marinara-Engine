@@ -24,6 +24,9 @@ export * from "./types/chat-preset.js";
 export * from "./types/game.js";
 export * from "./types/sidecar.js";
 export * from "./types/image-generation-defaults.js";
+export * from "./types/image-style-profile.js";
+export * from "./types/professor-mari-workspace.js";
+export * from "./types/achievement.js";
 
 // Schemas
 export * from "./schemas/chat.schema.js";
@@ -43,17 +46,29 @@ export * from "./schemas/app-settings.schema.js";
 export * from "./constants/providers.js";
 export * from "./constants/defaults.js";
 export * from "./constants/chat-modes.js";
+export * from "./constants/chat-mode-capabilities.js";
 export * from "./constants/model-lists.js"; // also exports IMAGE_GENERATION_SOURCES
 export * from "./constants/agent-prompts.js";
+export * from "./constants/agent-activation.js";
 export * from "./constants/impersonate.js";
 export * from "./constants/image-generation-defaults.js";
+export * from "./constants/image-style-profiles.js";
 export * from "./constants/image-model-families.js";
 export * from "./constants/security.js";
 export * from "./constants/game-assets.js";
 export * from "./constants/gallery-illustration-styles.js";
+export * from "./constants/conversation-prompt.js";
+export * from "./constants/game-prompt.js";
+export * from "./constants/achievements.js";
 
 // Game helpers
 export * from "./game/cg-frequency.js";
+
+// Feature registries
+export * from "./features/agents/agent-manifest.types.js";
+export * from "./features/agents/agent-registry.js";
+export * from "./features/function-calls/tool-definitions.js";
+export * from "./features/folder-packages/manifest-package.js";
 
 // Utils
 export * from "./utils/macro-engine.js";
@@ -68,4 +83,10 @@ export * from "./utils/generation-guide.js";
 export * from "./utils/lorebook-keyword-matching.js";
 export * from "./utils/regex-safety.js";
 export * from "./utils/game-state-text.js";
+export * from "./utils/custom-tracker-fields.js";
+export * from "./utils/tracker-field-locks.js";
 export * from "./utils/chat-summary-entries.js";
+export * from "./utils/quest-state.js";
+export * from "./utils/quote-format.js";
+export * from "./utils/image-prompt-compiler.js";
+export * from "./utils/thinking-tags.js";

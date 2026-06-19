@@ -2,7 +2,9 @@
 // Chat & Message Types
 // ──────────────────────────────────────────────
 
+import type { MariWorkspaceTraceItem } from "./professor-mari-workspace.js";
 import type { GenerationGuideSource } from "../utils/generation-guide.js";
+import type { HapticFeedbackSensitivity } from "./haptic.js";
 
 /** The four primary chat modes the engine supports. */
 export type ChatMode = "conversation" | "roleplay" | "visual_novel" | "game";
@@ -12,6 +14,34 @@ export type GroupChatMode = "merged" | "individual";
 
 /** How individual-mode group chats decide response order. */
 export type GroupResponseOrder = "sequential" | "smart" | "manual";
+
+/** Spotify source constraints used by Spotify DJ. */
+export type SpotifySourceType = "liked" | "playlist" | "artist" | "any";
+
+export interface KnowledgeAgentSourceSettings {
+  /** When true/omitted, this agent uses the chat's active lorebooks unless fixed sources are selected. */
+  useChatActiveLorebooks?: boolean;
+  /** Fixed lorebook IDs this agent should read instead of chat-active lorebooks. Empty means no fixed override. */
+  sourceLorebookIds?: string[];
+  /** Uploaded file source IDs. Used by Knowledge Retrieval only. */
+  sourceFileIds?: string[];
+}
+
+export const CONVERSATION_COMMAND_KEYS = [
+  "schedule_update",
+  "cross_post",
+  "selfie",
+  "memory",
+  "scene",
+  "music",
+  "haptic",
+  "influence",
+  "note",
+] as const;
+
+export type ConversationCommandKey = (typeof CONVERSATION_COMMAND_KEYS)[number];
+
+export type ConversationCommandToggles = Partial<Record<ConversationCommandKey, boolean>>;
 
 /** Role of a message in the conversation. */
 export type MessageRole = "user" | "assistant" | "system" | "narrator";
@@ -168,6 +198,8 @@ export interface ChatMetadata {
   summaryEntries?: ChatSummaryEntry[];
   /** Recent message count used by manual rolling summary generation and the automated summary agent. */
   summaryContextSize?: number;
+  /** User-message cadence for the automated roleplay summary updater. */
+  summaryRunInterval?: number;
   /** Chat-scoped manual summary prompt templates. Missing or empty uses the built-in default. */
   summaryPromptTemplates?: ChatSummaryPromptTemplate[];
   /** Selected manual summary prompt template ID. Null/omitted uses the built-in default. */
@@ -180,6 +212,12 @@ export interface ChatMetadata {
   agentOverrides: Record<string, boolean>;
   /** Agent IDs scoped to this chat. Non-empty = only these agents run; empty = use globally-enabled agents. */
   activeAgentIds: string[];
+  /** Per-chat selected named prompt template for each agent type. Missing/default = the agent's default prompt. */
+  agentPromptTemplateIds?: Record<string, string>;
+  /** Per-chat source overrides for knowledge agents. */
+  knowledgeAgentSources?: Partial<Record<"knowledge-retrieval" | "knowledge-router", KnowledgeAgentSourceSettings>>;
+  /** Narrative Director mode used when Push Story is armed. */
+  narrativeDirectorMode?: "natural" | "random";
   /** Explicit target lorebook for the Lorebook Keeper in this chat. Null/omitted = auto-pick. */
   lorebookKeeperTargetLorebookId?: string | null;
   /** How many assistant responses behind the latest available one Lorebook Keeper should read from. */
@@ -194,20 +232,35 @@ export interface ChatMetadata {
   groupChatMode?: GroupChatMode;
   /** Group individual mode: color dialogues with speaker tags */
   groupSpeakerColors?: boolean;
+  /** Group individual mode: prefix chat history turns with the speaker name before prompt merging. */
+  groupSpeakerNamesInHistory?: boolean;
   /** Group individual mode response order: "sequential" or "smart" (agent-decided) */
   groupResponseOrder?: GroupResponseOrder;
+  /** When true/omitted, individual group turns append a responding-character instruction to the prompt. */
+  groupTurnPromptEnabled?: boolean;
+  /** Chat members that are temporarily excluded from group prompt/generation participation. */
+  inactiveCharacterIds?: string[];
   /** Characters with visible roleplay sprites enabled for this chat. */
   spriteCharacterIds?: string[];
   /** Which sprite file families the roleplay Expression Engine may display. */
   spriteDisplayModes?: Array<"expressions" | "full-body">;
   /** Preferred sidebar / default layout side for chat sprites. */
   spritePosition?: SpriteSide;
+  /**
+   * How creator-notes card CSS is applied in this chat:
+   * "exclusive" (each character's CSS only styles their own messages) or "chat"
+   * (all card CSS styles the whole chat area). Defaults to "disabled" (off) —
+   * card styling is opt-in per chat.
+   */
+  cardCssMode?: "disabled" | "exclusive" | "chat";
   /** Display scale for roleplay Expression Engine sprites. */
   spriteScale?: number;
   /** Display opacity for roleplay Expression Engine sprites. */
   spriteOpacity?: number;
   /** Saved freeform positions for enabled roleplay sprites. */
   spritePlacements?: Record<string, SpritePlacement>;
+  /** When true, roleplay message avatars use the per-message Expression Engine sprite when one is available. */
+  expressionAvatarsEnabled?: boolean;
   /** When true, a shared group scenario replaces individual character card scenarios */
   groupScenarioOverride?: boolean;
   /** The shared scenario text used when groupScenarioOverride is enabled */
@@ -216,6 +269,14 @@ export interface ChatMetadata {
   showSecretPlotPanel?: boolean;
   /** When true, show the Injections tab in the roleplay Agents menu for cached prompt injections. */
   showInjectionsPanel?: boolean;
+  /** Prose Guardian per-chat banned words/settings applied to the rewrite prompt. */
+  proseGuardianBannedWords?: string | null;
+  /** Prose Guardian per-chat prose habits to remove. */
+  proseGuardianAvoidInstructions?: string | null;
+  /** Prose Guardian per-chat preferred style instructions. */
+  proseGuardianStyleInstructions?: string | null;
+  /** Shared Prose Guardian / Continuity Checker toggle. When true/omitted, hide the raw response until rewriting finishes. */
+  proseGuardianHoldForRewrite?: boolean;
   /** When true, tracker agents only run when the user manually triggers them (not after every generation) */
   manualTrackers?: boolean;
   /** Whether to recall memories from this chat during generation. Default: true for conversation/scenes, false for roleplay. */
@@ -241,6 +302,20 @@ export interface ChatMetadata {
   roleplayDmCommandsEnabled?: boolean;
   /** Chat-scoped Intiface Central WebSocket URL for haptic manual and auto-connect. */
   hapticIntifaceUrl?: string | null;
+  /** Roleplay haptic intensity scaling. Missing = standard. */
+  hapticSensitivity?: HapticFeedbackSensitivity;
+  /** When true, very brief accidental brushes may trigger small haptic feedback. Missing/false = only deliberate contact. */
+  hapticIncidentalContact?: boolean;
+  /** Music source constraint for Spotify DJ in roleplay and visual novel chats. */
+  spotifySourceType?: SpotifySourceType;
+  /** Spotify playlist ID used when spotifySourceType is "playlist". */
+  spotifyPlaylistId?: string | null;
+  /** Human-readable playlist name cached for prompts/display. */
+  spotifyPlaylistName?: string | null;
+  /** Spotify artist name used when spotifySourceType is "artist". */
+  spotifyArtist?: string | null;
+  /** Recent Spotify track URIs played by the roleplay/conversation Spotify DJ. */
+  spotifyRecentTracks?: string[];
   /** Durable count of autonomous messages the user has not viewed yet. */
   autonomousUnreadCount?: number;
   /** Character IDs that contributed to the current autonomous unread state. */
@@ -253,6 +328,8 @@ export interface ChatMetadata {
   conversationSchedulesEnabled?: boolean;
   /** Allow conversation characters to use hidden command tags. Default: true. */
   characterCommands?: boolean;
+  /** Per-command Conversation command enable overrides. Missing/true means enabled. */
+  conversationCommandToggles?: ConversationCommandToggles;
   /** Chat-scoped generated schedules for conversation characters. */
   characterSchedules?: Record<string, unknown>;
   /** Week start timestamp for the current generated conversation schedules. */
@@ -358,6 +435,12 @@ export interface ChatMetadata {
   gameLastIllustrationSessionNumber?: number | null;
   /** Background tag for the last rare generated scene illustration. */
   gameLastIllustrationTag?: string;
+  /** Game-mode GM instruction override. Empty/null uses the built-in default prompt. */
+  gameSystemPrompt?: string | null;
+  /** Additional game-mode generation instructions appended to the final GM format reminder. */
+  gameSpecialInstructions?: string | null;
+  /** Generic Game Mode Music DJ toggle. Legacy gameUseSpotifyMusic remains the Spotify-specific pipeline flag. */
+  gameUseMusicDj?: boolean;
   /** Extra user instructions for game scene illustration prompts. */
   gameImagePromptInstructions?: string | null;
   /** Auto VN CG frequency preset. Omitted = rare (legacy default). */
@@ -367,13 +450,15 @@ export interface ChatMetadata {
   /** When true, Game Mode uses Spotify DJ for music instead of local music assets. */
   gameUseSpotifyMusic?: boolean;
   /** Music source constraint for Spotify DJ in Game Mode. */
-  gameSpotifySourceType?: "liked" | "playlist" | "artist" | "any";
+  gameSpotifySourceType?: SpotifySourceType;
   /** Spotify playlist ID used when gameSpotifySourceType is "playlist". */
   gameSpotifyPlaylistId?: string | null;
   /** Human-readable playlist name cached for prompts/display. */
   gameSpotifyPlaylistName?: string | null;
   /** Spotify artist name used when gameSpotifySourceType is "artist". */
   gameSpotifyArtist?: string | null;
+  /** Recent Spotify track URIs played by Game Mode Spotify music. */
+  gameRecentSpotifyTracks?: string[];
   /** Run Game Lorebook Keeper after a session is concluded. */
   gameLorebookKeeperEnabled?: boolean;
   /** Chat-scoped lorebook maintained by Game Lorebook Keeper. */
@@ -406,6 +491,8 @@ export interface ChatMetadata {
    * Valid range: 0-50. Default: 10.
    */
   summaryTailMessages?: number;
+  /** When true or omitted, prior provider reasoning metadata is not replayed into future prompts. */
+  excludePastReasoning?: boolean;
 
   /** Any extra key-value data */
   [key: string]: unknown;
@@ -444,6 +531,12 @@ export interface MessageExtra {
   isConversationStart?: boolean;
   /** Model's reasoning/thinking content (if available) */
   thinking?: string | null;
+  /** Original assistant message before a post-processing rewrite, used for one-click restore. */
+  proseGuardianOriginalText?: string | null;
+  /** Timestamp for the last post-processing rewrite applied to this message. */
+  proseGuardianRewrittenAt?: string | null;
+  /** Professor Mari workspace trace shown on the home assistant transcript. */
+  mariWorkspaceTimeline?: MariWorkspaceTraceItem[] | null;
   /** Per-swipe sprite expressions from the Expression Engine agent */
   spriteExpressions?: Record<string, string> | null;
   /** Per-swipe CYOA choices from the CYOA Choices agent */
@@ -468,6 +561,8 @@ export interface MessageExtra {
    * saved with this assistant message — reused when regenerating that swipe unless refreshed.
    */
   contextInjections?: Array<{ agentType: string; agentName?: string; text: string }> | null;
+  /** Fingerprint of the compiled chat summary used when prompt caches/reasoning were stored. */
+  chatSummaryFingerprint?: string | null;
   /**
    * Hidden command-generation options needed to make swipes/regenerations replay
    * the same slash-command or guided-regenerate prompt behavior.
@@ -477,6 +572,7 @@ export interface MessageExtra {
     userMessage?: string | null;
     generationGuide?: string | null;
     generationGuideSource?: GenerationGuideSource | null;
+    narrativeDirectorMode?: "natural" | "random" | null;
     impersonatePresetId?: string | null;
     impersonateConnectionId?: string | null;
     impersonateBlockAgents?: boolean;
@@ -515,6 +611,8 @@ export interface GenerateRequest {
   regenerateMessageId: string | null;
   /** Override connection for this generation */
   connectionId: string | null;
+  /** One-shot Narrative Director mode for this generation, if the user armed Push Story. */
+  narrativeDirectorMode?: "natural" | "random" | null;
 }
 
 /** An SSE event from the generation stream. */

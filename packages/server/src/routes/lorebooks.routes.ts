@@ -13,6 +13,7 @@ import {
   createLorebookFolderSchema,
   updateLorebookFolderSchema,
   LOCAL_SIDECAR_CONNECTION_ID,
+  stripMacroComments,
   type CreateLorebookEntryInput,
   type LorebookEntryTimingState,
   type LorebookEntry,
@@ -21,10 +22,12 @@ import type { ExportEnvelope } from "@marinara-engine/shared";
 import { createLorebooksStorage } from "../services/storage/lorebooks.storage.js";
 import { createChatsStorage } from "../services/storage/chats.storage.js";
 import { createCharactersStorage } from "../services/storage/characters.storage.js";
+import { createGameStateStorage } from "../services/storage/game-state.storage.js";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { processLorebooks } from "../services/lorebook/index.js";
 import { resolveGameLorebookScopeExclusions } from "../services/lorebook/game-lorebook-scope.js";
 import { buildPromptMacroContext, resolveMacrosWithVariableSnapshot } from "../services/prompt/index.js";
+import { parseGameStateRow, resolveVisibleGameStateAnchor } from "./generate/generate-route-utils.js";
 import {
   syncCharacterBookFromLorebook,
   clearCharacterEmbeddedLorebook,
@@ -44,6 +47,10 @@ function toSafeExportName(name: string, fallback: string) {
     .replace(/\s+/g, " ")
     .trim();
   return sanitized || fallback;
+}
+
+function cardPromptText(value: unknown): string {
+  return typeof value === "string" ? stripMacroComments(value).trim() : "";
 }
 
 type ExportFormat = "native" | "compatible";
@@ -645,6 +652,23 @@ export async function lorebooksRoutes(app: FastifyInstance) {
       content: typeof m.content === "string" ? m.content : "",
     }));
     const lastInput = [...scanMessages].reverse().find((message) => message.role === "user")?.content;
+    const gameStateForScan =
+      chat?.mode === "game"
+        ? await (async () => {
+            try {
+              const visibleAnchor = resolveVisibleGameStateAnchor(chatMessages);
+              const row = await createGameStateStorage(app.db).getForGeneration(chatId, {
+                preferLatestVisible: true,
+                visibleAnchor,
+              });
+              return row
+                ? (parseGameStateRow(row as Record<string, unknown>) as unknown as Record<string, unknown>)
+                : null;
+            } catch {
+              return null;
+            }
+          })()
+        : null;
 
     const lorebookMacroResolvers = await (async () => {
       try {
@@ -656,12 +680,12 @@ export async function lorebooksRoutes(app: FastifyInstance) {
           const persona = await charactersStorage.getPersona(personaId);
           if (persona) {
             personaName = persona.name || personaName;
-            personaDescription = persona.description ?? "";
+            personaDescription = cardPromptText(persona.description);
             personaFields = {
-              personality: persona.personality ?? "",
-              scenario: persona.scenario ?? "",
-              backstory: persona.backstory ?? "",
-              appearance: persona.appearance ?? "",
+              personality: cardPromptText(persona.personality),
+              scenario: cardPromptText(persona.scenario),
+              backstory: cardPromptText(persona.backstory),
+              appearance: cardPromptText(persona.appearance),
             };
           }
         }
@@ -683,7 +707,7 @@ export async function lorebooksRoutes(app: FastifyInstance) {
       }
     })();
 
-    const result = await processLorebooks(app.db, scanMessages, null, {
+    const result = await processLorebooks(app.db, scanMessages, gameStateForScan, {
       chatId,
       characterIds,
       personaId,
@@ -757,6 +781,10 @@ export async function lorebooksRoutes(app: FastifyInstance) {
 
     const allEntries = await storage.listEntries(req.params.id);
     if (!allEntries.length) return { vectorized: 0, total: 0, skipped: 0 };
+    const lorebook = (await storage.getById(req.params.id)) as Record<string, unknown> | null;
+    if (lorebook?.excludeFromVectorization === true) {
+      return { vectorized: 0, total: allEntries.length, skipped: allEntries.length };
+    }
     const vectorizableEntries = allEntries.filter(
       (entry) => !(entry as Record<string, unknown>).excludeFromVectorization,
     );

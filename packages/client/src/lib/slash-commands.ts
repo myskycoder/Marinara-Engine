@@ -118,6 +118,8 @@ function buildMacroHelpText(): string {
   return [
     "Supported Macros:",
     "Tip: In group chats, a bracketed block containing character macros like {{char}} and {{description}} repeats once per character.",
+    'Conditional blocks: {{#if character == "Dottore"}}Dottore prompt{{else}}Fallback prompt{{/if}}',
+    "Conditionals support char, character, speaker, user, preset variables, ==, !=, contains, and straight or typographic quotes.",
     ...Array.from(sections.entries()).flatMap(([category, lines], index) =>
       index === 0 ? ["", `${category}:`, ...lines] : ["", `${category}:`, ...lines],
     ),
@@ -140,9 +142,10 @@ function parseImpersonatePromptArg(args: string): string {
   if (!prompt) return "";
 
   const quote = prompt[0];
-  if (quote === '"' || quote === "'") {
+  const closeQuote = quote === "\u201c" ? "\u201d" : quote === "\u2018" ? "\u2019" : quote;
+  if (quote === '"' || quote === "'" || quote === "\u201c" || quote === "\u2018") {
     prompt = prompt.slice(1);
-    if (prompt.endsWith(quote)) {
+    if (prompt.endsWith(closeQuote)) {
       prompt = prompt.slice(0, -1);
     }
   }
@@ -152,23 +155,25 @@ function parseImpersonatePromptArg(args: string): string {
 
 function parseNamedArgs(input: string): Record<string, string> {
   const values: Record<string, string> = {};
-  const argPattern = /([A-Za-z][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s]+))/g;
+  const argPattern =
+    /([A-Za-z][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|\u201c([^\u201d]*)\u201d|\u2018([^\u2019]*)\u2019|([^\s]+))/g;
   let match: RegExpExecArray | null;
   while ((match = argPattern.exec(input))) {
-    values[match[1]!.toLowerCase()] = (match[2] ?? match[3] ?? match[4] ?? "").trim();
+    values[match[1]!.toLowerCase()] = (match[2] ?? match[3] ?? match[4] ?? match[5] ?? match[6] ?? "").trim();
   }
   return values;
 }
 
 function parseCommandTokens(input: string): Array<{ value: string; quoted: boolean }> {
   const tokens: Array<{ value: string; quoted: boolean }> = [];
-  const tokenPattern = /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|(\S+)/g;
+  const tokenPattern =
+    /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|\u201c([^\u201d\\]*(?:\\.[^\u201d\\]*)*)\u201d|\u2018([^\u2019\\]*(?:\\.[^\u2019\\]*)*)\u2019|(\S+)/g;
   let match: RegExpExecArray | null;
   while ((match = tokenPattern.exec(input))) {
-    const quoted = match[1] !== undefined || match[2] !== undefined;
-    const raw = (match[1] ?? match[2] ?? match[3] ?? "").trim();
+    const quoted = match[1] !== undefined || match[2] !== undefined || match[3] !== undefined || match[4] !== undefined;
+    const raw = (match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5] ?? "").trim();
     if (!raw) continue;
-    tokens.push({ value: raw.replace(/\\(["'\\])/g, "$1"), quoted });
+    tokens.push({ value: raw.replace(/\\(["'\u201c\u201d\u2018\u2019\\])/g, "$1"), quoted });
   }
   return tokens;
 }

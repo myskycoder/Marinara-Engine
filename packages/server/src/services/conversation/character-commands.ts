@@ -12,6 +12,7 @@
 // - [memory: target="CharName", summary="description of the memory"]
 // - [scene: scenario="...", background="...", plan="..."] (initiate a mini-roleplay scene)
 // - [spotify: title="Song title", artist="Artist"] (play a song on the user's active Spotify player)
+// - [youtube: query="Song title Artist"] (play a song on the user's active YouTube player)
 // - [haptic: action="vibrate", intensity=0.5, duration=3] (haptic device feedback)
 // - <influence>text</influence> (OOC influence for connected roleplay, one-shot)
 // - <note>text</note> (durable note for connected roleplay, persists until cleared)
@@ -24,6 +25,7 @@
 // - [update_persona: name="...", description="...", personality="...", appearance="...", scenario="...", backstory="..."]
 // - <create_lorebook>{"name":"...","description":"...","category":"...","tags":["..."],"entries":[{"name":"...","content":"...","keys":["..."],"tag":"..."}]}</create_lorebook>
 // - <update_lorebook>{"name":"Existing","description":"...","entries":[{"name":"Entry","content":"refined content","keys":["..."]}]}</update_lorebook>
+// - <create_preset>{"name":"...","description":"...","sections":[{"name":"...","content":"...","role":"system"}],"choiceBlocks":[{"variableName":"...","question":"...","options":[{"label":"...","value":"..."}]}]}</create_preset>
 // - [create_chat: character="...", mode="conversation|roleplay"]
 // - [navigate: panel="...", tab="..."]
 // - [fetch: type="character|persona|lorebook|chat|preset", name="..."]
@@ -85,6 +87,11 @@ export interface DirectMessageCommand {
   character: string;
   /** Text the character sends in the generated conversation DM */
   message: string;
+  /** Original command text, used to strip or visible-fallback individual commands. */
+  raw?: string;
+  /** Resolved by the generation route once the target is verified as a real character card. */
+  resolvedCharacterId?: string;
+  resolvedCharacterName?: string;
 }
 
 export interface HapticCommand {
@@ -103,6 +110,12 @@ export interface SpotifyCommand {
   title: string;
   /** Artist name to disambiguate the track */
   artist: string;
+}
+
+export interface YouTubeCommand {
+  type: "youtube";
+  /** YouTube search query to resolve on the client player */
+  query: string;
 }
 
 // ── Assistant commands (Professor Mari) ──
@@ -212,6 +225,52 @@ export interface UpdateLorebookCommand {
   entries?: UpdateLorebookEntryCommand[];
 }
 
+export interface CreatePresetSectionCommand {
+  name: string;
+  content?: string;
+  identifier?: string;
+  role?: "system" | "user" | "assistant";
+  enabled?: boolean;
+  groupName?: string;
+  injectionPosition?: "ordered" | "depth";
+  injectionDepth?: number;
+  injectionOrder?: number;
+  forbidOverrides?: boolean;
+}
+
+export interface CreatePresetGroupCommand {
+  name: string;
+  parentGroupName?: string;
+  order?: number;
+  enabled?: boolean;
+}
+
+export interface CreatePresetChoiceOptionCommand {
+  id?: string;
+  label: string;
+  value: string;
+}
+
+export interface CreatePresetChoiceBlockCommand {
+  variableName: string;
+  question: string;
+  options: CreatePresetChoiceOptionCommand[];
+  multiSelect?: boolean;
+  separator?: string;
+  randomPick?: boolean;
+}
+
+export interface CreatePresetCommand {
+  type: "create_preset";
+  name: string;
+  description?: string;
+  wrapFormat?: "xml" | "markdown" | "none";
+  author?: string;
+  groups?: CreatePresetGroupCommand[];
+  sections?: CreatePresetSectionCommand[];
+  choiceBlocks?: CreatePresetChoiceBlockCommand[];
+}
+
 export interface CreateChatCommand {
   type: "create_chat";
   character: string;
@@ -239,6 +298,7 @@ export type AssistantCommand =
   | UpdatePersonaCommand
   | CreateLorebookCommand
   | UpdateLorebookCommand
+  | CreatePresetCommand
   | CreateChatCommand
   | NavigateCommand
   | FetchCommand;
@@ -254,6 +314,7 @@ export type CharacterCommand =
   | DirectMessageCommand
   | HapticCommand
   | SpotifyCommand
+  | YouTubeCommand
   | AssistantCommand;
 
 // Param block matcher: any char that isn't `"` or `]`, OR a complete
@@ -272,6 +333,7 @@ const MEMORY_RE = /\[memory:\s*target="([^"]+)"\s*,\s*summary="([^"]+)"\]/gi;
 const SCENE_RE = new RegExp(`\\[scene:\\s*(${QUOTED_PARAM_BLOCK})\\]`, "gi");
 const HAPTIC_RE = new RegExp(`\\[haptic:\\s*(${QUOTED_PARAM_BLOCK})\\]`, "gi");
 const SPOTIFY_RE = new RegExp(`\\[spotify:\\s*(${QUOTED_PARAM_BLOCK})\\]`, "gi");
+const YOUTUBE_RE = new RegExp(`\\[youtube:\\s*(${QUOTED_PARAM_BLOCK})\\]`, "gi");
 const DIRECT_MESSAGE_RE = new RegExp(`\\[dm:\\s*(${QUOTED_PARAM_BLOCK})\\]`, "gi");
 const INFLUENCE_RE = /<influence>([\s\S]*?)<\/influence>/gi;
 const NOTE_RE = /<note>([\s\S]*?)<\/note>/gi;
@@ -284,6 +346,7 @@ const UPDATE_PERSONA_RE = new RegExp(`\\[update_persona:\\s*(${QUOTED_PARAM_BLOC
 const CREATE_LOREBOOK_RE = new RegExp(`\\[create_lorebook:\\s*(${QUOTED_PARAM_BLOCK})\\]`, "gi");
 const CREATE_LOREBOOK_BLOCK_RE = /<create_lorebook>([\s\S]*?)<\/create_lorebook>/gi;
 const UPDATE_LOREBOOK_BLOCK_RE = /<update_lorebook>([\s\S]*?)<\/update_lorebook>/gi;
+const CREATE_PRESET_BLOCK_RE = /<create_preset>([\s\S]*?)<\/create_preset>/gi;
 const CREATE_CHAT_RE = new RegExp(`\\[create_chat:\\s*(${QUOTED_PARAM_BLOCK})\\]`, "gi");
 const NAVIGATE_RE = new RegExp(`\\[navigate:\\s*(${QUOTED_PARAM_BLOCK})\\]`, "gi");
 const FETCH_RE = new RegExp(`\\[fetch:\\s*(${QUOTED_PARAM_BLOCK})\\]`, "gi");
@@ -451,18 +514,45 @@ function parseUpdateLorebookBlock(raw: string): UpdateLorebookCommand | null {
       .map((entry): UpdateLorebookEntryCommand | null => {
         if (!entry || typeof entry !== "object") return null;
         const data = entry as Record<string, unknown>;
-        const entryName = typeof data.name === "string" ? data.name.trim() : "";
+        const nestedEntry = data.entry && typeof data.entry === "object" ? (data.entry as Record<string, unknown>) : {};
+        const entryName =
+          typeof data.name === "string"
+            ? data.name.trim()
+            : typeof nestedEntry.name === "string"
+              ? nestedEntry.name.trim()
+              : "";
         if (!entryName) return null;
         return {
           name: entryName,
           matchName: typeof data.matchName === "string" ? data.matchName.trim() : undefined,
-          content: typeof data.content === "string" ? data.content : undefined,
-          description: typeof data.description === "string" ? data.description : undefined,
-          keys: parseUnknownStringList(data.keys),
-          secondaryKeys: parseUnknownStringList(data.secondaryKeys),
-          tag: typeof data.tag === "string" ? data.tag : undefined,
-          constant: typeof data.constant === "boolean" ? data.constant : undefined,
-          selective: typeof data.selective === "boolean" ? data.selective : undefined,
+          content:
+            typeof data.content === "string"
+              ? data.content
+              : typeof nestedEntry.content === "string"
+                ? nestedEntry.content
+                : undefined,
+          description:
+            typeof data.description === "string"
+              ? data.description
+              : typeof nestedEntry.description === "string"
+                ? nestedEntry.description
+                : undefined,
+          keys: parseUnknownStringList(data.keys ?? nestedEntry.keys),
+          secondaryKeys: parseUnknownStringList(data.secondaryKeys ?? nestedEntry.secondaryKeys),
+          tag:
+            typeof data.tag === "string" ? data.tag : typeof nestedEntry.tag === "string" ? nestedEntry.tag : undefined,
+          constant:
+            typeof data.constant === "boolean"
+              ? data.constant
+              : typeof nestedEntry.constant === "boolean"
+                ? nestedEntry.constant
+                : undefined,
+          selective:
+            typeof data.selective === "boolean"
+              ? data.selective
+              : typeof nestedEntry.selective === "boolean"
+                ? nestedEntry.selective
+                : undefined,
         } satisfies UpdateLorebookEntryCommand;
       })
       .filter((entry): entry is UpdateLorebookEntryCommand => entry !== null);
@@ -475,6 +565,140 @@ function parseUpdateLorebookBlock(raw: string): UpdateLorebookCommand | null {
       category: typeof parsed.category === "string" ? parsed.category : undefined,
       tags: parseUnknownStringList(parsed.tags),
       entries: entries.length ? entries : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parsePresetRole(raw: unknown): CreatePresetSectionCommand["role"] | undefined {
+  if (raw !== "system" && raw !== "user" && raw !== "assistant") return undefined;
+  return raw;
+}
+
+function parsePresetWrapFormat(raw: unknown): CreatePresetCommand["wrapFormat"] | undefined {
+  if (raw !== "xml" && raw !== "markdown" && raw !== "none") return undefined;
+  return raw;
+}
+
+function parsePresetInjectionPosition(raw: unknown): CreatePresetSectionCommand["injectionPosition"] | undefined {
+  if (raw !== "ordered" && raw !== "depth") return undefined;
+  return raw;
+}
+
+function parseOptionalInteger(raw: unknown): number | undefined {
+  if (typeof raw !== "number") return undefined;
+  if (!Number.isSafeInteger(raw)) return undefined;
+  if (raw < 0) return undefined;
+  return raw;
+}
+
+function parseCreatePresetBlock(raw: string): CreatePresetCommand | null {
+  try {
+    const parsed = JSON.parse(stripJsonFence(raw)) as Record<string, unknown>;
+    const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
+    if (!name) return null;
+
+    const rawGroups = Array.isArray(parsed.groups) ? parsed.groups : [];
+    const groups = rawGroups
+      .map((group): CreatePresetGroupCommand | null => {
+        if (!group || typeof group !== "object") return null;
+        const data = group as Record<string, unknown>;
+        const groupName = typeof data.name === "string" ? data.name.trim() : "";
+        if (!groupName) return null;
+        return {
+          name: groupName,
+          parentGroupName: typeof data.parentGroupName === "string" ? data.parentGroupName.trim() : undefined,
+          order: parseOptionalInteger(data.order),
+          enabled: typeof data.enabled === "boolean" ? data.enabled : undefined,
+        };
+      })
+      .filter((group): group is CreatePresetGroupCommand => group !== null);
+
+    const rawSections = Array.isArray(parsed.sections) ? parsed.sections : [];
+    const sections = rawSections
+      .map((section): CreatePresetSectionCommand | null => {
+        if (!section || typeof section !== "object") return null;
+        const data = section as Record<string, unknown>;
+        const sectionName = typeof data.name === "string" ? data.name.trim() : "";
+        if (!sectionName) return null;
+        return {
+          name: sectionName,
+          content: typeof data.content === "string" ? data.content : "",
+          identifier: typeof data.identifier === "string" ? data.identifier.trim() : undefined,
+          role: parsePresetRole(data.role),
+          enabled: typeof data.enabled === "boolean" ? data.enabled : undefined,
+          groupName:
+            typeof data.groupName === "string"
+              ? data.groupName.trim()
+              : typeof data.group === "string"
+                ? data.group.trim()
+                : undefined,
+          injectionPosition: parsePresetInjectionPosition(data.injectionPosition),
+          injectionDepth: parseOptionalInteger(data.injectionDepth),
+          injectionOrder: parseOptionalInteger(data.injectionOrder),
+          forbidOverrides: typeof data.forbidOverrides === "boolean" ? data.forbidOverrides : undefined,
+        } satisfies CreatePresetSectionCommand;
+      })
+      .filter((section): section is CreatePresetSectionCommand => section !== null);
+
+    const rawChoiceBlocks = Array.isArray(parsed.choiceBlocks)
+      ? parsed.choiceBlocks
+      : Array.isArray(parsed.choices)
+        ? parsed.choices
+        : [];
+    const choiceBlocks = rawChoiceBlocks
+      .map((choiceBlock): CreatePresetChoiceBlockCommand | null => {
+        if (!choiceBlock || typeof choiceBlock !== "object") return null;
+        const data = choiceBlock as Record<string, unknown>;
+        const variableName = typeof data.variableName === "string" ? data.variableName.trim() : "";
+        const question = typeof data.question === "string" ? data.question.trim() : "";
+        const rawOptions = Array.isArray(data.options) ? data.options : [];
+        const options = rawOptions
+          .map((option): CreatePresetChoiceOptionCommand | null => {
+            if (!option || typeof option !== "object") return null;
+            const optionData = option as Record<string, unknown>;
+            const label =
+              typeof optionData.label === "string"
+                ? optionData.label.trim()
+                : typeof optionData.value === "string"
+                  ? optionData.value.trim()
+                  : "";
+            const value =
+              typeof optionData.value === "string"
+                ? optionData.value
+                : typeof optionData.label === "string"
+                  ? optionData.label
+                  : "";
+            if (!label || !value) return null;
+            return {
+              id: typeof optionData.id === "string" ? optionData.id.trim() : undefined,
+              label,
+              value,
+            };
+          })
+          .filter((option): option is CreatePresetChoiceOptionCommand => option !== null);
+        if (!variableName || !question || options.length === 0) return null;
+        return {
+          variableName,
+          question,
+          options,
+          multiSelect: typeof data.multiSelect === "boolean" ? data.multiSelect : undefined,
+          separator: typeof data.separator === "string" ? data.separator : undefined,
+          randomPick: typeof data.randomPick === "boolean" ? data.randomPick : undefined,
+        };
+      })
+      .filter((choiceBlock): choiceBlock is CreatePresetChoiceBlockCommand => choiceBlock !== null);
+
+    return {
+      type: "create_preset",
+      name,
+      description: typeof parsed.description === "string" ? parsed.description : undefined,
+      wrapFormat: parsePresetWrapFormat(parsed.wrapFormat),
+      author: typeof parsed.author === "string" ? parsed.author : undefined,
+      groups: groups.length ? groups : undefined,
+      sections: sections.length ? sections : undefined,
+      choiceBlocks: choiceBlocks.length ? choiceBlocks : undefined,
     };
   } catch {
     return null;
@@ -655,6 +879,17 @@ export function parseCharacterCommands(content: string): {
     }
   }
 
+  // Parse YouTube song commands
+  for (const match of content.matchAll(YOUTUBE_RE)) {
+    const params = match[1]!;
+    const query =
+      parseQuotedParam(params, "query") ??
+      [parseQuotedParam(params, "title"), parseQuotedParam(params, "artist")].filter(Boolean).join(" ");
+    if (query) {
+      commands.push({ type: "youtube", query });
+    }
+  }
+
   // Parse assistant commands (Professor Mari)
   for (const match of content.matchAll(CREATE_PERSONA_RE)) {
     const params = match[1]!;
@@ -713,6 +948,11 @@ export function parseCharacterCommands(content: string): {
 
   for (const match of content.matchAll(UPDATE_LOREBOOK_BLOCK_RE)) {
     const cmd = parseUpdateLorebookBlock(match[1] ?? "");
+    if (cmd) commands.push(cmd);
+  }
+
+  for (const match of content.matchAll(CREATE_PRESET_BLOCK_RE)) {
+    const cmd = parseCreatePresetBlock(match[1] ?? "");
     if (cmd) commands.push(cmd);
   }
 
@@ -777,6 +1017,7 @@ export function parseCharacterCommands(content: string): {
     .replace(SCENE_RE, "")
     .replace(HAPTIC_RE, "")
     .replace(SPOTIFY_RE, "")
+    .replace(YOUTUBE_RE, "")
     .replace(INFLUENCE_RE, "")
     .replace(NOTE_RE, "")
     .replace(CREATE_PERSONA_RE, "")
@@ -785,6 +1026,7 @@ export function parseCharacterCommands(content: string): {
     .replace(UPDATE_PERSONA_RE, "")
     .replace(CREATE_LOREBOOK_BLOCK_RE, "")
     .replace(UPDATE_LOREBOOK_BLOCK_RE, "")
+    .replace(CREATE_PRESET_BLOCK_RE, "")
     .replace(CREATE_LOREBOOK_RE, "")
     .replace(CREATE_CHAT_RE, "")
     .replace(NAVIGATE_RE, "")
@@ -808,7 +1050,7 @@ export function parseDirectMessageCommands(content: string): {
     const message = parseQuotedParam(params, "message");
     const cleanMessage = message ? stripConversationPromptTimestamps(message.trim()) : "";
     if (character && cleanMessage) {
-      commands.push({ type: "dm", character, message: cleanMessage });
+      commands.push({ type: "dm", character, message: cleanMessage, raw: match[0] });
     }
   }
 

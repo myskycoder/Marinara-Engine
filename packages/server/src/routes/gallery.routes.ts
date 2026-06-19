@@ -10,9 +10,24 @@ import { createGalleryStorage } from "../services/storage/gallery.storage.js";
 import { createChatsStorage } from "../services/storage/chats.storage.js";
 import { newId } from "../utils/id-generator.js";
 import { DATA_DIR } from "../utils/data-dir.js";
+import { assertInsideDir } from "../utils/security.js";
+import { logger } from "../lib/logger.js";
 
 const GALLERY_DIR = join(DATA_DIR, "gallery");
 const ALLOWED_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"]);
+
+// Reject any chatId segment that could escape GALLERY_DIR (traversal, absolute
+// path separators, empty, or NUL byte). Mirrors avatars.routes.ts isValidFilename
+// but adds the empty/null-byte guards the gallery serve route omits.
+export function isValidChatId(chatId: string): boolean {
+  return (
+    chatId.length > 0 &&
+    !chatId.includes("..") &&
+    !chatId.includes("/") &&
+    !chatId.includes("\\") &&
+    !chatId.includes("\0")
+  );
+}
 
 function ensureDir(chatId: string) {
   const dir = join(GALLERY_DIR, chatId);
@@ -68,6 +83,9 @@ export async function galleryRoutes(app: FastifyInstance) {
   // Upload an image to a chat's gallery
   app.post<{ Params: { chatId: string } }>("/:chatId/upload", async (req, reply) => {
     const { chatId } = req.params;
+    if (!isValidChatId(chatId)) {
+      return reply.status(400).send({ error: "Invalid chatId" });
+    }
     const data = await req.file();
     if (!data) {
       return reply.status(400).send({ error: "No file uploaded" });
@@ -80,7 +98,12 @@ export async function galleryRoutes(app: FastifyInstance) {
 
     const dir = ensureDir(chatId);
     const filename = `${newId()}${ext}`;
-    const filePath = join(dir, filename);
+    let filePath: string;
+    try {
+      filePath = assertInsideDir(GALLERY_DIR, join(dir, filename));
+    } catch {
+      return reply.status(400).send({ error: "Invalid path" });
+    }
 
     await pipeline(data.file, createWriteStream(filePath));
 
@@ -131,10 +154,14 @@ export async function galleryRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Not found" });
     }
 
-    // Remove file from disk
-    const filePath = join(GALLERY_DIR, image.filePath);
-    if (existsSync(filePath)) {
-      unlinkSync(filePath);
+    // Remove file from disk (assertInsideDir guards a poisoned stored filePath)
+    try {
+      const filePath = assertInsideDir(GALLERY_DIR, join(GALLERY_DIR, image.filePath));
+      if (existsSync(filePath)) {
+        unlinkSync(filePath);
+      }
+    } catch (err) {
+      logger.warn(err, "Skipped gallery file unlink for %s: path escapes gallery dir", id);
     }
 
     await storage.remove(id);

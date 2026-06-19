@@ -2,7 +2,7 @@
 // LLM Provider — Abstract Base
 // ──────────────────────────────────────────────
 import { logger } from "../../lib/logger.js";
-import { isProviderLocalUrlsEnabled } from "../../config/runtime-config.js";
+import { getEmbeddingRequestTimeoutMs, isProviderLocalUrlsEnabled } from "../../config/runtime-config.js";
 import { requestHeadersWithIdentityEncoding, safeFetch, type SafeFetchOptions } from "../../utils/security.js";
 import { recordAiRequest, applyUsageToAuditInput } from "../ai-audit/audit-logger.js";
 
@@ -20,13 +20,12 @@ const llmAgentOptions = { bodyTimeout: 0, headersTimeout: LLM_HEADERS_TIMEOUT };
  */
 export function llmFetch(
   url: string | URL,
-  init?: RequestInit & Pick<SafeFetchOptions, "bufferResponse" | "decodeCompressedResponse">,
+  init?: RequestInit & Pick<SafeFetchOptions, "agentOptions" | "bufferResponse" | "decodeCompressedResponse">,
 ): Promise<Response> {
   const bufferResponse = init?.bufferResponse ?? false;
   return safeFetch(url, {
     ...(init ?? {}),
     headers: requestHeadersWithIdentityEncoding(init?.headers),
-    agentOptions: llmAgentOptions,
     policy: {
       allowLocal: isProviderLocalUrlsEnabled(),
       allowLoopback: true,
@@ -35,6 +34,7 @@ export function llmFetch(
       flagName: "PROVIDER_LOCAL_URLS_ENABLED",
     },
     maxResponseBytes: 50 * 1024 * 1024,
+    agentOptions: init?.agentOptions ?? llmAgentOptions,
     bufferResponse,
     decodeCompressedResponse: init?.decodeCompressedResponse ?? bufferResponse,
   });
@@ -100,9 +100,11 @@ export interface ChatOptions {
   /** Enable extended thinking (reasoning models) */
   enableThinking?: boolean;
   /** Reasoning effort level for models that support it */
-  reasoningEffort?: "low" | "medium" | "high" | "xhigh";
+  reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max";
   /** Output verbosity for GPT-5+ models */
   verbosity?: "low" | "medium" | "high";
+  /** OpenRouter-only service tier. */
+  serviceTier?: "flex" | "priority" | null;
   /** Abort signal — when triggered, the in-flight LLM request should be cancelled. */
   signal?: AbortSignal;
   /** Callback to receive the full response parts (for providers that return structured metadata like Gemini thought signatures) */
@@ -119,6 +121,8 @@ export interface ChatOptions {
   responseFormat?: { type: string; [key: string]: unknown };
   /** Raw provider request parameters merged into the outgoing request body. */
   customParameters?: Record<string, unknown>;
+  /** Do not add inferred generation/model parameters; only merge customParameters. */
+  suppressModelParameters?: boolean;
 }
 
 /** Token usage statistics returned by the model */
@@ -159,7 +163,7 @@ export interface ContextFitResult {
   trimmed: boolean;
 }
 
-type ContextFitOptions = Pick<ChatOptions, "maxContext" | "maxTokens" | "tools">;
+type ContextFitOptions = Pick<ChatOptions, "maxContext" | "maxTokens" | "tools" | "suppressModelParameters">;
 
 const CHARS_PER_TOKEN = 4;
 const MESSAGE_OVERHEAD_TOKENS = 6;
@@ -317,13 +321,13 @@ export function fitMessagesToContext(
   options: ContextFitOptions,
   defaultMaxContext?: number,
 ): ContextFitResult {
-  const requestedMaxTokens = normalizePositiveInteger(options.maxTokens);
-  const maxContext = minDefined(
-    normalizePositiveInteger(options.maxContext),
-    normalizePositiveInteger(defaultMaxContext),
-  );
+  const suppressModelParameters = options.suppressModelParameters === true;
+  const requestedMaxTokens = suppressModelParameters ? undefined : normalizePositiveInteger(options.maxTokens);
+  const maxContext = suppressModelParameters
+    ? undefined
+    : minDefined(normalizePositiveInteger(options.maxContext), normalizePositiveInteger(defaultMaxContext));
   const estimatedTokensBefore = estimateMessagesTokens(messages);
-  const toolTokens = estimateToolDefinitionTokens(options.tools);
+  const toolTokens = suppressModelParameters ? 0 : estimateToolDefinitionTokens(options.tools);
 
   if (!maxContext) {
     return {
@@ -646,6 +650,7 @@ export abstract class BaseLLMProvider {
    * should always use {@link embed} so audit logging fires.
    */
   async _doEmbed(texts: string[], model: string): Promise<number[][]> {
+    const timeoutMs = getEmbeddingRequestTimeoutMs();
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Authorization: `Bearer ${this.apiKey}`,
@@ -658,7 +663,8 @@ export abstract class BaseLLMProvider {
       method: "POST",
       headers,
       body: JSON.stringify({ input: texts, model }),
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(timeoutMs),
+      agentOptions: { bodyTimeout: 0, headersTimeout: timeoutMs },
       bufferResponse: true,
     });
     if (!res.ok) {

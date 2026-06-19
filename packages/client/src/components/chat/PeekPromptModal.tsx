@@ -21,6 +21,7 @@ interface GenerationInfo {
   showThoughts?: boolean | null;
   reasoningEffort?: string | null;
   verbosity?: string | null;
+  serviceTier?: string | null;
   assistantPrefill?: string | null;
   tokensPrompt?: number | null;
   tokensCompletion?: number | null;
@@ -34,10 +35,24 @@ interface PeekPromptModalProps {
   data: {
     messages: Array<{ role: string; content: string }>;
     parameters: unknown;
+    source?: "cached" | "live_preview" | "raw_messages";
+    exact?: boolean;
     generationInfo?: GenerationInfo | null;
     agentNote?: string;
   };
   onClose: () => void;
+}
+
+function sourceLabel(data: PeekPromptModalProps["data"]): string {
+  if (data.exact) return "Exact Text Model Request";
+  if (data.source === "live_preview") return "Live Preview";
+  if (data.source === "raw_messages") return "Raw Messages";
+  return "Prompt Preview";
+}
+
+function sourceBadgeClass(data: PeekPromptModalProps["data"]): string {
+  if (data.exact) return "border-emerald-500/30 bg-emerald-500/10 text-emerald-400";
+  return "border-amber-500/30 bg-amber-500/10 text-amber-300";
 }
 
 function prettifyTag(tag: string): string {
@@ -382,6 +397,7 @@ export function PeekPromptModal({ data, onClose }: PeekPromptModalProps) {
       if (gen.showThoughts) pills.push({ label: "Thinking", value: "On" });
       if (gen.reasoningEffort) pills.push({ label: "Reasoning", value: gen.reasoningEffort });
       if (gen.verbosity) pills.push({ label: "Verbosity", value: gen.verbosity });
+      if (gen.serviceTier) pills.push({ label: "Service Tier", value: gen.serviceTier });
       if (gen.assistantPrefill) pills.push({ label: "Assistant Prefill", value: "On" });
     } else if (params) {
       if (params.temperature != null) pills.push({ label: "Temperature", value: String(params.temperature) });
@@ -397,6 +413,7 @@ export function PeekPromptModal({ data, onClose }: PeekPromptModalProps) {
       if (params.showThoughts) pills.push({ label: "Thinking", value: "On" });
       if (params.reasoningEffort) pills.push({ label: "Reasoning", value: String(params.reasoningEffort) });
       if (params.verbosity) pills.push({ label: "Verbosity", value: String(params.verbosity) });
+      if (params.serviceTier) pills.push({ label: "Service Tier", value: String(params.serviceTier) });
       if (params.assistantPrefill) pills.push({ label: "Assistant Prefill", value: "On" });
     }
     return pills;
@@ -419,9 +436,17 @@ export function PeekPromptModal({ data, onClose }: PeekPromptModalProps) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="shrink-0 flex items-center justify-between border-b border-[var(--border)] px-5 py-3">
-          <div className="flex items-center gap-3">
-            <h3 className="text-sm font-bold">Assembled Prompt</h3>
-            <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <h3 className="shrink-0 text-sm font-bold">Assembled Prompt</h3>
+            <span
+              className={cn(
+                "shrink-0 rounded-md border px-2 py-0.5 text-[0.5625rem] font-bold uppercase tracking-wider",
+                sourceBadgeClass(data),
+              )}
+            >
+              {sourceLabel(data)}
+            </span>
+            <span className="min-w-0 text-[0.625rem] text-[var(--muted-foreground)]">
               {sections.length} section{sections.length !== 1 ? "s" : ""} &middot; ~{fmtTokens(totalTokens)} tokens
             </span>
           </div>
@@ -471,7 +496,7 @@ export function PeekPromptModal({ data, onClose }: PeekPromptModalProps) {
           )}
           {data.agentNote && (
             <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[0.6875rem] text-amber-300/80">
-              ⚠ {data.agentNote}
+              Note: {data.agentNote}
             </div>
           )}
           {sections.map((s, i) =>

@@ -11,6 +11,8 @@ import { mapSheetAttributesToRPG } from "../services/game/skill-check.service.js
 import { createLLMProvider } from "../services/llm/provider-registry.js";
 import { enterAiAuditContext } from "../services/ai-audit/audit-context.js";
 import type { ChatMessage } from "../services/llm/base-provider.js";
+import { logger, logDebugOverride } from "../lib/logger.js";
+import { stripMacroComments } from "@marinara-engine/shared";
 import type {
   EncounterInitRequest,
   EncounterActionRequest,
@@ -19,6 +21,7 @@ import type {
   CombatPartyMember,
   CombatEnemy,
   CombatPlayerActions,
+  CombatActionResult,
   EncounterLogEntry,
 } from "@marinara-engine/shared";
 
@@ -27,6 +30,10 @@ import type {
 // ──────────────────────────────────────────────
 
 const COMBAT_BLUEPRINT_OUTPUT_TOKENS = 12000;
+
+function cardPromptText(value: unknown): string {
+  return typeof value === "string" ? stripMacroComments(value).trim() : "";
+}
 
 /** Resolve a connection (handles "random" pool + baseUrl fallback). */
 async function resolveConnection(
@@ -96,6 +103,19 @@ function parseJSON(raw: string): unknown {
   throw new Error("Unbalanced JSON in AI response");
 }
 
+function fallbackActionResult(input: EncounterActionRequest): CombatActionResult {
+  return {
+    combatStats: {
+      party: input.combatStats.party,
+      enemies: input.combatStats.enemies,
+    },
+    playerActions: input.playerActions ?? { attacks: [], items: [] },
+    enemyActions: [],
+    partyActions: [],
+    narrative: "",
+  };
+}
+
 /** Build character context from the chat's character IDs. */
 async function buildCharacterContext(chars: ReturnType<typeof createCharactersStorage>, characterIds: string[]) {
   let ctx = "";
@@ -139,10 +159,14 @@ async function buildPersonaContext(chars: ReturnType<typeof createCharactersStor
     allPersonas.find((p) => p.isActive === "true");
   if (!persona) return { personaName: "User", personaCtx: "No persona information available." };
   let ctx = `Name: ${persona.name}\n`;
-  if (persona.description) ctx += `${persona.description}\n`;
-  if (persona.personality) ctx += `${persona.personality}\n`;
-  if (persona.backstory) ctx += `${persona.backstory}\n`;
-  if (persona.appearance) ctx += `${persona.appearance}\n`;
+  const description = cardPromptText(persona.description);
+  const personality = cardPromptText(persona.personality);
+  const backstory = cardPromptText(persona.backstory);
+  const appearance = cardPromptText(persona.appearance);
+  if (description) ctx += `${description}\n`;
+  if (personality) ctx += `${personality}\n`;
+  if (backstory) ctx += `${backstory}\n`;
+  if (appearance) ctx += `${appearance}\n`;
   // Surface configured persona stats (status bars + RPG attributes) so the
   // combat-init AI uses the user-defined HP instead of inventing values.
   // `personaStats` is stored as a JSON string of { enabled, bars, rpgStats? }.
@@ -518,7 +542,10 @@ export async function encounterRoutes(app: FastifyInstance) {
 
   // ───────────────────────── INIT ─────────────────────────
   app.post<{ Body: EncounterInitRequest }>("/init", async (req, reply) => {
-    const { chatId, connectionId, settings, spellbookId } = req.body;
+    const { chatId, connectionId, settings, spellbookId, debugMode } = req.body;
+    const debugLog = (message: string, ...args: unknown[]) => {
+      logDebugOverride(debugMode === true, message, ...args);
+    };
 
     if (!chatId || !settings) {
       return reply.status(400).send({ error: "Missing required fields: chatId, settings" });
@@ -564,12 +591,27 @@ export async function encounterRoutes(app: FastifyInstance) {
       }));
 
       const prompt = buildInitPrompt(personaName, personaCtx, characterCtx, recentMsgs, gameStateCtx, spellbookCtx);
+      debugLog(
+        "[debug/game/combat:init] request chatId=%s model=%s historyMessages=%d settings=%s",
+        chatId,
+        conn.model ?? "",
+        recentMsgs.length,
+        JSON.stringify(settings),
+      );
+      debugLog("[debug/game/combat:init] prompt messages:\n%s", JSON.stringify(prompt, null, 2));
 
       const result = await provider.chatComplete(prompt, {
         model: conn.model,
         temperature: 0.8,
         maxTokens: COMBAT_BLUEPRINT_OUTPUT_TOKENS,
       });
+      debugLog(
+        "[debug/game/combat:init] raw response chatId=%s model=%s chars=%d\n%s",
+        chatId,
+        conn.model ?? "",
+        result.content?.length ?? 0,
+        result.content ?? "",
+      );
 
       if (!result.content) {
         return reply.status(502).send({ error: "No response from AI" });
@@ -585,10 +627,14 @@ export async function encounterRoutes(app: FastifyInstance) {
       if (!combatState?.party || !combatState?.enemies) {
         return reply.status(502).send({ error: "Invalid combat data returned by AI" });
       }
+      debugLog("[debug/game/combat:init] parsed response:\n%s", JSON.stringify(combatState, null, 2));
+
+      await chats.patchMetadata(chatId, { encounterActive: true }, { touchUpdatedAt: false });
 
       return { combatState };
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
+      logger.warn(err, "[game/combat:init] Encounter init failed");
       return reply.status(500).send({ error: `Encounter init failed: ${message}` });
     }
   });
@@ -648,18 +694,18 @@ export async function encounterRoutes(app: FastifyInstance) {
       });
 
       if (!result.content) {
-        return reply.status(502).send({ error: "No response from AI" });
+        return { result: fallbackActionResult(req.body), invalid: true };
       }
 
       let actionResult: Record<string, unknown>;
       try {
         actionResult = parseJSON(result.content) as Record<string, unknown>;
       } catch {
-        return reply.status(502).send({ error: "AI returned invalid JSON for action result" });
+        return { result: fallbackActionResult(req.body), invalid: true };
       }
 
       if (!actionResult?.combatStats) {
-        return reply.status(502).send({ error: "Invalid action result returned by AI" });
+        return { result: fallbackActionResult(req.body), invalid: true };
       }
 
       // Validate that party/enemies are actual arrays — AI may return null, a string, or omit them
@@ -747,6 +793,8 @@ export async function encounterRoutes(app: FastifyInstance) {
         characterId: null,
         content: summary,
       });
+
+      await chats.patchMetadata(chatId, { encounterActive: false }, { touchUpdatedAt: false });
 
       return { summary, messageId: msg?.id ?? "" };
     } catch (err) {

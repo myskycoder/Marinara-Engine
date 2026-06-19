@@ -12,6 +12,7 @@ import {
   getPendingHudWidgetPersistenceSignature,
   useGameModeStore,
 } from "../stores/game-mode.store";
+import { useGameAssetStore } from "../stores/game-asset.store";
 import { useGameStateStore } from "../stores/game-state.store";
 import { useChatStore } from "../stores/chat.store";
 import { useUIStore } from "../stores/ui.store";
@@ -259,6 +260,7 @@ export function useStartSession() {
       });
     },
     onSuccess: (res, variables) => {
+      useGameAssetStore.getState().resetPlaybackState();
       store.getState().setActiveGame(variables.gameId, res.sessionChat.id, null);
       store.getState().setSessionNumber(res.sessionNumber);
       qc.setQueryData(chatKeys.detail(res.sessionChat.id), res.sessionChat);
@@ -613,8 +615,35 @@ export function useGameSessions(gameId: string | null) {
 
 // ── Sync hook — reads chat metadata and updates game store ──
 
+function isNumericHudWidgetType(type: HudWidget["type"]) {
+  return type === "progress_bar" || type === "gauge" || type === "relationship_meter";
+}
+
+function finiteNumber(value: unknown): number | null {
+  const raw = typeof value === "string" && value.trim() ? Number(value.trim()) : value;
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+}
+
 function normalizeHudWidgets(widgets: readonly HudWidget[]): HudWidget[] {
   return widgets.map((w) => {
+    if (isNumericHudWidgetType(w.type)) {
+      const max = Math.max(1, finiteNumber(w.config.max) ?? 100);
+      const value = finiteNumber(w.config.value) ?? finiteNumber(w.config.startingValue) ?? 0;
+      const startingValue = finiteNumber(w.config.startingValue) ?? value;
+
+      if (w.config.max !== max || w.config.value !== value || w.config.startingValue !== startingValue) {
+        return {
+          ...w,
+          config: {
+            ...w.config,
+            max,
+            startingValue,
+            value,
+          },
+        };
+      }
+    }
+
     if (w.type === "inventory_grid" && !w.config.contents && Array.isArray((w.config as any).items)) {
       const items = (w.config as any).items as Array<{ name: string; slot?: string | number; quantity?: number }>;
       return {

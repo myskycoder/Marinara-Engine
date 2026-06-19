@@ -196,6 +196,8 @@ export interface EncounterInitRequest {
   settings: EncounterSettings;
   /** Optional spellbook lorebook ID to inject spell/attack data into combat */
   spellbookId?: string | null;
+  /** When enabled, log the generated combat request/response in the server console. */
+  debugMode?: boolean;
 }
 
 /** Response from POST /api/encounter/init */
@@ -223,6 +225,8 @@ export interface EncounterActionRequest {
 /** Response from POST /api/encounter/action */
 export interface EncounterActionResponse {
   result: CombatActionResult;
+  /** True when the model/API produced no usable combat turn and state should not advance. */
+  invalid?: boolean;
 }
 
 /** Payload for POST /api/encounter/summary */

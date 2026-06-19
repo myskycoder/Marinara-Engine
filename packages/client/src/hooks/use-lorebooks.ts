@@ -5,6 +5,7 @@ import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/rea
 import { api, ApiError } from "../lib/api-client";
 import type { Lorebook, LorebookEntry, LorebookFolder } from "@marinara-engine/shared";
 import { characterKeys } from "./use-characters";
+import { achievementKeys, trackAchievementEvent } from "./use-achievements";
 
 export const lorebookKeys = {
   all: ["lorebooks"] as const,
@@ -45,6 +46,9 @@ export function useCreateLorebook() {
     mutationFn: (data: Record<string, unknown>) => api.post<Lorebook>("/lorebooks", data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: lorebookKeys.all });
+      void trackAchievementEvent("library_changed")
+        .finally(() => qc.invalidateQueries({ queryKey: achievementKeys.all }))
+        .catch(() => undefined);
     },
   });
 }
@@ -190,6 +194,26 @@ export function useDeleteLorebookEntry() {
   return useMutation({
     mutationFn: ({ lorebookId, entryId }: { lorebookId: string; entryId: string }) =>
       api.delete(`/lorebooks/${lorebookId}/entries/${entryId}`),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: lorebookKeys.entries(variables.lorebookId) });
+      qc.invalidateQueries({ queryKey: lorebookKeys.active() });
+    },
+  });
+}
+
+export function useDuplicateLorebookEntry() {
+  const qc = useQueryClient();
+  return useMutation({
+    // Clone every field through the create path. The create schema drops server-managed
+    // fields (id/createdAt/updatedAt) and the route re-derives lorebookId, so each other
+    // field — keys, filters, position/depth/order, timing, etc. — carries over verbatim.
+    mutationFn: ({ lorebookId, entry }: { lorebookId: string; entry: LorebookEntry }) => {
+      const clone: Record<string, unknown> = { ...entry, name: `${entry.name} (Copy)` };
+      delete clone.id;
+      delete clone.createdAt;
+      delete clone.updatedAt;
+      return api.post<LorebookEntry>(`/lorebooks/${lorebookId}/entries`, clone);
+    },
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: lorebookKeys.entries(variables.lorebookId) });
       qc.invalidateQueries({ queryKey: lorebookKeys.active() });

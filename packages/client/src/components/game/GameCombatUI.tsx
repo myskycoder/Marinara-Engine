@@ -16,6 +16,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
@@ -70,6 +71,12 @@ import {
 // shape-tagged value so the renderer picks `<img>`, an emoji glyph, or the
 // initials fallback instead of stuffing free text into `<img src>`.
 type SpriteKind = { kind: "url"; value: string } | { kind: "emoji"; value: string } | { kind: "none" };
+type CombatantCardStyle = CSSProperties & {
+  "--combat-card-width": string;
+  "--combat-avatar-size": string;
+  "--combat-dialogue-width": string;
+  "--combat-dialogue-max-height": string;
+};
 
 type CombatSkillType = NonNullable<Combatant["skills"]>[number]["type"];
 type CombatStatusStat = NonNullable<Combatant["statusEffects"]>[number]["stat"];
@@ -461,6 +468,9 @@ const COMBAT_SFX = {
 
 const DAMAGE_DISPLAY_MS = 1200;
 const INTRO_DURATION_MS = 1500;
+const COMBAT_ACTION_DELAY_MS = 1800;
+const COMBAT_REACTION_DELAY_MS = 2200;
+const COMBAT_ACTION_START_DELAY_MS = 400;
 
 /** Element‐to‐color mapping for aura badges. */
 const ELEMENT_AURA_COLORS: Record<string, string> = {
@@ -530,6 +540,8 @@ function buildCombatVoiceConfigSignature(config?: TTSConfig | null): string {
     config.baseUrl,
     config.model,
     config.voice,
+    config.narratorVoiceEnabled ? "narrator-voice" : "narrator-global",
+    config.narratorVoice,
     config.voiceMode,
     JSON.stringify(config.voiceAssignments ?? []),
     config.npcDefaultVoicesEnabled ? "npc-defaults" : "npc-global",
@@ -663,6 +675,7 @@ export function GameCombatUI({
   const [combatVoicePaused, setCombatVoicePaused] = useState(false);
   const [lastCombatVoiceKeys, setLastCombatVoiceKeys] = useState<string[]>([]);
   const [dismissedCombatDialogueKeys, setDismissedCombatDialogueKeys] = useState<Set<string>>(() => new Set());
+  const [mobileCombatDialogueKey, setMobileCombatDialogueKey] = useState<string | null>(null);
 
   const combatRound = useCombatRound();
   const { data: ttsConfig } = useTTSConfig();
@@ -678,6 +691,11 @@ export function GameCombatUI({
   const combatVoicePendingRef = useRef<Map<string, AbortController>>(new Map());
   const combatVoiceSequenceRef = useRef(0);
   const lastAutoPlayedCombatVoiceGroupRef = useRef<string | null>(null);
+  // Mobile is treated as a separate render path below — `useIsCombatMobile()` toggles
+  // between the existing desktop tree and a sticky-bottom-action-sheet layout. Drawers
+  // (Mechanics / Cues / Log / Party) replace inline panels that don't fit on small screens.
+  const isMobile = useIsCombatMobile();
+  const [openDrawer, setOpenDrawer] = useState<MobileDrawerKind>(null);
 
   const appendCombatLog = useCallback((text: string, tone: CombatLogEntry["tone"] = "action") => {
     const trimmed = text.trim();
@@ -764,13 +782,39 @@ export function GameCombatUI({
     });
   }, []);
 
+  const displayableCombatDialogue = useMemo(
+    () => visibleCombatDialogue.filter((line) => !dismissedCombatDialogueKeys.has(buildCombatDialogueLineKey(line))),
+    [dismissedCombatDialogueKeys, visibleCombatDialogue],
+  );
+
+  useEffect(() => {
+    if (!isMobile || displayableCombatDialogue.length === 0) {
+      setMobileCombatDialogueKey(null);
+      return;
+    }
+
+    setMobileCombatDialogueKey((current) => {
+      if (current && displayableCombatDialogue.some((line) => buildCombatDialogueLineKey(line) === current)) {
+        return current;
+      }
+      return buildCombatDialogueLineKey(displayableCombatDialogue[0]!);
+    });
+  }, [displayableCombatDialogue, isMobile]);
+
+  const renderedCombatDialogue = useMemo(() => {
+    if (!isMobile) return displayableCombatDialogue;
+    if (displayableCombatDialogue.length === 0) return [];
+    const selected =
+      displayableCombatDialogue.find((line) => buildCombatDialogueLineKey(line) === mobileCombatDialogueKey) ??
+      displayableCombatDialogue[0]!;
+    return [selected];
+  }, [displayableCombatDialogue, isMobile, mobileCombatDialogueKey]);
+
   const combatDialogueLayout = useMemo(() => {
     const byCombatantId = new Map<string, PartyDialogueLine[]>();
     const unanchored: PartyDialogueLine[] = [];
 
-    for (const line of visibleCombatDialogue) {
-      if (dismissedCombatDialogueKeys.has(buildCombatDialogueLineKey(line))) continue;
-
+    for (const line of renderedCombatDialogue) {
       const match = findDialogueCombatant(line, party, enemies);
       if (!match) {
         unanchored.push(line);
@@ -782,7 +826,7 @@ export function GameCombatUI({
     }
 
     return { byCombatantId, unanchored: unanchored.slice(-3) };
-  }, [dismissedCombatDialogueKeys, enemies, party, visibleCombatDialogue]);
+  }, [enemies, party, renderedCombatDialogue]);
 
   const voicedCombatSpeakerSet = useMemo(
     () => new Set(voicedCombatSpeakerNames.map(normalizeTTSCharacterName).filter(Boolean)),
@@ -796,7 +840,7 @@ export function GameCombatUI({
     if (!ttsConfig?.enabled || !ttsConfig.autoplayGame) return [];
 
     const lines: CombatVoiceLine[] = [];
-    for (const line of visibleCombatDialogue) {
+    for (const line of renderedCombatDialogue) {
       if (!isSpokenCombatDialogue(line)) continue;
       if (!voicedCombatSpeakerSet.has(normalizeTTSCharacterName(line.character))) continue;
 
@@ -815,7 +859,7 @@ export function GameCombatUI({
     }
 
     return lines;
-  }, [combatVoiceConfigSignature, ttsConfig, visibleCombatDialogue, voicedCombatSpeakerSet]);
+  }, [combatVoiceConfigSignature, renderedCombatDialogue, ttsConfig, voicedCombatSpeakerSet]);
 
   const stopCombatVoicePlayback = useCallback(() => {
     combatVoiceSequenceRef.current += 1;
@@ -908,6 +952,32 @@ export function GameCombatUI({
       return entry?.status === "ready" && entry.urls.length > 0;
     })
     .map((line) => line.voiceKey);
+  const activeMobileCombatDialogue = isMobile ? (renderedCombatDialogue[0] ?? null) : null;
+  const activeMobileCombatDialogueKey = activeMobileCombatDialogue
+    ? buildCombatDialogueLineKey(activeMobileCombatDialogue)
+    : null;
+  const activeMobileCombatDialogueMatch = activeMobileCombatDialogue
+    ? findDialogueCombatant(activeMobileCombatDialogue, party, enemies)
+    : null;
+  const activeMobileCombatDialogueIsEnemy =
+    activeMobileCombatDialogueMatch?.combatant.side === "enemy" ||
+    (!activeMobileCombatDialogueMatch &&
+      !!activeMobileCombatDialogue &&
+      !voicedCombatSpeakerSet.has(normalizeTTSCharacterName(activeMobileCombatDialogue.character)));
+  const showNextMobileCombatDialogue = useCallback(() => {
+    if (!isMobile || !activeMobileCombatDialogue || !activeMobileCombatDialogueKey) return;
+    const currentIndex = displayableCombatDialogue.findIndex(
+      (line) => buildCombatDialogueLineKey(line) === activeMobileCombatDialogueKey,
+    );
+    const nextLine = currentIndex >= 0 ? displayableCombatDialogue[currentIndex + 1] : undefined;
+    setDismissedCombatDialogueKeys((previous) => {
+      if (previous.has(activeMobileCombatDialogueKey)) return previous;
+      const next = new Set(previous);
+      next.add(activeMobileCombatDialogueKey);
+      return next;
+    });
+    setMobileCombatDialogueKey(nextLine ? buildCombatDialogueLineKey(nextLine) : null);
+  }, [activeMobileCombatDialogue, activeMobileCombatDialogueKey, displayableCombatDialogue, isMobile]);
 
   const pauseCombatVoicePlayback = useCallback(() => {
     if (!combatVoiceAudioRef.current || !combatVoicePlaying || combatVoicePaused) return;
@@ -1367,10 +1437,10 @@ export function GameCombatUI({
         if (!action.isMiss) updateCombatantHp(action.defenderId, action.remainingHp);
 
         actionIdx++;
-        setTimeout(playNextAction, action.reaction ? 1200 : 800);
+        setTimeout(playNextAction, action.reaction ? COMBAT_REACTION_DELAY_MS : COMBAT_ACTION_DELAY_MS);
       };
 
-      setTimeout(playNextAction, 400);
+      setTimeout(playNextAction, COMBAT_ACTION_START_DELAY_MS);
     },
     [allCombatants, appendCombatLog, playSfx, spawnDamage, applyRoundEnd, updateCombatantHp],
   );
@@ -1555,11 +1625,6 @@ export function GameCombatUI({
   }, [phase, actionMenuIndex, handleActionSelect, playSfx]);
 
   // ── Mobile layout state ──
-  // Mobile is treated as a separate render path below — `useIsCombatMobile()` toggles
-  // between the existing desktop tree and a sticky-bottom-action-sheet layout. Drawers
-  // (Mechanics / Cues / Log / Party) replace inline panels that don't fit on small screens.
-  const isMobile = useIsCombatMobile();
-  const [openDrawer, setOpenDrawer] = useState<MobileDrawerKind>(null);
   // Keyboard parity for tablets / external keyboards: Escape dismisses the drawer
   // (matches the existing close button + backdrop tap behavior).
   useEffect(() => {
@@ -1601,30 +1666,7 @@ export function GameCombatUI({
           </div>
         )}
 
-        {/* Top: round counter + compact enemy strip */}
-        <div className="relative z-10 shrink-0 border-b border-white/10 bg-black/70 px-2 py-2 backdrop-blur-md">
-          <div className="flex items-stretch gap-2">
-            <div className="flex shrink-0 flex-col items-center justify-center rounded border border-white/10 bg-white/5 px-2">
-              <span className="text-[0.5rem] font-semibold uppercase tracking-wide text-white/40">Round</span>
-              <span className="text-base font-bold leading-none tabular-nums text-white">{round}</span>
-            </div>
-            <div className="flex flex-1 gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-              {enemies.map((enemy) => (
-                <MobileCombatantChip
-                  key={enemy.id}
-                  combatant={enemy}
-                  side="enemy"
-                  isTargetable={phase === "target-select" && selectingEnemyTarget}
-                  isActive={turnOrder[0]?.id === enemy.id && phase === "animating"}
-                  onSelect={() => handleTargetSelect(enemy.id)}
-                  damagePopups={damagePopups.filter((p) => p.targetId === enemy.id)}
-                />
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Middle: touch battle stage with anchored dialogue bubbles */}
+        {/* Middle: touch battle stage */}
         <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
           {phase === "animating" && roundResult && animatingActionIndex >= 0 && (
             <div className="pointer-events-none absolute inset-x-2 top-2 z-10 rounded-lg border border-white/10 bg-black/75 px-3 py-2 backdrop-blur-md">
@@ -1640,75 +1682,48 @@ export function GameCombatUI({
             </div>
           )}
 
-          <div className="relative z-0 flex min-h-0 flex-1 flex-col justify-between gap-2 overflow-hidden px-2 py-2">
-            <div className="flex min-h-0 flex-1 flex-wrap content-start items-start justify-center gap-1.5 overflow-visible pt-14">
-              {enemies.map((enemy) => (
-                <CombatantCard
-                  key={`stage-${enemy.id}`}
-                  combatant={enemy}
-                  side="enemy"
-                  isTargetable={phase === "target-select" && selectingEnemyTarget}
-                  isActive={turnOrder[0]?.id === enemy.id && phase === "animating"}
-                  onSelect={() => handleTargetSelect(enemy.id)}
-                  damagePopups={damagePopups.filter((p) => p.targetId === enemy.id)}
-                  dialogueLines={combatDialogueLayout.byCombatantId.get(enemy.id)}
-                  onDismissDialogue={dismissCombatDialogueLine}
-                  compact
-                />
-              ))}
+          <div className="relative z-0 grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto] gap-y-[clamp(1.25rem,5svh,2.5rem)] overflow-hidden px-2 py-[clamp(0.5rem,2svh,1rem)]">
+            <div className="min-h-0 overflow-x-auto overflow-y-visible pt-[clamp(2.75rem,9svh,4rem)] [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              <div className="flex w-max min-w-full flex-nowrap items-start justify-center gap-[clamp(0.25rem,1.5vw,0.5rem)]">
+                {enemies.map((enemy) => (
+                  <CombatantCard
+                    key={`stage-${enemy.id}`}
+                    combatant={enemy}
+                    side="enemy"
+                    isTargetable={phase === "target-select" && selectingEnemyTarget}
+                    isActive={turnOrder[0]?.id === enemy.id && phase === "animating"}
+                    onSelect={() => handleTargetSelect(enemy.id)}
+                    damagePopups={damagePopups.filter((p) => p.targetId === enemy.id)}
+                    sideCount={enemies.length}
+                    compact
+                  />
+                ))}
+              </div>
             </div>
 
-            <div className="flex shrink-0 flex-wrap items-end justify-center gap-1.5 overflow-visible pb-1">
-              {party.map((member, i) => (
-                <CombatantCard
-                  key={`stage-${member.id}`}
-                  combatant={member}
-                  side="player"
-                  isTargetable={phase === "target-select" && selectingAllyTarget}
-                  isActive={
-                    (phase === "player-turn" && i === activePlayerIndex) ||
-                    (turnOrder[0]?.id === member.id && phase === "animating")
-                  }
-                  onSelect={
-                    phase === "target-select" && selectingAllyTarget ? () => handleTargetSelect(member.id) : undefined
-                  }
-                  damagePopups={damagePopups.filter((p) => p.targetId === member.id)}
-                  dialogueLines={combatDialogueLayout.byCombatantId.get(member.id)}
-                  onDismissDialogue={dismissCombatDialogueLine}
-                  compact
-                />
-              ))}
+            <div className="min-h-0 shrink-0 overflow-x-auto overflow-y-visible pb-[clamp(0.75rem,3svh,1.5rem)] [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              <div className="flex w-max min-w-full flex-nowrap items-end justify-center gap-[clamp(0.25rem,1.5vw,0.5rem)]">
+                {party.map((member, i) => (
+                  <CombatantCard
+                    key={`stage-${member.id}`}
+                    combatant={member}
+                    side="player"
+                    isTargetable={phase === "target-select" && selectingAllyTarget}
+                    isActive={
+                      (phase === "player-turn" && i === activePlayerIndex) ||
+                      (turnOrder[0]?.id === member.id && phase === "animating")
+                    }
+                    onSelect={
+                      phase === "target-select" && selectingAllyTarget ? () => handleTargetSelect(member.id) : undefined
+                    }
+                    damagePopups={damagePopups.filter((p) => p.targetId === member.id)}
+                    sideCount={party.length}
+                    compact
+                  />
+                ))}
+              </div>
             </div>
           </div>
-
-          {combatDialogueLayout.unanchored.length > 0 &&
-            phase !== "intro" &&
-            phase !== "victory" &&
-            phase !== "defeat" && (
-              <div className="pointer-events-none absolute inset-x-2 bottom-2 z-10 max-h-[35%] space-y-1 overflow-hidden">
-                {combatDialogueLayout.unanchored.map((line, index) => {
-                  const isEnemyLine = !voicedCombatSpeakerSet.has(normalizeTTSCharacterName(line.character));
-                  return (
-                    <div
-                      key={`mobile-cue-${line.character}-${line.type}-${index}-${line.content.slice(0, 16)}`}
-                      className={cn(
-                        "game-combat-action-bark mx-auto w-fit max-w-full rounded-xl border px-2.5 py-1.5 shadow-lg backdrop-blur-md animate-party-slide-in",
-                        isEnemyLine
-                          ? "border-red-300/20 bg-red-950/60 text-red-50/85"
-                          : "border-sky-300/20 bg-sky-950/60 text-sky-50/90",
-                      )}
-                    >
-                      <div className="flex items-center gap-1">
-                        <span className={cn("text-[0.6rem] font-bold", isEnemyLine ? "text-red-200" : "text-sky-200")}>
-                          {line.character}
-                        </span>
-                      </div>
-                      <p className="mt-0.5 break-words text-xs leading-snug [overflow-wrap:anywhere]">{line.content}</p>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
           {/* Victory / defeat overlays — full-screen on mobile, not buried in the bottom sheet */}
           {phase === "victory" && (
             <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-black/85 px-6 text-center animate-in fade-in duration-500">
@@ -1736,6 +1751,47 @@ export function GameCombatUI({
             </div>
           )}
         </div>
+
+        {activeMobileCombatDialogue && phase !== "intro" && phase !== "victory" && phase !== "defeat" && (
+          <div className="relative z-30 shrink-0 px-2 pb-2">
+            <button
+              type="button"
+              onClick={showNextMobileCombatDialogue}
+              className={cn(
+                "game-combat-action-bark mx-auto block max-h-[18svh] w-full overflow-y-auto rounded-xl border px-3 py-2 text-left shadow-lg backdrop-blur-md animate-party-slide-in focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50",
+                activeMobileCombatDialogueIsEnemy
+                  ? "border-red-300/25 bg-red-950/70 text-red-50/90"
+                  : "border-sky-300/25 bg-sky-950/70 text-sky-50/90",
+                isShoutedCombatDialogue(activeMobileCombatDialogue) && "game-combat-action-bark--shout",
+              )}
+            >
+              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                <span
+                  className={cn(
+                    "truncate text-[0.68rem] font-bold",
+                    activeMobileCombatDialogueIsEnemy ? "text-red-200" : "text-sky-200",
+                  )}
+                >
+                  {activeMobileCombatDialogue.character}
+                </span>
+                {activeMobileCombatDialogue.expression && (
+                  <span className="rounded-full bg-white/10 px-1.5 py-0.5 text-[0.5rem] font-semibold uppercase tracking-wide text-white/55">
+                    {activeMobileCombatDialogue.expression}
+                  </span>
+                )}
+              </div>
+              <p
+                className={cn(
+                  "mt-0.5 break-words text-xs leading-relaxed [overflow-wrap:anywhere]",
+                  activeMobileCombatDialogue.type === "thought" && "italic opacity-80",
+                  activeMobileCombatDialogue.type === "whisper" && "italic",
+                )}
+              >
+                {activeMobileCombatDialogue.content}
+              </p>
+            </button>
+          </div>
+        )}
 
         {/* Bottom action sheet — sticky, always shows current player + active phase content */}
         <div className="relative z-30 shrink-0 border-t border-white/10 bg-gradient-to-t from-black/95 to-black/85 backdrop-blur-md">
@@ -1779,7 +1835,7 @@ export function GameCombatUI({
                     : "border-white/10 bg-white/5 text-white/55 hover:bg-white/10",
                 )}
               >
-                Cues · {visibleCombatDialogue.length}
+                Cues
               </button>
             )}
             <button
@@ -1824,9 +1880,14 @@ export function GameCombatUI({
                     {activePlayer.maxMp ? ` · MP ${activePlayer.mp ?? 0}/${activePlayer.maxMp}` : ""}
                   </div>
                 </div>
-                <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[0.55rem] font-semibold uppercase tracking-wide text-amber-200">
-                  Your turn
-                </span>
+                <div className="flex shrink-0 flex-col items-center gap-0.5 text-center">
+                  <span className="min-w-[4.25rem] rounded border border-white/10 bg-white/5 px-1.5 py-0.5 text-[0.5rem] font-semibold uppercase tracking-wide text-white/45">
+                    Round {round}
+                  </span>
+                  <span className="min-w-[4.25rem] rounded bg-amber-500/20 px-1.5 py-0.5 text-[0.55rem] font-semibold uppercase tracking-wide text-amber-200">
+                    Your turn
+                  </span>
+                </div>
               </div>
             )}
 
@@ -2207,7 +2268,7 @@ export function GameCombatUI({
       {/* ── Battle scene ── */}
       <div
         className={cn(
-          "relative flex min-h-0 flex-1 flex-col overflow-hidden",
+          "relative grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto] gap-y-[clamp(0.25rem,2svh,1.25rem)] overflow-hidden",
           activeImpactTone === "critical" && "game-combat-scene--critical",
           activeImpactTone === "hit" && "game-combat-scene--hit",
           activeImpactTone === "reaction" && "game-combat-scene--reaction",
@@ -2238,7 +2299,7 @@ export function GameCombatUI({
         )}
 
         {/* ── Enemy area (top section) ── */}
-        <div className="relative flex min-h-0 flex-1 flex-wrap content-start items-start justify-center gap-2 overflow-visible px-3 pt-20 sm:px-6 sm:pt-20 md:pt-24 lg:gap-3 lg:pt-20 xl:gap-4 xl:pt-6">
+        <div className="relative flex min-h-0 flex-nowrap items-start justify-center gap-[clamp(0.25rem,1vw,1rem)] overflow-visible px-3 pt-[clamp(3.25rem,13svh,5.5rem)] sm:px-6">
           {enemies.map((enemy) => (
             <CombatantCard
               key={enemy.id}
@@ -2249,13 +2310,14 @@ export function GameCombatUI({
               onSelect={() => handleTargetSelect(enemy.id)}
               damagePopups={damagePopups.filter((p) => p.targetId === enemy.id)}
               dialogueLines={combatDialogueLayout.byCombatantId.get(enemy.id)}
+              sideCount={enemies.length}
               onDismissDialogue={dismissCombatDialogueLine}
             />
           ))}
         </div>
 
         {/* ── Party area (bottom section) ── */}
-        <div className="relative flex shrink-0 flex-wrap items-end justify-center gap-2 overflow-visible px-3 pb-3 sm:px-6 sm:pb-4 lg:gap-3 xl:gap-4">
+        <div className="relative flex min-h-0 shrink-0 flex-nowrap items-end justify-center gap-[clamp(0.25rem,1vw,1rem)] overflow-visible px-3 pb-[clamp(0.25rem,2svh,1rem)] sm:px-6">
           {party.map((member, i) => (
             <CombatantCard
               key={member.id}
@@ -2271,6 +2333,7 @@ export function GameCombatUI({
               }
               damagePopups={damagePopups.filter((p) => p.targetId === member.id)}
               dialogueLines={combatDialogueLayout.byCombatantId.get(member.id)}
+              sideCount={party.length}
               onDismissDialogue={dismissCombatDialogueLine}
             />
           ))}
@@ -2841,6 +2904,7 @@ function CombatantCard({
   onSelect,
   damagePopups,
   dialogueLines,
+  sideCount = 1,
   onDismissDialogue,
   compact = false,
 }: {
@@ -2851,6 +2915,7 @@ function CombatantCard({
   onSelect?: () => void;
   damagePopups: DamagePopup[];
   dialogueLines?: PartyDialogueLine[];
+  sideCount?: number;
   onDismissDialogue?: (line: PartyDialogueLine) => void;
   compact?: boolean;
 }) {
@@ -2874,6 +2939,22 @@ function CombatantCard({
             ? "critical"
             : "hit"
     : null;
+  const combatantCount = Math.max(1, sideCount);
+  const desktopFitVw = Math.max(2.5, Math.min(40, 70 / combatantCount));
+  const desktopDialogueFitWidth = `calc((100vw - 3rem) / ${combatantCount})`;
+  const compactFitWidth = `calc((100vw - 2.5rem) / ${combatantCount})`;
+  const cardStyle: CombatantCardStyle = {
+    "--combat-card-width": compact
+      ? `clamp(2.75rem, min(22vw, 9svh, ${compactFitWidth}), 5.5rem)`
+      : `clamp(4rem, min(10vw, 12svh, ${desktopFitVw}vw), 7.5rem)`,
+    "--combat-avatar-size": compact
+      ? "calc(var(--combat-card-width) - 1rem)"
+      : "calc(var(--combat-card-width) - 1.5rem)",
+    "--combat-dialogue-width": compact
+      ? "var(--combat-avatar-size)"
+      : `clamp(6.5rem, min(15rem, ${desktopDialogueFitWidth}), 15rem)`,
+    "--combat-dialogue-max-height": compact ? "clamp(3rem, 16svh, 5rem)" : "clamp(3rem, 12svh, 7rem)",
+  };
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (!canSelect) return;
@@ -2889,9 +2970,10 @@ function CombatantCard({
       aria-disabled={!canSelect}
       onClick={canSelect ? onSelect : undefined}
       onKeyDown={handleKeyDown}
+      style={cardStyle}
       className={cn(
         "relative flex min-w-0 flex-col items-center rounded-2xl border border-transparent p-1 text-center transition-all duration-200",
-        compact ? "w-[clamp(4.25rem,24vw,5.5rem)]" : "w-[clamp(5rem,11vw,7.5rem)] max-w-[calc((100vw-3rem)/2)]",
+        "w-[var(--combat-card-width)]",
         isTargetable && !isKo && "cursor-pointer border-amber-400/35 bg-amber-400/5",
         !isTargetable && "cursor-default",
       )}
@@ -2899,11 +2981,12 @@ function CombatantCard({
       {dialogueLines && dialogueLines.length > 0 && onDismissDialogue && (
         <div
           className={cn(
-            "pointer-events-auto absolute bottom-full left-1/2 z-40 mb-2 flex -translate-x-1/2 flex-col items-center gap-1",
-            compact ? "w-[min(12rem,84vw)]" : "w-[min(15rem,78vw)]",
+            "pointer-events-auto absolute left-1/2 z-40 flex -translate-x-1/2 flex-col items-center gap-1",
+            side === "enemy" ? "top-full mt-2" : "bottom-full mb-2",
+            "w-[var(--combat-dialogue-width)]",
           )}
         >
-          {dialogueLines.slice(-2).map((line, index) => (
+          {dialogueLines.slice(-1).map((line, index) => (
             <button
               key={`${buildCombatDialogueLineKey(line)}-${index}`}
               type="button"
@@ -2913,7 +2996,7 @@ function CombatantCard({
                 onDismissDialogue(line);
               }}
               className={cn(
-                "game-combat-action-bark w-full rounded-xl border px-2.5 py-1.5 text-left shadow-lg backdrop-blur-md transition-colors animate-party-slide-in hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50",
+                "game-combat-action-bark max-h-[var(--combat-dialogue-max-height)] w-full overflow-y-auto rounded-xl border px-2 py-1.5 text-left shadow-lg backdrop-blur-md transition-colors animate-party-slide-in hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50",
                 side === "enemy"
                   ? "border-red-300/25 bg-red-950/70 text-red-50/90"
                   : "border-sky-300/25 bg-sky-950/70 text-sky-50/90",
@@ -2938,7 +3021,7 @@ function CombatantCard({
               </div>
               <p
                 className={cn(
-                  "mt-0.5 max-h-20 overflow-y-auto break-words text-xs leading-snug [overflow-wrap:anywhere]",
+                  "mt-0.5 break-words text-[0.68rem] leading-snug [overflow-wrap:anywhere]",
                   line.type === "thought" && "italic opacity-80",
                   line.type === "whisper" && "italic",
                 )}
@@ -2946,26 +3029,6 @@ function CombatantCard({
                 {line.content}
               </p>
             </button>
-          ))}
-        </div>
-      )}
-
-      {combatant.statusEffects && combatant.statusEffects.length > 0 && (
-        <div className="pointer-events-none absolute -top-3 left-1/2 z-10 flex -translate-x-1/2 gap-1">
-          {combatant.statusEffects.map((effect, i) => (
-            <div
-              key={`${effect.name}-${effect.turnsLeft}-${i}`}
-              title={`${effect.name} (${effect.turnsLeft} turns)`}
-              className={cn(
-                "relative flex h-6 min-w-6 items-center justify-center rounded-full border px-1 text-[0.72rem] shadow-[0_4px_12px_rgba(0,0,0,0.35)] backdrop-blur-sm",
-                effect.modifier > 0 ? "border-emerald-300/35 bg-emerald-500/20" : "border-rose-300/35 bg-rose-500/20",
-              )}
-            >
-              <span aria-hidden="true">{getStatusEffectEmoji(effect)}</span>
-              <span className="absolute -bottom-1 -right-1 rounded-full bg-black/80 px-1 text-[0.45rem] font-bold leading-none text-white/80">
-                {effect.turnsLeft}
-              </span>
-            </div>
           ))}
         </div>
       )}
@@ -2979,7 +3042,7 @@ function CombatantCard({
       <div
         className={cn(
           "relative flex aspect-square items-center justify-center rounded-xl border-2 transition-all duration-200",
-          compact ? "w-[clamp(3rem,18vw,4.25rem)]" : "w-[clamp(3.75rem,8vw,6rem)]",
+          "w-[var(--combat-avatar-size)]",
           isKo && "grayscale opacity-40",
           isTargetable &&
             !isKo &&
@@ -3004,6 +3067,26 @@ function CombatantCard({
           emojiClassName={compact ? "text-2xl leading-none" : "text-2xl leading-none sm:text-3xl xl:text-4xl"}
         />
 
+        {combatant.statusEffects && combatant.statusEffects.length > 0 && (
+          <div className="pointer-events-none absolute -right-1.5 -top-1.5 z-10 flex max-w-[calc(100%+0.75rem)] flex-wrap justify-end gap-0.5">
+            {combatant.statusEffects.slice(0, 4).map((effect, i) => (
+              <div
+                key={`${effect.name}-${effect.turnsLeft}-${i}`}
+                title={`${effect.name} (${effect.turnsLeft} turns)`}
+                className={cn(
+                  "relative flex h-5 min-w-5 items-center justify-center rounded-full border px-0.5 text-[0.65rem] shadow-[0_4px_12px_rgba(0,0,0,0.35)] backdrop-blur-sm",
+                  effect.modifier > 0 ? "border-emerald-300/35 bg-emerald-500/25" : "border-rose-300/35 bg-rose-500/25",
+                )}
+              >
+                <span aria-hidden="true">{getStatusEffectEmoji(effect)}</span>
+                <span className="absolute -bottom-1 -right-1 rounded-full bg-black/85 px-0.5 text-[0.42rem] font-bold leading-none text-white/80">
+                  {effect.turnsLeft}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* KO overlay */}
         {isKo && (
           <div className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/50">
@@ -3025,7 +3108,7 @@ function CombatantCard({
       </div>
 
       {/* Name + Level */}
-      <div className={cn("mt-1.5 flex min-w-0 items-center gap-1", compact ? "max-w-[5rem]" : "max-w-[7rem]")}>
+      <div className="mt-1.5 flex max-w-[calc(var(--combat-avatar-size)+1rem)] min-w-0 items-center gap-1">
         <span
           className={cn("truncate text-[0.68rem] font-semibold sm:text-xs", isKo ? "text-white/30" : "text-white/90")}
         >
@@ -3037,7 +3120,7 @@ function CombatantCard({
       </div>
 
       {/* HP bar */}
-      <div className={cn("mt-1", compact ? "w-[clamp(3.75rem,22vw,5rem)]" : "w-[clamp(4.5rem,10vw,7rem)]")}>
+      <div className="mt-1 w-[calc(var(--combat-avatar-size)+1rem)]">
         <div className="flex items-center gap-1">
           <Heart size={9} className={cn(isKo ? "text-white/20" : "text-red-400")} />
           <div className={cn("h-2 flex-1 overflow-hidden rounded-full bg-white/10", !isKo && `shadow-sm ${hpGlow}`)}>
@@ -3068,131 +3151,22 @@ function CombatantCard({
         )}
       </div>
 
-      {/* Element aura indicator */}
-      {combatant.elementAura && (
-        <div
-          className="mt-0.5 rounded-full px-1.5 py-0 text-[0.5rem] font-bold uppercase tracking-wider"
-          style={{
-            backgroundColor: `${ELEMENT_AURA_COLORS[combatant.elementAura.element] ?? "#888"}20`,
-            color: ELEMENT_AURA_COLORS[combatant.elementAura.element] ?? "#aaa",
-          }}
-          title={`${combatant.elementAura.element} aura (gauge: ${combatant.elementAura.gauge})`}
-        >
-          {combatant.elementAura.element}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * Compact mobile-only combatant chip used in the top enemy strip on small viewports.
- * Single horizontal row: small avatar + name + HP bar. Designed for the mobile combat
- * layout where the full CombatantCard would push the bottom action sheet off-screen
- * once a couple of enemies are present.
- */
-function MobileCombatantChip({
-  combatant,
-  side,
-  isTargetable,
-  isActive,
-  onSelect,
-  damagePopups,
-}: {
-  combatant: Combatant;
-  side: "player" | "enemy";
-  isTargetable: boolean;
-  isActive: boolean;
-  onSelect?: () => void;
-  damagePopups: DamagePopup[];
-}) {
-  const hpPercent = combatant.maxHp > 0 ? (combatant.hp / combatant.maxHp) * 100 : 0;
-  const isKo = combatant.hp <= 0;
-  const hpColor = hpPercent > 60 ? "bg-emerald-500" : hpPercent > 25 ? "bg-amber-500" : "bg-red-500";
-  const latestPopup = damagePopups[damagePopups.length - 1] ?? null;
-
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      disabled={!isTargetable || isKo}
-      className={cn(
-        "relative flex h-full min-w-[7rem] shrink-0 items-center gap-1.5 rounded-lg border px-1.5 py-1 transition-all",
-        side === "enemy" ? "bg-red-500/8" : "bg-blue-500/8",
-        isTargetable && !isKo
-          ? "cursor-pointer border-amber-400/55 hover:border-amber-300"
-          : isActive && !isKo
-            ? "border-white/35"
-            : "border-white/10",
-        isKo && "grayscale opacity-40",
-      )}
-    >
-      <div
-        className={cn(
-          "relative flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-md",
-          side === "enemy" ? "bg-red-500/15 text-red-300/65" : "bg-blue-500/15 text-blue-300/65",
-        )}
-      >
-        <CombatantSpriteVisual
-          combatant={combatant}
-          imageClassName="h-full w-full object-cover"
-          textClassName="text-sm font-bold"
-          emojiClassName="text-lg leading-none"
-        />
-        {isKo && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/55">
-            <Skull className="h-4 w-4 text-red-400/80" />
-          </div>
-        )}
-        {latestPopup && (
-          <div className="pointer-events-none absolute -top-3 left-1/2 -translate-x-1/2">
-            <DamageNumber popup={latestPopup} />
-          </div>
-        )}
-      </div>
-      <div className="min-w-0 flex-1 text-left">
-        <div className="flex items-center gap-1">
-          <span
-            className={cn("min-w-0 truncate text-[0.65rem] font-semibold", isKo ? "text-white/30" : "text-white/90")}
+      {/* Element aura indicator keeps a reserved row so one status never shifts the card. */}
+      <div className={cn("mt-0.5 flex items-center justify-center", compact ? "h-3" : "h-4")}>
+        {combatant.elementAura && (
+          <div
+            className="rounded-full px-1.5 py-0 text-[0.5rem] font-bold uppercase tracking-wider"
+            style={{
+              backgroundColor: `${ELEMENT_AURA_COLORS[combatant.elementAura.element] ?? "#888"}20`,
+              color: ELEMENT_AURA_COLORS[combatant.elementAura.element] ?? "#aaa",
+            }}
+            title={`${combatant.elementAura.element} aura (gauge: ${combatant.elementAura.gauge})`}
           >
-            {combatant.name}
-          </span>
-          <span className="rounded bg-white/10 px-1 text-[0.5rem] tabular-nums text-white/45">
-            Lv.{combatant.level}
-          </span>
-        </div>
-        <div className="mt-1 flex items-center gap-1">
-          <Heart size={8} className={cn(isKo ? "text-white/20" : "text-red-400")} />
-          <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
-            <div
-              className={cn("h-full rounded-full transition-all duration-500 ease-out", hpColor)}
-              style={{ width: `${hpPercent}%` }}
-            />
-          </div>
-          <span className="shrink-0 text-[0.5rem] tabular-nums text-white/55">{combatant.hp}</span>
-        </div>
-        {combatant.statusEffects && combatant.statusEffects.length > 0 && (
-          <div className="mt-0.5 flex gap-0.5 overflow-hidden">
-            {combatant.statusEffects.slice(0, 4).map((effect, i) => (
-              <span
-                key={`${effect.name}-${i}`}
-                title={`${effect.name} (${effect.turnsLeft} turns)`}
-                className="text-[0.6rem]"
-                aria-hidden="true"
-              >
-                {getStatusEffectEmoji(effect)}
-              </span>
-            ))}
+            {combatant.elementAura.element}
           </div>
         )}
       </div>
-      {isTargetable && !isKo && (
-        <div className="pointer-events-none absolute -inset-0.5 animate-pulse rounded-lg border border-amber-400/60" />
-      )}
-      {isActive && !isKo && (
-        <div className="pointer-events-none absolute -bottom-0.5 left-1/2 h-1 w-5 -translate-x-1/2 rounded-full bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.6)]" />
-      )}
-    </button>
+    </div>
   );
 }
 

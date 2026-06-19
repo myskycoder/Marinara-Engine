@@ -18,8 +18,9 @@ import { buildAssetManifest, GAME_ASSETS_DIR, getAssetManifest } from "./asset-m
 import { sha1HexLegacy } from "./npc-name-server.js";
 import type { PromptOverridesStorage } from "../storage/prompt-overrides.storage.js";
 import { loadPrompt, GAME_NPC_PORTRAIT, GAME_BACKGROUND, GAME_SCENE_ILLUSTRATION } from "../prompt-overrides/index.js";
-import type { ImageGenerationDefaultsProfile } from "@marinara-engine/shared";
+import { type ImageGenerationDefaultsProfile, type ImageStyleProfileSettings } from "@marinara-engine/shared";
 import type { ImageGenerationSize } from "../image/image-generation-settings.js";
+import { compileImagePrompt } from "../image/image-prompt-compiler.js";
 
 const NPC_AVATAR_DIR = join(DATA_DIR, "avatars", "npc");
 const CHAT_BACKGROUND_DIR = join(DATA_DIR, "backgrounds");
@@ -319,6 +320,7 @@ export function deleteNpcAvatar(chatId: string, npcId: string): boolean {
   }
 }
 
+
 function truncateSlugByBytes(slug: string, maxBytes: number): string {
   let truncated = slug;
   while (Buffer.byteLength(truncated, "utf8") > maxBytes) {
@@ -347,12 +349,100 @@ function hasExplicitNonHumanCue(value: string): boolean {
   );
 }
 
+function normalizeNpcGenderCue(gender: string | null | undefined, pronouns: string | null | undefined, text: string) {
+  const explicit = `${gender ?? ""} ${pronouns ?? ""}`.toLowerCase();
+  if (/\b(?:non[-\s]?binary|enby|androgynous|genderless|agender|they\/them)\b/.test(explicit)) {
+    return "androgynous";
+  }
+  if (/\b(?:female|woman|girl|lady|feminine|she\/her|she|her)\b/.test(explicit)) return "female";
+  if (/\b(?:male|man|boy|gentleman|masculine|he\/him|he|him|his)\b/.test(explicit)) return "male";
+
+  const lower = text.toLowerCase();
+  if (/\b(?:non[-\s]?binary|enby|androgynous|genderless|agender)\b/.test(lower)) return "androgynous";
+  if (/\b(?:she|her|hers|woman|female|girl|lady)\b/.test(lower)) return "female";
+  if (/\b(?:he|him|his|man|male|boy|gentleman)\b/.test(lower)) return "male";
+  return null;
+}
+
+function deriveNpcAgeCue(text: string): string | null {
+  const lower = text.toLowerCase();
+  const decade = lower.match(/\b(?:early|mid|late)\s+(?:twenties|thirties|forties|fifties|sixties)\b/);
+  if (decade?.[0]) return decade[0];
+  const ageLabel = lower.match(/\b(?:young adult|middle[-\s]aged|elderly|senior|adult|teen(?:ager)?|child|kid)\b/);
+  if (ageLabel?.[0]) return ageLabel[0].replace(/\s+/, " ");
+
+  const adultMilestones = [
+    /\b(?:owner|employee|business|agency|rent|debt|pay off|mercenary work|adventuring guilds?)\b/,
+    /\b(?:joined the army|basic training|deployed|shipped off|fight in the war|crew)\b/,
+    /\b(?:high\s*school dropout|expelled|academy|final exam)\b/,
+    /\b(?:refugee|moved to|save enough money|opened)\b/,
+  ];
+  const score = adultMilestones.reduce((count, pattern) => count + (pattern.test(lower) ? 1 : 0), 0);
+  return score >= 2 ? "young adult" : null;
+}
+
+function normalizeVisualTag(value: string): string | null {
+  const tag = value
+    .toLowerCase()
+    .replace(/\b(?:her|his|their|the|a|an|with|has|have|having|is|are|was|were)\b/g, " ")
+    .replace(/[^a-z0-9 -]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!tag || tag.length > 48) return null;
+  if (/\b(?:someone|something|nothing|thing|person|people|room|scene)\b/.test(tag)) return null;
+  return tag;
+}
+
+function addUniqueVisualTag(tags: string[], value: string | null | undefined): void {
+  const tag = value ? normalizeVisualTag(value) : null;
+  if (!tag || tags.some((existing) => existing.toLowerCase() === tag)) return;
+  tags.push(tag);
+}
+
+function collectNpcVisualAttributeTags(text: string): string[] {
+  const tags: string[] = [];
+  const clean = text.replace(/\s+/g, " ");
+  const nounPattern = /\b((?:short|long|curly|wavy|straight|messy|neat|dark|light|pale|bright|piercing|deep|warm|cool|grey|gray|blue|green|hazel|brown|black|blonde|blond|auburn|red|white|silver|golden|olive|tan|tanned|fair|freckled|weathered)(?:[-\s]+[a-z]+){0,4}\s+(?:hair|eyes|skin))\b/gi;
+  for (const match of clean.matchAll(nounPattern)) {
+    addUniqueVisualTag(tags, match[1]);
+  }
+
+  const eyesArePattern = /\beyes?\s+(?:are|is|were|was)\s+(?:a\s+|an\s+)?((?:piercing|bright|deep|pale|dark|light|grey|gray|blue|green|hazel|brown|black|amber)(?:[-\s]+[a-z]+){0,3})\b/gi;
+  for (const match of clean.matchAll(eyesArePattern)) {
+    addUniqueVisualTag(tags, `${match[1]} eyes`);
+  }
+
+  const skinPattern = /\b(?:skin|complexion)\s+(?:is|are|was|were)?\s*(?:a\s+|an\s+)?((?:pale|fair|tan|tanned|olive|brown|dark|light|warm|cool|freckled|weathered)(?:[-\s]+[a-z]+){0,3})\b/gi;
+  for (const match of clean.matchAll(skinPattern)) {
+    addUniqueVisualTag(tags, `${match[1]} skin`);
+  }
+
+  return tags.slice(0, 4);
+}
+
+function buildNpcAppearanceLine(req: NpcPortraitRequest, explicitNonHuman: boolean): string {
+  const context = req.appearance.trim();
+  if (explicitNonHuman && !context) return "Appearance: non-human creature.";
+
+  const identityTags: string[] = [];
+  if (!explicitNonHuman) {
+    identityTags.push(deriveNpcAgeCue(context) ?? "adult");
+    identityTags.push(normalizeNpcGenderCue(req.gender, req.pronouns, context) ?? "androgynous");
+    identityTags.push("human or humanoid person");
+  }
+  identityTags.push(...collectNpcVisualAttributeTags(context));
+
+  const identityLine = identityTags.length > 0 ? `Appearance: ${identityTags.join(", ")}.` : "";
+  if (!context) return identityLine || "Appearance: human or humanoid adult.";
+  return `${identityLine} Canonical visual description from the current game: ${context}.`.trim();
+}
+
 function npcPortraitVariables(req: NpcPortraitRequest) {
   const context = req.appearance.trim();
   const explicitNonHuman = hasExplicitNonHumanCue(`${req.npcName} ${context}`);
   return {
     npcName: req.npcName,
-    appearanceLine: context ? `Canonical visual description from the current game: ${context}.` : "",
+    appearanceLine: buildNpcAppearanceLine(req, explicitNonHuman),
     nonHumanRule: explicitNonHuman
       ? "The description explicitly indicates a non-human subject. Preserve that exact species, body plan, age category, and silhouette; do not turn it into a human or kemonomimi character unless the description says humanoid."
       : "Unless the description explicitly says otherwise, depict this NPC as a human or humanoid person. Do not infer an animal species from the name, mood, speech verbs, or setting.",
@@ -384,6 +474,8 @@ export interface NpcPortraitRequest {
   /** Display name — used only inside the image prompt, never in paths. */
   npcName: string;
   appearance: string;
+  gender?: string | null;
+  pronouns?: string | null;
   /** Unified art style prompt for visual consistency. */
   artStyle?: string;
   /** Connection credentials — already resolved & decrypted. */
@@ -396,22 +488,81 @@ export interface NpcPortraitRequest {
   imgComfyWorkflow?: string | undefined;
   imgComfyWorkflowWithReference?: string | undefined;
   imgDefaults?: ImageGenerationDefaultsProfile | null;
+  styleProfiles?: ImageStyleProfileSettings;
+  styleProfileId?: string | null;
   debugLog?: (message: string, ...args: any[]) => void;
   /** Storage for user-supplied prompt overrides. Optional — falls back to default builder when omitted. */
   promptOverridesStorage?: PromptOverridesStorage;
   size?: ImageGenerationSize;
   promptOverride?: string;
+  negativePromptOverride?: string;
   /** When true, overwrite an existing generated NPC portrait instead of reusing it. */
   force?: boolean;
 }
 
-export async function buildNpcPortraitImagePrompt(req: NpcPortraitRequest): Promise<string> {
-  if (req.promptOverride?.trim()) return req.promptOverride.trim().slice(0, 1400);
+export type CompiledGameImagePrompt = {
+  prompt: string;
+  negativePrompt: string;
+};
+
+async function buildNpcPortraitRawPrompt(req: NpcPortraitRequest): Promise<string> {
   const vars = npcPortraitVariables(req);
-  const rawPrompt = req.promptOverridesStorage
+  return req.promptOverridesStorage
     ? await loadPrompt(req.promptOverridesStorage, GAME_NPC_PORTRAIT, vars)
     : GAME_NPC_PORTRAIT.defaultBuilder(vars);
-  return rawPrompt.slice(0, 1400);
+}
+
+export async function buildNpcPortraitProviderPrompt(req: NpcPortraitRequest): Promise<CompiledGameImagePrompt> {
+  if (req.promptOverride?.trim()) {
+    return {
+      prompt: req.promptOverride.trim(),
+      negativePrompt: req.negativePromptOverride?.trim() || "",
+    };
+  }
+  return compileGameImagePrompt(
+    req,
+    "portrait",
+    await buildNpcPortraitRawPrompt(req),
+    1400,
+    GAME_PORTRAIT_NEGATIVE_PROMPT,
+  );
+}
+
+export async function buildNpcPortraitImagePrompt(req: NpcPortraitRequest): Promise<string> {
+  return (await buildNpcPortraitProviderPrompt(req)).prompt;
+}
+
+function compileGameImagePrompt(
+  req: Pick<
+    NpcPortraitRequest | BackgroundGenRequest | SceneIllustrationGenRequest,
+    "styleProfiles" | "styleProfileId" | "imgDefaults" | "artStyle"
+  >,
+  kind: "portrait" | "background" | "illustration",
+  prompt: string,
+  maxLength: number,
+  hardNegative?: string,
+  negativePrompt?: string | null,
+) {
+  if (!req.styleProfiles) {
+    return {
+      prompt: prompt.slice(0, maxLength),
+      negativePrompt: [negativePrompt, hardNegative].filter(Boolean).join(", "),
+    };
+  }
+  const compiled = compileImagePrompt({
+    kind,
+    prompt,
+    negativePrompt,
+    hardNegative,
+    styleProfiles: req.styleProfiles,
+    styleProfileId: req.styleProfileId,
+    imageDefaults: req.imgDefaults,
+    generatedStyle: req.artStyle,
+  });
+  return {
+    prompt: compiled.prompt.slice(0, maxLength),
+    negativePrompt: compiled.negativePrompt,
+  };
 }
 
 /**
@@ -635,9 +786,16 @@ export interface BackgroundPromptInput {
   backgroundPrompt: string;
   /** Visual conditions used to compose an "atmosphere" line. Optional. */
   conditions?: BackgroundConditions;
+  /** Genre / tone hint for style guidance (e.g. "fantasy", "sci-fi"). */
+  genre?: string;
   /** The game's broader cultural/era context (e.g. "Snowy Russian village, 1992"). */
   setting?: string;
   /** Unified art-style prompt for visual consistency. */
+  /** Current tracked world-state location, used to keep generic scene prompts grounded. */
+  currentLocation?: string | null;
+  currentWeather?: string | null;
+  currentTimeOfDay?: string | null;
+  worldOverview?: string | null;
   artStyle?: string;
   /** Verbatim prompt that bypasses the builder. */
   promptOverride?: string;
@@ -656,8 +814,12 @@ export interface ImageProviderCredentials {
   imgComfyWorkflow?: string | undefined;
   imgComfyWorkflowWithReference?: string | undefined;
   imgDefaults?: ImageGenerationDefaultsProfile | null;
+  styleProfiles?: ImageStyleProfileSettings;
+  styleProfileId?: string | null;
   debugLog?: (message: string, ...args: any[]) => void;
   size?: ImageGenerationSize;
+  promptOverride?: string;
+  negativePromptOverride?: string;
 }
 
 export interface BackgroundGenRequest extends BackgroundPromptInput, ImageProviderCredentials {
@@ -685,7 +847,9 @@ export interface BackgroundGenResult {
   prompt?: string;
 }
 
-export interface ChatBackgroundGenRequest extends ImageProviderCredentials {
+export interface ChatBackgroundGenRequest
+  extends Omit<BackgroundPromptInput, "backgroundPrompt">,
+    ImageProviderCredentials {
   chatId: string;
   /** Why the background agent asked for generation. Stored as background metadata. */
   reason?: string;
@@ -693,18 +857,11 @@ export interface ChatBackgroundGenRequest extends ImageProviderCredentials {
   locationSlug?: string;
   /** Narrative description of the scene — fed to the image model and used to build the slug. */
   sceneDescription: string;
-  /** Verbatim prompt that bypasses the builder. */
-  promptOverride?: string;
-  /** Storage for user-supplied prompt overrides. */
-  promptOverridesStorage?: PromptOverridesStorage;
-  /** Optional cinematic context — adds an atmosphere line when present. */
-  conditions?: BackgroundConditions;
-  setting?: string;
-  artStyle?: string;
 }
 
 export interface SceneIllustrationGenRequest {
   chatId: string;
+  title?: string;
   prompt: string;
   reason?: string;
   characters?: string[];
@@ -727,11 +884,122 @@ export interface SceneIllustrationGenRequest {
   imgComfyWorkflow?: string | undefined;
   imgComfyWorkflowWithReference?: string | undefined;
   imgDefaults?: ImageGenerationDefaultsProfile | null;
+  styleProfiles?: ImageStyleProfileSettings;
+  styleProfileId?: string | null;
   debugLog?: (message: string, ...args: any[]) => void;
   /** Storage for user-supplied prompt overrides. Optional — falls back to default builder when omitted. */
   promptOverridesStorage?: PromptOverridesStorage;
   size?: ImageGenerationSize;
   promptOverride?: string;
+  negativePromptOverride?: string;
+}
+
+async function buildBackgroundRawPrompt(req: BackgroundPromptInput): Promise<string> {
+  const styleHint = [req.artStyle, req.genre, req.setting].filter(Boolean).join(", ");
+  const worldContext = buildBackgroundWorldContext(req);
+  const groundedSceneDescription = [worldContext, req.backgroundPrompt].filter(Boolean).join(". ");
+  const backgroundVars = {
+    sceneDescription: groundedSceneDescription,
+    styleLine: styleHint ? `Style: ${styleHint}.` : "",
+  };
+  return req.promptOverridesStorage
+    ? await loadPrompt(req.promptOverridesStorage, GAME_BACKGROUND, backgroundVars)
+    : GAME_BACKGROUND.defaultBuilder(backgroundVars);
+}
+
+function buildBackgroundWorldContext(req: BackgroundPromptInput): string {
+  const fragments = [
+    req.genre,
+    req.setting,
+    req.currentLocation ? `location ${req.currentLocation}` : "",
+    req.currentWeather ? `${req.currentWeather} weather` : "",
+    req.currentTimeOfDay ? req.currentTimeOfDay : "",
+    compactWorldOverview(req.worldOverview),
+  ]
+    .map((fragment) => cleanBackgroundContextFragment(fragment))
+    .filter(Boolean);
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const fragment of fragments) {
+    const key = fragment.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(fragment);
+  }
+  return deduped.slice(0, 6).join(", ");
+}
+
+function compactWorldOverview(value: string | null | undefined): string {
+  const clean = cleanBackgroundContextFragment(value);
+  if (!clean) return "";
+  const firstSentence = clean.split(/(?<=[.!?])\s+/)[0]?.trim() ?? clean;
+  return firstSentence.split(/\s+/).slice(0, 18).join(" ");
+}
+
+function cleanBackgroundContextFragment(value: string | null | undefined): string {
+  return (value ?? "")
+    .replace(/[<>\r\n]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/[.!?]+$/g, "")
+    .trim()
+    .slice(0, 180);
+}
+
+export async function buildBackgroundProviderPrompt(req: BackgroundGenRequest): Promise<CompiledGameImagePrompt> {
+  if (req.promptOverride?.trim()) {
+    return {
+      prompt: req.promptOverride.trim(),
+      negativePrompt: req.negativePromptOverride?.trim() || "",
+    };
+  }
+  return compileGameImagePrompt(
+    req,
+    "background",
+    await buildBackgroundRawPrompt(req),
+    1000,
+    GAME_BACKGROUND_NEGATIVE_PROMPT,
+  );
+}
+
+function adaptChatBackgroundToProviderRequest(req: ChatBackgroundGenRequest): BackgroundGenRequest {
+  const conditions = req.conditions ?? {
+    weather: req.currentWeather ?? null,
+    timeOfDay: req.currentTimeOfDay ?? null,
+    season: null,
+  };
+  const locationId =
+    req.locationSlug ||
+    safeGeneratedAssetSlug(req.sceneDescription.slice(0, 80), { maxBytes: 160 }) ||
+    "roleplay-scene";
+  return {
+    chatId: req.chatId,
+    locationId,
+    conditions,
+    backgroundPrompt: req.sceneDescription,
+    genre: req.genre,
+    setting: req.setting,
+    currentLocation: req.currentLocation,
+    currentWeather: req.currentWeather ?? conditions.weather,
+    currentTimeOfDay: req.currentTimeOfDay ?? conditions.timeOfDay,
+    worldOverview: req.worldOverview,
+    artStyle: req.artStyle,
+    promptOverride: req.promptOverride,
+    negativePromptOverride: req.negativePromptOverride,
+    promptOverridesStorage: req.promptOverridesStorage,
+    imgSource: req.imgSource,
+    imgModel: req.imgModel,
+    imgBaseUrl: req.imgBaseUrl,
+    imgApiKey: req.imgApiKey,
+    imgService: req.imgService,
+    imgEndpointId: req.imgEndpointId,
+    imgComfyWorkflow: req.imgComfyWorkflow,
+    imgComfyWorkflowWithReference: req.imgComfyWorkflowWithReference,
+    imgDefaults: req.imgDefaults,
+    styleProfiles: req.styleProfiles,
+    styleProfileId: req.styleProfileId,
+    debugLog: req.debugLog,
+    size: req.size,
+  };
 }
 
 /**
@@ -774,7 +1042,7 @@ function sanitizeArtStyleForBackground(artStyle?: string): string | undefined {
   return joined.length > 0 ? joined : undefined;
 }
 
-export async function buildBackgroundImagePrompt(req: BackgroundPromptInput): Promise<string> {
+async function buildChatBackgroundImagePrompt(req: BackgroundPromptInput): Promise<string> {
   if (req.promptOverride?.trim()) return req.promptOverride.trim().slice(0, 1500);
   const conditionParts = req.conditions
     ? [
@@ -794,8 +1062,6 @@ export async function buildBackgroundImagePrompt(req: BackgroundPromptInput): Pr
   const rawBackgroundPrompt = req.promptOverridesStorage
     ? await loadPrompt(req.promptOverridesStorage, GAME_BACKGROUND, backgroundVars)
     : GAME_BACKGROUND.defaultBuilder(backgroundVars);
-  // VN composition + hard "no people" negative. Diffusion models respond better
-  // to repeated restatements than a single "no characters" line.
   const composition =
     " Visual-novel composition: wide 16:9 establishing shot; keep the lower third and bottom-center visually open and uncluttered so standing character sprites read at a natural scale. Place doors, signage, faces-on-posters, and story-critical props away from that overlay zone — stronger depth, architecture, and sky in mid-ground and upper frame.";
   const hardNegative =
@@ -803,9 +1069,15 @@ export async function buildBackgroundImagePrompt(req: BackgroundPromptInput): Pr
   return `${rawBackgroundPrompt}${composition}${hardNegative}`.slice(0, 1500);
 }
 
-export async function buildSceneIllustrationImagePrompt(req: SceneIllustrationGenRequest): Promise<string> {
-  if (req.promptOverride?.trim()) return req.promptOverride.trim().slice(0, 2600);
+export async function buildBackgroundImagePrompt(req: BackgroundGenRequest): Promise<string> {
+  return (await buildBackgroundProviderPrompt(req)).prompt;
+}
+
+async function buildSceneIllustrationRawPrompt(req: SceneIllustrationGenRequest): Promise<string> {
   const styleHint = [req.artStyle, req.genre, req.setting].filter(Boolean).join(", ");
+  const sceneTitle = sceneIllustrationContextTitle(req);
+  const narrativePurpose = cleanSceneIllustrationContext(req.reason);
+  const meaningfulNarrativePurpose = isGenericSceneMomentLabel(narrativePurpose) ? "" : narrativePurpose;
   const imagePromptInstructionsLine = req.imagePromptInstructions?.trim()
     ? `User image instructions: ${req.imagePromptInstructions.trim().replace(/\s+/g, " ").slice(0, 1200)}`
     : "";
@@ -814,8 +1086,9 @@ export async function buildSceneIllustrationImagePrompt(req: SceneIllustrationGe
     : "";
   const scenePromptCombined = continuityHint ? `${req.prompt}\n${continuityHint}` : req.prompt;
   const sceneIllustrationVars = {
+    sceneTitleLine: sceneTitle ? `${sceneTitle}.` : "",
     scenePrompt: scenePromptCombined,
-    narrativePurposeLine: req.reason ? `Narrative purpose: ${req.reason}.` : "",
+    narrativePurposeLine: meaningfulNarrativePurpose ? `Narrative purpose: ${meaningfulNarrativePurpose}.` : "",
     charactersLine: req.characters?.length ? `Characters: ${req.characters.join(", ")}.` : "",
     referenceHandlingLine: req.referenceImages?.length
       ? "Reference handling: attached character reference images are available. Use them to match faces, hair, build, colors, and distinctive features for the referenced characters."
@@ -833,7 +1106,59 @@ export async function buildSceneIllustrationImagePrompt(req: SceneIllustrationGe
     imagePromptInstructionsLine && !rawIllustrationPrompt.includes(imagePromptInstructionsLine)
       ? `${rawIllustrationPrompt}\n${imagePromptInstructionsLine}`
       : rawIllustrationPrompt;
-  return finalPrompt.slice(0, 2600);
+  return finalPrompt;
+}
+
+function sceneIllustrationContextTitle(req: SceneIllustrationGenRequest): string {
+  const explicitTitle = cleanSceneIllustrationContext(req.title);
+  if (explicitTitle) return explicitTitle;
+
+  const visualReason = cleanSceneIllustrationContext(req.reason);
+  if (visualReason && hasSceneSubjectCue(visualReason)) return visualReason;
+
+  const slugTitle = cleanSceneIllustrationContext(req.slug?.replace(/[-_]+/g, " "));
+  return slugTitle && hasSceneSubjectCue(slugTitle) ? slugTitle : "";
+}
+
+function cleanSceneIllustrationContext(value: string | null | undefined): string {
+  return (value ?? "")
+    .replace(/\b(?:major character moment|key emotional moment|major reveal|dramatic action scene|important scene|scene moment|narrative purpose)\s*[-:]\s*/gi, "")
+    .replace(/\s+/g, " ")
+    .replace(/[.!?]+$/g, "")
+    .trim()
+    .slice(0, 180);
+}
+
+function hasSceneSubjectCue(value: string): boolean {
+  return /\b(?:seeing|watching|looking|facing|meeting|holding|reaching|standing|kneeling|falling|fighting|duel|kiss|confession|reveal|transformation|mirror|uniform|door|character|protagonist|player|npc|self|room|hall|chamber|courtyard|battle|boss|monster|creature|arrival|entrance)\b/i.test(value);
+}
+
+function isGenericSceneMomentLabel(value: string): boolean {
+  return /^(?:major character moment|key emotional moment|major reveal|dramatic action scene|important scene|scene moment)$/i.test(
+    value,
+  );
+}
+
+export async function buildSceneIllustrationProviderPrompt(
+  req: SceneIllustrationGenRequest,
+): Promise<CompiledGameImagePrompt> {
+  if (req.promptOverride?.trim()) {
+    return {
+      prompt: req.promptOverride.trim(),
+      negativePrompt: req.negativePromptOverride?.trim() || "",
+    };
+  }
+  return compileGameImagePrompt(
+    req,
+    "illustration",
+    await buildSceneIllustrationRawPrompt(req),
+    2200,
+    GAME_ILLUSTRATION_NEGATIVE_PROMPT,
+  );
+}
+
+export async function buildSceneIllustrationImagePrompt(req: SceneIllustrationGenRequest): Promise<string> {
+  return (await buildSceneIllustrationProviderPrompt(req)).prompt;
 }
 
 /**
@@ -899,7 +1224,8 @@ export async function generateBackground(req: BackgroundGenRequest): Promise<Bac
     );
   }
 
-  const prompt = await buildBackgroundImagePrompt(req);
+  const compiled = await buildBackgroundProviderPrompt(req);
+  const prompt = compiled.prompt;
   const size = resolvedSize(req.size, DEFAULT_GAME_BACKGROUND_SIZE);
   req.debugLog?.(
     "[debug/game/image-generation] background request key=%s model=%s source=%s targetSize=%dx%d prompt:\n%s",
@@ -928,7 +1254,7 @@ export async function generateBackground(req: BackgroundGenRequest): Promise<Bac
       req.imgSource || req.imgService || "",
       {
         prompt,
-        negativePrompt: GAME_BACKGROUND_NEGATIVE_PROMPT,
+        negativePrompt: compiled.negativePrompt || undefined,
         model: req.imgModel,
         width: size.width,
         height: size.height,
@@ -990,14 +1316,8 @@ export async function generateChatBackground(req: ChatBackgroundGenRequest): Pro
   const existingPath = existingGeneratedBackgroundPath(CHAT_BACKGROUND_DIR, slug);
   if (existingPath) return basename(existingPath);
 
-  const prompt = await buildBackgroundImagePrompt({
-    backgroundPrompt: req.sceneDescription,
-    conditions: req.conditions,
-    setting: req.setting,
-    artStyle: req.artStyle,
-    promptOverride: req.promptOverride,
-    promptOverridesStorage: req.promptOverridesStorage,
-  });
+  const compiled = await buildBackgroundProviderPrompt(adaptChatBackgroundToProviderRequest(req));
+  const prompt = compiled.prompt;
   const size = resolvedSize(req.size, DEFAULT_GAME_BACKGROUND_SIZE);
   req.debugLog?.(
     "[debug/background-agent/image-generation] request slug=%s model=%s source=%s targetSize=%dx%d prompt:\n%s",
@@ -1017,7 +1337,7 @@ export async function generateChatBackground(req: ChatBackgroundGenRequest): Pro
       req.imgSource || req.imgService || "",
       {
         prompt,
-        negativePrompt: GAME_BACKGROUND_NEGATIVE_PROMPT,
+        negativePrompt: compiled.negativePrompt || undefined,
         model: req.imgModel,
         width: size.width,
         height: size.height,
@@ -1061,7 +1381,8 @@ export async function generateSceneIllustration(req: SceneIllustrationGenRequest
   const targetDir = join(GAME_ASSETS_DIR, "backgrounds", "illustrations");
   const tag = `backgrounds:illustrations:${slug}`;
 
-  const prompt = await buildSceneIllustrationImagePrompt(req);
+  const compiled = await buildSceneIllustrationProviderPrompt(req);
+  const prompt = compiled.prompt;
   const size = resolvedSize(req.size, DEFAULT_GAME_BACKGROUND_SIZE);
   req.debugLog?.(
     "[debug/game/image-generation] scene illustration request slug=%s model=%s source=%s targetSize=%dx%d refs=%d prompt:\n%s",
@@ -1082,7 +1403,7 @@ export async function generateSceneIllustration(req: SceneIllustrationGenRequest
       req.imgSource || req.imgService || "",
       {
         prompt,
-        negativePrompt: GAME_ILLUSTRATION_NEGATIVE_PROMPT,
+        negativePrompt: compiled.negativePrompt || undefined,
         model: req.imgModel,
         width: size.width,
         height: size.height,
