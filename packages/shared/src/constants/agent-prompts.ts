@@ -441,6 +441,7 @@ Instructions:
 3. Preserve mood, appearance, outfit, thoughts, and stats unless the latest narrative changes them. Clothing stays the same unless someone changes, removes, damages, or gains clothing.
 4. Track HP and any other RPG stats defined on the character card; adjust values based on narrative events (combat damage, healing, etc.). Use the card's initial values as maximums.
 5. Fill in appearance and outfit from the character's description or card if not mentioned in the current message. Don't leave them null just because this specific message didn't repeat the description.
+5a. For role-tagged NPCs without a character card, if the narration does not describe what they are wearing, set outfit to a neutral default such as "plain worn everyday clothes, no armor" rather than null.
 6. Preserve continuity with the previous state.
 7. If a new character enters the scene, add them with full details immediately.
 8. Do NOT output lastSeenLocation or lastSeenTurn — the server computes presence metadata after your response.`,

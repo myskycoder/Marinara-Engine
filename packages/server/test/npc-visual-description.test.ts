@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import type { GameNpc, PresentCharacter } from "@marinara-engine/shared";
 import {
   findPresentCharacterForNpc,
+  hasExplicitOutfit,
   resolveNpcVisualDescription,
 } from "../src/services/game/npc-visual-description.js";
+import { buildNpcPortraitProviderPrompt } from "../src/services/game/game-asset-generation.js";
 import { sanitizeNpcSpriteAppearanceSource } from "../src/services/game/npc-sprite-generation.service.js";
 
 function baseNpc(overrides: Partial<GameNpc> = {}): GameNpc {
@@ -107,4 +109,24 @@ test("sanitizeNpcSpriteAppearanceSource stays idempotent for prior spritePrompt 
   const noisy =
     "Tall woman. Match the described gender, age, build, hair, and features exactly — do not invent attributes.";
   assert.equal(sanitizeNpcSpriteAppearanceSource(noisy), "Tall woman");
+});
+
+test("hasExplicitOutfit detects Outfit lines in visual descriptions", () => {
+  assert.equal(hasExplicitOutfit("Appearance: bald man\nOutfit: worn tunic"), true);
+  assert.equal(hasExplicitOutfit("Appearance: bald man"), false);
+});
+
+test("buildNpcPortraitProviderPrompt discourages invented armor when outfit is missing", async () => {
+  const compiled = await buildNpcPortraitProviderPrompt({
+    chatId: "chat-1",
+    npcId: "npc-1",
+    npcName: "Dock Worker",
+    appearance: "Appearance: middle-aged man, bald, with a scar across his eyebrow",
+    imgModel: "",
+    imgBaseUrl: "",
+    imgApiKey: "",
+  });
+  assert.match(compiled.prompt, /Plain simple everyday clothing/i);
+  assert.match(compiled.negativePrompt, /armor/i);
+  assert.doesNotMatch(compiled.prompt, /clear outfit cues/i);
 });

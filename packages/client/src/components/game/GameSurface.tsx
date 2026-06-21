@@ -114,6 +114,9 @@ import {
   GAME_ILLUSTRATION_DRAFT_MAX,
   GAME_ILLUSTRATION_NARRATION_EXCERPT_MAX,
   BUILT_IN_AGENTS,
+  shouldDeferIllustrationSegment,
+  shouldSkipUnresolvedIllustrationBackground,
+  isIllustrationBgTag,
 } from "@marinara-engine/shared";
 import { GameNarration, formatNarration } from "./GameNarration";
 import { GameInput } from "./GameInput";
@@ -3209,9 +3212,21 @@ export function GameSurface({
 
       const assetMap = scopedAssetMap;
       if (effects.length > 0) {
-        appliedSegmentsRef.current.add(segmentIndex);
+        let skippedUnresolvedIllustrationBg = false;
         for (const fx of effects) {
+          if (typeof fx.locationId === "string" && fx.locationId.trim()) {
+            void api
+              .patch(`/chats/${activeChatId}/metadata`, { currentLocationId: fx.locationId.trim() })
+              .then(() => {
+                void queryClient.invalidateQueries({ queryKey: chatKeys.detail(activeChatId) });
+              })
+              .catch(() => {});
+          }
           if (fx.background) {
+            if (shouldSkipUnresolvedIllustrationBackground(fx.background, assetMap)) {
+              skippedUnresolvedIllustrationBg = true;
+              continue;
+            }
             const resolved = resolveAssetTag(fx.background, "backgrounds", assetMap);
             useGameAssetStore.getState().setCurrentBackground(resolved);
           }
@@ -3236,6 +3251,9 @@ export function GameSurface({
           }
           // Widget updates handled by GM model via inline [widget:] tags
         }
+        if (!skippedUnresolvedIllustrationBg) {
+          appliedSegmentsRef.current.add(segmentIndex);
+        }
       }
 
       if (inventoryUpdates.length > 0) {
@@ -3253,6 +3271,8 @@ export function GameSurface({
       useSpotifyGameMusic,
       useYoutubeGameMusic,
       tryReconcileDeferredEndPlate,
+      activeChatId,
+      queryClient,
     ],
   );
 
@@ -4556,10 +4576,8 @@ export function GameSurface({
         }
         return [...list, { segment: seg, background: illustration.tag }];
       });
-      if (seg <= 0) {
-        appliedSegmentsRef.current.delete(0);
-        setSegmentEffectsSignal((n) => n + 1);
-      }
+      appliedSegmentsRef.current.delete(seg);
+      setSegmentEffectsSignal((n) => n + 1);
     },
     [activeChatId, fetchManifest, queryClient],
   );
@@ -4821,10 +4839,20 @@ export function GameSurface({
     if (result.segmentEffects?.length) {
       setPendingSegmentEffects(result.segmentEffects);
       appliedSegmentsRef.current = new Set();
+      const pendingIllustrationSegment =
+        result.illustration && !result.generatedIllustration
+          ? typeof result.illustration.segment === "number" && Number.isFinite(result.illustration.segment)
+            ? Math.floor(result.illustration.segment)
+            : 0
+          : null;
+      const illustrationDeferOptions = {
+        segmentEffects: result.segmentEffects,
+        pendingIllustrationSegment,
+        generatedIllustration: result.generatedIllustration ?? null,
+        assetMap,
+      };
       const seg0 = result.segmentEffects.filter((e) => e.segment === 0);
-      const seg0DefersIllustrationSync = seg0.some(
-        (fx) => typeof fx.background === "string" && fx.background.startsWith("backgrounds:illustrations:"),
-      );
+      const seg0DefersIllustrationSync = shouldDeferIllustrationSegment(0, illustrationDeferOptions);
       if (seg0.length > 0) {
         if (!seg0DefersIllustrationSync) {
           appliedSegmentsRef.current.add(0);
@@ -4832,9 +4860,9 @@ export function GameSurface({
         if (!seg0DefersIllustrationSync) {
           for (const fx of seg0) {
             if (fx.background) {
-              if (locationMoved && fx.background.startsWith("backgrounds:illustrations:")) continue;
-              if (skipSeg0IllustrationWhenTopIsConcretePlate && fx.background.startsWith("backgrounds:illustrations:"))
-                continue;
+              if (locationMoved && isIllustrationBgTag(fx.background)) continue;
+              if (skipSeg0IllustrationWhenTopIsConcretePlate && isIllustrationBgTag(fx.background)) continue;
+              if (shouldSkipUnresolvedIllustrationBackground(fx.background, assetMap)) continue;
               // Match top-level `skipBgUpdate`: do not fuzzy-resolve an unresolved
               // or placeholder generated tag while async /generate-assets is pending.
               const skipSegBg =

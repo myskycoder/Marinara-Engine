@@ -8,6 +8,7 @@ import { DATA_DIR } from "../../utils/data-dir.js";
 import { generateImage } from "../image/image-generation.js";
 import { removeNearWhiteBackgroundPng } from "../image/sprite-bg-removal.js";
 import { getSharp } from "../image/sharp-loader.js";
+import { hasExplicitOutfit } from "./npc-visual-description.js";
 
 // Auto-generated NPC sprites are rendered on a solid white background (it's
 // in the prompt). Match the default cleanup strength used by the manual
@@ -125,8 +126,16 @@ function resolveFullBodyIdleExpression(
 const NPC_SPRITE_VISUAL_CORE_MAX_CHARS = 1000;
 const NPC_SPRITE_APPEARANCE_PROMPT_MAX_CHARS = 1600;
 
-const NPC_SPRITE_VN_STYLE_LINE =
+const NPC_SPRITE_VN_STYLE_LINE_WITH_OUTFIT =
   "VN game sprite style, cel-shaded character art, clean readable silhouette, consistent proportions, detailed costume,";
+const NPC_SPRITE_VN_STYLE_LINE_PLAIN_CLOTHING =
+  "VN game sprite style, cel-shaded character art, clean readable silhouette, consistent proportions, plain readable everyday clothing,";
+
+function npcSpriteStyleLine(appearanceText: string): string {
+  return hasExplicitOutfit(appearanceText)
+    ? NPC_SPRITE_VN_STYLE_LINE_WITH_OUTFIT
+    : NPC_SPRITE_VN_STYLE_LINE_PLAIN_CLOTHING;
+}
 
 const NPC_SPRITE_GENDER_RULE =
   "Match the described gender, age, build, hair, and features exactly — do not invent attributes.";
@@ -243,7 +252,7 @@ export function buildNpcSpriteFullBodyPromptForExpression(
   return [
     `single full-body character sprite, one character only, entire body visible from head to toe, centered in frame,`,
     `solid white studio background, plain white void, no environment, no scenery,`,
-    `${NPC_SPRITE_VN_STYLE_LINE} ${appearance},`,
+    `${npcSpriteStyleLine(appearance)} ${appearance},`,
     idleHint,
     `facial expression and overall mood for this render (asset full_${moodExpression}): clearly readable as "${moodExpression}", body language consistent with that mood,`,
     `single character only, one face with a clearly readable "${moodExpression}" expression, no grid, no panel borders, no multiple faces,`,
@@ -267,7 +276,7 @@ export function buildNpcSpritePromptBundle(
     `${cols * rows} equally sized square cells arranged in a perfectly uniform grid,`,
     `solid white background, thin straight lines separating each cell,`,
     `same character in every cell, consistent art style,`,
-    `${NPC_SPRITE_VN_STYLE_LINE}`,
+    `${npcSpriteStyleLine(appearance)}`,
     `expressions left-to-right top-to-bottom: ${expressions.join(", ")},`,
     appearance,
     `each cell shows head and shoulders portrait with a different facial expression,`,
@@ -277,7 +286,7 @@ export function buildNpcSpritePromptBundle(
   const fullBody = [
     `single full-body character sprite, one character only, entire body visible from head to toe, centered in frame,`,
     `solid white studio background, plain white void, no environment, no scenery,`,
-    `${NPC_SPRITE_VN_STYLE_LINE} ${appearanceForFullBody},`,
+    `${npcSpriteStyleLine(appearanceForFullBody)} ${appearanceForFullBody},`,
     `facial expression and overall mood for this full-body idle reference (asset full_idle): clearly readable as "${idleFace}", body language consistent with that mood,`,
     `single character only, one face with a clearly readable "${idleFace}" expression, no grid, no panel borders, no multiple faces,`,
     `standing idle game pose, no text, no watermark`,

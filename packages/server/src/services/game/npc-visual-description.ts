@@ -52,6 +52,17 @@ function parseStructuredNpcDescription(description: string): {
   };
 }
 
+/** True when a visual description block includes an explicit Outfit line. */
+export function hasExplicitOutfit(visualDescription: string): boolean {
+  return /^Outfit:\s*.+/im.test(visualDescription.trim());
+}
+
+/** Read outfit from a structured GameNpc.description block when present. */
+export function extractNpcOutfitFromDescription(description: string): string | null {
+  const parsed = parseStructuredNpcDescription(description);
+  return parsed.outfit ? parsed.outfit.trim() : null;
+}
+
 function formatVisualDescriptionParts(parts: string[]): string {
   return parts.filter(Boolean).join("\n").trim();
 }

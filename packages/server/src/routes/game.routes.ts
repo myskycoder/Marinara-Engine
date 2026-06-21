@@ -831,6 +831,27 @@ function buildConditionsKey(conditions: BackgroundConditions): string {
   return `${conditions.weather ?? "none"}__${conditions.timeOfDay ?? "none"}__${conditions.season ?? "none"}`;
 }
 
+function catalogDescriptionFromPrompt(prompt: string): string | undefined {
+  const trimmed = prompt.trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > 120 ? `${trimmed.slice(0, 119)}…` : trimmed;
+}
+
+/** Human-readable catalog hints for the scene analyzer (id plus optional brief). */
+function formatKnownLocationCatalogHints(
+  catalog: Record<string, LocationCatalogEntry> | undefined,
+): string[] {
+  if (!catalog) return [];
+  return Object.entries(catalog).map(([key, entry]) => {
+    const id = entry?.locationId?.trim() || key;
+    const desc =
+      entry?.description?.trim() ||
+      entry?.variants?.find((variant) => variant.prompt?.trim())?.prompt.trim().slice(0, 120) ||
+      "";
+    return desc ? `${id} — ${desc}` : id;
+  });
+}
+
 /**
  * Append a freshly-generated variant to the per-chat locationCatalog. Returns
  * a new metadata patch object (caller should merge it into the latest meta
@@ -860,7 +881,7 @@ function upsertLocationCatalogVariant(
   };
   const nextEntry: LocationCatalogEntry = {
     locationId,
-    description: description ?? prevEntry?.description,
+    description: description?.trim() || catalogDescriptionFromPrompt(prompt) || prevEntry?.description,
     variants: [...filtered, newVariant],
   };
   return { ...existing, [locationId]: nextEntry };
@@ -6840,8 +6861,8 @@ export async function gameRoutes(app: FastifyInstance) {
       logger.warn(err, "[game/scene-wrap][bg] failed to merge server-manifest chat plates");
     }
 
-    const knownLocationIds = Object.keys(
-      (meta.locationCatalog as Record<string, LocationCatalogEntry> | undefined) ?? {},
+    const knownLocationIds = formatKnownLocationCatalogHints(
+      meta.locationCatalog as Record<string, LocationCatalogEntry> | undefined,
     );
     const currentLocationId = (meta.currentLocationId as string | null | undefined) ?? null;
     const currentSeason = coerceSeason(meta.gameCurrentSeason);
@@ -8295,6 +8316,9 @@ export async function gameRoutes(app: FastifyInstance) {
 
       const userBody = [
         `Technical location id (context only, do not paste verbatim): ${forceRichBg.locationId}`,
+        latestImageState?.location?.trim()
+          ? `Current scene location label from game state: ${latestImageState.location.trim()}`
+          : null,
         `Previous image brief to improve or replace: ${forceRichBg.backgroundPrompt}`,
         setting.trim() ? `Game world setting: ${setting.trim()}` : null,
         artStyle.trim() ? `Art direction: ${artStyle.trim()}` : null,

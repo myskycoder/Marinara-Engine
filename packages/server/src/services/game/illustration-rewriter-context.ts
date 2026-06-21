@@ -3,6 +3,7 @@
 // ──────────────────────────────────────────────
 
 import type { GameNpc, PresentCharacter } from "@marinara-engine/shared";
+import { extractNpcOutfitFromDescription } from "./npc-visual-description.js";
 
 export interface BuildScenePresenceBlockOptions {
   maxNpcs?: number;
@@ -85,7 +86,8 @@ export function buildScenePresenceBlock(
     if (mood) fields.push(`mood=${clamp(mood, 80)}`);
     const appearance = stripWhitespace(tracker?.appearance ?? card?.description ?? "");
     if (appearance) fields.push(`appearance=${clamp(appearance, 200)}`);
-    const outfit = stripWhitespace(tracker?.outfit ?? "");
+    const cardOutfit = card?.description ? extractNpcOutfitFromDescription(card.description) : null;
+    const outfit = stripWhitespace(tracker?.outfit ?? cardOutfit ?? "");
     if (outfit) fields.push(`outfit=${clamp(outfit, 160)}`);
     const thoughts = stripWhitespace(tracker?.thoughts ?? "");
     if (thoughts) fields.push(`thoughts=${clamp(thoughts, 160)}`);

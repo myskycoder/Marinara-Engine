@@ -21,6 +21,7 @@ import { loadPrompt, GAME_NPC_PORTRAIT, GAME_BACKGROUND, GAME_SCENE_ILLUSTRATION
 import { type ImageGenerationDefaultsProfile, type ImageStyleProfileSettings } from "@marinara-engine/shared";
 import type { ImageGenerationSize } from "../image/image-generation-settings.js";
 import { compileImagePrompt } from "../image/image-prompt-compiler.js";
+import { hasExplicitOutfit } from "./npc-visual-description.js";
 
 const NPC_AVATAR_DIR = join(DATA_DIR, "avatars", "npc");
 const CHAT_BACKGROUND_DIR = join(DATA_DIR, "backgrounds");
@@ -31,6 +32,8 @@ export const GENERATED_GAME_BACKGROUND_EXTS = ["png", "jpg", "jpeg", "webp", "av
 const GAME_BACKGROUND_EXT_SET = new Set<string>(GENERATED_GAME_BACKGROUND_EXTS);
 const GAME_PORTRAIT_NEGATIVE_PROMPT =
   "text, letters, captions, subtitles, UI, watermark, logo, signature, speech bubble, split screen, panel, collage, contact sheet, grid, four portraits, multiple portraits, duplicated face, extra head, extra person, bad anatomy, low quality";
+const GAME_PORTRAIT_UNSPECIFIED_OUTFIT_NEGATIVE_PROMPT =
+  `${GAME_PORTRAIT_NEGATIVE_PROMPT}, armor, chainmail, plate armor, military uniform, tactical gear, heavy pauldrons, knight, full plate`;
 const GAME_BACKGROUND_NEGATIVE_PROMPT =
   "text, letters, captions, subtitles, UI, watermark, logo, signature, people, character, portrait, split screen, panel, collage, contact sheet, grid, multiple frames, low quality";
 const GAME_ILLUSTRATION_NEGATIVE_PROMPT =
@@ -440,6 +443,7 @@ function buildNpcAppearanceLine(req: NpcPortraitRequest, explicitNonHuman: boole
 function npcPortraitVariables(req: NpcPortraitRequest) {
   const context = req.appearance.trim();
   const explicitNonHuman = hasExplicitNonHumanCue(`${req.npcName} ${context}`);
+  const hasOutfit = hasExplicitOutfit(context);
   return {
     npcName: req.npcName,
     appearanceLine: buildNpcAppearanceLine(req, explicitNonHuman),
@@ -449,8 +453,16 @@ function npcPortraitVariables(req: NpcPortraitRequest) {
     artStyleLine: req.artStyle ? `Art style: ${req.artStyle}.` : "",
     compositionRule: explicitNonHuman
       ? "Use a centered avatar composition appropriate to the subject, including a creature portrait or full head-and-body crop only when that best preserves the described non-human form."
-      : "Use a centered human/humanoid avatar composition: face and shoulders, readable expression, clear outfit cues.",
+      : hasOutfit
+        ? "Use a centered human/humanoid avatar composition: face and shoulders, readable expression, clear outfit cues."
+        : "Use a centered human/humanoid avatar composition: face and shoulders, readable expression. Plain simple everyday clothing only; do not invent armor, uniforms, plate mail, or profession-specific gear unless explicitly described in the appearance block.",
   };
+}
+
+function portraitNegativePromptForAppearance(appearance: string): string {
+  return hasExplicitOutfit(appearance)
+    ? GAME_PORTRAIT_NEGATIVE_PROMPT
+    : GAME_PORTRAIT_UNSPECIFIED_OUTFIT_NEGATIVE_PROMPT;
 }
 
 function resolvedSize(size: ImageGenerationSize | undefined, fallback: ImageGenerationSize): ImageGenerationSize {
@@ -524,7 +536,7 @@ export async function buildNpcPortraitProviderPrompt(req: NpcPortraitRequest): P
     "portrait",
     await buildNpcPortraitRawPrompt(req),
     1400,
-    GAME_PORTRAIT_NEGATIVE_PROMPT,
+    portraitNegativePromptForAppearance(req.appearance),
   );
 }
 
@@ -669,7 +681,7 @@ export async function generateNpcPortrait(req: NpcPortraitRequest): Promise<stri
         req.imgSource || req.imgService || "",
         {
           prompt,
-          negativePrompt: GAME_PORTRAIT_NEGATIVE_PROMPT,
+          negativePrompt: portraitNegativePromptForAppearance(req.appearance),
           model: req.imgModel,
           width: size.width,
           height: size.height,

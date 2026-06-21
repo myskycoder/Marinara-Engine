@@ -316,7 +316,7 @@ export function buildSceneAnalyzerUserPrompt(
     );
     if (ctx.knownLocationIds?.length) {
       parts.push(
-        `Known locationIds (REUSE these when narration returns to one of these places): ${ctx.knownLocationIds.join(", ")}`,
+        `Known locationIds (REUSE the exact id when narration returns to the same physical frame; each entry may include a short scene hint after " — "): ${ctx.knownLocationIds.join(", ")}`,
       );
     }
     const worldContext = [
@@ -355,7 +355,7 @@ export function buildSceneAnalyzerUserPrompt(
     `TASK: You are the scene director for a visual novel game. Read the narration above and decide:`,
     // music and ambient are scored deterministically on the server — not requested from the model
     `1. SCENE SETTING — Pick the BEST overall background, weather, time of day, and season that fit the narration. Top-level "background" + "locationId" are the CANONICAL END-OF-TURN state (where the party stands after this message) — used for the next turn's context, metadata, and illustration grounding. They are NOT necessarily the first on-screen frame: the client keeps showing the previous turn's location plate until a segmentEffect at the matching beat changes "background". If characters move house → office (or any room change), top-level "background" MUST be the office (tag or backgrounds:generated:...) and top-level "locationId" MUST match — do NOT leave "background": null just because the move happens mid-text; null is ONLY when the party stays in the exact same place with no plate change.`,
-    `2. LOCATION ID — Output a stable kebab-case "locationId" for the place currently in frame (e.g. "chernorechye-village-edge", "aunt-zoya-izba-kitchen", "abandoned-bell-tower"). REUSE the same id whenever the narration returns to a previously-visited place — even if phrasing differs. Inventing a new id for an already-visited location creates a duplicate cadre and wastes generation.`,
+    `2. LOCATION ID — Output a stable kebab-case "locationId" for the place currently in frame (e.g. "chernorechye-village-edge", "aunt-zoya-izba-kitchen", "abandoned-bell-tower"). REUSE the same id only when the narration returns to the same physical frame (same room, same camera area). Different rooms, floors, yards, or sub-areas inside one building or complex MUST get distinct ids (e.g. "syrins-thermae-entrance" vs "syrins-thermae-lower-pool"). Inventing a new id for an already-visited frame creates duplicate art; reusing one id for different sub-areas shows the wrong plate.`,
     `3. BACKGROUND PROMPT — When you cannot find a STRONG match in the listed availableBackgrounds (locale, era, geography, language/cultural context — e.g. nothing matches a snowy Russian village or a 1990s post-Soviet bus stop), set "background" to "backgrounds:generated:<short-slug>" AND fill "backgroundPrompt" with a rich 1–2 sentence visual description: location type, materials, lighting, atmosphere, and key visual details from the narration. For generated backgrounds, describe a composition that works behind full-body character sprites: keep the lower foreground and bottom-center relatively clear; put focal interest, important props, doors, and readable text-like signage in mid-ground or upper frame or off-center so sprites are not parked on top of the scene's key beats. When you DO pick a tag from availableBackgrounds, set "backgroundPrompt": null.`,
     useSpotifyMusic
       ? `4. AUDIO DIRECTION — Choose locationKind for ambient scoring, and set spotifyTrack to ONE Spotify URI from SPOTIFY TRACK OPTIONS that best fits the just-finished turn. Use null only if there are no suitable options. Do NOT output musicGenre or musicIntensity.`
@@ -364,7 +364,7 @@ export function buildSceneAnalyzerUserPrompt(
     `6. PER-BEAT EFFECTS — Scan each narration beat [0]-[${lines.length - 1}]. For each beat you can optionally add:`,
     `   - "sfx": sound effects (door slam, explosion, footsteps, impact)`,
     `   - "directions": rare cinematic effects at the exact beat they should happen, usually paired with a meaningful sound or reveal. Available per-beat: fade_from_black, fade_to_black, flash, screen_shake, blur, vignette, letterbox, color_grade (presets: warm, cold_blue, horror, noir, vintage, neon, dreamy), focus, pulse, slow_zoom, impact_zoom, tilt, desaturate, chromatic_aberration, film_grain, rain_streaks, spotlight.`,
-    `   - "background"+"locationId"+"backgroundPrompt": when the characters PHYSICALLY MOVE to a new location at that beat. Same rules as the top-level fields: use a stable locationId, set backgroundPrompt only when no listed tag fits. The background stays the same until the NEXT segment that changes it, so only set these on the beat where characters actually arrive at a new place. Do NOT repeat the current background.`,
+    `   - "background"+"locationId"+"backgroundPrompt": when the characters PHYSICALLY MOVE to a new location at that beat. Same rules as the top-level fields: use a stable locationId, set backgroundPrompt only when no listed tag fits. The background stays the same until the NEXT segment that changes it, so only set these on the beat where characters actually arrive at a new place. Do NOT repeat the current background. Example: if beats [0]-[7] are still at the thermae entrance but beat [8] says the party enters the lower pool, put the lower-pool plate on segment 8 with locationId "syrins-thermae-lower-pool" and a backgroundPrompt describing the dome cave pool interior (steaming rock pools, amber lamps, murky water) — not the entrance archway.`,
     `   Only include segments that HAVE at least one effect — omit empty segments.`,
     ...(canGenerateBackgrounds
       ? [
@@ -387,7 +387,7 @@ export function buildSceneAnalyzerUserPrompt(
     `- For "background" use ONE of: a tag from availableBackgrounds (exact spelling), or "backgrounds:generated:<short-slug>". Nothing else.`,
     `- Prefer "backgrounds:generated:..." when the listed tags don't capture the locale, era, or cultural setting of the scene. A bad fit from the list is worse than a fresh generation.`,
     `- "backgroundPrompt" MUST be set whenever "background" is "backgrounds:generated:..." and MUST be null otherwise. Cyrillic and other non-Latin descriptions are fine — image models read them.`,
-    `- "locationId" should be ASCII kebab-case (a-z, 0-9, hyphens, max ~60 chars). Stable across turns for the same place.`,
+    `- "locationId" should be ASCII kebab-case (a-z, 0-9, hyphens, max ~60 chars). Stable across turns for the same physical frame.`,
     `- Use ONLY the exact tags listed in the template below for music, ambient, sfx, and other enumerated fields. If backgrounds:generated:<short-location-slug> is listed, replace <short-location-slug> with a short concrete location slug.`,
     `- Expressions and widget updates are handled by the GM model. Do NOT include them in your output.`,
     ...(useSpotifyMusic
