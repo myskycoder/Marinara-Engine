@@ -67,7 +67,7 @@ import { processReputationActions } from "../services/game/reputation.service.js
 import { sanitizeGameNpcAvatarUrls } from "../services/game/npc-avatar-utils.js";
 import { createCheckpointService, type CheckpointTrigger } from "../services/game/checkpoint.service.js";
 import { copyBranchMessagesAndSnapshots } from "../services/chats/branch-chat-copy.service.js";
-import { remapBackgroundChatTagsInMetadata } from "../services/game/game-fork-metadata.service.js";
+import { remapBackgroundChatTagsInMetadata, collectBackgroundChatIdsFromMetadata } from "../services/game/game-fork-metadata.service.js";
 import { copyGameCheckpointsForFork } from "../services/game/copy-checkpoints-for-fork.service.js";
 import { resolveSkillCheck } from "../services/game/skill-check.service.js";
 import {
@@ -145,7 +145,7 @@ import {
   resolveGalleryIllustrationArtStyle,
   type GalleryIllustrationStylePresetId,
 } from "@marinara-engine/shared";
-import { getAssetManifest, GAME_ASSETS_DIR } from "../services/game/asset-manifest.service.js";
+import { getAssetManifest, buildAssetManifest, GAME_ASSETS_DIR } from "../services/game/asset-manifest.service.js";
 import {
   GENERATED_GAME_BACKGROUND_EXTS,
   generateNpcPortrait,
@@ -154,6 +154,7 @@ import {
   findCachedBackground,
   buildBackgroundCacheKey,
   backgroundTagForChat,
+  copyChatBackgroundPlates,
   readAvatarBase64,
   readBackgroundBase64,
   readNpcAvatarBase64,
@@ -4256,7 +4257,27 @@ export async function gameRoutes(app: FastifyInstance) {
         gameModeAutoSeeded: true,
         ...(carriedInventory.length > 0 ? { gameInventory: carriedInventory } : {}),
       };
-      await chats.updateMetadata(newChat.id, updatedNewMeta);
+
+      let migratedNewMeta: Record<string, unknown> = updatedNewMeta;
+      const sourceChatIds = collectBackgroundChatIdsFromMetadata(carryMeta);
+      sourceChatIds.add(latestSession.id);
+      let copiedPlateCount = 0;
+      for (const oldChatId of sourceChatIds) {
+        if (oldChatId === newChat.id) continue;
+        copiedPlateCount += copyChatBackgroundPlates(oldChatId, newChat.id);
+        migratedNewMeta = remapBackgroundChatTagsInMetadata(migratedNewMeta, oldChatId, newChat.id);
+      }
+      if (copiedPlateCount > 0) {
+        buildAssetManifest();
+        logger.info(
+          "[game/session/start] Migrated %d chat background plates into session chat %s from %d source chat(s)",
+          copiedPlateCount,
+          newChat.id,
+          sourceChatIds.size,
+        );
+      }
+
+      await chats.updateMetadata(newChat.id, migratedNewMeta);
 
       let recapMessageId = "";
       let recapText = "";

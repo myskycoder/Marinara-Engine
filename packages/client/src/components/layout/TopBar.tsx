@@ -1,7 +1,7 @@
 // ──────────────────────────────────────────────
 // Layout: Top Bar (polished, with hover glow)
 // ──────────────────────────────────────────────
-import { MessageSquareText, Home, Settings, Link, BookOpen, Users, Sparkles, FileText, User, Bot, ScrollText } from "lucide-react";
+import { MessageSquareText, Home, Settings, Link, BookOpen, Users, Sparkles, FileText, User, Bot, ScrollText, Gamepad2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useUIStore } from "../../stores/ui.store";
 import { useChatStore } from "../../stores/chat.store";
@@ -17,6 +17,7 @@ const RIGHT_PANEL_BUTTONS = [
   { panel: "agents" as const, icon: Sparkles, label: "Agents", color: "from-violet-400 to-purple-500" },
   { panel: "personas" as const, icon: User, label: "Personas", color: "from-emerald-400 to-teal-500" },
   { panel: "ai-audit" as const, icon: ScrollText, label: "AI Audit", color: "from-yellow-400 to-amber-500" },
+  { panel: "game-admin" as const, icon: Gamepad2, label: "Game Admin", color: "from-rose-400 to-red-500" },
 ] as const;
 
 const SPOTIFY_TOPBAR_MIN_WIDTH = 320;

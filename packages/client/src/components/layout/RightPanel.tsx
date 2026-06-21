@@ -2,7 +2,7 @@
 // Layout: Right Panel (polished with panel transitions)
 // ──────────────────────────────────────────────
 import { lazy, Suspense, type ComponentType, type LazyExoticComponent, type ReactNode } from "react";
-import { X, Users, BookOpen, FileText, Link, Sparkles, Settings, User, Bot, ScrollText } from "lucide-react";
+import { X, Users, BookOpen, FileText, Link, Sparkles, Settings, User, Bot, ScrollText, Gamepad2 } from "lucide-react";
 import { useUIStore } from "../../stores/ui.store";
 
 const CharactersPanel = lazy(() =>
@@ -28,6 +28,9 @@ const BotBrowserPanel = lazy(() =>
 const AiAuditPanel = lazy(() =>
   import("../panels/AiAuditPanel").then((module) => ({ default: module.AiAuditPanel })),
 );
+const GameAdminPanel = lazy(() =>
+  import("../panels/GameAdminPanel").then((module) => ({ default: module.GameAdminPanel })),
+);
 
 const PANEL_CONFIG: Record<string, { title: string; icon: ReactNode; gradient: string }> = {
   "bot-browser": { title: "Browser", icon: <Bot size="0.875rem" />, gradient: "from-cyan-400 to-blue-500" },
@@ -42,6 +45,11 @@ const PANEL_CONFIG: Record<string, { title: string; icon: ReactNode; gradient: s
     icon: <ScrollText size="0.875rem" />,
     gradient: "from-yellow-400 to-amber-500",
   },
+  "game-admin": {
+    title: "Game Admin",
+    icon: <Gamepad2 size="0.875rem" />,
+    gradient: "from-rose-400 to-red-500",
+  },
   settings: { title: "Settings", icon: <Settings size="0.875rem" />, gradient: "from-gray-400 to-gray-500" },
 };
 
@@ -54,6 +62,7 @@ const PANELS: Record<string, LazyExoticComponent<ComponentType>> = {
   agents: AgentsPanel,
   personas: PersonasPanel,
   "ai-audit": AiAuditPanel,
+  "game-admin": GameAdminPanel,
   settings: SettingsPanel,
 };
 

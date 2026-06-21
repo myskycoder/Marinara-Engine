@@ -21,7 +21,8 @@ type Panel =
   | "personas"
   | "settings"
   | "bot-browser"
-  | "ai-audit";
+  | "ai-audit"
+  | "game-admin";
 export type ChatModeShortcut = "conversation" | "roleplay" | "game";
 type FontSize = 12 | 14 | 16 | 17 | 19 | 22;
 export type VisualTheme = "default" | "sillytavern";

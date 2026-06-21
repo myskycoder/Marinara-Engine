@@ -7,7 +7,7 @@
 // `enableSpriteGeneration` is active.
 // ──────────────────────────────────────────────
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
 import { logger } from "../../lib/logger.js";
 import { basename, join } from "path";
@@ -770,6 +770,43 @@ export function backgroundTagForChat(chatId: string, key: string): string {
 /** Absolute filesystem path for a per-chat generated background. */
 export function backgroundFilePath(chatId: string, key: string): string {
   return join(GAME_ASSETS_DIR, "backgrounds", "chat", chatId, `${key}.png`);
+}
+
+/** Directory holding all per-chat generated background plates for one chat. */
+export function chatBackgroundPlatesDir(chatId: string): string {
+  return join(GAME_ASSETS_DIR, "backgrounds", "chat", chatId);
+}
+
+/**
+ * Copy every on-disk chat-scoped background plate from one chat to another.
+ * Used when a new game session inherits the previous session's location catalog.
+ * Returns the number of files copied (existing destination files are skipped).
+ */
+export function copyChatBackgroundPlates(fromChatId: string, toChatId: string): number {
+  if (fromChatId === toChatId) return 0;
+  const sourceDir = chatBackgroundPlatesDir(fromChatId);
+  if (!existsSync(sourceDir)) return 0;
+
+  const destDir = chatBackgroundPlatesDir(toChatId);
+  if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true });
+
+  let copied = 0;
+  for (const entry of readdirSync(sourceDir)) {
+    if (entry.startsWith(".")) continue;
+    const sourcePath = join(sourceDir, entry);
+    const destPath = join(destDir, entry);
+    if (existsSync(destPath)) continue;
+    try {
+      copyFileSync(sourcePath, destPath);
+      copied++;
+    } catch (err) {
+      logger.warn(err, "[game-asset-gen] Failed to copy chat background plate %s -> %s", sourcePath, destPath);
+    }
+  }
+  if (copied > 0) {
+    logger.info("[game-asset-gen] Copied %d chat background plates from %s to %s", copied, fromChatId, toChatId);
+  }
+  return copied;
 }
 
 /**
